@@ -91,6 +91,7 @@ from custom_messages.contracts.access_v2 import (
     AccessRequestV1,
     AccountLinkV1,
     AccountMode,
+    CHANGE_ITEMS_MAX_COUNT,
     ChangeApprovalMode,
     ChangeApprovalRecordV1,
     DataFolderRecordV1,
@@ -518,6 +519,17 @@ class ProposalCompiler:
         rows += self._folder_rows(proposal)
         rows += self._account_rows(candidate, proposal)
         rows += self._revocation_rows(proposal)
+        if len(rows) > CHANGE_ITEMS_MAX_COUNT:
+            logger.warning(
+                "Refused an access proposal with too many review rows to show on one card. "
+                "event=proposal_review_rows_limit_exceeded row_count=%s limit=%s",
+                len(rows),
+                CHANGE_ITEMS_MAX_COUNT,
+            )
+            raise ProposalRefused(
+                f"This proposal needs {len(rows)} review rows, which exceeds the {CHANGE_ITEMS_MAX_COUNT}-row "
+                "review card limit; split it into smaller proposals so every change can be shown."
+            )
         return CompiledProposal(proposal, proposal_digest(proposal), tuple(rows), tuple(needs.values()))
 
     # -- items ----------------------------------------------------------------------
@@ -587,12 +599,24 @@ class ProposalCompiler:
         rows: list[ReviewItemV1] = []
         for index, (item, tool_file) in enumerate(zip(proposal.tool_changes, changed_files)):
             proposed_def = tool_definition(item)
-            diff, item_rows = tool_change_rows(
-                index,
-                current=tool_file.definition,
-                proposed=proposed_def,
-                active_links=self.links_for_tool(item.tool_id),
-            )
+            try:
+                diff, item_rows = tool_change_rows(
+                    index,
+                    current=tool_file.definition,
+                    proposed=proposed_def,
+                    active_links=self.links_for_tool(item.tool_id),
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Refused a proposed tool change whose diff could not fit without truncation. "
+                    "event=proposal_tool_change_refused reason=review_row_too_long tool_id=%s error=%s",
+                    item.tool_id,
+                    exc,
+                )
+                raise ProposalRefused(
+                    f"The proposed change to {item.tool_id} cannot be shown on the review card without hiding part "
+                    f"of the change: {exc}"
+                ) from exc
             if not diff.has_changes:
                 logger.warning(
                     "Refused a proposed tool change with no effective differences. "

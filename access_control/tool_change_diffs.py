@@ -76,16 +76,47 @@ _OWNER_SCOPE_WORDS = {
 }
 
 
-def _bounded(text: str) -> str:
-    if len(text) <= _ROW_TEXT_LIMIT:
-        return text
-    return text[: _ROW_TEXT_LIMIT - 1].rstrip() + "…"
+def _review_row(item_id: str, text: str, *, flags: tuple[str, ...] = ()) -> ReviewItemV1:
+    """Build one review row without ever truncating a difference."""
+
+    if len(text) > _ROW_TEXT_LIMIT:
+        raise ValueError(
+            f"Review row {item_id!r} is {len(text)} characters, exceeding the {_ROW_TEXT_LIMIT}-character limit."
+        )
+    return ReviewItemV1(item_id=item_id, section="tool", text=text, flags=flags)
 
 
-def describe_injections(injections: Iterable[CredentialInjectionV1]) -> str:
-    """Plain-language summary of credential or gate injections in stable order."""
+def _pack_text_rows(
+    item_id_prefix: str,
+    header: str,
+    entries: list[str],
+    *,
+    separator: str = ", ",
+    suffix: str = ".",
+) -> list[ReviewItemV1]:
+    """Pack complete ``entries`` across as many rows as needed so no entry is ever cut."""
 
-    items = sorted(
+    rows: list[ReviewItemV1] = []
+    chunk: list[str] = []
+    for entry in entries:
+        candidate = f"{header}{separator.join([*chunk, entry])}{suffix}"
+        if chunk and len(candidate) > _ROW_TEXT_LIMIT:
+            rows.append(_review_row(f"{item_id_prefix}-{len(rows)}", f"{header}{separator.join(chunk)}{suffix}"))
+            chunk = [entry]
+        else:
+            chunk.append(entry)
+    if chunk:
+        rows.append(_review_row(f"{item_id_prefix}-{len(rows)}", f"{header}{separator.join(chunk)}{suffix}"))
+    return rows
+
+
+def _describe_one_injection(item: CredentialInjectionV1) -> str:
+    template = f", format {item.template}" if item.template != "{value}" else ""
+    return f"{item.placement.value} {item.name} (field {item.field}{template})"
+
+
+def _sorted_injections(injections: Iterable[CredentialInjectionV1]) -> list[CredentialInjectionV1]:
+    return sorted(
         injections,
         key=lambda item: (
             item.placement.value,
@@ -94,13 +125,15 @@ def describe_injections(injections: Iterable[CredentialInjectionV1]) -> str:
             item.template,
         ),
     )
+
+
+def describe_injections(injections: Iterable[CredentialInjectionV1]) -> str:
+    """Plain-language summary of credential or gate injections in stable order."""
+
+    items = _sorted_injections(injections)
     if not items:
         return "none"
-    parts: list[str] = []
-    for item in items:
-        template = f", format {item.template}" if item.template != "{value}" else ""
-        parts.append(f"{item.placement.value} {item.name} (field {item.field}{template})")
-    return ", ".join(parts)
+    return ", ".join(_describe_one_injection(item) for item in items)
 
 
 @dataclass(frozen=True)
@@ -294,8 +327,8 @@ def diff_tool_definition(current: ToolDefinitionV1, proposed: ToolDefinitionV1) 
 
     current_hosts = set(current.hosts)
     proposed_hosts = set(proposed.hosts)
-    added_hosts = tuple(host for host in proposed.hosts if host not in current_hosts)
-    removed_hosts = tuple(host for host in current.hosts if host not in proposed_hosts)
+    added_hosts = tuple(dict.fromkeys(host for host in proposed.hosts if host not in current_hosts))
+    removed_hosts = tuple(dict.fromkeys(host for host in current.hosts if host not in proposed_hosts))
     added_routes, removed_routes, changed_routes, routes_reordered = _diff_routes(current.routes, proposed.routes)
     (
         added_or_changed_steps,
@@ -365,134 +398,213 @@ def _overview_row(index: int, diff: ToolChangeDiff) -> ReviewItemV1:
         aspects.append("details")
     if diff.policy_changed:
         aspects.append("account and ownership settings")
-    return ReviewItemV1(
-        item_id=f"change-{index}",
-        section="tool",
-        text=_bounded(
-            f"Change web API tool {diff.current_name} ({diff.tool_id}): updates {', '.join(aspects)}."
-        ),
+    return _review_row(
+        f"change-{index}",
+        f"Change web API tool {diff.current_name} ({diff.tool_id}): updates {', '.join(aspects)}.",
     )
 
 
 def _host_rows(index: int, diff: ToolChangeDiff, impact: LinkImpact) -> list[ReviewItemV1]:
+    """One review row per added or removed host so no host or credential warning can be hidden."""
+
     rows: list[ReviewItemV1] = []
-    if diff.added_hosts:
+    for host_index, host in enumerate(diff.added_hosts):
         flags = ["new_host"]
-        if private_host_names(diff.added_hosts):
+        if private_host_names((host,)):
             flags.append("private_address")
-        label = "host" if len(diff.added_hosts) == 1 else "hosts"
-        text = f"Add {label} to {diff.proposed_name} ({diff.tool_id}): {', '.join(diff.added_hosts)}."
+        text = f"Add host to {diff.proposed_name} ({diff.tool_id}): {host}."
         if impact.has_surviving_links:
             flags.append("credential_to_new_host")
-            target_word = "this new host" if len(diff.added_hosts) == 1 else "these new hosts"
             text += (
                 f" Existing stored credentials ({_surviving_links_words(impact)}) will be sent to "
-                f"{target_word} immediately once approved, without linking again."
+                "this new host immediately once approved, without linking again."
             )
+        rows.append(_review_row(f"change-{index}-host-added-{host_index}", text, flags=tuple(flags)))
+    for host_index, host in enumerate(diff.removed_hosts):
         rows.append(
-            ReviewItemV1(
-                item_id=f"change-{index}-hosts-added",
-                section="tool",
-                text=_bounded(text),
-                flags=tuple(flags),
-            )
-        )
-    if diff.removed_hosts:
-        label = "host" if len(diff.removed_hosts) == 1 else "hosts"
-        rows.append(
-            ReviewItemV1(
-                item_id=f"change-{index}-hosts-removed",
-                section="tool",
-                text=_bounded(
-                    f"Remove {label} from {diff.proposed_name} ({diff.tool_id}): {', '.join(diff.removed_hosts)}."
-                ),
+            _review_row(
+                f"change-{index}-host-removed-{host_index}",
+                f"Remove host from {diff.proposed_name} ({diff.tool_id}): {host}.",
             )
         )
     return rows
 
 
-def _route_row(
+def _reordered_route_rows(
     index: int, current: ToolDefinitionV1, proposed: ToolDefinitionV1, diff: ToolChangeDiff
 ) -> list[ReviewItemV1]:
+    old_names = [route.name for route in current.routes]
+    new_names = [route.name for route in proposed.routes]
+    combined = (
+        f"Routes reordered for {diff.proposed_name} ({diff.tool_id}) (first match wins): "
+        f"{', '.join(old_names)} -> {', '.join(new_names)}."
+    )
+    if len(combined) <= _ROW_TEXT_LIMIT:
+        return [_review_row(f"change-{index}-routes-reordered", combined)]
+    return [
+        *_pack_text_rows(
+            f"change-{index}-routes-reordered-before",
+            f"Routes reordered for {diff.proposed_name} ({diff.tool_id}) (first match wins), previous order: ",
+            old_names,
+        ),
+        *_pack_text_rows(
+            f"change-{index}-routes-reordered-after",
+            f"Routes reordered for {diff.proposed_name} ({diff.tool_id}) (first match wins), new order: ",
+            new_names,
+        ),
+    ]
+
+
+def _route_rows(
+    index: int, current: ToolDefinitionV1, proposed: ToolDefinitionV1, diff: ToolChangeDiff
+) -> list[ReviewItemV1]:
+    """One review row per added, removed, or changed route so no route change can be pushed past a limit."""
+
     if not diff.routes_changed:
         return []
-    parts: list[str] = []
+    rows: list[ReviewItemV1] = []
+    route_index = 0
     for route in diff.added_routes:
-        parts.append(f"added {route.name} ({route.method} {route.path}, needs {LEVEL_WORDS[route.level]})")
+        rows.append(
+            _review_row(
+                f"change-{index}-route-{route_index}",
+                f"Route added for {diff.proposed_name} ({diff.tool_id}): "
+                f"{route.name} ({route.method} {route.path}, needs {LEVEL_WORDS[route.level]}).",
+            )
+        )
+        route_index += 1
     for route in diff.removed_routes:
-        parts.append(f"removed {route.name} ({route.method} {route.path}, was {LEVEL_WORDS[route.level]})")
+        rows.append(
+            _review_row(
+                f"change-{index}-route-{route_index}",
+                f"Route removed for {diff.proposed_name} ({diff.tool_id}): "
+                f"{route.name} ({route.method} {route.path}, was {LEVEL_WORDS[route.level]}).",
+            )
+        )
+        route_index += 1
     for old_route, new_route in diff.changed_routes:
         if old_route.method == new_route.method and old_route.path == new_route.path:
-            parts.append(
-                f"re-levelled {new_route.name} ({new_route.method} {new_route.path}): "
-                f"{LEVEL_WORDS[old_route.level]} -> {LEVEL_WORDS[new_route.level]}"
+            text = (
+                f"Route re-levelled for {diff.proposed_name} ({diff.tool_id}): "
+                f"{new_route.name} ({new_route.method} {new_route.path}): "
+                f"{LEVEL_WORDS[old_route.level]} -> {LEVEL_WORDS[new_route.level]}."
             )
         else:
-            parts.append(
-                f"changed {new_route.name}: {old_route.method} {old_route.path} ({LEVEL_WORDS[old_route.level]}) -> "
-                f"{new_route.method} {new_route.path} ({LEVEL_WORDS[new_route.level]})"
+            text = (
+                f"Route changed for {diff.proposed_name} ({diff.tool_id}): "
+                f"{new_route.name}: {old_route.method} {old_route.path} ({LEVEL_WORDS[old_route.level]}) -> "
+                f"{new_route.method} {new_route.path} ({LEVEL_WORDS[new_route.level]})."
             )
+        rows.append(_review_row(f"change-{index}-route-{route_index}", text))
+        route_index += 1
     if diff.routes_reordered:
-        old_order = ", ".join(route.name for route in current.routes)
-        new_order = ", ".join(route.name for route in proposed.routes)
-        parts.append(f"reordered routes (first match wins): {old_order} -> {new_order}")
-    return [
-        ReviewItemV1(
-            item_id=f"change-{index}-routes",
-            section="tool",
-            text=_bounded(f"Routes changed for {diff.proposed_name} ({diff.tool_id}): {'; '.join(parts)}."),
+        rows.extend(_reordered_route_rows(index, current, proposed, diff))
+    return rows
+
+
+def _split_injection_rows(
+    item_id_prefix: str,
+    label: str,
+    diff: ToolChangeDiff,
+    previous: tuple[CredentialInjectionV1, ...],
+    proposed: tuple[CredentialInjectionV1, ...],
+    *,
+    trailing_note: str = "",
+) -> list[ReviewItemV1]:
+    rows: list[ReviewItemV1] = []
+    for sub_index, item in enumerate(_sorted_injections(previous)):
+        rows.append(
+            _review_row(
+                f"{item_id_prefix}-was-{sub_index}",
+                f"Previous {label} for {diff.proposed_name} ({diff.tool_id}): {_describe_one_injection(item)}.",
+            )
         )
-    ]
+    proposed_sorted = _sorted_injections(proposed)
+    for sub_index, item in enumerate(proposed_sorted):
+        note = trailing_note if sub_index == len(proposed_sorted) - 1 else ""
+        rows.append(
+            _review_row(
+                f"{item_id_prefix}-now-{sub_index}",
+                f"New {label} for {diff.proposed_name} ({diff.tool_id}): {_describe_one_injection(item)}.{note}",
+            )
+        )
+    return rows
+
+
+def _account_credential_rows(
+    index: int, current: ToolDefinitionV1, proposed: ToolDefinitionV1, diff: ToolChangeDiff
+) -> list[ReviewItemV1]:
+    if not (diff.account_mode_changed or diff.account_injections_changed):
+        return []
+    if current.account is AccountMode.NONE and proposed.account is AccountMode.LINKED_CREDENTIAL:
+        text = (
+            f"Account credentials added for {diff.proposed_name} ({diff.tool_id}): now requires a linked "
+            f"account ({describe_injections(proposed.credential_injections)})."
+        )
+    elif current.account is AccountMode.LINKED_CREDENTIAL and proposed.account is AccountMode.NONE:
+        text = (
+            f"Account credentials removed from {diff.proposed_name} ({diff.tool_id}): no longer uses a "
+            f"linked account (was {describe_injections(current.credential_injections)})."
+        )
+    else:
+        text = (
+            f"Account credential injections changed for {diff.proposed_name} ({diff.tool_id}): "
+            f"was {describe_injections(current.credential_injections)}; "
+            f"now {describe_injections(proposed.credential_injections)}."
+        )
+    if len(text) <= _ROW_TEXT_LIMIT:
+        return [_review_row(f"change-{index}-account-credentials", text)]
+    return _split_injection_rows(
+        f"change-{index}-account-credentials",
+        "account credential injection",
+        diff,
+        current.credential_injections,
+        proposed.credential_injections,
+    )
+
+
+def _gate_credential_rows(
+    index: int, current: ToolDefinitionV1, proposed: ToolDefinitionV1, diff: ToolChangeDiff
+) -> list[ReviewItemV1]:
+    if not diff.gate_injections_changed:
+        return []
+    gate_cmd = link_command(diff.tool_id, LinkOwnerKind.TEAM, purpose=LinkPurpose.GATE)
+    added_note = f" An administrator must link it with {gate_cmd} before the tool can be used."
+    if not current.gate_injections and proposed.gate_injections:
+        text = (
+            f"Team gate credential added for {diff.proposed_name} ({diff.tool_id}): "
+            f"{describe_injections(proposed.gate_injections)}.{added_note}"
+        )
+    elif current.gate_injections and not proposed.gate_injections:
+        text = (
+            f"Team gate credential removed from {diff.proposed_name} ({diff.tool_id}) "
+            f"(was {describe_injections(current.gate_injections)})."
+        )
+    else:
+        text = (
+            f"Team gate credential injections changed for {diff.proposed_name} ({diff.tool_id}): "
+            f"was {describe_injections(current.gate_injections)}; "
+            f"now {describe_injections(proposed.gate_injections)}."
+        )
+    if len(text) <= _ROW_TEXT_LIMIT:
+        return [_review_row(f"change-{index}-gate-credentials", text)]
+    return _split_injection_rows(
+        f"change-{index}-gate-credentials",
+        "team gate credential injection",
+        diff,
+        current.gate_injections,
+        proposed.gate_injections,
+        trailing_note=added_note if not current.gate_injections else "",
+    )
 
 
 def _credential_rows(
     index: int, current: ToolDefinitionV1, proposed: ToolDefinitionV1, diff: ToolChangeDiff
 ) -> list[ReviewItemV1]:
-    rows: list[ReviewItemV1] = []
-    if diff.account_mode_changed or diff.account_injections_changed:
-        if current.account is AccountMode.NONE and proposed.account is AccountMode.LINKED_CREDENTIAL:
-            text = (
-                f"Account credentials added for {diff.proposed_name} ({diff.tool_id}): now requires a linked "
-                f"account ({describe_injections(proposed.credential_injections)})."
-            )
-        elif current.account is AccountMode.LINKED_CREDENTIAL and proposed.account is AccountMode.NONE:
-            text = (
-                f"Account credentials removed from {diff.proposed_name} ({diff.tool_id}): no longer uses a "
-                f"linked account (was {describe_injections(current.credential_injections)})."
-            )
-        else:
-            text = (
-                f"Account credential injections changed for {diff.proposed_name} ({diff.tool_id}): "
-                f"was {describe_injections(current.credential_injections)}; "
-                f"now {describe_injections(proposed.credential_injections)}."
-            )
-        rows.append(
-            ReviewItemV1(item_id=f"change-{index}-account-credentials", section="tool", text=_bounded(text))
-        )
-
-    if diff.gate_injections_changed:
-        gate_cmd = link_command(diff.tool_id, LinkOwnerKind.TEAM, purpose=LinkPurpose.GATE)
-        if not current.gate_injections and proposed.gate_injections:
-            text = (
-                f"Team gate credential added for {diff.proposed_name} ({diff.tool_id}): "
-                f"{describe_injections(proposed.gate_injections)}. An administrator must link it with "
-                f"{gate_cmd} before the tool can be used."
-            )
-        elif current.gate_injections and not proposed.gate_injections:
-            text = (
-                f"Team gate credential removed from {diff.proposed_name} ({diff.tool_id}) "
-                f"(was {describe_injections(current.gate_injections)})."
-            )
-        else:
-            text = (
-                f"Team gate credential injections changed for {diff.proposed_name} ({diff.tool_id}): "
-                f"was {describe_injections(current.gate_injections)}; "
-                f"now {describe_injections(proposed.gate_injections)}."
-            )
-        rows.append(
-            ReviewItemV1(item_id=f"change-{index}-gate-credentials", section="tool", text=_bounded(text))
-        )
-    return rows
+    return [
+        *_account_credential_rows(index, current, proposed, diff),
+        *_gate_credential_rows(index, current, proposed, diff),
+    ]
 
 
 def _relink_row(index: int, diff: ToolChangeDiff, impact: LinkImpact) -> list[ReviewItemV1]:
@@ -522,13 +634,7 @@ def _relink_row(index: int, diff: ToolChangeDiff, impact: LinkImpact) -> list[Re
         notes.append("The existing team gate link will no longer be used because the tool no longer declares gate injections.")
     if not notes:
         return []
-    return [
-        ReviewItemV1(
-            item_id=f"change-{index}-relink",
-            section="tool",
-            text=_bounded(" ".join(notes)),
-        )
-    ]
+    return [_review_row(f"change-{index}-relink", " ".join(notes))]
 
 
 def _setup_rows(index: int, proposed: ToolDefinitionV1, diff: ToolChangeDiff) -> list[ReviewItemV1]:
@@ -547,29 +653,53 @@ def _setup_rows(index: int, proposed: ToolDefinitionV1, diff: ToolChangeDiff) ->
         parts.append(f"removed steps: {', '.join(diff.removed_step_ids)}")
     if diff.steps_reordered:
         parts.append("reordered setup steps")
-    rows = [
-        ReviewItemV1(
-            item_id=f"change-{index}-setup",
-            section="tool",
-            text=_bounded(f"Setup changed for {diff.proposed_name} ({diff.tool_id}): {'; '.join(parts)}."),
+    summary_text = f"Setup changed for {diff.proposed_name} ({diff.tool_id}): {'; '.join(parts)}."
+    if len(summary_text) <= _ROW_TEXT_LIMIT:
+        rows = [_review_row(f"change-{index}-setup", summary_text)]
+    else:
+        rows = _pack_text_rows(
+            f"change-{index}-setup",
+            f"Setup changed for {diff.proposed_name} ({diff.tool_id}): ",
+            parts,
+            separator="; ",
         )
-    ]
     for number, step in enumerate(diff.added_or_changed_steps, start=1):
         who = "an administrator" if step.who == "administrator" else "the person"
         link = f" at {step.url}" if step.url else ""
         check = f" How to tell it worked: {step.verify}" if step.verify else ""
         rows.append(
-            ReviewItemV1(
-                item_id=f"change-{index}-step-{number}",
-                section="tool",
-                text=_bounded(
-                    f"Setup step {number} for {proposed.display_name}, done by {who}{link}: \"{step.title}\". "
-                    f"{step.instructions}{check}"
-                ),
+            _review_row(
+                f"change-{index}-step-{number}",
+                f"Setup step {number} for {proposed.display_name}, done by {who}{link}: \"{step.title}\". "
+                f"{step.instructions}{check}",
                 flags=("setup_steps",),
             )
         )
     return rows
+
+
+def _description_rows(index: int, proposed: ToolDefinitionV1, diff: ToolChangeDiff) -> list[ReviewItemV1]:
+    if not proposed.description:
+        return [
+            _review_row(
+                f"change-{index}-details-description",
+                f"Details changed for {diff.proposed_name} ({diff.tool_id}): description cleared.",
+            )
+        ]
+    prefix = f"Description updated for {diff.proposed_name} ({diff.tool_id}) (part {{part}}/{{total}}): "
+    chunk_size = _ROW_TEXT_LIMIT - len(prefix.format(part=99, total=99))
+    chunks = [
+        proposed.description[offset : offset + chunk_size]
+        for offset in range(0, len(proposed.description), chunk_size)
+    ]
+    total = len(chunks)
+    return [
+        _review_row(
+            f"change-{index}-details-description-{part_index - 1}",
+            f"{prefix.format(part=part_index, total=total)}{chunk}",
+        )
+        for part_index, chunk in enumerate(chunks, start=1)
+    ]
 
 
 def _details_row(
@@ -582,13 +712,21 @@ def _details_row(
         parts.append(f"display name {current.display_name!r} -> {proposed.display_name!r}")
     if diff.description_changed:
         parts.append(f"description updated to {proposed.description!r}" if proposed.description else "description cleared")
-    return [
-        ReviewItemV1(
-            item_id=f"change-{index}-details",
-            section="tool",
-            text=_bounded(f"Details changed for {diff.proposed_name} ({diff.tool_id}): {'; '.join(parts)}."),
+    combined = f"Details changed for {diff.proposed_name} ({diff.tool_id}): {'; '.join(parts)}."
+    if len(combined) <= _ROW_TEXT_LIMIT:
+        return [_review_row(f"change-{index}-details", combined)]
+    rows: list[ReviewItemV1] = []
+    if diff.display_name_changed:
+        rows.append(
+            _review_row(
+                f"change-{index}-details-name",
+                f"Details changed for {diff.proposed_name} ({diff.tool_id}): "
+                f"display name {current.display_name!r} -> {proposed.display_name!r}.",
+            )
         )
-    ]
+    if diff.description_changed:
+        rows.extend(_description_rows(index, proposed, diff))
+    return rows
 
 
 def _link_owners_words(owners: tuple[str, ...]) -> str:
@@ -625,13 +763,10 @@ def _policy_row(
     if diff.other_changed_fields:
         parts.append(f"other settings: {', '.join(diff.other_changed_fields)}")
     return [
-        ReviewItemV1(
-            item_id=f"change-{index}-settings",
-            section="tool",
-            text=_bounded(
-                f"Account and ownership settings changed for {diff.proposed_name} ({diff.tool_id}): "
-                f"{'; '.join(parts)}."
-            ),
+        _review_row(
+            f"change-{index}-settings",
+            f"Account and ownership settings changed for {diff.proposed_name} ({diff.tool_id}): "
+            f"{'; '.join(parts)}.",
         )
     ]
 
@@ -652,7 +787,7 @@ def tool_change_rows(
     rows: list[ReviewItemV1] = [
         _overview_row(index, diff),
         *_host_rows(index, diff, impact),
-        *_route_row(index, current, proposed, diff),
+        *_route_rows(index, current, proposed, diff),
         *_credential_rows(index, current, proposed, diff),
         *_relink_row(index, diff, impact),
         *_setup_rows(index, proposed, diff),

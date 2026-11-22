@@ -419,8 +419,8 @@ def test_tool_change_proposal_end_to_end_replaces_file_enforces_gate_and_outdate
         )
     req2 = service.store.get_request(c2.raised[0]["access_request_id"])
     rows = {row.item_id: row for row in req2.change.items}
-    assert "change-0" in rows and "change-0-hosts-added" in rows
-    assert "new_host" in rows["change-0-hosts-added"].flags
+    assert "change-0" in rows and "change-0-host-added-0" in rows
+    assert "new_host" in rows["change-0-host-added-0"].flags
     assert "change-0-account-credentials" in rows and "change-0-gate-credentials" in rows
     assert "/link http:portainer team" in rows["change-0-relink"].text
     assert "gate credential" in rows["account-0"].text

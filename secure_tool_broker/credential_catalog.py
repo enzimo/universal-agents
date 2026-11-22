@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import json
 import logging
 import os
@@ -59,7 +60,7 @@ from secure_tool_broker.credential_templates import (
     save_approved_template_variant,
 )
 from secure_tool_broker.defaults import DEFAULT_API_REQUEST_USER_AGENT
-from secure_tool_broker.redaction import redact_json, redact_text
+from secure_tool_broker.redaction import SECRET_VALUE_RE, redact_json, redact_text
 from secure_tool_broker.sealbox_cli import (
     first_json_value,
     is_auth_required as sealbox_is_auth_required,
@@ -2436,6 +2437,12 @@ def _bounded_response_bytes(value: Any) -> int:
         return _DEFAULT_API_RESPONSE_BYTES
 
 
+# Minimum lookahead past max_bytes when a response is truncated, so pattern-matched
+# secrets (such as JWTs or API keys) that cross the byte cut are redacted completely.
+_REDACTION_LOOKAHEAD_MIN_BYTES = 1024
+_PERCENT_HEX_RE = re.compile(r"%[0-9A-F]{2}")
+
+
 def _api_response_result(
     *,
     response: Any,
@@ -2449,15 +2456,16 @@ def _api_response_result(
     status_code = int(getattr(response, "status", None) or getattr(response, "code", None) or response.getcode())
     headers = getattr(response, "headers", {}) or {}
     content_type = _string(headers.get("Content-Type") if hasattr(headers, "get") else "")
-    body = response.read(max_bytes + 1)
-    truncated = len(body) > max_bytes
-    if truncated:
-        body = body[:max_bytes]
     charset = "utf-8"
     get_charset = getattr(headers, "get_content_charset", None)
     if callable(get_charset):
         charset = get_charset() or charset
-    text = body.decode(charset, errors="replace")
+    text, truncated, already_redacted = _read_api_response_text(
+        response,
+        charset=charset,
+        max_bytes=max_bytes,
+        secret_values=secret_values,
+    )
     content: dict[str, Any] = {
         "status": "api_request_completed",
         "method": method,
@@ -2483,26 +2491,145 @@ def _api_response_result(
             parsed_json = None
     if parsed_json is not None:
         content["json"] = redact_json(_redact_known_secret_values(parsed_json, secret_values))
+    elif already_redacted:
+        content["text"] = text
     else:
         content["text"] = redact_text(_redact_known_secret_text(text, secret_values))
     return ToolResult(status="success", content=content)
 
 
-def _redact_known_secret_values(value: Any, secret_values: list[str]) -> Any:
+def _expand_secret_variants(secret_values: list[str]) -> tuple[str, ...]:
+    """Raw, URL-encoded (``quote_plus``, ``quote``, lowercase percent-hex), and JSON-escaped forms to redact."""
+
+    variants: set[str] = set()
+    for raw in secret_values:
+        if not raw:
+            continue
+        candidates = [
+            raw,
+            urllib_parse.quote_plus(raw),
+            urllib_parse.quote(raw, safe=""),
+            urllib_parse.quote(raw),
+            json.dumps(raw)[1:-1],
+        ]
+        for candidate in candidates:
+            if len(candidate) >= 4:
+                variants.add(candidate)
+            if "%" in candidate:
+                lowered = _PERCENT_HEX_RE.sub(lambda match: match.group(0).lower(), candidate)
+                if len(lowered) >= 4:
+                    variants.add(lowered)
+    return tuple(sorted(variants, key=lambda item: (-len(item), item)))
+
+
+def _known_secret_pattern(variants: tuple[str, ...]) -> re.Pattern[str] | None:
+    if not variants:
+        return None
+    return re.compile("|".join(re.escape(item) for item in variants))
+
+
+def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    spans.sort(key=lambda span: (span[0], -span[1]))
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _redact_text_before_cut(full_text: str, *, cut_index: int, variants: tuple[str, ...]) -> str:
+    """Redact known secrets and pattern-matched tokens on ``full_text``, then cut at ``cut_index``.
+
+    Any match starting before ``cut_index`` (even if it extends past ``cut_index``)
+    is replaced with ``[REDACTED]`` and nothing past ``cut_index`` is emitted, so
+    an agent-chosen ``max_response_bytes`` cannot slice an echoed secret in half.
+    """
+
+    spans: list[tuple[int, int]] = []
+    known_pattern = _known_secret_pattern(variants)
+    if known_pattern is not None:
+        spans.extend(match.span() for match in known_pattern.finditer(full_text))
+    spans.extend(match.span() for match in SECRET_VALUE_RE.finditer(full_text))
+    if not spans:
+        return full_text[:cut_index]
+    parts: list[str] = []
+    cursor = 0
+    for start, end in _merge_spans(spans):
+        if start >= cut_index:
+            break
+        if start > cursor:
+            parts.append(full_text[cursor:start])
+        parts.append("[REDACTED]")
+        cursor = end
+        if cursor >= cut_index:
+            break
+    if cursor < cut_index:
+        parts.append(full_text[cursor:cut_index])
+    return "".join(parts)
+
+
+def _read_api_response_text(
+    response: Any,
+    *,
+    charset: str,
+    max_bytes: int,
+    secret_values: list[str],
+) -> tuple[str, bool, bool]:
+    """Read up to ``max_bytes`` plus a secret-sized lookahead; redact before cutting when truncated."""
+
+    try:
+        decoder_factory = codecs.getincrementaldecoder(charset)
+        encoding = charset
+    except LookupError:
+        decoder_factory = codecs.getincrementaldecoder("utf-8")
+        encoding = "utf-8"
+    variants = _expand_secret_variants(secret_values)
+    max_secret_bytes = max((len(item.encode(encoding, errors="ignore")) for item in variants), default=0)
+    lookahead_bytes = max(max_secret_bytes, _REDACTION_LOOKAHEAD_MIN_BYTES)
+    raw = response.read(max_bytes + lookahead_bytes)
+    truncated = len(raw) > max_bytes
+    if not truncated:
+        return raw.decode(encoding, errors="replace"), False, False
+    bounded = raw[: max_bytes + lookahead_bytes]
+    decoder = decoder_factory(errors="replace")
+    prefix_text = decoder.decode(bounded[:max_bytes], final=False)
+    suffix_text = decoder.decode(bounded[max_bytes:], final=True)
+    full_text = prefix_text + suffix_text
+    redacted = _redact_text_before_cut(full_text, cut_index=len(prefix_text), variants=variants)
+    return redacted, True, True
+
+
+def _redact_known_secret_values(
+    value: Any,
+    secret_values: list[str],
+    *,
+    _pattern: re.Pattern[str] | None = None,
+    _prepared: bool = False,
+) -> Any:
+    pattern = _pattern if _prepared else _known_secret_pattern(_expand_secret_variants(secret_values))
+    if pattern is None:
+        return value
     if isinstance(value, str):
-        return _redact_known_secret_text(value, secret_values)
+        return pattern.sub("[REDACTED]", value)
     if isinstance(value, list):
-        return [_redact_known_secret_values(item, secret_values) for item in value]
+        return [_redact_known_secret_values(item, secret_values, _pattern=pattern, _prepared=True) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_known_secret_values(child, secret_values) for key, child in value.items()}
+        return {
+            (pattern.sub("[REDACTED]", key) if isinstance(key, str) else key): _redact_known_secret_values(
+                child, secret_values, _pattern=pattern, _prepared=True
+            )
+            for key, child in value.items()
+        }
     return value
 
 
 def _redact_known_secret_text(value: str, secret_values: list[str]) -> str:
-    rendered = value
-    for secret in sorted({item for item in secret_values if len(item) >= 4}, key=len, reverse=True):
-        rendered = rendered.replace(secret, "[REDACTED]")
-    return rendered
+    pattern = _known_secret_pattern(_expand_secret_variants(secret_values))
+    if pattern is None:
+        return value
+    return pattern.sub("[REDACTED]", value)
 
 
 def signup_prepare(params: Mapping[str, Any]) -> ToolResult:

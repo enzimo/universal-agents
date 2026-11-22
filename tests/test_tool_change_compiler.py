@@ -177,13 +177,17 @@ def test_tool_change_hosts_added_flags_surviving_credentials_and_private_address
     rows = {row.item_id: row for row in compiled.rows}
 
     assert "change-0" in rows
-    hosts_added = rows["change-0-hosts-added"]
-    assert set(hosts_added.flags) == {"new_host", "private_address", "credential_to_new_host"}
-    assert "gitea-mirror.example.com, 10.0.0.5" in hosts_added.text
-    assert "the team's account" in hosts_added.text
-    assert "2 people's accounts" in hosts_added.text
-    assert "the team's gate credential" in hosts_added.text
-    assert "without linking again" in hosts_added.text
+    mirror_row = rows["change-0-host-added-0"]
+    private_row = rows["change-0-host-added-1"]
+    assert set(mirror_row.flags) == {"new_host", "credential_to_new_host"}
+    assert "gitea-mirror.example.com" in mirror_row.text
+    assert set(private_row.flags) == {"new_host", "private_address", "credential_to_new_host"}
+    assert "10.0.0.5" in private_row.text
+    for host_row in (mirror_row, private_row):
+        assert "the team's account" in host_row.text
+        assert "2 people's accounts" in host_row.text
+        assert "the team's gate credential" in host_row.text
+        assert "without linking again" in host_row.text
     assert "change-0-relink" not in rows
 
     summary = proposal_summary(compiled.rows)
@@ -213,7 +217,7 @@ def test_tool_change_hosts_added_with_changed_account_injections_only_warns_surv
     rows = {row.item_id: row for row in compiled.rows}
 
     # Account links become outdated so only the surviving gate link triggers credential_to_new_host.
-    hosts_added = rows["change-0-hosts-added"]
+    hosts_added = rows["change-0-host-added-0"]
     assert "credential_to_new_host" in hosts_added.flags
     assert "the team's gate credential" in hosts_added.text
     assert "the team's account" not in hosts_added.text
@@ -233,8 +237,8 @@ def test_tool_change_hosts_added_without_surviving_links_omits_credential_to_new
     compiled, _ = _compile_change(tmp_path, instance, change, links=[])
     rows = {row.item_id: row for row in compiled.rows}
 
-    assert rows["change-0-hosts-added"].flags == ("new_host",)
-    assert "without linking again" not in rows["change-0-hosts-added"].text
+    assert rows["change-0-host-added-0"].flags == ("new_host",)
+    assert "without linking again" not in rows["change-0-host-added-0"].text
 
 
 def test_tool_change_reports_removed_hosts_routes_credentials_gate_setup_and_details(tmp_path: Path) -> None:
@@ -292,10 +296,11 @@ def test_tool_change_reports_removed_hosts_routes_credentials_gate_setup_and_det
     )
     rows = {row.item_id: row for row in compiled.rows}
 
-    assert "legacy.example.com" in rows["change-0-hosts-removed"].text
-    assert "added pulls.list" in rows["change-0-routes"].text
-    assert "removed repos.list" in rows["change-0-routes"].text
-    assert "re-levelled issues.create" in rows["change-0-routes"].text
+    assert "legacy.example.com" in rows["change-0-host-removed-0"].text
+    route_texts = "\n".join(row.text for item_id, row in rows.items() if item_id.startswith("change-0-route-"))
+    assert "Route added" in route_texts and "pulls.list" in route_texts
+    assert "Route removed" in route_texts and "repos.list" in route_texts
+    assert "Route re-levelled" in route_texts and "issues.create" in route_texts
     assert "Team gate credential added" in rows["change-0-gate-credentials"].text
     assert "/link http:gitea gate" in rows["change-0-gate-credentials"].text
     assert "No existing links" in rows["change-0-relink"].text
@@ -317,7 +322,7 @@ def test_tool_change_detects_route_reordering(tmp_path: Path) -> None:
     change = _gitea_change(routes=(r2, r1))
     compiled, _ = _compile_change(tmp_path, instance, change)
     rows = {row.item_id: row for row in compiled.rows}
-    assert "reordered routes" in rows["change-0-routes"].text
+    assert "Routes reordered" in rows["change-0-routes-reordered"].text
 
 
 def test_tool_change_refuses_unchanged_and_canonical_only_injection_diff(tmp_path: Path, caplog) -> None:
@@ -709,3 +714,209 @@ def test_account_link_refuses_literal_gate_or_account_as_purpose_text(
     with pytest.raises(ProposalRefused, match='set link_purpose to "gate"'):
         compiler.compile(proposal, person=None, task_id="task-1")
     assert "event=proposal_account_link_purpose_ambiguous" in caplog.text
+
+
+def _max_valid_host(prefix: str) -> str:
+    """Build a valid 253-character ASCII host name with <=63-char labels."""
+
+    label = "a" * 62
+    candidate = f"{prefix}.{label}.{label}.{label}"
+    tail_len = 253 - len(candidate) - 1
+    assert 1 <= tail_len <= 63
+    host = f"{candidate}.{'b' * tail_len}"
+    assert len(host) == 253
+    return host
+
+
+def test_tool_change_never_truncates_many_long_hosts_or_60_routes(tmp_path: Path) -> None:
+    """F2: long padding hosts or 60 routes never push a new host, credential warning, or full->read change past 1,600 chars."""
+
+    instance = tmp_path / "instance"
+    base_routes = tuple(
+        HttpRouteV1(
+            name=f"route_{idx:02d}_" + ("x" * 60),
+            method="POST",
+            path=f"/api/v1/resource/{idx:02d}/" + ("seg/" * 15),
+            level=AccessLevel.FULL if idx == 59 else AccessLevel.WRITE,
+        )
+        for idx in range(60)
+    )
+    write_instance_tool(instance, _gitea_tool(routes=base_routes))
+    links = [_link(link_id="team-1", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM)]
+
+    # 1. Six 253-char hosts plus a private target host (>1,500 chars combined) each get their own un-cut row.
+    padding_hosts = tuple(_max_valid_host(f"pad{i}") for i in range(6))
+    host_change = _gitea_change(
+        hosts=("gitea.example.com", *padding_hosts, "10.0.0.99"),
+        routes=base_routes,
+    )
+    compiled_hosts, _ = _compile_change(tmp_path, instance, host_change, links=links)
+    host_rows = [row for row in compiled_hosts.rows if row.item_id.startswith("change-0-host-added-")]
+    assert len(host_rows) == 7
+    assert all("…" not in row.text and len(row.text) <= 1600 for row in host_rows)
+    target_row = next(row for row in host_rows if "10.0.0.99" in row.text)
+    assert set(target_row.flags) == {"new_host", "private_address", "credential_to_new_host"}
+    assert "Existing stored credentials (the team's account)" in target_row.text
+    assert "without linking again" in target_row.text
+
+    # 2. All 60 routes changed, with route #59 lowered from full -> read: every route gets its own row.
+    lowered_routes = tuple(
+        HttpRouteV1(
+            name=route.name,
+            method=route.method,
+            path=route.path,
+            level=AccessLevel.READ if idx == 59 else AccessLevel.FULL,
+        )
+        for idx, route in enumerate(base_routes)
+    )
+    route_change = _gitea_change(routes=lowered_routes)
+    compiled_routes, _ = _compile_change(tmp_path, instance, route_change)
+    route_rows = [row for row in compiled_routes.rows if row.item_id.startswith("change-0-route-")]
+    assert len(route_rows) == 60
+    assert all("…" not in row.text and len(row.text) <= 1600 for row in route_rows)
+    last_route = route_rows[-1]
+    assert base_routes[59].name in last_route.text
+    assert "full -> read" in last_route.text
+
+    # 3. Reordering 60 long-named routes splits cleanly across rows without cutting any route name.
+    reordered_change = _gitea_change(routes=(*base_routes[1:], base_routes[0]))
+    compiled_reorder, _ = _compile_change(tmp_path, instance, reordered_change)
+    reorder_rows = [row for row in compiled_reorder.rows if row.item_id.startswith("change-0-routes-reordered")]
+    assert len(reorder_rows) >= 2
+    assert all("…" not in row.text and len(row.text) <= 1600 for row in reorder_rows)
+    combined_reorder_text = "\n".join(row.text for row in reorder_rows)
+    assert base_routes[0].name in combined_reorder_text
+    assert base_routes[59].name in combined_reorder_text
+
+
+def test_tool_change_splits_long_credential_templates_and_descriptions_and_refuses_card_overflow(
+    tmp_path: Path,
+) -> None:
+    """F2: long templates/descriptions split without cutting, and >80 total review rows are refused cleanly."""
+
+    instance = tmp_path / "instance"
+    long_injs = tuple(
+        CredentialInjectionV1(
+            placement=InjectionPlacement.HEADER,
+            name=f"X-Long-Header-{idx}",
+            field=f"secret_{idx}",
+            template=("prefix-" * 80) + "{value}",
+        )
+        for idx in range(4)
+    )
+    write_instance_tool(instance, _gitea_tool())
+    big_desc = "D" * 1950 + "TAIL-MARKER"
+    change = _gitea_change(
+        display_name="Gitea Long",
+        description=big_desc,
+        credential_injections=long_injs,
+    )
+    compiled, _ = _compile_change(tmp_path, instance, change)
+    assert all("…" not in row.text and len(row.text) <= 1600 for row in compiled.rows)
+    joined = "\n".join(row.text for row in compiled.rows)
+    for inj in long_injs:
+        assert inj.name in joined
+    assert "TAIL-MARKER" in joined
+
+    # Overflowing the 80-row review card limit refuses cleanly instead of dropping rows.
+    write_instance_tool(
+        instance,
+        ProposedHttpToolV1(
+            tool_id="http:forge2",
+            display_name="Forge 2",
+            hosts=("forge2.example.com",),
+            uses_credential=False,
+        ),
+    )
+    routes_50 = tuple(
+        HttpRouteV1(name=f"r{idx}", method="GET", path=f"/r/{idx}", level=AccessLevel.READ)
+        for idx in range(50)
+    )
+    compiler, _ = _compiler(tmp_path, instance)
+    overflow = with_tool_change_baselines(
+        AccessProposalV1(
+            title="Too many rows",
+            reason="Two large tool changes",
+            tool_changes=(
+                _gitea_change(routes=routes_50),
+                ProposedHttpToolChangeV1(
+                    tool_id="http:forge2",
+                    display_name="Forge 2",
+                    hosts=("forge2.example.com",),
+                    routes=routes_50,
+                    uses_credential=False,
+                ),
+            ),
+        ),
+        instance_root=instance,
+        catalog=compiler.catalog,
+    )
+    with pytest.raises(ProposalRefused, match="review card limit"):
+        compiler.compile(overflow, person=None, task_id="task-1")
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "g\u0456tea.example.com",  # Cyrillic small letter i
+        "gitea.ex\u0430mple.com",  # Cyrillic small letter a
+        "gitea\u200b.example.com",  # zero-width space
+        "gitea\u200d.example.com",  # zero-width joiner
+        "\u202egitea.example.com",  # RTL override
+        "a" * 64 + ".example.com",  # label > 63 chars
+        ("a" * 60 + ".") * 4 + "b" * 10,  # total > 253 chars (254 chars)
+        "-gitea.example.com",
+        "gitea-.example.com",
+        "gitea..example.com",
+        ".gitea.example.com",
+        "gitea.example.com.",
+        "*.example.com",
+        "gitea.example.com:8443",
+        "gitea.example.com/api",
+        "gitea .example.com",
+        "bad_host.example.com",
+        "",
+    ],
+)
+def test_host_validation_rejects_homoglyphs_zero_width_and_invalid_names(bad_host: str) -> None:
+    """F3: ProposedHttpToolV1, ProposedHttpToolChangeV1, and ToolDefinitionV1 allow only exact ASCII host names."""
+
+    from pydantic import ValidationError
+
+    from custom_messages.contracts.access_v2 import ToolDefinitionV1, ToolKind
+
+    with pytest.raises(ValidationError):
+        ProposedHttpToolV1(
+            tool_id="http:gitea",
+            display_name="Gitea",
+            hosts=(bad_host,),
+            uses_credential=False,
+        )
+    with pytest.raises(ValidationError):
+        ProposedHttpToolChangeV1(
+            tool_id="http:gitea",
+            display_name="Gitea",
+            hosts=(bad_host,),
+            uses_credential=False,
+        )
+    with pytest.raises(ValidationError):
+        ToolDefinitionV1(
+            tool_id="http:gitea",
+            kind=ToolKind.HTTP,
+            display_name="Gitea",
+            hosts=(bad_host,),
+        )
+
+
+def test_host_validation_accepts_punycode_ipv4_localhost_and_boundary_lengths() -> None:
+    """F3: valid ASCII punycode, IPv4, localhost, 63-char labels, and 253-char names remain accepted."""
+
+    valid_63_label = f"{'a' * 63}.example.com"
+    valid_253 = _max_valid_host("ok")
+    tool = ProposedHttpToolV1(
+        tool_id="http:valid_hosts",
+        display_name="Valid Hosts",
+        hosts=("LOCALHOST", "10.0.0.5", "xn--bcher-kva.example", valid_63_label, valid_253),
+        uses_credential=False,
+    )
+    assert tool.hosts == ("localhost", "10.0.0.5", "xn--bcher-kva.example", valid_63_label, valid_253)

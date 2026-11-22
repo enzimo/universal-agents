@@ -40,7 +40,30 @@ TOOL_SET_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 INJECTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _FILE_PART_PATTERN = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9_.-]{0,127}$")
 CREDENTIAL_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$")
+HOST_NAME_MAX_CHARS = 253
+HOST_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.ASCII)
 HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
+
+
+def validate_host_name(raw: str) -> str:
+    """Normalize and validate an exact ASCII host name (labels <= 63, total <= 253).
+
+    Allows only ASCII letters, digits, hyphens, and dots so look-alike Unicode
+    domains (Cyrillic homoglyphs, zero-width characters) and oversized padding
+    hosts are refused before reaching a review card or the catalog.
+    """
+
+    host = raw.strip().lower()
+    if not host or len(host) > HOST_NAME_MAX_CHARS:
+        raise ValueError(
+            f"Hosts are exact ASCII names up to {HOST_NAME_MAX_CHARS} characters (labels up to 63): {raw!r}"
+        )
+    if not all(HOST_LABEL_PATTERN.fullmatch(label) for label in host.split(".")):
+        raise ValueError(
+            "Hosts are exact ASCII names (letters, digits, hyphens, dots; labels up to 63 characters) "
+            f"without wildcards, ports, or non-ASCII characters: {raw!r}"
+        )
+    return host
 
 
 class AccessLevel(StrEnum):
@@ -349,11 +372,7 @@ class ToolDefinitionV1(AccessContractModel):
     @field_validator("hosts")
     @classmethod
     def _valid_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        hosts = tuple(host.strip().lower() for host in value)
-        for host in hosts:
-            if not host or "*" in host or "/" in host or ":" in host:
-                raise ValueError(f"Hosts are exact names without wildcards or ports: {host!r}")
-        return hosts
+        return tuple(validate_host_name(host) for host in value)
 
     @model_validator(mode="after")
     def _consistent(self) -> "ToolDefinitionV1":
@@ -973,6 +992,7 @@ class ChangeApprovalRecordV1(AccessContractModel):
 # chat message and a card heading.
 CHANGE_SUMMARY_MAX_CHARS = 300
 CHANGE_EFFECT_MAX_CHARS = 1000
+CHANGE_ITEMS_MAX_COUNT = 80
 
 
 def summary_line(text: str) -> str:
@@ -1055,7 +1075,7 @@ class ChangeProposalV1(AccessContractModel):
     agreement_required: bool = True
     # Rows for the review card (proposals, deliveries); ``effect`` stays the
     # plain summary for chat and older views.
-    items: tuple[ReviewItemV1, ...] = Field(default=(), max_length=80)
+    items: tuple[ReviewItemV1, ...] = Field(default=(), max_length=CHANGE_ITEMS_MAX_COUNT)
     # The effect lines the stored request keeps once it is decided (granted,
     # denied or withdrawn) when ``effect`` names what the change deletes: a
     # history clean-up shows the person their conversation titles while they
@@ -1110,6 +1130,11 @@ class ProposedHttpToolV1(AccessContractModel):
     # Steps outside Universal Agents (such as creating a token on the service's
     # site) and tools to set up first; shown on the review card as proposed.
     setup: ToolSetupSpecV1 | None = None
+
+    @field_validator("hosts")
+    @classmethod
+    def _valid_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(validate_host_name(host) for host in value)
 
     @model_validator(mode="after")
     def _consistent(self) -> "ProposedHttpToolV1":
@@ -1764,7 +1789,11 @@ __all__ = [
     "ChangeApprovalRecordV1",
     "CHANGE_SUMMARY_MAX_CHARS",
     "CHANGE_EFFECT_MAX_CHARS",
+    "CHANGE_ITEMS_MAX_COUNT",
     "ChangeProposalV1",
+    "HOST_LABEL_PATTERN",
+    "HOST_NAME_MAX_CHARS",
+    "validate_host_name",
     "AccountLinkStatus",
     "AccountLinkV1",
     "AccountSharing",

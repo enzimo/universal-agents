@@ -1741,6 +1741,256 @@ def test_api_request_injects_account_and_team_gate_credentials_and_redacts_both(
     assert "[REDACTED]" in plain_redir.content["redirect_location"]
 
 
+def test_api_request_redacts_url_encoded_gate_and_account_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: query/header secrets with +, /, =, or spaces are redacted in quote/quote_plus/lowercase forms."""
+
+    import io
+    from urllib import error as urllib_error
+    from urllib import parse as urllib_parse
+
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    acct_secret = "acct+sec/ret=1 2"
+    gate_secret = "gate+key/val=3 4"
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_OWNER_SCOPE,
+        token_env="ENC_ACCT_TOKEN",
+        token=acct_secret,
+        credential_key="enc_acct",
+    )
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="ENC_GATE_TOKEN",
+        token=gate_secret,
+        credential_key="enc_gate",
+    )
+    account = _link(_query("api_key"), credential_key="enc_acct", owner_kind=LinkOwnerKind.PERSON)
+    gate = AccountLinkV1(
+        link_id="account_link_team_enc_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="enc_gate",
+        injections=(_query("gate_key"),),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    encoded_forms = [
+        urllib_parse.quote_plus(acct_secret),
+        urllib_parse.quote(acct_secret, safe=""),
+        urllib_parse.quote(acct_secret),
+        urllib_parse.quote_plus(acct_secret).lower(),
+        urllib_parse.quote_plus(gate_secret),
+        urllib_parse.quote(gate_secret, safe=""),
+        urllib_parse.quote(gate_secret),
+        urllib_parse.quote_plus(gate_secret).lower(),
+    ]
+    # Note: lowercasing only the hex escapes preserves uppercase letters when present.
+    gate_lower_hex = urllib_parse.quote_plus(gate_secret).replace("%2B", "%2b").replace("%2F", "%2f").replace("%3D", "%3d")
+    acct_lower_hex = urllib_parse.quote(acct_secret, safe="").replace("%2B", "%2b").replace("%2F", "%2f").replace("%3D", "%3d").replace("%20", "%20")
+
+    # 1. HTTPError body echoing quote_plus, quote(safe=""), quote(), and lowercase percent-hex forms.
+    error_body = (
+        f"bad request: ?api_key={urllib_parse.quote_plus(acct_secret)}"
+        f"&alt={urllib_parse.quote(acct_secret, safe='')}"
+        f"&slash={urllib_parse.quote(acct_secret)}"
+        f"&low={acct_lower_hex}"
+        f"&gate_key={urllib_parse.quote_plus(gate_secret)}"
+        f"&gate_alt={urllib_parse.quote(gate_secret, safe='')}"
+        f"&gate_low={gate_lower_hex}"
+    ).encode("utf-8")
+
+    def raise_http_error(_req, *, timeout):
+        raise urllib_error.HTTPError(
+            "https://api.example.test/items",
+            400,
+            "Bad Request",
+            _JsonHeaders({"Content-Type": "text/plain"}),
+            io.BytesIO(error_body),
+        )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", raise_http_error)
+    err_resp = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(account, gate_link=gate),
+    )
+    assert err_resp.status == "success"
+    assert err_resp.content["http_status"] == 400
+    for forbidden in (acct_secret, gate_secret, gate_lower_hex, acct_lower_hex, *encoded_forms):
+        assert forbidden not in err_resp.content["text"]
+
+    # 2. 302 Redirect Location echoing URL-encoded query values.
+    class _EncodedRedirect(_JsonResponse):
+        def __init__(self) -> None:
+            super().__init__(b"moved", status=302)
+            self.headers = _JsonHeaders(
+                {
+                    "Content-Type": "text/plain",
+                    "Location": (
+                        f"https://other.example.com/login?"
+                        f"gate_key={urllib_parse.quote_plus(gate_secret)}&api_key={urllib_parse.quote(acct_secret, safe='')}"
+                    ),
+                }
+            )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", lambda _req, *, timeout: _EncodedRedirect())
+    redir = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(account, gate_link=gate),
+    )
+    assert redir.status == "success"
+    for forbidden in (acct_secret, gate_secret, *encoded_forms):
+        assert forbidden not in redir.content["redirect_location"]
+
+    # 3. URLError echoing URL-encoded query secret.
+    def raise_url_error(_req, *, timeout):
+        raise urllib_error.URLError(f"failed for ?gate_key={urllib_parse.quote_plus(gate_secret)}")
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", raise_url_error)
+    url_err = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(account, gate_link=gate),
+    )
+    assert url_err.status == "error"
+    assert urllib_parse.quote_plus(gate_secret) not in (url_err.error or "")
+    assert "[REDACTED]" in (url_err.error or "")
+
+
+def test_api_request_redacts_secrets_before_max_response_bytes_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: an agent-chosen max_response_bytes cutting mid-secret leaks zero characters of the secret."""
+
+    import io
+    from urllib import error as urllib_error
+    from urllib import parse as urllib_parse
+
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    gate_secret = "GATE+SUPER/SECRET=9876543210"
+    encoded_gate = urllib_parse.quote_plus(gate_secret)
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="CUT_GATE_SECRET",
+        token=gate_secret,
+        credential_key="cut_gate",
+    )
+    gate = AccountLinkV1(
+        link_id="account_link_team_cut_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="cut_gate",
+        injections=(_query("gate_key"),),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    class _StreamResponse:
+        def __init__(self, body: bytes, *, status: int = 200, content_type: str = "text/plain") -> None:
+            self.status = self.code = status
+            self.headers = _JsonHeaders({"Content-Type": content_type})
+            self._stream = io.BytesIO(body)
+
+        def read(self, limit: int = -1) -> bytes:
+            return self._stream.read(limit)
+
+        def getcode(self) -> int:
+            return self.status
+
+        def close(self) -> None:
+            self._stream.close()
+
+    # Probe every single byte cut offset across both raw and URL-encoded echoed secrets.
+    prefix = "echo="
+    for echoed in (gate_secret, encoded_gate):
+        body = f"{prefix}{echoed} trailing".encode("utf-8")
+        for cut in range(len(prefix), len(prefix) + len(echoed) + 2):
+            monkeypatch.setattr(
+                credential_catalog,
+                "_send_api_request",
+                lambda _req, *, timeout, payload=body: _StreamResponse(payload),
+            )
+            res = credential_catalog.api_request(
+                {"url": "https://api.example.test/items", "max_response_bytes": cut},
+                context=_linked_context(None, gate_link=gate),
+            )
+            assert res.status == "success"
+            assert res.content["truncated"] is True
+            text = res.content["text"]
+            assert text.startswith(prefix)
+            remainder = text[len(prefix) :]
+            if cut == len(prefix):
+                assert remainder == ""
+            else:
+                # Never leaks even a single character of the secret; emits [REDACTED] and stops at the cut.
+                assert remainder.startswith("[REDACTED]")
+                assert not any(echoed[:n] in remainder for n in range(1, len(echoed) + 1) if echoed[:n] not in "[REDACTED]")
+
+    # Repeated long secret where redacting the first shrinks the text: the second secret must not be pulled in.
+    long_secret = "S" * 50
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="CUT_GATE_SECRET",
+        token=long_secret,
+        credential_key="cut_gate",
+    )
+    repeated_body = f"AAAA{long_secret}BBBB{long_secret}CCCC".encode("utf-8")
+    monkeypatch.setattr(
+        credential_catalog,
+        "_send_api_request",
+        lambda _req, *, timeout: _StreamResponse(repeated_body),
+    )
+    rep_res = credential_catalog.api_request(
+        {"url": "https://api.example.test/items", "max_response_bytes": 20},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert rep_res.status == "success"
+    assert rep_res.content["truncated"] is True
+    assert rep_res.content["text"] == "AAAA[REDACTED]"
+    assert "S" not in rep_res.content["text"]
+
+    # Also applies to HTTPError bodies cut mid-secret.
+    err_body = f"bad ?gate_key={long_secret} end".encode("utf-8")
+
+    def fail_http(_req, *, timeout):
+        raise urllib_error.HTTPError(
+            "https://api.example.test/items",
+            502,
+            "Bad Gateway",
+            _JsonHeaders({"Content-Type": "text/plain"}),
+            io.BytesIO(err_body),
+        )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", fail_http)
+    err_cut = credential_catalog.api_request(
+        {"url": "https://api.example.test/items", "max_response_bytes": 18},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert err_cut.status == "success"
+    assert err_cut.content["http_status"] == 502
+    assert err_cut.content["truncated"] is True
+    assert err_cut.content["text"] == "bad ?gate_key=[REDACTED]"
+    assert "S" not in err_cut.content["text"]
+
+
 def test_api_request_refuses_agent_supplied_gate_header_query_and_injection_collisions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
