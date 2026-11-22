@@ -700,7 +700,7 @@ function canonicalFollowUpUrl(raw) {
  * skipping while `isFollowUpSettling(review)` is true.
  */
 export function createFollowUpPageWatcher({
-  getOpenPages, get, onClosePages, browser = globalThis, now = () => Date.now(),
+  getOpenPages, get, onClosePages, isRequestWatched, browser = globalThis, now = () => Date.now(),
   pollMs = FOLLOW_UP_POLL_MS, graceMs = FOLLOW_UP_EXPIRY_GRACE_MS, maxPolls = FOLLOW_UP_MAX_POLLS,
 }) {
   const warn = (event, detail) => browser && browser.console && browser.console.warn(event, detail);
@@ -739,32 +739,44 @@ export function createFollowUpPageWatcher({
     return targets;
   }
 
+  /** Applies a freshly read review so inline cards close on the same read as chat or Inbox cards. */
+  function noteReview(requestId, review) {
+    const id = text(requestId);
+    if (!id || !review || typeof onClosePages !== "function") return;
+    const current = openByRequest().get(id) || [];
+    if (!current.length) {
+      settlingUntil.delete(id);
+      return;
+    }
+    if (isFollowUpSettling(review)) {
+      settlingUntil.set(id, text(review.follow_up_settling_until_utc));
+      watcher.sync();
+      return;
+    }
+    settlingUntil.delete(id);
+    const pendingUrls = new Set(followUpLinks(review).map(link => canonicalFollowUpUrl(link.url)));
+    const ended = [];
+    current.forEach(page => {
+      if (!pendingUrls.has(canonicalFollowUpUrl(page.url)) && !ended.includes(page.url)) {
+        ended.push(page.url);
+      }
+    });
+    if (ended.length) onClosePages(id, ended);
+    watcher.sync();
+  }
+
   function refresh() {
     if (typeof get !== "function" || typeof onClosePages !== "function") return Promise.resolve([]);
     const readGeneration = generation;
     const reads = [];
     openByRequest().forEach((_pages, requestId) => {
-      if (inflight.has(requestId)) return;
+      if (inflight.has(requestId) || (typeof isRequestWatched === "function" && isRequestWatched(requestId))) return;
       const pending = Promise.resolve()
         .then(() => get(`${ACCESS_INBOX_API}/requests/${encodeURIComponent(requestId)}`))
         .then(payload => {
           if (readGeneration !== generation) return;
           const review = (payload && payload.review) || null;
-          if (!review) return;
-          if (isFollowUpSettling(review)) {
-            settlingUntil.set(requestId, text(review.follow_up_settling_until_utc));
-            return;
-          }
-          settlingUntil.delete(requestId);
-          const pendingUrls = new Set(followUpLinks(review).map(link => canonicalFollowUpUrl(link.url)));
-          const current = openByRequest().get(requestId) || [];
-          const ended = [];
-          current.forEach(page => {
-            if (!pendingUrls.has(canonicalFollowUpUrl(page.url)) && !ended.includes(page.url)) {
-              ended.push(page.url);
-            }
-          });
-          if (ended.length) onClosePages(requestId, ended);
+          if (review) noteReview(requestId, review);
         }, error => {
           if (readGeneration !== generation) return;
           if (error && (error.status === 403 || error.status === 404)) stopped.add(requestId);
@@ -793,6 +805,7 @@ export function createFollowUpPageWatcher({
   return {
     sync: watcher.sync,
     refresh,
+    noteReview,
     clear() {
       generation += 1;
       inflight.clear();
@@ -1003,6 +1016,7 @@ export function createFollowUpWatcher({
 
   return {
     sync,
+    isActive: () => Boolean(timer),
     stop() {
       stopTimer();
       polls = 0;
@@ -1286,6 +1300,7 @@ export function createAccessInbox({
     return Promise.all(reads);
   }
 
+  const panelVisible = typeof isVisible === "function" ? isVisible : () => !container.hidden;
   const followUpWatcher = createFollowUpWatcher({
     getPendingLinks: pendingOutcomeLinks,
     onRefresh: refreshFollowUps,
@@ -1296,7 +1311,7 @@ export function createAccessInbox({
         }
       });
     },
-    isVisible: typeof isVisible === "function" ? isVisible : () => !container.hidden,
+    isVisible: panelVisible,
     browser,
     now,
   });
@@ -1727,6 +1742,11 @@ export function createAccessInbox({
     load,
     refreshFollowUps,
     syncFollowUps: followUpWatcher.sync,
+    isWatchingFollowUp(id) {
+      const entry = state.outcomes.get(text(id));
+      return Boolean(entry && !entry.followUpStop && hasPendingFollowUp(entry.review)
+        && followUpWatcher.isActive() && panelVisible());
+    },
     /** Highlight and focus this request after the next successful load (Inbox links). */
     focusRequest(id) { state.focusId = text(id); },
     setVisible(visible) {

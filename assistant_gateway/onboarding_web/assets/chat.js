@@ -3027,9 +3027,6 @@ function addFollowUpPages(requestId, links, placement) {
     });
     if (added) {
       thread.transientItems = window.UAChatDelivery.reconcileTransientItems(thread.transientItems, thread.messages);
-      if (sharedState.settingsControls && typeof sharedState.settingsControls.syncFollowUpPages === "function") {
-        sharedState.settingsControls.syncFollowUpPages();
-      }
       // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
       lifecycle.timeout(renderMessages, 0);
     }
@@ -3196,9 +3193,7 @@ function setBrokerCardState(thread, itemId, state) {
       target.brokerCardStates = target.brokerCardStates || new Map();
       target.brokerCardStates.set(itemId, state);
     });
-    if (sharedState.settingsControls && typeof sharedState.settingsControls.syncFollowUpPages === "function") {
-      sharedState.settingsControls.syncFollowUpPages();
-    }
+    sharedState.settingsControls.syncFollowUpPages();
   }
 
 function createTransientItemCard(thread, item) {

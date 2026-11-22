@@ -452,7 +452,10 @@ reloads while the form is open, and once each form is used, closed or expires
 the approved card clears the prompt (or fallback button) and shows a short line
 saying what happened (if the form's time runs out while the gateway is still
 checking with the broker, the card briefly says it is checking whether the form
-finished for up to about a minute first). The broker's form
+finished for up to about a minute first). If you finish or decline the form in
+its own tab or on another device, its card in the conversation closes to "This
+secure page is closed." (or the expired line if its time ran out) while the
+approved card says whether it was done or declined. The broker's form
 can also take a new credential in the same step
 ([Account links](#account-links)). TeamLead's task keeps waiting until those
 forms are used, closed or expired, and then learns which accounts were linked,

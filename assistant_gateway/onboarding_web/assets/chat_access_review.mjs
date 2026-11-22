@@ -322,6 +322,13 @@ export function createChatAccessReviews({
     },
     /** Re-reads decided cards that still have open proposal follow-up links. */
     refreshFollowUps,
+    /** Whether this view is actively polling follow-up status for `id`. */
+    isWatchingFollowUp(id) {
+      const key = text(id);
+      const entry = entries.get(key);
+      return Boolean(entry && hasPendingFollowUps(entry) && followUpWatcher.isActive()
+        && findReviewSlots(document, key).length);
+    },
     /** Sign-out: forget every request and ignore replies to earlier reads. */
     clear() {
       generation += 1;

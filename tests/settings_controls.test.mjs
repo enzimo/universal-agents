@@ -389,13 +389,44 @@ test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up l
   }));
   assert.equal(bubble.querySelectorAll("a").length, 1);
 
+  assert.equal(closedPages.length, 0);
+  // 1) Firing every 4s follow-up poll tick while the chat review card is on screen issues
+  //    only one read and updates both the decided card and the inline broker card together (C16).
+  const requestsBeforePoll = f.requests.length;
+  [...f.intervals.values()]
+    .filter(timer => timer.delay === FOLLOW_UP_POLL_MS)
+    .forEach(timer => timer.callback());
+  await settle();
+  assert.equal(
+    f.requests.slice(requestsBeforePoll).filter(req => req.path === "/api/web-chat/access-inbox/requests/req-follow").length,
+    1,
+    "page watcher skips polling while the chat review card is actively watching the same request",
+  );
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
+    review: review({
+      request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [
+        {
+          label: "Choose the credential for Gitea",
+          url: "https://broker.example/link/2",
+          expires_at_utc: "2099-01-01T00:15:00+00:00",
+        },
+      ],
+      follow_up_outcomes: ["The account link for Portainer is done."],
+    }),
+  }));
+  assert.equal(bubble.querySelectorAll("a").length, 1);
+  assert.match(bubble.textContent, /The account link for Portainer is done\./);
+  assert.deepEqual(closedPages, [{ id: "req-follow", urls: ["https://broker.example/link/1"] }]);
+
+  // 2) noteAgentMessage also refreshes the remaining follow-up link and clears it.
   const requestsBefore = f.requests.length;
   f.settings.noteAgentMessage();
   await settle();
   assert.equal(
     f.requests.slice(requestsBefore).filter(req => req.path === "/api/web-chat/access-inbox/requests/req-follow").length,
     1,
-    "concurrent chat-review and inline-card refreshes deduplicate into one request read",
+    "noteAgentMessage issues one request read",
   );
   await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
     review: review({
@@ -405,8 +436,7 @@ test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up l
     }),
   }));
   assert.equal(bubble.querySelectorAll("a").length, 0);
-  assert.match(bubble.textContent, /The account link for Portainer is done\./);
-  assert.deepEqual(closedPages, [{ id: "req-follow", urls: ["https://broker.example/link/1"] }]);
+  assert.match(bubble.textContent, /The account link for Gitea is done\./);
 });
 
 test("approving in Settings Inbox keeps watching its inline card after closing Settings and reopening the Inbox (C14)", async () => {

@@ -288,7 +288,10 @@ test("cross-thread broker card outcome and expiry close the form in every thread
     brokerCardElement,
     BROKER_CARD_EXPIRED,
     lifecycle,
-    sharedState: { threads: [thread1, thread2, thread3] },
+    sharedState: {
+      threads: [thread1, thread2, thread3],
+      settingsControls: { syncFollowUpPages() {} },
+    },
     activeThread: () => current,
     shellState: { expiredSecureFormMessage: "This secure form link has expired." },
     copyTextToClipboard: () => Promise.resolve(),

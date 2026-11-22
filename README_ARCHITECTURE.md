@@ -3788,10 +3788,13 @@ page, the gateway, agents and models still never see what is typed.
   to close every copy. While any inline proposal card remains non-terminal, a
   page-level watcher (`access_inbox.mjs createFollowUpPageWatcher`, gated only
   on document visibility so it outlives closing Settings, reloading the Inbox,
-  and threads without a review card) polls the request and closes cards whose
-  URLs leave `follow_up_links` once settling ends: cards past their expiry
-  close as expired, cards ended before expiry show the neutral `"This secure
-  page is closed."` line (while the decided card's `follow_up_outcomes` says
+  and threads without a review card) tracks them: review reads from the chat
+  card and Inbox feed into `noteReview` so both cards update on the same read,
+  and the page watcher polls only requests no card watcher is actively polling,
+  closing cards whose URLs leave `follow_up_links` once settling ends: cards
+  past their expiry close as expired, cards ended before expiry show the neutral
+  `"This secure page is closed."` line (while the decided card's
+  `follow_up_outcomes` says
   whether the form was done or declined), and frame-reported `finished` or
   `declined` states stay intact; once all forms finish or expire, the decided
   card clears both the inline-card prompt and any fallback buttons in favor of

@@ -113,6 +113,17 @@ export function createSettingsControls({
     warning: "ua.settings: the Knowledge proposal count could not be read; retrying.",
     browser,
   });
+  const REVIEW_PATH_PREFIX = `${ACCESS_INBOX_API}/requests/`;
+  function reviewIdFromPath(path) {
+    if (typeof path !== "string" || !path.startsWith(REVIEW_PATH_PREFIX)) return "";
+    const raw = path.slice(REVIEW_PATH_PREFIX.length);
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  }
+  let reviewGeneration = 0;
   const inflightReviewReads = new Map();
   function readAccessReview(path) {
     if (inflightReviewReads.has(path)) return inflightReviewReads.get(path);
@@ -124,15 +135,26 @@ export function createSettingsControls({
     inflightReviewReads.set(path, pending);
     return pending;
   }
-  const getInboxOrReview = path => (
-    typeof path === "string" && path.startsWith(`${ACCESS_INBOX_API}/requests/`)
-      ? readAccessReview(path)
-      : client.get(path, ACCESS_READ_FALLBACK)
-  );
+  const getInboxOrReview = path => {
+    if (typeof path !== "string" || !path.startsWith(REVIEW_PATH_PREFIX)) {
+      return client.get(path, ACCESS_READ_FALLBACK);
+    }
+    const generation = reviewGeneration;
+    const pathId = reviewIdFromPath(path);
+    return readAccessReview(path).then(payload => {
+      if (generation === reviewGeneration) {
+        const review = (payload && payload.review) || null;
+        const requestId = (review && review.request_id) || pathId;
+        if (review && requestId) followUpPageWatcher.noteReview(requestId, review);
+      }
+      return payload;
+    });
+  };
   const followUpPageWatcher = createFollowUpPageWatcher({
     getOpenPages: getOpenFollowUpPages,
     get: readAccessReview,
     onClosePages: onCloseFollowUpPages,
+    isRequestWatched: id => chatReviews.isWatchingFollowUp(id) || accessInbox.isWatchingFollowUp(id),
     browser,
   });
   const handleFollowUpPages = typeof onFollowUpPages === "function"
@@ -367,6 +389,7 @@ export function createSettingsControls({
       state.view = SETTINGS_VIEWS.INBOX;
       state.sessionKey = "";
       client.setCsrfToken("");
+      reviewGeneration += 1;
       inflightReviewReads.clear();
       tasks.clear();
       chatReviews.clear();

@@ -821,6 +821,7 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
   ];
   const gets = [];
   const closed = [];
+  const watchedElsewhere = new Set();
   const watcher = createFollowUpPageWatcher({
     getOpenPages: () => openPages,
     get: path => new Promise((resolve, reject) => gets.push({ path, resolve, reject })),
@@ -828,6 +829,7 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
       closed.push({ requestId, urls });
       openPages = openPages.filter(page => !(page.requestId === requestId && urls.includes(page.url)));
     },
+    isRequestWatched: id => watchedElsewhere.has(id),
     browser,
     now: () => clock,
   });
@@ -901,6 +903,19 @@ test("createFollowUpPageWatcher watches open inline proposal cards by document v
   gets[5].resolve({ status: "ok", review: { follow_up_links: [], follow_up_settling: false } });
   await settle();
   assert.equal(closed.length, 2, "stale response after clear() does not close anything");
+
+  // While another watcher owns a request, polling skips it, and noteReview closes ended cards immediately (C16).
+  openPages = [{ requestId: "req-11", url: "http://b.example/e", expiresAtUtc: "2099-01-01T00:00:00Z" }];
+  watchedElsewhere.add("req-11");
+  watcher.sync();
+  assert.equal(intervals.size, 1);
+  const getsBeforeSkip = gets.length;
+  [...intervals.values()][0].cb();
+  await settle();
+  assert.equal(gets.length, getsBeforeSkip, "skips polling while another watcher owns the request");
+  watcher.noteReview("req-11", { follow_up_links: [], follow_up_settling: false });
+  assert.deepEqual(closed.at(-1), { requestId: "req-11", urls: ["http://b.example/e"] });
+  assert.equal(intervals.size, 0, "stops immediately once noteReview closes the last open card");
 });
 
 test("approving a proposal in the Inbox panel shows its forms in the conversation, not in a new tab", async () => {
