@@ -1162,3 +1162,227 @@ async def test_gate_link_form_is_admin_only_ignores_sharing_and_works_with_auth_
     )
     assert stored_docs_gate is not None
     assert saved_env_values["http-gitea-gate"] == {"client_secret": "CF-TOP-SECRET"}
+
+
+@pytest.mark.asyncio
+async def test_link_form_pins_shown_definition_and_refuses_when_tool_changes_before_submit(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """F4 (R3): changing a tool's hosts or injections between GET and POST refuses linking for both account and gate forms."""
+
+    import os
+    import re
+    import time
+    from types import SimpleNamespace
+
+    from access_catalog.catalog import CatalogSource
+    from secure_tool_broker.account_links import DEFINITION_DIGEST_FIELD, REASON_DEFINITION_CHANGED
+
+    instance_root = tmp_path / "instance"
+    tools_dir = instance_root / "control" / "access" / "tools"
+    tools_dir.mkdir(parents=True)
+    tool_file = tools_dir / "proposed-http-gitea.yaml"
+
+    def write_def(yaml_text: str, *, bump_ns: int) -> None:
+        tool_file.write_text(yaml_text, encoding="utf-8")
+        stamp = time.time_ns() + bump_ns
+        os.utime(tool_file, ns=(stamp, stamp))
+
+    def_a = """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - {placement: header, name: Authorization, field: api_token, template: "token {value}"}
+    gate_injections:
+      - {placement: header, name: CF-Access-Client-Secret, field: client_secret}
+"""
+    def_b = """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com, mirror.example.net]
+    credential_injections:
+      - {placement: query, name: access_token, field: api_token}
+    gate_injections:
+      - {placement: query, name: cf_secret, field: client_secret}
+"""
+    def_a_reordered_description = """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    description: Updated description only.
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - {placement: header, name: authorization, field: api_token, template: "token {value}"}
+    gate_injections:
+      - {placement: header, name: cf-access-client-secret, field: client_secret}
+"""
+    write_def(def_a, bump_ns=0)
+
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    gate = BrokerAccessGate(
+        catalogs=CatalogSource(instance_root),
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    monkeypatch.setenv("GITEA_TOKEN", "personal-secret")
+    save_credentials(CredentialOwnerScope.user("user-1"), gitea_personal=token_credential("GITEA_TOKEN"))
+    stored_new: list[str] = []
+
+    def fake_collect(payload, values, *, scope):
+        stored_new.append(payload["credential_key"])
+        return SimpleNamespace(status="success", content={}, error=None)
+
+    monkeypatch.setattr("secure_tool_broker.account_links.collect_credential", fake_collect)
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
+    caplog.set_level(logging.WARNING)
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        # 1. Account link form: GET shows definition A, file changes to B before POST -> refused.
+        acct_created = await (
+            await client.post(
+                "/v1/account-link/sessions",
+                headers=gateway_headers(),
+                json={
+                    "request_id": "req-pin-account",
+                    "team_id": TEST_TEAM,
+                    "tool_id": "http:gitea",
+                    "owner_kind": "person",
+                    "purpose": "account",
+                    "person_id": "user-1",
+                    "person_roles": ["member"],
+                    "reason": "Link Gitea",
+                },
+            )
+        ).json()
+        acct_sid = acct_created["session_id"]
+        acct_form = await (await client.get(f"/account-link/{acct_sid}")).text()
+        assert "Authorization" in acct_form and "mirror.example.net" not in acct_form
+        digest_match = re.search(rf'name="{DEFINITION_DIGEST_FIELD}" value="([0-9a-f]{{64}})"', acct_form)
+        assert digest_match is not None
+
+        # Open a gate session at definition A too, then replace the file with definition B.
+        gate_created = await (
+            await client.post(
+                "/v1/account-link/sessions",
+                headers=gateway_headers(),
+                json={
+                    "request_id": "req-pin-gate",
+                    "team_id": TEST_TEAM,
+                    "tool_id": "http:gitea",
+                    "owner_kind": "team",
+                    "purpose": "gate",
+                    "person_id": "admin-1",
+                    "person_roles": ["admin"],
+                    "reason": "Link Gitea gate",
+                },
+            )
+        ).json()
+        gate_sid = gate_created["session_id"]
+        gate_form = await (await client.get(f"/account-link/{gate_sid}")).text()
+        assert "CF-Access-Client-Secret" in gate_form and "mirror.example.net" not in gate_form
+
+        write_def(def_b, bump_ns=2_000_000_000)
+
+        acct_submit = await client.post(
+            f"/account-link/{acct_sid}",
+            data={"credential_key": "gitea_personal", "confirm": "yes"},
+        )
+        assert acct_submit.status == 200
+        acct_status = await (await client.get(f"/v1/account-link/sessions/{acct_sid}", headers=gateway_headers())).json()
+        assert acct_status["status"] == "account_link_unavailable"
+        assert acct_status["result"]["reason_code"] == REASON_DEFINITION_CHANGED
+        assert "/link http:gitea" in acct_status["result"]["error"]
+
+        # Submitting a new gate credential after the change refuses BEFORE storing the credential.
+        gate_submit = await client.post(
+            f"/account-link/{gate_sid}",
+            data={"credential_source": "new", "field__client_secret": "gate-secret", "confirm": "yes"},
+        )
+        assert gate_submit.status == 200
+        gate_status = await (await client.get(f"/v1/account-link/sessions/{gate_sid}", headers=gateway_headers())).json()
+        assert gate_status["status"] == "account_link_unavailable"
+        assert gate_status["result"]["reason_code"] == REASON_DEFINITION_CHANGED
+        assert "/link http:gitea gate" in gate_status["result"]["error"]
+        assert stored_new == [], "nothing is stored in the credential store when the definition changed"
+        assert store.list_links(TEST_TEAM, purpose=None) == []
+
+        # 2. Stale rendered tab: GET 1 shows B, file changes back to A, GET 2 refreshes session to A,
+        #    submitting form with B's definition_digest is still refused.
+        tab_created = await (
+            await client.post(
+                "/v1/account-link/sessions",
+                headers=gateway_headers(),
+                json={
+                    "request_id": "req-pin-stale-tab",
+                    "team_id": TEST_TEAM,
+                    "tool_id": "http:gitea",
+                    "owner_kind": "person",
+                    "purpose": "account",
+                    "person_id": "user-1",
+                    "person_roles": ["member"],
+                    "reason": "Stale tab check",
+                },
+            )
+        ).json()
+        tab_sid = tab_created["session_id"]
+        tab_page_b = await (await client.get(f"/account-link/{tab_sid}")).text()
+        digest_b = re.search(rf'name="{DEFINITION_DIGEST_FIELD}" value="([0-9a-f]{{64}})"', tab_page_b)
+        assert digest_b is not None
+        write_def(def_a, bump_ns=4_000_000_000)
+        await client.get(f"/account-link/{tab_sid}")  # second tab refreshes session to A
+        await client.post(
+            f"/account-link/{tab_sid}",
+            data={
+                "credential_key": "gitea_personal",
+                DEFINITION_DIGEST_FIELD: digest_b.group(1),
+                "confirm": "yes",
+            },
+        )
+        tab_status = await (await client.get(f"/v1/account-link/sessions/{tab_sid}", headers=gateway_headers())).json()
+        assert tab_status["status"] == "account_link_unavailable"
+        assert tab_status["result"]["reason_code"] == REASON_DEFINITION_CHANGED
+
+        # 3. Unrelated change (description + header case only) still succeeds.
+        ok_created = await (
+            await client.post(
+                "/v1/account-link/sessions",
+                headers=gateway_headers(),
+                json={
+                    "request_id": "req-pin-unchanged",
+                    "team_id": TEST_TEAM,
+                    "tool_id": "http:gitea",
+                    "owner_kind": "person",
+                    "purpose": "account",
+                    "person_id": "user-1",
+                    "person_roles": ["member"],
+                    "reason": "Unchanged hosts and injections",
+                },
+            )
+        ).json()
+        ok_sid = ok_created["session_id"]
+        ok_page = await (await client.get(f"/account-link/{ok_sid}")).text()
+        ok_digest = re.search(rf'name="{DEFINITION_DIGEST_FIELD}" value="([0-9a-f]{{64}})"', ok_page)
+        assert ok_digest is not None
+        write_def(def_a_reordered_description, bump_ns=6_000_000_000)
+        await client.post(
+            f"/account-link/{ok_sid}",
+            data={
+                "credential_key": "gitea_personal",
+                DEFINITION_DIGEST_FIELD: ok_digest.group(1),
+                "confirm": "yes",
+            },
+        )
+        ok_status = await (await client.get(f"/v1/account-link/sessions/{ok_sid}", headers=gateway_headers())).json()
+        assert ok_status["status"] == "account_link_created"
+
+    assert "event=account_link_definition_changed" in caplog.text

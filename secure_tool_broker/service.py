@@ -64,6 +64,7 @@ from secure_tool_broker.account_links import (
     credential_choices,
     linkable_tool,
     owner_scope,
+    pinned_link_definition,
     read_choice,
     render_form,
     required_fields,
@@ -1248,6 +1249,7 @@ class SecureToolBrokerService:
                 now + timedelta(seconds=self._credential_collection_ttl_seconds()),
                 now + timedelta(minutes=30),
             ),
+            shown_definition=pinned_link_definition(tool, link_request.purpose),
         )
         self._account_link_sessions[session_id] = session
         self._account_link_session_by_request[link_request.request_id] = session_id
@@ -1323,6 +1325,7 @@ class SecureToolBrokerService:
                 status=409,
             )
         used_by = used_by_text(self._access_gate.access, tool, session.request)
+        session.shown_definition = pinned_link_definition(tool, session.request.purpose)
         page_title = (
             "Link a team gate credential"
             if session.request.purpose is LinkPurpose.GATE

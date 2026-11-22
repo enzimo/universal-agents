@@ -51,6 +51,8 @@ from custom_messages.contracts.access_v2 import (
     TargetKind,
     ToolDefinitionV1,
     ToolKind,
+    canonical_injections,
+    contract_digest,
 )
 from id_generation import new_id
 from secure_tool_broker.auth_pages import render_credential_input, render_session_countdown
@@ -58,6 +60,7 @@ from secure_tool_broker.credential_catalog import collect_credential, load_catal
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from secure_tool_broker.redaction import redact_text
 from secure_tools.auth_methods import sign_in_instead_text, tool_sign_in
+from secure_tools.chat_commands import link_command
 from storage.access_repository import AccessRepository
 
 if TYPE_CHECKING:
@@ -80,8 +83,10 @@ FIXED_CLI_FIELDS = {"cli:huggingface": "api_token", "cli:x": "oauth_json"}
 # ``field__<name>`` value per credential field; the stored-credential part
 # sends ``credential_key`` instead.
 CREDENTIAL_SOURCE_FIELD = "credential_source"
+DEFINITION_DIGEST_FIELD = "definition_digest"
 NEW_CREDENTIAL = "new"
 NEW_FIELD_PREFIX = "field__"
+REASON_DEFINITION_CHANGED = "account_link_definition_changed"
 REASON_FIELDS_MISSING = "account_link_credential_fields_missing"
 REASON_KEY_UNAVAILABLE = "account_link_credential_key_unavailable"
 REASON_NOT_STORED = "account_link_credential_not_stored"
@@ -107,6 +112,35 @@ class AccountLinkRefused(ValueError):
         self.reason_code = reason_code
 
 
+@dataclass(frozen=True)
+class PinnedLinkDefinition:
+    """The tool hosts and canonical injections shown to the person on the link form."""
+
+    hosts: frozenset[str]
+    injections: frozenset[tuple[InjectionPlacement, str, str, str]]
+
+    @property
+    def digest(self) -> str:
+        return contract_digest(
+            {
+                "hosts": sorted(self.hosts),
+                "injections": sorted(
+                    (placement.value, name, field_name, template)
+                    for placement, name, field_name, template in self.injections
+                ),
+            }
+        )
+
+
+def pinned_link_definition(tool: ToolDefinitionV1, purpose: LinkPurpose) -> PinnedLinkDefinition:
+    """Canonical hosts and injections for ``purpose`` pinned while a link form is open."""
+
+    return PinnedLinkDefinition(
+        hosts=frozenset(tool.hosts),
+        injections=canonical_injections(_injections_for(tool, purpose)),
+    )
+
+
 @dataclass
 class AccountLinkSession:
     request: AccountLinkRequestV1
@@ -116,6 +150,7 @@ class AccountLinkSession:
     result: dict[str, object] | None = None
     used: bool = False
     submission_in_progress: bool = False
+    shown_definition: PinnedLinkDefinition | None = None
 
 
 def owner_scope(request: AccountLinkRequestV1) -> CredentialOwnerScope:
@@ -371,6 +406,7 @@ def _stored_credential_form(
     choices: list[dict[str, str]],
     *,
     purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+    definition_digest: str = "",
 ) -> str:
     """The part of the page that links a credential the owner already stored (only when one fits)."""
 
@@ -388,11 +424,17 @@ def _stored_credential_form(
         else f"Link this credential to {tool.display_name} as described above."
     )
     submit_label = "Link gate credential" if gate else "Link account"
+    digest_input = (
+        f'<input type="hidden" name="{DEFINITION_DIGEST_FIELD}" value="{html.escape(definition_digest, quote=True)}">'
+        if definition_digest
+        else ""
+    )
     return (
         '<section class="content-panel"><h2>Use a stored credential</h2>'
         # No action: the form posts to the page's own address, query included,
         # so a card (?view=card) stays a card.
         '<form method="post">'
+        f"{digest_input}"
         '<label for="credential_key">Stored credential</label>'
         f'<select id="credential_key" name="credential_key" required>{options}</select>'
         f"{_confirmation(confirm_text)}"
@@ -400,7 +442,12 @@ def _stored_credential_form(
     )
 
 
-def _new_credential_form(tool: ToolDefinitionV1, request: AccountLinkRequestV1) -> str:
+def _new_credential_form(
+    tool: ToolDefinitionV1,
+    request: AccountLinkRequestV1,
+    *,
+    definition_digest: str = "",
+) -> str:
     """The part of the page that stores a new credential and links it in the same submission.
 
     A separate form, so its required inputs do not block linking a stored
@@ -434,11 +481,17 @@ def _new_credential_form(tool: ToolDefinitionV1, request: AccountLinkRequestV1) 
         else f"Save this credential and link it to {tool.display_name} as described above."
     )
     submit_label = "Save and link gate credential" if gate else "Save and link account"
+    digest_input = (
+        f'<input type="hidden" name="{DEFINITION_DIGEST_FIELD}" value="{html.escape(definition_digest, quote=True)}">'
+        if definition_digest
+        else ""
+    )
     return (
         '<section class="content-panel"><h2>Add a new credential</h2>'
         f"<p>{intro}</p>"
         '<form method="post">'
         f'<input type="hidden" name="{CREDENTIAL_SOURCE_FIELD}" value="{NEW_CREDENTIAL}">'
+        f"{digest_input}"
         f"{inputs}"
         f"{_confirmation(confirm_text)}"
         f'<p><button type="submit">{submit_label}</button></p></form></section>'
@@ -486,6 +539,7 @@ def render_form(
             "Linking an account gives nobody access. People and agents still need access to "
             f"{html.escape(tool.display_name)} to use it, and the credential value never leaves the broker."
         )
+    definition_digest = pinned_link_definition(tool, request.purpose).digest
     return (
         f'<section class="content-panel"><p class="eyebrow">{eyebrow}</p>'
         f"<h1>{heading}</h1>"
@@ -496,8 +550,8 @@ def render_form(
         f"<p><strong>Reason:</strong> {html.escape(request.reason or 'Not given')}</p>"
         f"<p>{no_access_note}</p>"
         f"{render_session_countdown(session.expires_at, label='This form expires in')}</section>"
-        f"{_stored_credential_form(tool, choices, purpose=request.purpose)}"
-        f"{_new_credential_form(tool, request)}"
+        f"{_stored_credential_form(tool, choices, purpose=request.purpose, definition_digest=definition_digest)}"
+        f"{_new_credential_form(tool, request, definition_digest=definition_digest)}"
     )
 
 
@@ -548,24 +602,31 @@ class LinkChoice:
     """What the person sent: a stored credential's key, or the values of a new credential.
 
     ``new_values`` holds secret values; it is kept out of ``repr`` and is never
-    logged or put into a page.
+    logged or put into a page. ``definition_digest`` pins the tool definition
+    shown in the rendered form when present.
     """
 
     credential_key: str = ""
     new_values: dict[str, str] | None = field(default=None, repr=False)
+    definition_digest: str | None = None
 
 
 def read_choice(form: Mapping[str, Any]) -> LinkChoice:
     """The person's choice from the submitted form fields."""
 
+    definition_digest = str(form.get(DEFINITION_DIGEST_FIELD) or "").strip() or None
     if str(form.get(CREDENTIAL_SOURCE_FIELD) or "") != NEW_CREDENTIAL:
-        return LinkChoice(credential_key=str(form.get("credential_key") or "").strip())
+        return LinkChoice(
+            credential_key=str(form.get("credential_key") or "").strip(),
+            definition_digest=definition_digest,
+        )
     return LinkChoice(
         new_values={
             str(key).removeprefix(NEW_FIELD_PREFIX): value
             for key, value in form.items()
             if str(key).startswith(NEW_FIELD_PREFIX) and isinstance(value, str)
-        }
+        },
+        definition_digest=definition_digest,
     )
 
 
@@ -699,6 +760,36 @@ class LinkOutcome:
         return f"The chosen {noun} is now linked to {self.tool.display_name}."
 
 
+def _check_pinned_definition(
+    tool: ToolDefinitionV1,
+    request: AccountLinkRequestV1,
+    *,
+    expected_definition: PinnedLinkDefinition | None,
+    submitted_digest: str | None,
+) -> None:
+    """Refuse to link when the tool's hosts or injections changed after the form was shown."""
+
+    current = pinned_link_definition(tool, request.purpose)
+    session_mismatch = expected_definition is not None and current != expected_definition
+    form_mismatch = submitted_digest is not None and submitted_digest != current.digest
+    if not (session_mismatch or form_mismatch):
+        return
+    command = link_command(tool.tool_id, request.owner_kind, purpose=request.purpose)
+    logger.warning(
+        "Refused account link because the tool definition changed while the form was open. "
+        "event=account_link_definition_changed tool_id=%s owner_kind=%s purpose=%s person_id=%s",
+        tool.tool_id,
+        request.owner_kind.value,
+        request.purpose.value,
+        request.person_id,
+    )
+    raise AccountLinkRefused(
+        f"{tool.display_name}'s definition changed while this form was open, so nothing was linked. "
+        f"Open the form again with {command} to review the updated hosts and credential settings.",
+        reason_code=REASON_DEFINITION_CHANGED,
+    )
+
+
 def link_account(
     store: AccessRepository,
     catalog: ToolCatalog,
@@ -706,14 +797,22 @@ def link_account(
     choice: LinkChoice,
     *,
     now: datetime,
+    expected_definition: PinnedLinkDefinition | None = None,
 ) -> LinkOutcome:
     """Link the chosen credential, storing it first when the person typed a new one.
 
-    ``linkable_tool`` runs first, so nothing is stored for someone who may not
-    link for this owner.
+    ``linkable_tool`` and the pinned-definition check run first, so nothing is
+    stored for someone who may not link for this owner or when the tool changed
+    after the form was shown.
     """
 
     tool = linkable_tool(catalog, request, TeamAccountSharing(store, request.team_id))
+    _check_pinned_definition(
+        tool,
+        request,
+        expected_definition=expected_definition,
+        submitted_digest=choice.definition_digest,
+    )
     if choice.new_values is None:
         return LinkOutcome(create_link(store, request, tool, choice.credential_key, now=now), tool)
     added = add_credential(request, tool, choice.new_values)
@@ -744,7 +843,14 @@ def finish_account_link(
         }
         return "Nothing was linked."
     try:
-        outcome = link_account(store, catalog, link_request, choice, now=datetime.now(timezone.utc))
+        outcome = link_account(
+            store,
+            catalog,
+            link_request,
+            choice,
+            now=datetime.now(timezone.utc),
+            expected_definition=session.shown_definition,
+        )
     except AccountLinkRefused as exc:
         session.status = STATUS_UNAVAILABLE
         session.result = {"status": session.status, "error": str(exc), "reason_code": exc.reason_code}
@@ -793,10 +899,13 @@ __all__ = [
     "AccountLinkRefused",
     "AccountLinkSession",
     "CREDENTIAL_SOURCE_FIELD",
+    "DEFINITION_DIGEST_FIELD",
     "LinkChoice",
     "LinkOutcome",
     "NEW_CREDENTIAL",
     "NEW_FIELD_PREFIX",
+    "PinnedLinkDefinition",
+    "REASON_DEFINITION_CHANGED",
     "REASON_FIELDS_MISSING",
     "REASON_KEY_UNAVAILABLE",
     "REASON_NOT_STORED",
@@ -813,6 +922,7 @@ __all__ = [
     "linkable_tool",
     "new_credential_key",
     "owner_scope",
+    "pinned_link_definition",
     "read_choice",
     "render_form",
     "required_fields",
