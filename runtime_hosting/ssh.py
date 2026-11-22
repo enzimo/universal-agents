@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -39,6 +39,7 @@ from runtime_hosting.execution_contracts import (
     EnrolledSSHTargetV1,
     InteractiveSessionStatus,
     InteractiveSessionV1,
+    OwnerScopeKind,
     OwnerScopeV1,
     SSHInteractionRecordV1,
     SSHSecretRecipe,
@@ -55,11 +56,11 @@ from runtime_hosting.ssh_credentials import (
     SessionSecretScrubber,
     StreamSecretScrubber,
     build_ssh_subprocess_env,
+    record_ssh_child_pid,
     sweep_stale_ssh_ephemeral_dirs,
 )
 from runtime_hosting.ssh_network import (
     LocalAddressChecker,
-    SSHHostResolutionError,
     SSHHostResolver,
     SSHNetworkPolicy,
     ValidatedSSHHost,
@@ -107,6 +108,12 @@ _TERMINAL_SESSION_STATUSES = frozenset(
     }
 )
 _MAX_COMPLETED_COMMANDS = 200
+_DEFAULT_MAX_CONCURRENT_COMMANDS_PER_SESSION = 4
+_DEFAULT_MAX_CONCURRENT_COMMANDS_PER_BROKER = 16
+_REMOTE_TERMINATION_NOTE = (
+    "remote process group signalled; any process that detached into its own session "
+    "may still require host-side cleanup"
+)
 _RECIPE_REQUIRED_FIELD: dict[SSHSecretRecipe, str] = {
     SSHSecretRecipe.TAILSCALE_UP: "tailscale_auth_key",
 }
@@ -139,6 +146,114 @@ async def _await_shielded(
     if caller_cancelled and reraise_on_caller_cancel:
         raise asyncio.CancelledError
     return result
+
+
+async def _enter_context_safely(
+    factory: Callable[[], AbstractContextManager[_T]],
+    *,
+    verify: Callable[[_T], None] | None = None,
+) -> tuple[AbstractContextManager[_T], _T]:
+    """Enter a blocking context manager in a worker thread without leaking on cancellation."""
+
+    handoff_lock = threading.Lock()
+    abandoned = False
+    entered_ref: list[AbstractContextManager[_T]] = []
+
+    def _enter() -> tuple[AbstractContextManager[_T], _T]:
+        ctx = factory()
+        value = ctx.__enter__()
+        try:
+            if verify is not None:
+                verify(value)
+        except Exception:
+            ctx.__exit__(None, None, None)
+            raise
+        with handoff_lock:
+            if abandoned:
+                ctx.__exit__(None, None, None)
+                raise asyncio.CancelledError("Context entry was cancelled during prepare.")
+            entered_ref.append(ctx)
+        return ctx, value
+
+    task = asyncio.create_task(asyncio.to_thread(_enter))
+    try:
+        return await asyncio.shield(task)
+    except BaseException:
+        ctx_to_close: AbstractContextManager[_T] | None = None
+        try:
+            ctx_to_close, _ = await _await_shielded(task, reraise_on_caller_cancel=False)
+        except BaseException:
+            with handoff_lock:
+                abandoned = True
+                if entered_ref:
+                    ctx_to_close = entered_ref[0]
+        if ctx_to_close is not None:
+            try:
+                await _await_shielded(
+                    asyncio.to_thread(ctx_to_close.__exit__, None, None, None),
+                    reraise_on_caller_cancel=False,
+                )
+            except BaseException:
+                pass
+        raise
+
+
+def _close_async_stdin(process: asyncio.subprocess.Process) -> None:
+    stdin = process.stdin
+    if stdin is None:
+        return
+    try:
+        if stdin.can_write_eof():
+            stdin.write_eof()
+    except (OSError, RuntimeError):
+        pass
+    try:
+        stdin.close()
+    except (OSError, RuntimeError):
+        pass
+
+
+async def _kill_async_process_group(
+    process: asyncio.subprocess.Process,
+    *,
+    close_stdin_first: bool = False,
+    stdin_grace_seconds: float = 1.5,
+    grace_seconds: float = 1.0,
+) -> None:
+    """Stop an asyncio subprocess and its process group without holding worker threads.
+
+    When ``close_stdin_first`` is True, closes SSH stdin first so the remote
+    stdin-EOF watcher terminates the remote process group (including ``sudo``
+    commands) cleanly before falling back to local process-group signals.
+    """
+
+    if process.returncode is not None:
+        return
+    if close_stdin_first:
+        _close_async_stdin(process)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=max(0.1, stdin_grace_seconds))
+            return
+        except TimeoutError:
+            pass
+    if process.returncode is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=max(0.1, grace_seconds))
+    except TimeoutError:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except OSError:
+            process.kill()
+        await process.wait()
 
 
 async def _kill_process_group(
@@ -184,6 +299,7 @@ def _write_private_copy(path: Path, payload: bytes) -> None:
 @dataclass
 class _LiveSSHSession:
     session: InteractiveSessionV1
+    caller: SSHCallerContext
     lease_token: str = field(repr=False)
     process: subprocess.Popen[bytes]
     master_fd: int
@@ -192,19 +308,34 @@ class _LiveSSHSession:
     stream_scrubber: StreamSecretScrubber = field(repr=False)
     raw_transcript: bytearray = field(default_factory=bytearray, repr=False)
     transcript_truncated: bool = False
-    expiry_monitor: asyncio.Task[None] | None = None
+
+
+@dataclass(eq=False)
+class _CancellableStep:
+    """In-flight broker SSH step (for example key bootstrap or sudo probe) watched by the monitor."""
+
+    session: InteractiveSessionV1
+    caller: SSHCallerContext
+    capability: SSHCapability
+    secret_recipe: SSHSecretRecipe | None = None
+    revoked_event: asyncio.Event = field(default_factory=asyncio.Event)
+    invalidation_reason: str | None = None
 
 
 @dataclass
 class _LiveSSHCommand:
     command_id: str
     session_id: str
+    session: InteractiveSessionV1
+    caller: SSHCallerContext
+    capability: SSHCapability
     target_id: str | None
     owner_person_id: str | None
     started_at_utc: datetime
     scrubber: SessionSecretScrubber = field(repr=False)
     stdout_stream: StreamSecretScrubber = field(repr=False)
     stderr_stream: StreamSecretScrubber = field(repr=False)
+    secret_recipe: SSHSecretRecipe | None = None
     raw_stdout: bytearray = field(default_factory=bytearray, repr=False)
     raw_stderr: bytearray = field(default_factory=bytearray, repr=False)
     scrubbed_stdout: bytearray = field(default_factory=bytearray, repr=False)
@@ -215,18 +346,15 @@ class _LiveSSHCommand:
     exit_code: int | None = None
     finished_at_utc: datetime | None = None
     error: str | None = None
-    process: subprocess.Popen[bytes] | None = None
+    invalidation_reason: str | None = None
+    process: asyncio.subprocess.Process | None = None
     done_event: asyncio.Event = field(default_factory=asyncio.Event)
     revoked_event: asyncio.Event = field(default_factory=asyncio.Event)
     runner_task: asyncio.Task[None] | None = None
 
     def snapshot(self) -> SSHCommandResult:
-        if self.status is SSHCommandStatus.RUNNING:
-            stdout_bytes = bytes(self.scrubbed_stdout)
-            stderr_bytes = bytes(self.scrubbed_stderr)
-        else:
-            stdout_bytes = bytes(self.scrubbed_stdout)
-            stderr_bytes = bytes(self.scrubbed_stderr)
+        stdout_bytes = bytes(self.scrubbed_stdout)
+        stderr_bytes = bytes(self.scrubbed_stderr)
         return SSHCommandResult(
             command_id=self.command_id,
             session_id=self.session_id,
@@ -259,6 +387,8 @@ class SSHSessionBroker:
     lease_ttl_seconds: int = 300
     transcript_limit_bytes: int = 4_194_304
     command_output_limit_bytes: int = DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES
+    max_concurrent_commands_per_session: int = _DEFAULT_MAX_CONCURRENT_COMMANDS_PER_SESSION
+    max_concurrent_commands_per_broker: int = _DEFAULT_MAX_CONCURRENT_COMMANDS_PER_BROKER
     network_policy: SSHNetworkPolicy | None = None
     resolver: SSHHostResolver | None = None
     local_address_checker: LocalAddressChecker | None = None
@@ -270,6 +400,8 @@ class SSHSessionBroker:
     _sessions: dict[str, _LiveSSHSession] = field(default_factory=dict, init=False, repr=False)
     _commands: dict[str, _LiveSSHCommand] = field(default_factory=dict, init=False, repr=False)
     _session_commands: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
+    _active_steps: set[_CancellableStep] = field(default_factory=set, init=False, repr=False)
+    _monitor_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
 
     # -- host key probing ---------------------------------------------------------
 
@@ -335,29 +467,18 @@ class SSHSessionBroker:
         return enrolled_target, interaction
 
     def _validate_target_network(self, session: InteractiveSessionV1) -> ValidatedSSHHost | None:
-        if session.target.target_id is not None:
-            policy = self.network_policy or SSHNetworkPolicy.default()
-            return validate_ssh_host(
-                session.target.host,
-                session.target.port,
-                policy,
-                resolver=self.resolver,
-                local_address_checker=self.local_address_checker,
-            )
-        if self.network_policy is None:
+        if session.target.target_id is None:
+            # Operator-pinned static targets from execution_control.ssh.targets connect
+            # directly as in 0.9 without dynamic network-policy checks or IP pinning.
             return None
-        try:
-            return validate_ssh_host(
-                session.target.host,
-                session.target.port,
-                self.network_policy,
-                resolver=self.resolver,
-                local_address_checker=self.local_address_checker,
-            )
-        except SSHHostResolutionError:
-            if not self.network_policy.allowed_cidrs and not self.network_policy.allowed_domains:
-                return None
-            raise
+        policy = self.network_policy or SSHNetworkPolicy.default()
+        return validate_ssh_host(
+            session.target.host,
+            session.target.port,
+            policy,
+            resolver=self.resolver,
+            local_address_checker=self.local_address_checker,
+        )
 
     def _session_for_operation(self, session_id: str) -> InteractiveSessionV1:
         live = self._sessions.get(session_id)
@@ -423,37 +544,6 @@ class SSHSessionBroker:
             return self.material_provider.catalog_provider
         raise PermissionError("Sealbox SSH credential provider is not enabled in this broker.")
 
-    def _is_session_invalidated(
-        self,
-        session: InteractiveSessionV1,
-        *,
-        require_active_delegation: bool,
-    ) -> str | None:
-        if (
-            self.repository.get_interactive_session_revocation(
-                team_id=self.team_id, session_id=session.session_id
-            )
-            is not None
-        ):
-            return "session_revoked"
-        if session.target.target_id is not None:
-            enrolled = self.repository.get_ssh_target(
-                team_id=self.team_id, target_id=session.target.target_id
-            )
-            if enrolled is None or not enrolled.is_usable(now=self.repository.current_time_utc()):
-                return "target_revoked_or_expired"
-        interaction = self.repository.get_ssh_interaction(
-            team_id=self.team_id, session_id=session.session_id
-        )
-        if interaction is not None:
-            if interaction.revoked_at_utc is not None:
-                return "delegation_revoked"
-            if not interaction.is_active(now=self.repository.current_time_utc()):
-                return "delegation_expired"
-        elif require_active_delegation:
-            return "delegation_missing"
-        return None
-
     # -- interactive PTY lifecycle -----------------------------------------------
 
     async def open(
@@ -505,38 +595,14 @@ class SSHSessionBroker:
         master_fd = -1
         slave_fd = -1
         process: subprocess.Popen[bytes] | None = None
-        context_entered = False
-        prepare_task: asyncio.Task[
-            tuple[AbstractContextManager[SSHCredentialMaterial], SSHCredentialMaterial]
-        ] | None = None
-        handoff_lock = threading.Lock()
-        prepare_abandoned = False
-        prepared_ctx_ref: list[AbstractContextManager[SSHCredentialMaterial]] = []
         try:
-            def _prepare_and_verify() -> tuple[
-                AbstractContextManager[SSHCredentialMaterial],
-                SSHCredentialMaterial,
-            ]:
-                prepared_ctx = self._prepare_material_context(
+            context, material = await _enter_context_safely(
+                lambda: self._prepare_material_context(
                     claimed, key_lifetime_seconds=open_key_lifetime
-                )
-                prepared_material = prepared_ctx.__enter__()
-                try:
-                    self._verify_material(claimed, prepared_material)
-                except Exception:
-                    prepared_ctx.__exit__(None, None, None)
-                    raise
-                with handoff_lock:
-                    if prepare_abandoned:
-                        prepared_ctx.__exit__(None, None, None)
-                        raise asyncio.CancelledError("SSH open was cancelled during prepare.")
-                    prepared_ctx_ref.append(prepared_ctx)
-                return prepared_ctx, prepared_material
-
-            prepare_task = asyncio.create_task(asyncio.to_thread(_prepare_and_verify))
-            prepared_context, material = await asyncio.shield(prepare_task)
-            context = prepared_context
-            context_entered = True
+                ),
+                verify=lambda mat: self._verify_material(claimed, mat),
+            )
+            self._authorize_session(claimed, capability=SSHCapability.CONNECT, caller=caller)
             scrubber = SessionSecretScrubber(material.touched_secrets, logger=self.logger)
             stream_scrubber = scrubber.new_stream_scrubber()
             master_fd, slave_fd = pty.openpty()
@@ -556,6 +622,7 @@ class SSHSessionBroker:
                 close_fds=True,
                 start_new_session=True,
             )
+            record_ssh_child_pid(material.working_dir, process.pid)
             os.close(slave_fd)
             slave_fd = -1
             opened = claimed.model_copy(
@@ -572,34 +639,18 @@ class SSHSessionBroker:
             )
             live = _LiveSSHSession(
                 session=opened,
+                caller=caller,
                 lease_token=lease_token,
                 process=process,
                 master_fd=master_fd,
-                material_context=prepared_context,
+                material_context=context,
                 scrubber=scrubber,
                 stream_scrubber=stream_scrubber,
             )
             self._sessions[session_id] = live
-            live.expiry_monitor = asyncio.create_task(
-                self._monitor_expiry(session_id),
-                name=f"ssh-session-expiry:{session_id}",
-            )
+            self._ensure_monitor_started()
             return opened
         except BaseException:
-            if not context_entered and prepare_task is not None:
-                try:
-                    prepared_context, _ = await _await_shielded(
-                        prepare_task,
-                        reraise_on_caller_cancel=False,
-                    )
-                    context = prepared_context
-                    context_entered = True
-                except BaseException:
-                    with handoff_lock:
-                        prepare_abandoned = True
-                        if prepared_ctx_ref:
-                            context = prepared_ctx_ref[0]
-                            context_entered = True
             await _await_shielded(
                 self._cleanup_failed_open(
                     claimed=claimed,
@@ -607,7 +658,7 @@ class SSHSessionBroker:
                     process=process,
                     master_fd=master_fd,
                     slave_fd=slave_fd,
-                    context=context if context_entered else None,
+                    context=context,
                 ),
                 reraise_on_caller_cancel=False,
             )
@@ -792,9 +843,11 @@ class SSHSessionBroker:
         cmd = await self._start_tracked_command(
             session=session,
             caller=caller,
+            capability=SSHCapability.COMMAND,
             remote_argv=remote_argv,
             validated_host=validated_host,
             stdin_payload=None,
+            keep_stdin_open=(platform != SSHTargetPlatform.WINDOWS),
             timeout_seconds=effective_timeout,
             extra_secrets=(),
         )
@@ -811,13 +864,26 @@ class SSHSessionBroker:
         """Poll a tracked remote command after re-checking caller and session authorization."""
 
         cmd = self._commands.get(command_id)
-        if cmd is None or cmd.session_id != session_id:
-            raise LookupError(f"SSH command {command_id!r} was not found for session {session_id!r}.")
         session = self.repository.get_interactive_session(
             team_id=self.team_id, session_id=session_id
         )
         if session is None:
             raise SSHSessionUnavailable(f"SSH session {session_id!r} does not exist.")
+        if cmd is None or cmd.session_id != session_id:
+            if session.connect_activation is not None:
+                holder = session.connect_activation.holder
+                if holder.person_id is not None and caller.person_id != holder.person_id:
+                    raise ExecutionAuthorizationDenied("SSH session belongs to another person.")
+            elif (
+                session.owner.scope_kind == OwnerScopeKind.USER
+                and caller.person_id != session.owner.owner_id
+            ):
+                raise ExecutionAuthorizationDenied("SSH session belongs to another person.")
+            raise LookupError(
+                f"SSH command {command_id!r} is no longer tracked by this broker for session "
+                f"{session_id!r}; the broker may have restarted or the command record expired, "
+                "so its outcome is unknown."
+            )
         if cmd.status is SSHCommandStatus.RUNNING:
             self._authorize_session(session, capability=SSHCapability.CONNECT, caller=caller)
         else:
@@ -834,6 +900,7 @@ class SSHSessionBroker:
     ) -> SSHKeyEnrollResult:
         """One-time password bootstrap: install Sealbox ``ssh_public_key``, verify key login, latch target."""
 
+        bounded_requested_timeout = max(1.0, min(float(timeout_seconds), 3600.0))
         live = self._sessions.get(session_id)
         temp_lease_token: str | None = None
         claimed: InteractiveSessionV1 | None = None
@@ -847,7 +914,7 @@ class SSHSessionBroker:
                 session_id=existing.session_id,
                 broker_id=self.broker_id,
                 lease_token=temp_lease_token,
-                lease_ttl_seconds=max(self.lease_ttl_seconds, int(timeout_seconds) + 30),
+                lease_ttl_seconds=max(self.lease_ttl_seconds, int(bounded_requested_timeout) + 30),
             )
             session = claimed
 
@@ -862,7 +929,7 @@ class SSHSessionBroker:
             assert enrolled_target.bootstrap_credential_key is not None
             assert enrolled_target.bootstrap_credential_owner_scope is not None
             validated_host = self._validate_target_network(session)
-            effective_timeout = self._effective_timeout(timeout_seconds, interaction)
+            effective_timeout = self._effective_timeout(bounded_requested_timeout, interaction)
             catalog_provider = self._catalog_provider()
 
             bootstrap_claimed = self.repository.claim_ssh_target_password_bootstrap(
@@ -878,6 +945,7 @@ class SSHSessionBroker:
             scrubber = SessionSecretScrubber(logger=self.logger)
             key_fp, latched_record = await self._execute_key_bootstrap(
                 session=session,
+                caller=caller,
                 enrolled_target=enrolled_target,
                 validated_host=validated_host,
                 catalog_provider=catalog_provider,
@@ -927,60 +995,85 @@ class SSHSessionBroker:
         self,
         *,
         session: InteractiveSessionV1,
+        caller: SSHCallerContext,
+        capability: SSHCapability,
         argv: tuple[str, ...],
         env: dict[str, str],
         cwd: Path | None,
         stdin_payload: bytes | None,
         timeout_seconds: float,
         scrubber: SessionSecretScrubber,
+        secret_recipe: SSHSecretRecipe | None = None,
     ) -> tuple[int, str, str]:
-        """Run one broker SSH subprocess that can be terminated immediately on revocation."""
+        """Run one async broker SSH subprocess watched by the shared broker monitor."""
 
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE if stdin_payload is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(cwd) if cwd is not None else None,
-            env=env,
-            close_fds=True,
-            start_new_session=True,
+        if timeout_seconds <= 0:
+            raise TimeoutError("SSH operation timed out before the step could start.")
+        step = _CancellableStep(
+            session=session,
+            caller=caller,
+            capability=capability,
+            secret_recipe=secret_recipe,
         )
-        comm_task = asyncio.create_task(asyncio.to_thread(process.communicate, stdin_payload))
-        deadline = time.monotonic() + max(0.1, timeout_seconds)
-        poll_interval = max(0.05, float(self.revocation_poll_interval_seconds))
+        self._active_steps.add(step)
+        self._ensure_monitor_started()
+        process: asyncio.subprocess.Process | None = None
+        comm_task: asyncio.Task[tuple[bytes, bytes]] | None = None
+        revoke_waiter: asyncio.Task[bool] | None = None
         try:
-            while not comm_task.done():
-                invalidated = self._is_session_invalidated(
-                    session, require_active_delegation=True
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE if stdin_payload is not None else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(cwd) if cwd is not None else None,
+                env=env,
+                start_new_session=True,
+            )
+            record_ssh_child_pid(cwd, process.pid)
+            comm_task = asyncio.create_task(process.communicate(stdin_payload))
+            revoke_waiter = asyncio.create_task(step.revoked_event.wait())
+            done, _ = await asyncio.wait(
+                {comm_task, revoke_waiter},
+                timeout=max(0.1, timeout_seconds),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if step.revoked_event.is_set():
+                await _kill_async_process_group(process, grace_seconds=1.0)
+                await asyncio.gather(comm_task, return_exceptions=True)
+                raise ExecutionAuthorizationDenied(
+                    step.invalidation_reason
+                    or "SSH session or delegation became inactive during operation."
                 )
-                if invalidated is not None:
-                    await _kill_process_group(process, grace_seconds=1.0)
-                    await asyncio.gather(comm_task, return_exceptions=True)
-                    raise ExecutionAuthorizationDenied(
-                        f"SSH session or delegation became inactive during bootstrap ({invalidated})."
-                    )
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    await _kill_process_group(process, grace_seconds=1.0)
-                    await asyncio.gather(comm_task, return_exceptions=True)
-                    raise TimeoutError(f"SSH bootstrap step timed out after {timeout_seconds:.1f}s.")
-                await asyncio.wait({comm_task}, timeout=min(poll_interval, remaining))
-            raw_out, raw_err = await comm_task
+            if comm_task not in done:
+                await _kill_async_process_group(process, grace_seconds=1.0)
+                await asyncio.gather(comm_task, return_exceptions=True)
+                raise TimeoutError(f"SSH step timed out after {timeout_seconds:.1f}s.")
+            raw_out, raw_err = comm_task.result()
             out_text = scrubber.scrub_bytes(raw_out or b"").decode("utf-8", errors="replace")
             err_text = scrubber.scrub_bytes(raw_err or b"").decode("utf-8", errors="replace")
             return int(process.returncode or 0), out_text, err_text
         except BaseException:
-            if process.poll() is None:
-                await _kill_process_group(process, grace_seconds=1.0)
-            if not comm_task.done():
+            if process is not None and process.returncode is None:
+                await _await_shielded(
+                    _kill_async_process_group(process, grace_seconds=1.0),
+                    reraise_on_caller_cancel=False,
+                )
+            if comm_task is not None and not comm_task.done():
+                comm_task.cancel()
                 await asyncio.gather(comm_task, return_exceptions=True)
             raise
+        finally:
+            if revoke_waiter is not None and not revoke_waiter.done():
+                revoke_waiter.cancel()
+                await asyncio.gather(revoke_waiter, return_exceptions=True)
+            self._active_steps.discard(step)
 
     async def _execute_key_bootstrap(
         self,
         *,
         session: InteractiveSessionV1,
+        caller: SSHCallerContext,
         enrolled_target: EnrolledSSHTargetV1,
         validated_host: ValidatedSSHHost | None,
         catalog_provider: CatalogSSHCredentialMaterialProvider,
@@ -989,25 +1082,33 @@ class SSHSessionBroker:
     ) -> tuple[str, EnrolledSSHTargetV1]:
         assert enrolled_target.bootstrap_credential_key is not None
         assert enrolled_target.bootstrap_credential_owner_scope is not None
-        mat_ctx = catalog_provider.prepare(
-            session,
-            key_lifetime_seconds=max(15, int(timeout_seconds) + 10),
-            scrubber=scrubber,
+        deadline = time.monotonic() + max(0.1, timeout_seconds)
+        mat_ctx, material = await _enter_context_safely(
+            lambda: catalog_provider.prepare(
+                session,
+                key_lifetime_seconds=max(15, int(timeout_seconds) + 10),
+                scrubber=scrubber,
+            ),
+            verify=lambda mat: self._verify_material(session, mat),
         )
-        material = await asyncio.to_thread(mat_ctx.__enter__)
         try:
-            self._verify_material(session, material)
             if not material.public_key:
                 raise PermissionError("Resolved SSH key credential has no public key to enroll.")
             _algo, key_fp = ssh_public_key_sha256_fingerprint(material.public_key)
             install_cmd = build_key_install_command(enrolled_target.platform)
-            askpass_ctx = catalog_provider.prepare_password_askpass(
-                owner=enrolled_target.bootstrap_credential_owner_scope,
-                credential_key=enrolled_target.bootstrap_credential_key,
-                scrubber=scrubber,
+            boot_owner = enrolled_target.bootstrap_credential_owner_scope
+            boot_key = enrolled_target.bootstrap_credential_key
+            askpass_ctx, askpass = await _enter_context_safely(
+                lambda: catalog_provider.prepare_password_askpass(
+                    owner=boot_owner,
+                    credential_key=boot_key,
+                    scrubber=scrubber,
+                )
             )
-            askpass = await asyncio.to_thread(askpass_ctx.__enter__)
             try:
+                self._authorize_session(
+                    session, capability=SSHCapability.PASSWORD_BOOTSTRAP, caller=caller
+                )
                 assert askpass.working_dir is not None
                 known_hosts_copy = askpass.working_dir / "known_hosts"
                 _write_private_copy(
@@ -1021,13 +1122,16 @@ class SSHSessionBroker:
                     remote_command=install_cmd,
                 )
                 install_env = build_ssh_subprocess_env(extra=askpass.env)
+                remaining_install = deadline - time.monotonic()
                 rc, out_text, err_text = await self._run_cancellable_ssh_step(
                     session=session,
+                    caller=caller,
+                    capability=SSHCapability.PASSWORD_BOOTSTRAP,
                     argv=install_argv,
                     env=install_env,
                     cwd=askpass.working_dir,
                     stdin_payload=f"{material.public_key}\n".encode("utf-8"),
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=remaining_install,
                     scrubber=scrubber,
                 )
                 if rc != 0:
@@ -1037,12 +1141,18 @@ class SSHSessionBroker:
                         + (f": {detail}" if detail else ".")
                     )
             finally:
-                await asyncio.to_thread(askpass_ctx.__exit__, None, None, None)
+                await _await_shielded(
+                    asyncio.to_thread(askpass_ctx.__exit__, None, None, None),
+                    reraise_on_caller_cancel=False,
+                )
 
-            invalidated = self._is_session_invalidated(session, require_active_delegation=True)
-            if invalidated is not None:
-                raise ExecutionAuthorizationDenied(
-                    f"SSH session or delegation became inactive during bootstrap ({invalidated})."
+            self._authorize_session(
+                session, capability=SSHCapability.PASSWORD_BOOTSTRAP, caller=caller
+            )
+            remaining_verify = deadline - time.monotonic()
+            if remaining_verify <= 0:
+                raise TimeoutError(
+                    f"SSH key bootstrap timed out after {timeout_seconds:.1f}s before key verification."
                 )
 
             verify_cmd = build_key_verify_command(enrolled_target.platform)
@@ -1054,11 +1164,13 @@ class SSHSessionBroker:
             )
             verify_rc, verify_stdout, verify_stderr = await self._run_cancellable_ssh_step(
                 session=session,
+                caller=caller,
+                capability=SSHCapability.PASSWORD_BOOTSTRAP,
                 argv=verify_argv,
                 env=self._ssh_env(material),
                 cwd=material.working_dir,
                 stdin_payload=None,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=remaining_verify,
                 scrubber=scrubber,
             )
             if verify_rc != 0 or KEY_AUTH_VERIFY_MARKER not in verify_stdout:
@@ -1068,7 +1180,10 @@ class SSHSessionBroker:
                     + (f": {detail}" if detail else ".")
                 )
         finally:
-            await asyncio.to_thread(mat_ctx.__exit__, None, None, None)
+            await _await_shielded(
+                asyncio.to_thread(mat_ctx.__exit__, None, None, None),
+                reraise_on_caller_cancel=False,
+            )
 
         latched_record = self.repository.mark_ssh_target_password_bootstrap_completed(
             team_id=self.team_id,
@@ -1135,12 +1250,26 @@ class SSHSessionBroker:
         catalog_provider = self._catalog_provider()
 
         # Preflight: locate trusted absolute sudo binary and check NOPASSWD without touching secrets.
-        sudo_path, nopasswd = await asyncio.to_thread(
-            self._probe_remote_sudo_sync,
+        sudo_path, nopasswd = await self._probe_remote_sudo(
             session=session,
+            caller=caller,
             validated_host=validated_host,
             timeout_seconds=min(30.0, effective_timeout),
+            secret_recipe=parsed_recipe,
         )
+
+        # Re-authorize right before resolving secrets or starting the sudo command
+        # so a revocation during preflight never transmits the password.
+        enrolled_target, interaction = self._authorize_session(
+            session,
+            capability=SSHCapability.BROKER_SUDO,
+            caller=caller,
+            secret_recipe=parsed_recipe,
+        )
+        assert enrolled_target is not None
+        assert enrolled_target.bootstrap_credential_key is not None
+        assert enrolled_target.bootstrap_credential_owner_scope is not None
+        effective_timeout = self._effective_timeout(timeout_seconds, interaction)
 
         stdin_lines: list[str] = []
         extra_secrets: list[str] = []
@@ -1183,20 +1312,25 @@ class SSHSessionBroker:
         cmd = await self._start_tracked_command(
             session=session,
             caller=caller,
+            capability=SSHCapability.BROKER_SUDO,
+            secret_recipe=parsed_recipe,
             remote_argv=remote_argv,
             validated_host=validated_host,
             stdin_payload=stdin_payload,
+            keep_stdin_open=True,
             timeout_seconds=effective_timeout,
             extra_secrets=tuple(extra_secrets),
         )
         return await self._wait_for_command(cmd, wait_seconds=wait_seconds)
 
-    def _probe_remote_sudo_sync(
+    async def _probe_remote_sudo(
         self,
         *,
         session: InteractiveSessionV1,
+        caller: SSHCallerContext,
         validated_host: ValidatedSSHHost | None,
         timeout_seconds: float,
+        secret_recipe: SSHSecretRecipe | None = None,
     ) -> tuple[str, bool]:
         paths = validate_trusted_bin_paths(self.sudo_search_paths, label="sudo")
         quoted = " ".join(shlex.quote(path) for path in paths)
@@ -1208,33 +1342,40 @@ class SSHSessionBroker:
             "printf 'UA_SUDO_NOPASSWD:1\\n'; else printf 'UA_SUDO_NOPASSWD:0\\n'; fi; "
             "exit 0; fi; done; exit 127"
         )
-        with self._prepare_material_context(
-            session,
-            key_lifetime_seconds=max(15, int(timeout_seconds) + 10),
-        ) as material:
-            self._verify_material(session, material)
-            scrubber = SessionSecretScrubber(material.touched_secrets, logger=self.logger)
+        scrubber = SessionSecretScrubber(logger=self.logger)
+        mat_ctx, material = await _enter_context_safely(
+            lambda: self._prepare_material_context(
+                session,
+                key_lifetime_seconds=max(15, int(timeout_seconds) + 10),
+                scrubber=scrubber,
+            ),
+            verify=lambda mat: self._verify_material(session, mat),
+        )
+        try:
+            scrubber.register_many(material.touched_secrets)
             argv = self._ssh_command_argv(
                 session,
                 material,
                 validated_host=validated_host,
                 remote_command=(f"sh -c {shlex.quote(probe_script)}",),
             )
-            completed = subprocess.run(
-                argv,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                cwd=str(material.working_dir) if material.working_dir is not None else None,
+            rc, stdout, stderr = await self._run_cancellable_ssh_step(
+                session=session,
+                caller=caller,
+                capability=SSHCapability.BROKER_SUDO,
+                secret_recipe=secret_recipe,
+                argv=argv,
                 env=self._ssh_env(material),
-                timeout=timeout_seconds,
-                check=False,
+                cwd=material.working_dir,
+                stdin_payload=None,
+                timeout_seconds=timeout_seconds,
+                scrubber=scrubber,
             )
-            stdout = scrubber.scrub_bytes(completed.stdout).decode("utf-8", errors="replace")
-            stderr = scrubber.scrub_bytes(completed.stderr).decode("utf-8", errors="replace").strip()
-            if completed.returncode != 0:
+            if rc != 0:
+                detail = stderr.strip()
                 raise RuntimeError(
                     "Could not find sudo at a trusted path on the remote host"
-                    + (f": {stderr}" if stderr else ".")
+                    + (f": {detail}" if detail else ".")
                 )
             sudo_path = ""
             nopasswd = False
@@ -1246,6 +1387,11 @@ class SSHSessionBroker:
             if sudo_path not in paths:
                 raise RuntimeError("Remote sudo probe returned an untrusted binary path.")
             return sudo_path, nopasswd
+        finally:
+            await _await_shielded(
+                asyncio.to_thread(mat_ctx.__exit__, None, None, None),
+                reraise_on_caller_cancel=False,
+            )
 
     async def upload_bundle(
         self,
@@ -1271,9 +1417,11 @@ class SSHSessionBroker:
         cmd = await self._start_tracked_command(
             session=session,
             caller=caller,
+            capability=SSHCapability.WORKSPACE_TRANSFER,
             remote_argv=extract_argv,
             validated_host=validated_host,
             stdin_payload=archive_bytes,
+            keep_stdin_open=False,
             timeout_seconds=effective_timeout,
             extra_secrets=(),
         )
@@ -1312,17 +1460,46 @@ class SSHSessionBroker:
         *,
         session: InteractiveSessionV1,
         caller: SSHCallerContext,
+        capability: SSHCapability,
         remote_argv: tuple[str, ...],
         validated_host: ValidatedSSHHost | None,
         stdin_payload: bytes | None,
+        keep_stdin_open: bool,
         timeout_seconds: float,
         extra_secrets: tuple[str, ...],
+        secret_recipe: SSHSecretRecipe | None = None,
     ) -> _LiveSSHCommand:
+        session_running = sum(
+            1
+            for existing_id in self._session_commands.get(session.session_id, ())
+            if (existing := self._commands.get(existing_id)) is not None
+            and existing.status is SSHCommandStatus.RUNNING
+        )
+        if session_running >= max(1, int(self.max_concurrent_commands_per_session)):
+            raise RuntimeError(
+                f"SSH session {session.session_id!r} already has {session_running} running "
+                f"commands (limit {self.max_concurrent_commands_per_session}); "
+                "wait for one to finish before starting another."
+            )
+        broker_running = sum(
+            1 for existing in self._commands.values() if existing.status is SSHCommandStatus.RUNNING
+        )
+        if broker_running >= max(1, int(self.max_concurrent_commands_per_broker)):
+            raise RuntimeError(
+                f"SSH broker already has {broker_running} running commands "
+                f"(limit {self.max_concurrent_commands_per_broker}); "
+                "wait for one to finish before starting another."
+            )
+
         scrubber = SessionSecretScrubber(extra_secrets, logger=self.logger)
         command_id = new_id("ssh_cmd")
         cmd = _LiveSSHCommand(
             command_id=command_id,
             session_id=session.session_id,
+            session=session,
+            caller=caller,
+            capability=capability,
+            secret_recipe=secret_recipe,
             target_id=session.target.target_id,
             owner_person_id=caller.person_id,
             started_at_utc=self.repository.current_time_utc(),
@@ -1340,10 +1517,12 @@ class SSHSessionBroker:
                 remote_argv=remote_argv,
                 validated_host=validated_host,
                 stdin_payload=stdin_payload,
+                keep_stdin_open=keep_stdin_open,
                 timeout_seconds=timeout_seconds,
             ),
             name=f"ssh-command:{command_id}",
         )
+        self._ensure_monitor_started()
         self.logger.info(
             "Started SSH command. event=ssh_command_started session_id=%s command_id=%s agent_type=%s",
             session.session_id,
@@ -1351,6 +1530,19 @@ class SSHSessionBroker:
             caller.agent_type,
         )
         return cmd
+
+    def _release_command_quiet_output(self, cmd: _LiveSSHCommand) -> None:
+        if cmd.status is not SSHCommandStatus.RUNNING:
+            return
+        for stream_scrubber, scrubbed_buf in (
+            (cmd.stdout_stream, cmd.scrubbed_stdout),
+            (cmd.stderr_stream, cmd.scrubbed_stderr),
+        ):
+            released = stream_scrubber.release_quiet()
+            if released:
+                scrub_cap = self.command_output_limit_bytes - len(scrubbed_buf)
+                if scrub_cap > 0:
+                    scrubbed_buf.extend(released[:scrub_cap])
 
     async def _wait_for_command(
         self, cmd: _LiveSSHCommand, *, wait_seconds: float
@@ -1361,6 +1553,7 @@ class SSHSessionBroker:
                 await asyncio.wait_for(cmd.done_event.wait(), timeout=wait)
             except TimeoutError:
                 pass
+        self._release_command_quiet_output(cmd)
         return cmd.snapshot()
 
     async def _run_tracked_command(
@@ -1371,114 +1564,111 @@ class SSHSessionBroker:
         remote_argv: tuple[str, ...],
         validated_host: ValidatedSSHHost | None,
         stdin_payload: bytes | None,
+        keep_stdin_open: bool,
         timeout_seconds: float,
     ) -> None:
         material_context: AbstractContextManager[SSHCredentialMaterial] | None = None
-        process: subprocess.Popen[bytes] | None = None
+        process: asyncio.subprocess.Process | None = None
+        stdout_task: asyncio.Task[None] | None = None
+        stderr_task: asyncio.Task[None] | None = None
+        wait_task: asyncio.Task[int] | None = None
+        revoke_waiter: asyncio.Task[bool] | None = None
         try:
-            def _prepare() -> tuple[
-                AbstractContextManager[SSHCredentialMaterial], SSHCredentialMaterial
-            ]:
-                ctx = self._prepare_material_context(
+            material_context, material = await _enter_context_safely(
+                lambda: self._prepare_material_context(
                     session,
                     key_lifetime_seconds=max(15, int(timeout_seconds) + 10),
                     scrubber=cmd.scrubber,
-                )
-                mat = ctx.__enter__()
-                try:
-                    self._verify_material(session, mat)
-                except Exception:
-                    ctx.__exit__(None, None, None)
-                    raise
-                return ctx, mat
-
-            material_context, material = await asyncio.to_thread(_prepare)
+                ),
+                verify=lambda mat: self._verify_material(session, mat),
+            )
             cmd.scrubber.register_many(material.touched_secrets)
+
+            # Re-verify authorization immediately before starting ssh or sending stdin secrets.
+            if cmd.revoked_event.is_set():
+                raise ExecutionAuthorizationDenied(
+                    cmd.invalidation_reason
+                    or "SSH command was terminated because the session or target was revoked."
+                )
+            self._authorize_session(
+                session,
+                capability=cmd.capability,
+                caller=cmd.caller,
+                secret_recipe=cmd.secret_recipe,
+            )
+
             argv = self._ssh_command_argv(
                 session,
                 material,
                 validated_host=validated_host,
                 remote_command=remote_argv,
             )
-            process = subprocess.Popen(
-                argv,
-                stdin=subprocess.PIPE if stdin_payload is not None else subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            use_stdin_pipe = stdin_payload is not None or keep_stdin_open
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE if use_stdin_pipe else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=str(material.working_dir) if material.working_dir is not None else None,
                 env=self._ssh_env(material),
-                close_fds=True,
                 start_new_session=True,
             )
+            record_ssh_child_pid(material.working_dir, process.pid)
             cmd.process = process
-            if stdin_payload is not None and process.stdin is not None:
-                def _write_stdin(stream: Any, data: bytes) -> None:
-                    try:
-                        stream.write(data)
-                        stream.flush()
-                    except BrokenPipeError:
-                        pass
-                    except OSError:
-                        pass
-                    finally:
-                        try:
-                            stream.close()
-                        except OSError:
-                            pass
-
-                stdin_task: asyncio.Task[None] | None = asyncio.create_task(
-                    asyncio.to_thread(_write_stdin, process.stdin, stdin_payload)
-                )
-            else:
-                stdin_task = None
 
             assert process.stdout is not None and process.stderr is not None
             stdout_task = asyncio.create_task(
-                asyncio.to_thread(self._pump_command_stream, process.stdout, cmd, True)
+                self._pump_command_stream_async(process.stdout, cmd, True)
             )
             stderr_task = asyncio.create_task(
-                asyncio.to_thread(self._pump_command_stream, process.stderr, cmd, False)
+                self._pump_command_stream_async(process.stderr, cmd, False)
             )
-            wait_task = asyncio.create_task(asyncio.to_thread(process.wait))
+            wait_task = asyncio.create_task(process.wait())
 
-            deadline = time.monotonic() + max(0.1, timeout_seconds)
-            poll_interval = max(0.05, float(self.revocation_poll_interval_seconds))
-            while not wait_task.done():
-                if cmd.revoked_event.is_set():
-                    await _kill_process_group(process, grace_seconds=1.0)
-                    cmd.status = SSHCommandStatus.REVOKED
-                    cmd.error = "SSH command was terminated because the session or target was revoked."
-                    break
-                invalidated = self._is_session_invalidated(
-                    session, require_active_delegation=True
-                )
-                if invalidated is not None:
-                    await _kill_process_group(process, grace_seconds=1.0)
-                    cmd.status = SSHCommandStatus.REVOKED
-                    cmd.error = (
-                        f"SSH command was terminated because the session or delegation became inactive ({invalidated})."
-                    )
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    await _kill_process_group(process, grace_seconds=1.0)
-                    cmd.status = SSHCommandStatus.TIMED_OUT
-                    cmd.error = f"SSH command timed out after {timeout_seconds:.1f}s."
-                    break
-                revoke_waiter = asyncio.create_task(cmd.revoked_event.wait())
+            if stdin_payload is not None and process.stdin is not None:
                 try:
-                    await asyncio.wait(
-                        {wait_task, revoke_waiter},
-                        timeout=min(poll_interval, remaining),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
+                    process.stdin.write(stdin_payload)
+                    await process.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
                 finally:
-                    if not revoke_waiter.done():
-                        revoke_waiter.cancel()
-                        await asyncio.gather(revoke_waiter, return_exceptions=True)
+                    if not keep_stdin_open:
+                        _close_async_stdin(process)
 
-            if stdin_task is not None:
-                await asyncio.gather(stdin_task, return_exceptions=True)
+            revoke_waiter = asyncio.create_task(cmd.revoked_event.wait())
+            done, _ = await asyncio.wait(
+                {wait_task, revoke_waiter},
+                timeout=max(0.1, timeout_seconds),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cmd.revoked_event.is_set():
+                await _kill_async_process_group(
+                    process,
+                    close_stdin_first=keep_stdin_open,
+                    stdin_grace_seconds=1.5,
+                    grace_seconds=1.0,
+                )
+                cmd.status = SSHCommandStatus.REVOKED
+                reason = (
+                    cmd.invalidation_reason
+                    or "SSH command was terminated because the session or target was revoked."
+                )
+                cmd.error = f"{reason} ({_REMOTE_TERMINATION_NOTE})"
+            elif wait_task not in done:
+                await _kill_async_process_group(
+                    process,
+                    close_stdin_first=keep_stdin_open,
+                    stdin_grace_seconds=1.5,
+                    grace_seconds=1.0,
+                )
+                cmd.status = SSHCommandStatus.TIMED_OUT
+                cmd.error = (
+                    f"SSH command timed out after {timeout_seconds:.1f}s "
+                    f"({_REMOTE_TERMINATION_NOTE})."
+                )
+            elif keep_stdin_open:
+                _close_async_stdin(process)
+
             await asyncio.gather(stdout_task, stderr_task, wait_task, return_exceptions=True)
             cmd.exit_code = process.returncode
             self._finalize_command_buffers(cmd)
@@ -1493,19 +1683,72 @@ class SSHSessionBroker:
                 cmd.status.value,
                 cmd.exit_code,
             )
+        except asyncio.CancelledError:
+            if process is not None and process.returncode is None:
+                await _await_shielded(
+                    _kill_async_process_group(
+                        process,
+                        close_stdin_first=keep_stdin_open,
+                        stdin_grace_seconds=1.0,
+                        grace_seconds=0.5,
+                    ),
+                    reraise_on_caller_cancel=False,
+                )
+            for task in (stdout_task, stderr_task, wait_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            self._finalize_command_buffers(cmd)
+            cmd.exit_code = process.returncode if process is not None else None
+            cmd.status = (
+                SSHCommandStatus.REVOKED
+                if cmd.revoked_event.is_set()
+                else SSHCommandStatus.FAILED
+            )
+            cmd.error = (
+                cmd.invalidation_reason
+                or f"SSH command was interrupted because the broker stopped ({_REMOTE_TERMINATION_NOTE})."
+            )
+            cmd.finished_at_utc = self.repository.current_time_utc()
+            raise
+        except ExecutionAuthorizationDenied as exc:
+            if process is not None and process.returncode is None:
+                await _kill_async_process_group(
+                    process,
+                    close_stdin_first=keep_stdin_open,
+                    stdin_grace_seconds=1.0,
+                    grace_seconds=0.5,
+                )
+            self._finalize_command_buffers(cmd)
+            cmd.status = SSHCommandStatus.REVOKED
+            cmd.error = cmd.scrubber.scrub_text(str(exc))
+            cmd.finished_at_utc = self.repository.current_time_utc()
         except Exception as exc:
-            if process is not None and process.poll() is None:
-                await _kill_process_group(process, grace_seconds=1.0)
+            if process is not None and process.returncode is None:
+                await _kill_async_process_group(
+                    process,
+                    close_stdin_first=keep_stdin_open,
+                    stdin_grace_seconds=1.0,
+                    grace_seconds=0.5,
+                )
             self._finalize_command_buffers(cmd)
             cmd.status = SSHCommandStatus.FAILED
             cmd.error = cmd.scrubber.scrub_text(str(exc))
             cmd.finished_at_utc = self.repository.current_time_utc()
         finally:
+            if revoke_waiter is not None and not revoke_waiter.done():
+                revoke_waiter.cancel()
+                await asyncio.gather(revoke_waiter, return_exceptions=True)
+            if process is not None:
+                _close_async_stdin(process)
             cmd.process = None
             if material_context is not None:
                 try:
-                    await asyncio.to_thread(material_context.__exit__, None, None, None)
-                except Exception:
+                    await _await_shielded(
+                        asyncio.to_thread(material_context.__exit__, None, None, None),
+                        reraise_on_caller_cancel=False,
+                    )
+                except BaseException:
                     self.logger.exception(
                         "Failed to clean up SSH credential material after command. "
                         "event=ssh_command_cleanup_failed session_id=%s command_id=%s",
@@ -1514,17 +1757,47 @@ class SSHSessionBroker:
                     )
             cmd.done_event.set()
 
-    def _pump_command_stream(
-        self, stream: Any, cmd: _LiveSSHCommand, is_stdout: bool
+    async def _pump_command_stream_async(
+        self,
+        stream: asyncio.StreamReader,
+        cmd: _LiveSSHCommand,
+        is_stdout: bool,
     ) -> None:
         raw_buf = cmd.raw_stdout if is_stdout else cmd.raw_stderr
         scrubbed_buf = cmd.scrubbed_stdout if is_stdout else cmd.scrubbed_stderr
         stream_scrubber = cmd.stdout_stream if is_stdout else cmd.stderr_stream
+
+        def _append_scrubbed(emitted: bytes) -> None:
+            if not emitted:
+                return
+            scrub_cap = self.command_output_limit_bytes - len(scrubbed_buf)
+            if scrub_cap > 0:
+                scrubbed_buf.extend(emitted[:scrub_cap])
+
+        read_task: asyncio.Task[bytes] | None = None
         try:
             while True:
-                chunk = stream.read(4096)
+                if read_task is None:
+                    read_task = asyncio.create_task(stream.read(4096))
+                quiet_wait = stream_scrubber.time_until_quiet_release()
+                if quiet_wait is None:
+                    chunk = await read_task
+                    read_task = None
+                else:
+                    done, _ = await asyncio.wait(
+                        {read_task},
+                        timeout=max(0.0, quiet_wait) + 0.002,
+                    )
+                    if not done:
+                        _append_scrubbed(stream_scrubber.release_quiet())
+                        continue
+                    chunk = read_task.result()
+                    read_task = None
+
                 if not chunk:
+                    _append_scrubbed(stream_scrubber.flush())
                     break
+
                 remaining_cap = self.command_output_limit_bytes - len(raw_buf)
                 if remaining_cap > 0:
                     raw_buf.extend(chunk[:remaining_cap])
@@ -1533,16 +1806,11 @@ class SSHSessionBroker:
                         cmd.stdout_truncated = True
                     else:
                         cmd.stderr_truncated = True
-                emitted = stream_scrubber.feed(chunk)
-                if emitted:
-                    scrub_cap = self.command_output_limit_bytes - len(scrubbed_buf)
-                    if scrub_cap > 0:
-                        scrubbed_buf.extend(emitted[:scrub_cap])
+                _append_scrubbed(stream_scrubber.feed(chunk))
         finally:
-            try:
-                stream.close()
-            except OSError:
-                pass
+            if read_task is not None and not read_task.done():
+                read_task.cancel()
+                await asyncio.gather(read_task, return_exceptions=True)
 
     @staticmethod
     def _finalize_command_buffers(cmd: _LiveSSHCommand) -> None:
@@ -1603,7 +1871,17 @@ class SSHSessionBroker:
                     if not bucket:
                         self._session_commands.pop(removed.session_id, None)
 
-    async def _terminate_session_commands(self, session_id: str) -> int:
+    async def _terminate_session_commands(
+        self,
+        session_id: str,
+        *,
+        reason: str | None = None,
+    ) -> int:
+        for step in list(self._active_steps):
+            if step.session.session_id == session_id:
+                if reason:
+                    step.invalidation_reason = reason
+                step.revoked_event.set()
         cmd_ids = tuple(self._session_commands.get(session_id, ()))
         tasks: list[asyncio.Task[None]] = []
         terminated = 0
@@ -1612,6 +1890,8 @@ class SSHSessionBroker:
             if cmd is None or cmd.status is not SSHCommandStatus.RUNNING:
                 continue
             terminated += 1
+            if reason:
+                cmd.invalidation_reason = reason
             cmd.revoked_event.set()
             if cmd.runner_task is not None and not cmd.runner_task.done():
                 tasks.append(cmd.runner_task)
@@ -1619,7 +1899,47 @@ class SSHSessionBroker:
             await asyncio.gather(*tasks, return_exceptions=True)
         return terminated
 
-    # -- close and live revocation -----------------------------------------------
+    # -- close, shutdown, and live revocation ------------------------------------
+
+    async def shutdown(self) -> None:
+        """Stop all running commands, cancel active steps, and close every live PTY session."""
+
+        monitor = self._monitor_task
+        self._monitor_task = None
+        if monitor is not None and not monitor.done() and monitor is not asyncio.current_task():
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+
+        shutdown_reason = "SSH operation was interrupted because the broker shut down."
+        for step in list(self._active_steps):
+            step.invalidation_reason = shutdown_reason
+            step.revoked_event.set()
+
+        cmd_tasks: list[asyncio.Task[None]] = []
+        for cmd in list(self._commands.values()):
+            if cmd.status is SSHCommandStatus.RUNNING:
+                cmd.invalidation_reason = shutdown_reason
+                cmd.revoked_event.set()
+                if cmd.runner_task is not None and not cmd.runner_task.done():
+                    cmd_tasks.append(cmd.runner_task)
+        if cmd_tasks:
+            await asyncio.gather(*cmd_tasks, return_exceptions=True)
+
+        session_ids = tuple(self._sessions.keys())
+        for sid in session_ids:
+            try:
+                await self._close(session_id=sid, disconnected=True)
+            except Exception:
+                self.logger.exception(
+                    "Failed to close live SSH session during broker shutdown. "
+                    "event=ssh_broker_shutdown_close_failed session_id=%s",
+                    sid,
+                )
+        self.logger.info(
+            "Shut down SSH session broker. event=ssh_broker_shutdown closed_sessions=%d stopped_commands=%d",
+            len(session_ids),
+            len(cmd_tasks),
+        )
 
     async def close(
         self,
@@ -1644,7 +1964,10 @@ class SSHSessionBroker:
             session_id=session_id,
             revoked_by=revoked_by,
         )
-        terminated_cmds = await self._terminate_session_commands(session_id)
+        terminated_cmds = await self._terminate_session_commands(
+            session_id,
+            reason="SSH command was terminated because the session was revoked.",
+        )
         closed: InteractiveSessionV1 | None = None
         if session_id in self._sessions:
             closed = await self._close(session_id=session_id, disconnected=True)
@@ -1681,9 +2004,15 @@ class SSHSessionBroker:
         for cmd in list(self._commands.values()):
             if cmd.target_id == target_id and cmd.status is SSHCommandStatus.RUNNING:
                 affected_sessions.add(cmd.session_id)
+        for step in list(self._active_steps):
+            if step.session.target.target_id == target_id:
+                affected_sessions.add(step.session.session_id)
         terminated_cmds = 0
         for sid in sorted(affected_sessions):
-            terminated_cmds += await self._terminate_session_commands(sid)
+            terminated_cmds += await self._terminate_session_commands(
+                sid,
+                reason="SSH command was terminated because the enrolled target was revoked.",
+            )
             if sid in self._sessions:
                 await self._close(session_id=sid, disconnected=True)
         self.logger.info(
@@ -1713,12 +2042,10 @@ class SSHSessionBroker:
                 raise SSHSessionUnavailable(f"SSH session {session_id!r} does not exist.")
             return existing
         self._sessions.pop(session_id)
-        caller_task = asyncio.current_task()
         close_task = asyncio.create_task(
             self._finish_close(
                 live=live,
                 disconnected=disconnected,
-                cancel_expiry_monitor=(live.expiry_monitor is not caller_task),
             )
         )
         return await _await_shielded(close_task, reraise_on_caller_cancel=True)
@@ -1728,12 +2055,7 @@ class SSHSessionBroker:
         *,
         live: _LiveSSHSession,
         disconnected: bool,
-        cancel_expiry_monitor: bool = True,
     ) -> InteractiveSessionV1:
-        monitor = live.expiry_monitor
-        if cancel_expiry_monitor and monitor is not None:
-            monitor.cancel()
-            await asyncio.gather(monitor, return_exceptions=True)
         try:
             await _kill_process_group(live.process, grace_seconds=5.0)
         finally:
@@ -1789,59 +2111,197 @@ class SSHSessionBroker:
             release=True,
         )
 
-    async def _monitor_expiry(self, session_id: str) -> None:
+    def _has_monitored_work(self) -> bool:
+        if self._sessions or self._active_steps:
+            return True
+        return any(cmd.status is SSHCommandStatus.RUNNING for cmd in self._commands.values())
+
+    def _ensure_monitor_started(self) -> None:
+        if self._monitor_task is not None and not self._monitor_task.done():
+            return
+        self._monitor_task = asyncio.create_task(
+            self._monitor_loop(),
+            name=f"ssh-broker-monitor:{self.broker_id}",
+        )
+
+    async def _monitor_loop(self) -> None:
         interval = max(
             0.05,
-            min(float(self.revocation_poll_interval_seconds), max(0.05, float(self.lease_ttl_seconds) / 3)),
+            min(
+                float(self.revocation_poll_interval_seconds),
+                max(0.05, float(self.lease_ttl_seconds) / 3),
+            ),
         )
+        cancelled = False
         try:
-            while True:
+            while self._has_monitored_work():
                 await asyncio.sleep(interval)
-                live = self._sessions.get(session_id)
-                if live is None:
-                    return
-                invalidated = self._is_session_invalidated(
-                    live.session, require_active_delegation=False
-                )
-                if invalidated is not None:
-                    self.logger.info(
-                        "Terminating live SSH session after revocation or expiry. "
-                        "event=ssh_session_terminated_by_monitor session_id=%s reason=%s",
-                        session_id,
-                        invalidated,
-                    )
-                    await self._close(session_id=session_id, disconnected=True)
-                    return
-                expires_at = live.session.lease_expires_at_utc
-                if expires_at is None or self.repository.current_time_utc() < expires_at:
-                    continue
-                self.logger.info(
-                    "Closing idle SSH session after its broker lease expired",
-                    extra={"session_id": session_id, "team_id": self.team_id},
-                )
-                await self._close(
-                    session_id=session_id,
-                    disconnected=True,
-                )
-                return
+                if not self._has_monitored_work():
+                    break
+                await self._monitor_tick()
         except asyncio.CancelledError:
+            cancelled = True
             return
         except Exception:
             self.logger.exception(
-                "SSH session expiry monitor failed",
-                extra={"session_id": session_id, "team_id": self.team_id},
+                "SSH broker monitor failed. event=ssh_broker_monitor_failed broker_id=%s",
+                self.broker_id,
             )
-            if session_id in self._sessions:
+        finally:
+            if self._monitor_task is asyncio.current_task():
+                self._monitor_task = None
+            if not cancelled and self._has_monitored_work():
+                self._ensure_monitor_started()
+
+    async def _monitor_tick(self) -> None:
+        now = self.repository.current_time_utc()
+        revocation_cache: dict[str, Any] = {}
+        interaction_cache: dict[str, SSHInteractionRecordV1 | None] = {}
+        target_cache: dict[str, EnrolledSSHTargetV1 | None] = {}
+
+        def _get_revocation(sid: str) -> Any:
+            if sid not in revocation_cache:
+                revocation_cache[sid] = self.repository.get_interactive_session_revocation(
+                    team_id=self.team_id, session_id=sid
+                )
+            return revocation_cache[sid]
+
+        def _get_interaction(sid: str) -> SSHInteractionRecordV1 | None:
+            if sid not in interaction_cache:
+                interaction_cache[sid] = self.repository.get_ssh_interaction(
+                    team_id=self.team_id, session_id=sid
+                )
+            return interaction_cache[sid]
+
+        def _get_target(target_id: str | None) -> EnrolledSSHTargetV1 | None:
+            if target_id is None:
+                return None
+            if target_id not in target_cache:
+                target_cache[target_id] = self.repository.get_ssh_target(
+                    team_id=self.team_id, target_id=target_id
+                )
+            return target_cache[target_id]
+
+        # 1. Check active cancellable steps (bootstrap, sudo probe) via ExecutionAccessGuard.
+        for step in list(self._active_steps):
+            sid = step.session.session_id
+            try:
+                self.authorization_guard.require_ssh_capability(
+                    step.session,
+                    _get_interaction(sid),
+                    capability=step.capability,
+                    caller=step.caller,
+                    enrolled_target=_get_target(step.session.target.target_id),
+                    session_revocation=_get_revocation(sid),
+                    allow_password_bootstrap_setting=self.allow_password_bootstrap,
+                    secret_recipe=step.secret_recipe,
+                    now=now,
+                )
+            except ExecutionAuthorizationDenied as exc:
+                step.invalidation_reason = str(exc)
+                step.revoked_event.set()
+
+        # 2. Check running tracked commands via ExecutionAccessGuard.
+        for cmd in list(self._commands.values()):
+            if cmd.status is not SSHCommandStatus.RUNNING:
+                continue
+            sid = cmd.session_id
+            try:
+                self.authorization_guard.require_ssh_capability(
+                    cmd.session,
+                    _get_interaction(sid),
+                    capability=cmd.capability,
+                    caller=cmd.caller,
+                    enrolled_target=_get_target(cmd.target_id),
+                    session_revocation=_get_revocation(sid),
+                    allow_password_bootstrap_setting=self.allow_password_bootstrap,
+                    secret_recipe=cmd.secret_recipe,
+                    now=now,
+                )
+            except ExecutionAuthorizationDenied as exc:
+                cmd.invalidation_reason = str(exc)
+                cmd.revoked_event.set()
+
+        # 3. Check live PTY sessions:
+        #    - Static 0.9 operator-pinned targets without delegation bounds close on
+        #      explicit session revocation, connect-activation expiry, or lease expiry,
+        #      keeping 0.9 behavior where an expired typing approval leaves read open.
+        #    - Enrolled targets and bounded delegations close immediately on target/
+        #      delegation/session revocation or expiry via ExecutionAccessGuard.
+        for sid, live in list(self._sessions.items()):
+            session = live.session
+            revocation = _get_revocation(sid)
+            interaction = _get_interaction(sid)
+            enrolled_target = _get_target(session.target.target_id)
+            reason = self._check_live_session_validity(
+                live,
+                enrolled_target=enrolled_target,
+                interaction=interaction,
+                session_revocation=revocation,
+                now=now,
+            )
+            if reason is not None:
+                self.logger.info(
+                    "Terminating live SSH session after revocation or expiry. "
+                    "event=ssh_session_terminated_by_monitor session_id=%s reason=%s",
+                    sid,
+                    reason,
+                )
                 try:
-                    await self._close(
-                        session_id=session_id,
-                        disconnected=True,
-                    )
+                    await self._close(session_id=sid, disconnected=True)
                 except Exception:
                     self.logger.exception(
-                        "Failed to close SSH session after expiry monitor failure",
-                        extra={"session_id": session_id, "team_id": self.team_id},
+                        "Failed to close invalidated SSH session from broker monitor. "
+                        "event=ssh_monitor_close_failed session_id=%s",
+                        sid,
                     )
+
+    def _check_live_session_validity(
+        self,
+        live: _LiveSSHSession,
+        *,
+        enrolled_target: EnrolledSSHTargetV1 | None,
+        interaction: SSHInteractionRecordV1 | None,
+        session_revocation: Any,
+        now: datetime,
+    ) -> str | None:
+        session = live.session
+        if session_revocation is not None:
+            return "session_revoked"
+        is_bounded_or_enrolled = (
+            session.target.target_id is not None
+            or (interaction is not None and interaction.bounds is not None)
+        )
+        if is_bounded_or_enrolled:
+            try:
+                self.authorization_guard.require_ssh_connect(
+                    session,
+                    caller=live.caller,
+                    enrolled_target=enrolled_target,
+                    session_revocation=session_revocation,
+                    interaction=interaction,
+                    now=now,
+                )
+            except ExecutionAuthorizationDenied as exc:
+                return str(exc)
+            if interaction is not None:
+                if interaction.revoked_at_utc is not None:
+                    return "delegation_revoked"
+                if not interaction.is_active(now=now):
+                    return "delegation_expired"
+        else:
+            # Static 0.9 operator-pinned target without delegation bounds:
+            # keep PTY readable even after a legacy typing approval expires.
+            if (
+                session.connect_activation is not None
+                and session.connect_activation.expires_at_utc is not None
+                and now >= session.connect_activation.expires_at_utc
+            ):
+                return "connect_activation_expired"
+        expires_at = session.lease_expires_at_utc
+        if expires_at is not None and now >= expires_at:
+            return "lease_expired"
+        return None
 
     def recover_after_restart(self) -> tuple[InteractiveSessionV1, ...]:
         # Live PTYs cannot be reattached after broker restart. Sweep any leftover

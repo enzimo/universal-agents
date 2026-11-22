@@ -198,7 +198,7 @@ def _write_fake_ssh_exec(directory: Path, *, mode: str = "exec", state_dir: Path
             "cmd = ' '.join(tail[1:])\n"
             "env = dict(os.environ)\n"
             f"env['HOME'] = {state_root!r}\n"
-            "res = subprocess.run(['sh', '-c', cmd], env=env)\n"
+            "res = subprocess.run(['sh', '-c', cmd], env=env, start_new_session=True)\n"
             "sys.exit(res.returncode)\n",
             encoding="utf-8",
         )
@@ -251,24 +251,34 @@ def _write_fake_ssh_exec(directory: Path, *, mode: str = "exec", state_dir: Path
 
 
 def _write_fake_sudo(directory: Path, *, behavior: str, expected_password: str = "SuperAdminPass!99") -> Path:
-    """Create a fake sudo binary testing NOPASSWD, password+timestamp, wrong-password, and no-timestamp."""
+    """Create a realistic fake sudo binary matching real sudo's -k and TS_PPID behavior.
+
+    - ``-k`` paired with ``-v`` validates the password but NEVER writes a timestamp
+      (matching real sudo's ``MODE_IGNORE_TICKET``).
+    - Without a TTY, timestamps are keyed strictly on ``os.getppid()`` (matching real
+      sudo's ``TS_PPID``), so ``exec sudo`` from the outer shell fails with
+      ``a password is required``.
+    """
 
     directory.mkdir(parents=True, exist_ok=True)
-    stamp_file = directory / f"sudo_stamp_{behavior}"
+    stamp_dir = directory / f"sudo_stamps_{behavior}"
+    stamp_dir.mkdir(parents=True, exist_ok=True)
     binary = directory / f"fake-sudo-{behavior}"
     binary.write_text(
         "#!/usr/bin/env python3\n"
         "import os, pathlib, subprocess, sys\n"
         f"behavior = {behavior!r}\n"
         f"expected = {expected_password!r}\n"
-        f"stamp = pathlib.Path({str(stamp_file)!r})\n"
+        f"stamp_dir = pathlib.Path({str(stamp_dir)!r})\n"
+        "stamp = stamp_dir / f'ppid_{os.getppid()}'\n"
         "args = sys.argv[1:]\n"
         "if '-v' in args and '-S' in args:\n"
         "    pw = sys.stdin.readline().rstrip('\\r\\n')\n"
         "    if pw != expected:\n"
         "        sys.stderr.write('Sorry, try again.\\n')\n"
         "        sys.exit(1)\n"
-        "    if behavior != 'no_timestamp':\n"
+        "    # Real sudo with -k (MODE_IGNORE_TICKET) never updates cached credentials.\n"
+        "    if behavior != 'no_timestamp' and '-k' not in args:\n"
         "        stamp.write_text('ok', encoding='utf-8')\n"
         "    sys.exit(0)\n"
         "if '-n' in args and 'true' in args and '--' not in args:\n"
@@ -463,14 +473,40 @@ async def test_run_command_and_polling_on_pending_session_with_worker_delegation
     assert "ok:[REDACTED]" in fast.stdout
     assert "KeyPassphrase!42" not in fast.stdout
 
-    # Long-running command returns RUNNING and polls cleanly via get_command.
+    # Long-running command streams live output while RUNNING (including quiet prompt and split-secret scrubbing).
     started = await broker.run_command(
         session_id=session.session_id,
-        command="printf 'step1\\n'; sleep 0.4; printf 'step2\\n'",
+        command=(
+            "printf 'step1\\n'; "
+            "printf 'KeyPass'; sleep 0.1; printf 'phrase!42\\n'; "
+            "printf 'Continue? [y/N]'; "
+            "sleep 0.9; printf '\\nstep2\\n'"
+        ),
         caller=_WORKER_CALLER,
         wait_seconds=0.05,
     )
     assert started.status == SSHCommandStatus.RUNNING
+    live_seen = ""
+    poll_deadline = time.monotonic() + 2.0
+    while time.monotonic() < poll_deadline:
+        polled = await broker.get_command(
+            session_id=session.session_id,
+            command_id=started.command_id,
+            caller=_WORKER_CALLER,
+            wait_seconds=0.0,
+        )
+        assert "KeyPassphrase!42" not in polled.stdout
+        if polled.status == SSHCommandStatus.RUNNING and "step1" in polled.stdout and "Continue? [y/N]" in polled.stdout:
+            live_seen = polled.stdout
+            break
+        if polled.status != SSHCommandStatus.RUNNING:
+            break
+        await asyncio.sleep(0.05)
+    assert "step1" in live_seen
+    assert "Continue? [y/N]" in live_seen
+    assert "[REDACTED]" in live_seen
+    assert "KeyPassphrase!42" not in live_seen
+
     finished = await broker.get_command(
         session_id=session.session_id,
         command_id=started.command_id,
@@ -479,6 +515,7 @@ async def test_run_command_and_polling_on_pending_session_with_worker_delegation
     )
     assert finished.status == SSHCommandStatus.COMPLETED
     assert "step1" in finished.stdout and "step2" in finished.stdout
+    assert "KeyPassphrase!42" not in finished.stdout
 
     # recover_after_restart sweeps stale ephemeral dirs left behind by a crash.
     stale = tmp_path / "ssh-ephemeral" / "ua-ssh-deadbeef"
@@ -714,7 +751,7 @@ async def test_run_sudo_separated_handshake_and_tailscale_recipe_enforces_c03_ru
     assert rev_nopw.stdout == ""
     assert password_fetched is False
 
-    # (b) Password-required fake sudo with timestamp: validates alone via -S -k -v, command='rev' sees empty stdin!
+    # (b) Password-required fake sudo with timestamp: validates alone via -S -p '' -v (no -k, TS_PPID-keyed), command='rev' sees empty stdin!
     fake_sudo_pw = _write_fake_sudo(tmp_path / "sudo_pw", behavior="password", expected_password=admin_pw)
     broker_pw = _catalog_broker(
         tmp_path,
@@ -737,6 +774,32 @@ async def test_run_sudo_separated_handshake_and_tailscale_recipe_enforces_c03_ru
     assert rev_pw.status == SSHCommandStatus.COMPLETED
     assert rev_pw.stdout == "ran_ok:"
     assert admin_pw not in rev_pw.stdout and admin_pw[::-1] not in rev_pw.stdout
+
+    # Revoking a running sudo command terminates the remote child process too (C55).
+    sudo_pid_file = tmp_path / "sudo_revoke.pid"
+    session_sudo_rev = _create_session_and_delegation(
+        repository, target, bounds, session_id="ssh_sess_sudo_rev"
+    )
+    sudo_long = await broker_pw.run_sudo(
+        session_id=session_sudo_rev.session_id,
+        command=f"echo $$ > {sudo_pid_file}; sleep 60",
+        caller=_LEAD_CALLER,
+        wait_seconds=0.4,
+    )
+    assert sudo_long.status == SSHCommandStatus.RUNNING
+    wait_sudo = time.monotonic() + 3.0
+    while time.monotonic() < wait_sudo and not sudo_pid_file.is_file():
+        await asyncio.sleep(0.05)
+    assert sudo_pid_file.is_file()
+    sudo_child_pid = int(sudo_pid_file.read_text(encoding="utf-8").strip())
+    await broker_pw.revoke_session(session_id=session_sudo_rev.session_id, revoked_by="admin_sudo_rev")
+    sudo_after = await broker_pw.get_command(
+        session_id=session_sudo_rev.session_id, command_id=sudo_long.command_id, caller=_LEAD_CALLER
+    )
+    assert sudo_after.status == SSHCommandStatus.REVOKED
+    await asyncio.sleep(0.4)
+    with pytest.raises(ProcessLookupError):
+        os.kill(sudo_child_pid, 0)
 
     # (c) Wrong password -> clear failure, no retries, command never runs!
     marker_file = tmp_path / "should_not_exist"
@@ -924,6 +987,17 @@ async def test_upload_bundle_rejects_sensitive_files_and_extracts_verified_archi
     assert uploaded.file_count == 2
     assert (dest / "scripts" / "deploy.sh").read_text(encoding="utf-8") == "echo ok\n"
     assert (dest / "README.txt").read_text(encoding="utf-8") == "hello\n"
+
+    # C60(d): ~/app_tilde expands to $HOME/app_tilde rather than a literal '~' directory.
+    tilde_uploaded = await broker.upload_bundle(
+        session_id=session.session_id,
+        entries=[("hello.txt", b"tilde-ok\n")],
+        remote_destination="~/app_tilde",
+        caller=_LEAD_CALLER,
+    )
+    assert tilde_uploaded.file_count == 1
+    assert (tmp_path / "home" / "app_tilde" / "hello.txt").read_text(encoding="utf-8") == "tilde-ok\n"
+    assert not (tmp_path / "home" / "~").exists()
 
 
 # -- 6. Live revocation & cross-process DB revocation --------------------------
@@ -1165,14 +1239,26 @@ async def test_real_local_sshd_probe_pinned_ip_passphrase_agent_command_bundle_a
         assert uploaded.file_count == 1
         assert (upload_dest / "app" / "config.txt").read_text(encoding="utf-8") == "mode=prod\n"
 
-        # 5. Live revocation immediately terminates a long-running real ssh command.
+        # 5. Live revocation immediately terminates BOTH local ssh AND the actual remote processes on host (C55).
+        pid_file_revoke = tmp_path / "remote_revoke.pid"
+        tick_file_revoke = tmp_path / "remote_revoke.ticks"
         long_cmd = await broker.run_command(
             session_id=session.session_id,
-            command="sleep 30",
+            command=(
+                f"echo $$ > {pid_file_revoke}; "
+                f"while true; do date +%s >> {tick_file_revoke}; sleep 0.15; done"
+            ),
             caller=_LEAD_CALLER,
-            wait_seconds=0.2,
+            wait_seconds=0.4,
         )
         assert long_cmd.status == SSHCommandStatus.RUNNING
+        # Wait until the remote loop has actually written its PID and first tick.
+        wait_start = time.monotonic() + 3.0
+        while time.monotonic() < wait_start and not (pid_file_revoke.is_file() and tick_file_revoke.is_file()):
+            await asyncio.sleep(0.05)
+        assert pid_file_revoke.is_file()
+        remote_pid_revoke = int(pid_file_revoke.read_text(encoding="utf-8").strip())
+
         t0 = time.monotonic()
         await broker.revoke_session(session_id=session.session_id, revoked_by="admin_real")
         assert time.monotonic() - t0 < 4.0
@@ -1180,6 +1266,65 @@ async def test_real_local_sshd_probe_pinned_ip_passphrase_agent_command_bundle_a
             session_id=session.session_id, command_id=long_cmd.command_id, caller=_LEAD_CALLER
         )
         assert after.status == SSHCommandStatus.REVOKED
+        await asyncio.sleep(0.4)
+        with pytest.raises(ProcessLookupError):
+            os.kill(remote_pid_revoke, 0)
+        lines_after_revoke = len(tick_file_revoke.read_text(encoding="utf-8").splitlines())
+        await asyncio.sleep(0.45)
+        assert len(tick_file_revoke.read_text(encoding="utf-8").splitlines()) == lines_after_revoke
+
+        # 6. Command timeout terminates the actual remote process on the host (C55).
+        session_timeout = _create_session_and_delegation(
+            repository, target, bounds, session_id="ssh_sess_real_timeout"
+        )
+        pid_file_timeout = tmp_path / "remote_timeout.pid"
+        timed_cmd = await broker.run_command(
+            session_id=session_timeout.session_id,
+            command=f"echo $$ > {pid_file_timeout}; sleep 60",
+            caller=_LEAD_CALLER,
+            timeout_seconds=1.0,
+            wait_seconds=5.0,
+        )
+        assert timed_cmd.status == SSHCommandStatus.TIMED_OUT
+        assert pid_file_timeout.is_file()
+        remote_pid_timeout = int(pid_file_timeout.read_text(encoding="utf-8").strip())
+        await asyncio.sleep(0.4)
+        with pytest.raises(ProcessLookupError):
+            os.kill(remote_pid_timeout, 0)
+
+        # 7. Delegation expiry while a command is running terminates the actual remote process (C55).
+        session_exp = _create_session_and_delegation(
+            repository,
+            target,
+            bounds,
+            session_id="ssh_sess_real_expiry",
+            expires_in_seconds=2,
+        )
+        pid_file_exp = tmp_path / "remote_expiry.pid"
+        exp_cmd = await broker.run_command(
+            session_id=session_exp.session_id,
+            command=f"echo $$ > {pid_file_exp}; sleep 60",
+            caller=_LEAD_CALLER,
+            timeout_seconds=30.0,
+            wait_seconds=0.4,
+        )
+        assert exp_cmd.status == SSHCommandStatus.RUNNING
+        wait_exp = time.monotonic() + 3.0
+        while time.monotonic() < wait_exp and not pid_file_exp.is_file():
+            await asyncio.sleep(0.05)
+        assert pid_file_exp.is_file()
+        remote_pid_exp = int(pid_file_exp.read_text(encoding="utf-8").strip())
+        exp_after = await broker.get_command(
+            session_id=session_exp.session_id,
+            command_id=exp_cmd.command_id,
+            caller=_LEAD_CALLER,
+            wait_seconds=5.0,
+        )
+        assert exp_after.status in {SSHCommandStatus.REVOKED, SSHCommandStatus.TIMED_OUT}
+        await asyncio.sleep(0.4)
+        with pytest.raises(ProcessLookupError):
+            os.kill(remote_pid_exp, 0)
+        await broker.shutdown()
     finally:
         if sshd_proc.poll() is None:
             sshd_proc.terminate()
@@ -1188,3 +1333,416 @@ async def test_real_local_sshd_probe_pinned_ip_passphrase_agent_command_bundle_a
             except subprocess.TimeoutExpired:
                 sshd_proc.kill()
                 sshd_proc.wait(timeout=3)
+
+
+# -- 8. C54-C60 regression coverage: scalability, cancellation, restart, static targets, edge cases --
+
+
+@pytest.mark.asyncio
+async def test_c56_async_commands_do_not_starve_thread_pool_and_enforce_concurrency_limits(
+    tmp_path: Path,
+) -> None:
+    _, _, host_pub = _generate_ed25519_keypair(tmp_path / "host", name="host_ed25519")
+    _, client_priv, client_pub = _generate_ed25519_keypair(tmp_path / "client", name="client_ed25519")
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    target = _make_enrolled_target(
+        target_id="pool_host",
+        host="198.51.100.90",
+        port=22,
+        username="deploy",
+        platform=SSHTargetPlatform.LINUX,
+        host_pub=host_pub,
+        credential_key="ops_key",
+        credential_pub=client_pub,
+    )
+    repository.put_ssh_target(target)
+    bounds = SSHDelegationBoundsV1(allow_commands=True)
+    session_a = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_pool_a")
+    session_b = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_pool_b")
+    broker = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_public_key"): client_pub,
+        },
+        ssh_executable=_write_fake_ssh_exec(tmp_path / "bin", mode="exec", state_dir=tmp_path / "home"),
+    )
+    broker.max_concurrent_commands_per_session = 6
+    broker.max_concurrent_commands_per_broker = 7
+    try:
+        # Start 6 long-running commands on session_a; with subprocess threads this would starve the pool.
+        for _ in range(6):
+            res = await broker.run_command(
+                session_id=session_a.session_id,
+                command="sleep 30",
+                caller=_LEAD_CALLER,
+                wait_seconds=0.02,
+            )
+            assert res.status == SSHCommandStatus.RUNNING
+
+        # Unrelated asyncio.to_thread must complete immediately (zero threads held by commands).
+        t0 = time.monotonic()
+        value = await asyncio.wait_for(asyncio.to_thread(lambda: "pool-free"), timeout=1.0)
+        assert value == "pool-free"
+        assert time.monotonic() - t0 < 0.5
+
+        # 7th command on session_a hits the per-session limit.
+        with pytest.raises(RuntimeError, match="already has 6 running commands"):
+            await broker.run_command(
+                session_id=session_a.session_id,
+                command="echo nope",
+                caller=_LEAD_CALLER,
+                wait_seconds=0.02,
+            )
+
+        # 1st command on session_b reaches broker limit (7), 2nd is refused by broker limit.
+        res_b = await broker.run_command(
+            session_id=session_b.session_id,
+            command="sleep 30",
+            caller=_LEAD_CALLER,
+            wait_seconds=0.02,
+        )
+        assert res_b.status == SSHCommandStatus.RUNNING
+        with pytest.raises(RuntimeError, match="SSH broker already has 7 running commands"):
+            await broker.run_command(
+                session_id=session_b.session_id,
+                command="echo nope",
+                caller=_LEAD_CALLER,
+                wait_seconds=0.02,
+            )
+    finally:
+        await broker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_c58_cancel_shutdown_crash_pid_sweep_and_enroll_cancel_cleanup(tmp_path: Path) -> None:
+    _, _, host_pub = _generate_ed25519_keypair(tmp_path / "host", name="host_ed25519")
+    _, client_priv, client_pub = _generate_ed25519_keypair(
+        tmp_path / "client", name="client_ed25519", passphrase="CancelPass!44"
+    )
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    target = _make_enrolled_target(
+        target_id="cancel_host",
+        host="198.51.100.91",
+        port=22,
+        username="deploy",
+        platform=SSHTargetPlatform.LINUX,
+        host_pub=host_pub,
+        credential_key="ops_key",
+        credential_pub=client_pub,
+        bootstrap_credential_key="ops_boot",
+    )
+    repository.put_ssh_target(target)
+    bounds = SSHDelegationBoundsV1(allow_commands=True, allow_password_bootstrap=True)
+    session = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_cancel")
+    ephemeral_dir = tmp_path / "ssh-ephemeral"
+    broker = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_passphrase"): "CancelPass!44",
+            ("ops_key", "ssh_public_key"): client_pub,
+            ("ops_boot", "admin_password"): "BootSecret!44",
+        },
+        ssh_executable=_write_fake_ssh_exec(tmp_path / "bin", mode="exec", state_dir=tmp_path / "home"),
+        allow_password_bootstrap=True,
+    )
+
+    # (a) Cancelling a running command's runner_task stops the child process and marks a terminal status.
+    pid_file = tmp_path / "cancelled_cmd.pid"
+    running = await broker.run_command(
+        session_id=session.session_id,
+        command=f"echo $$ > {pid_file}; sleep 60",
+        caller=_LEAD_CALLER,
+        wait_seconds=0.3,
+    )
+    assert running.status == SSHCommandStatus.RUNNING
+    wait_until = time.monotonic() + 3.0
+    while time.monotonic() < wait_until and not pid_file.is_file():
+        await asyncio.sleep(0.05)
+    assert pid_file.is_file()
+    child_pid = int(pid_file.read_text(encoding="utf-8").strip())
+
+    live_cmd = broker._commands[running.command_id]
+    assert live_cmd.runner_task is not None
+    live_cmd.runner_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await live_cmd.runner_task
+    after_cancel = await broker.get_command(
+        session_id=session.session_id, command_id=running.command_id, caller=_LEAD_CALLER
+    )
+    assert after_cancel.status == SSHCommandStatus.FAILED
+    assert after_cancel.error and "interrupted" in after_cancel.error
+    await asyncio.sleep(0.3)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+    assert list(ephemeral_dir.glob("ua-ssh-*")) == []
+
+    # (b) Crash recovery: leftover ssh.pid in a stale ephemeral dir is killed on recover_after_restart,
+    # and a restarted broker's get_command explains clearly that the outcome is unknown.
+    from runtime_hosting.ssh_credentials import record_ssh_child_pid
+
+    stale_dir = ephemeral_dir / "ua-ssh-crashed1234"
+    stale_dir.mkdir(parents=True, exist_ok=True)
+    orphan = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    record_ssh_child_pid(stale_dir, orphan.pid)
+    restarted_broker = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_passphrase"): "CancelPass!44",
+            ("ops_key", "ssh_public_key"): client_pub,
+        },
+        ssh_executable=_write_fake_ssh_exec(tmp_path / "bin", mode="exec", state_dir=tmp_path / "home"),
+    )
+    restarted_broker.recover_after_restart()
+    orphan.wait(timeout=3)
+    assert orphan.poll() is not None
+    assert not stale_dir.exists()
+    with pytest.raises(LookupError, match="broker may have restarted.*outcome is unknown"):
+        await restarted_broker.get_command(
+            session_id=session.session_id, command_id=running.command_id, caller=_LEAD_CALLER
+        )
+
+    # (c) Cancelling enroll_ssh_key mid-prepare leaks no ephemeral dir or ssh-agent.
+    enroll_task = asyncio.create_task(
+        broker.enroll_ssh_key(session_id=session.session_id, caller=_LEAD_CALLER, timeout_seconds=30.0)
+    )
+    await asyncio.sleep(0.03)
+    enroll_task.cancel()
+    with pytest.raises((asyncio.CancelledError, Exception)):
+        await enroll_task
+    await asyncio.sleep(0.2)
+    assert list(ephemeral_dir.glob("ua-ssh-*")) == []
+    await broker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_c59_and_c60_static_target_policy_bypass_legacy_expiry_tilde_and_sid_icacls(
+    tmp_path: Path,
+) -> None:
+    from runtime_hosting.execution_contracts import SSHConnectionTargetV1
+    from runtime_hosting.ssh_operations import build_bundle_extract_command, build_key_install_command
+    from tests.execution_access_support import host_key_fingerprint, write_ssh_material
+
+    # C60(d): ~/app expands $HOME rather than creating a literal '~' directory; ~other is refused.
+    posix_tilde = build_bundle_extract_command("~/app", SSHTargetPlatform.LINUX)[0]
+    assert '"$HOME"/app' in posix_tilde
+    with pytest.raises(ValueError, match="~user"):
+        build_bundle_extract_command("~otheruser/app", SSHTargetPlatform.LINUX)
+
+    # C60(e): Windows key install uses locale-independent well-known SIDs with icacls.
+    import base64
+
+    win_cmd = build_key_install_command(SSHTargetPlatform.WINDOWS)[0]
+    encoded_ps = win_cmd.split("-EncodedCommand ", 1)[1]
+    decoded_ps = base64.b64decode(encoded_ps).decode("utf-16-le")
+    assert "*S-1-5-32-544:F" in decoded_ps
+    assert "*S-1-5-18:F" in decoded_ps
+    assert "Administrators:F" not in decoded_ps
+
+    # C59 & C60(c): Static operator-pinned target (target_id=None) on 127.0.0.1 succeeds even when
+    # the broker carries a strict SSHNetworkPolicy allowlist, connects without HostName/HostKeyAlias,
+    # and keeps its live PTY open for reading when a legacy 0.9 typing approval expires.
+    key_bytes = b"static-target-host-key"
+    identity, known_hosts = write_ssh_material(tmp_path / "static_ssh", key_bytes=key_bytes)
+    known_hosts.write_text(
+        f"127.0.0.1 ssh-ed25519 {base64.b64encode(key_bytes).decode('ascii')}\n",
+        encoding="utf-8",
+    )
+    argv_log = tmp_path / "static_argv.txt"
+    fake_ssh_static = tmp_path / "bin" / "fake-ssh-static"
+    fake_ssh_static.parent.mkdir(parents=True, exist_ok=True)
+    fake_ssh_static.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys, time\n"
+        f"pathlib.Path({str(argv_log)!r}).write_text('\\n'.join(sys.argv[1:]), encoding='utf-8')\n"
+        "sys.stdout.write('static-ready\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(5)\n",
+        encoding="utf-8",
+    )
+    fake_ssh_static.chmod(0o755)
+
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    static_target = SSHConnectionTargetV1(
+        host="127.0.0.1",
+        username="deploy",
+        host_key_algorithm="ssh-ed25519",
+        host_key_fingerprint=host_key_fingerprint(key_bytes),
+        credential_binding_id="static_binding",
+    )
+    static_digest = static_target.calculate_digest()
+    static_session = InteractiveSessionV1(
+        session_id="ssh_sess_static_c59",
+        owner=_USER_OWNER,
+        target=static_target,
+        target_digest=static_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_static_c59",
+            resource_digest=static_digest,
+            owner_scope=_USER_OWNER,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        ),
+    )
+    repository.create_interactive_session(static_session)
+    # Legacy 0.9 typing approval (bounds=None) that expires quickly.
+    repository.put_ssh_interaction(
+        build_activation(
+            ExecutionActivationKind.SSH_INTERACT,
+            resource_id="ssh_sess_static_c59",
+            resource_digest=static_digest,
+            owner_scope=_USER_OWNER,
+            function="change:execution_ssh_interaction",
+            expires_at=datetime.now(timezone.utc) + timedelta(milliseconds=100),
+        )
+    )
+    strict_policy = SSHNetworkPolicy(
+        allowed_cidrs=(ipaddress.ip_network("10.0.0.0/8"),),
+        allowed_domains=(),
+        denied_cidrs=(ipaddress.ip_network("127.0.0.0/8"),),
+    )
+    from runtime_hosting.ssh import SSHCredentialMaterial
+
+    broker = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=_AGREEMENT_GUARD,
+        material_provider=ConfiguredSSHCredentialMaterialProvider(
+            {"static_binding": SSHCredentialMaterial(identity_file=identity, known_hosts_file=known_hosts)}
+        ),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        team_id="team_alpha",
+        broker_id="broker-static-c59",
+        ssh_executable=str(fake_ssh_static),
+        network_policy=strict_policy,
+        revocation_poll_interval_seconds=0.05,
+    )
+    try:
+        opened = await broker.open(
+            session_id="ssh_sess_static_c59",
+            lease_token="lease-static",
+            caller=_LEAD_CALLER,
+        )
+        assert opened.status == InteractiveSessionStatus.OPEN
+        wait_argv = time.monotonic() + 3.0
+        while time.monotonic() < wait_argv and not argv_log.is_file():
+            await asyncio.sleep(0.05)
+        logged_argv = argv_log.read_text(encoding="utf-8")
+        assert "HostKeyAlias=" not in logged_argv
+        assert "HostName=" not in logged_argv
+
+        # Wait past legacy typing approval expiry; monitor must NOT close static read-only PTY (C60(c)).
+        await asyncio.sleep(0.3)
+        assert "ssh_sess_static_c59" in broker._sessions
+        out = await broker.read(
+            session_id="ssh_sess_static_c59",
+            timeout_seconds=1.0,
+            caller=_LEAD_CALLER,
+        )
+        assert b"static-ready" in out
+        # Typing is refused once the legacy approval has expired.
+        with pytest.raises(ExecutionAuthorizationDenied, match="expired"):
+            await broker.write(
+                session_id="ssh_sess_static_c59",
+                payload=b"ls\n",
+                caller=_LEAD_CALLER,
+            )
+    finally:
+        await broker.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_c60_run_sudo_rechecks_revocation_after_preflight_and_enroll_bounds_lease(
+    tmp_path: Path,
+) -> None:
+    _, _, host_pub = _generate_ed25519_keypair(tmp_path / "host", name="host_ed25519")
+    _, client_priv, client_pub = _generate_ed25519_keypair(tmp_path / "client", name="client_ed25519")
+    repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+    target = _make_enrolled_target(
+        target_id="c60_host",
+        host="198.51.100.92",
+        port=22,
+        username="ops",
+        platform=SSHTargetPlatform.LINUX,
+        host_pub=host_pub,
+        credential_key="ops_key",
+        credential_pub=client_pub,
+        bootstrap_credential_key="ops_boot",
+    )
+    repository.put_ssh_target(target)
+    bounds = SSHDelegationBoundsV1(allow_broker_sudo=True, allow_password_bootstrap=True)
+    session = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_c60")
+
+    # C60(b): Revocation happening between sudo preflight and password resolution must refuse
+    # without ever resolving or sending admin_password.
+    password_resolved = False
+
+    def _resolver(key: str, field_name: str, _owner: OwnerScopeV1) -> str | None:
+        nonlocal password_resolved
+        if field_name == "admin_password":
+            password_resolved = True
+        return {
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_public_key"): client_pub,
+            ("ops_boot", "admin_password"): "NeverSendAfterRevoke!1",
+        }.get((key, field_name))
+
+    fake_sudo = _write_fake_sudo(tmp_path / "sudo_c60", behavior="password", expected_password="NeverSendAfterRevoke!1")
+    catalog = CatalogSSHCredentialMaterialProvider(
+        ephemeral_base_dir=tmp_path / "ssh-ephemeral-c60",
+        secret_resolver=_resolver,
+    )
+    broker = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=_AGREEMENT_GUARD,
+        material_provider=CompositeSSHCredentialMaterialProvider(
+            ConfiguredSSHCredentialMaterialProvider({}), catalog
+        ),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts"),
+        team_id="team_alpha",
+        broker_id="broker-c60",
+        ssh_executable=str(_write_fake_ssh_exec(tmp_path / "bin", mode="exec", state_dir=tmp_path / "home")),
+        network_policy=SSHNetworkPolicy.default(),
+        resolver=lambda host, _port: (host,),
+        local_address_checker=lambda _ip: False,
+        sudo_search_paths=(str(fake_sudo),),
+        allow_password_bootstrap=True,
+    )
+
+    orig_probe = broker._probe_remote_sudo
+
+    async def _probe_then_revoke(**kwargs: Any) -> tuple[str, bool]:
+        result = await orig_probe(**kwargs)
+        repository.revoke_interactive_session(
+            team_id="team_alpha", session_id=session.session_id, revoked_by="admin_mid_preflight"
+        )
+        return result
+
+    broker._probe_remote_sudo = _probe_then_revoke  # type: ignore[method-assign]
+    with pytest.raises(ExecutionAuthorizationDenied, match="revoked"):
+        await broker.run_sudo(session_id=session.session_id, command="whoami", caller=_LEAD_CALLER)
+    assert password_resolved is False
+
+    # C60(a): Huge timeout_seconds on enroll_ssh_key is bounded to <= 3630s lease TTL (not raw timeout).
+    session_boot = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_c60_boot")
+    recorded_ttls: list[int] = []
+    orig_claim = repository.claim_interactive_session
+
+    def _capturing_claim(*args: Any, **kwargs: Any) -> InteractiveSessionV1:
+        recorded_ttls.append(int(kwargs["lease_ttl_seconds"]))
+        return orig_claim(*args, **kwargs)
+
+    repository.claim_interactive_session = _capturing_claim  # type: ignore[method-assign]
+    enrolled = await broker.enroll_ssh_key(
+        session_id=session_boot.session_id,
+        caller=_LEAD_CALLER,
+        timeout_seconds=10**9,
+    )
+    assert enrolled.verified_key_login is True
+    assert recorded_ttls and recorded_ttls[0] <= 3630
+    await broker.shutdown()

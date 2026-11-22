@@ -52,6 +52,7 @@ _REDACTED_TEXT = "[REDACTED]"
 _REDACTED_BYTES = b"[REDACTED]"
 _AGENT_SOCKET_RELATIVE = "./s"
 _AGENT_PID_FILENAME = "agent.pid"
+_SSH_PID_FILENAME = "ssh.pid"
 _PASSWORD_FIFO_RELATIVE = "./pw.fifo"
 _PEM_HEADER_PREFIX = "-----BEGIN "
 _PEM_FOOTER_PREFIX = "-----END "
@@ -828,13 +829,140 @@ def _terminate_pid(pid: int, *, expected_start_time: int | None) -> bool:
     return True
 
 
+def _read_proc_comm(pid: int) -> str | None:
+    if sys.platform != "linux":
+        return None
+    try:
+        comm = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="ignore").strip()
+        return comm or None
+    except OSError:
+        return None
+
+
+def record_ssh_child_pid(working_dir: Path | None, pid: int) -> None:
+    """Record a spawned broker SSH client PID and kernel identity for crash-recovery sweeping."""
+
+    if working_dir is None or pid <= 1:
+        return
+    pid_path = working_dir / _SSH_PID_FILENAME
+    start_time = _read_proc_start_time(pid)
+    comm = _read_proc_comm(pid) or ""
+    if start_time is not None:
+        payload = f"{pid} {start_time} {comm}\n" if comm else f"{pid} {start_time}\n"
+    else:
+        payload = f"{pid}\n"
+    try:
+        os.unlink(pid_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return
+    try:
+        _write_private_file(pid_path, payload.encode("utf-8"), mode=0o600)
+    except OSError:
+        pass
+
+
+def _parse_ssh_pid_file(pid_file: Path) -> tuple[int, int | None, str | None] | None:
+    try:
+        st = os.lstat(pid_file)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    try:
+        parts = pid_file.read_text(encoding="utf-8").strip().split(None, 2)
+    except OSError:
+        return None
+    if not parts:
+        return None
+    try:
+        pid = int(parts[0])
+        start_time = int(parts[1]) if len(parts) >= 2 else None
+        comm = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else None
+    except ValueError:
+        return None
+    return pid, start_time, comm
+
+
+def _pid_matches_recorded_ssh(
+    pid: int,
+    *,
+    expected_start_time: int | None,
+    expected_comm: str | None,
+) -> bool:
+    if pid <= 1 or pid == os.getpid():
+        return False
+    if sys.platform == "linux":
+        if expected_start_time is None:
+            return False
+        if _read_proc_start_time(pid) != expected_start_time:
+            return False
+        if expected_comm is not None and _read_proc_comm(pid) != expected_comm:
+            return False
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _terminate_recorded_ssh_pid(
+    pid: int,
+    *,
+    expected_start_time: int | None,
+    expected_comm: str | None,
+) -> bool:
+    if not _pid_matches_recorded_ssh(
+        pid,
+        expected_start_time=expected_start_time,
+        expected_comm=expected_comm,
+    ):
+        return False
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return False
+    deadline = time.monotonic() + 1.5
+    while time.monotonic() < deadline:
+        if _pid_is_zombie(pid):
+            return True
+        if sys.platform == "linux" and expected_start_time is not None:
+            if _read_proc_start_time(pid) != expected_start_time:
+                return True
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(0.05)
+    if _pid_matches_recorded_ssh(
+        pid,
+        expected_start_time=expected_start_time,
+        expected_comm=expected_comm,
+    ):
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    return True
+
+
 def sweep_stale_ssh_ephemeral_dirs(
     base_dir: Path,
     *,
     active_dirs: Iterable[Path] = (),
     logger: logging.Logger | None = None,
 ) -> int:
-    """Remove leftover broker SSH ephemeral directories and orphaned ssh-agents after a crash."""
+    """Remove leftover broker SSH ephemeral directories, orphaned ssh clients, and ssh-agents after a crash."""
 
     log = logger or _LOGGER
     resolved_base = base_dir.expanduser().resolve()
@@ -858,6 +986,15 @@ def sweep_stale_ssh_ephemeral_dirs(
             continue
         if entry.resolve() in active_resolved:
             continue
+        killed_ssh = False
+        parsed_ssh = _parse_ssh_pid_file(entry / _SSH_PID_FILENAME)
+        if parsed_ssh is not None:
+            ssh_pid, ssh_start, ssh_comm = parsed_ssh
+            killed_ssh = _terminate_recorded_ssh_pid(
+                ssh_pid,
+                expected_start_time=ssh_start,
+                expected_comm=ssh_comm,
+            )
         killed_agent = False
         parsed_pid = _parse_agent_pid_file(entry / _AGENT_PID_FILENAME)
         if parsed_pid is not None:
@@ -867,8 +1004,9 @@ def sweep_stale_ssh_ephemeral_dirs(
         swept += 1
         log.info(
             "Swept stale ephemeral SSH session directory. "
-            "event=ssh_ephemeral_dir_swept directory=%s killed_agent=%s",
+            "event=ssh_ephemeral_dir_swept directory=%s killed_ssh=%s killed_agent=%s",
             entry.name,
+            killed_ssh,
             killed_agent,
         )
     return swept
@@ -1520,5 +1658,6 @@ __all__ = [
     "StreamSecretScrubber",
     "build_ssh_subprocess_env",
     "is_short_secret",
+    "record_ssh_child_pid",
     "sweep_stale_ssh_ephemeral_dirs",
 ]

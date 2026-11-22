@@ -9,9 +9,11 @@ broker (never by agents):
   platform-appropriate ``authorized_keys`` file and verifies key-only login.
 - Separated ``sudo`` handling checks ``sudo -n true`` first (never resolving or
   sending ``admin_password`` on NOPASSWD hosts), validates ``admin_password``
-  alone via ``<sudo_bin> -S -k -p '' -v`` with no retries when needed, verifies
-  that a sudo timestamp persists, and executes free commands with stdin wired
-  to ``/dev/null``.
+  alone via ``<sudo_bin> -S -p '' -v`` with no retries when needed (without
+  ``-k`` so ``sudo`` caches its ``TS_PPID`` timestamp for the outer shell),
+  verifies that a sudo timestamp persists, and executes free commands as a
+  child of that same shell with stdin wired to ``/dev/null`` and a stdin-EOF
+  watcher that terminates the remote process group on revoke or timeout.
 - Secret-consuming sudo steps are restricted to broker-written named recipes
   (``SSHSecretRecipe.TAILSCALE_UP``) with strictly validated non-secret flags;
   no Sealbox secret is ever piped to an arbitrary agent-written command.
@@ -305,6 +307,81 @@ def _windows_powershell_command(script: str) -> tuple[str, ...]:
     return (f"powershell -NoProfile -NonInteractive -EncodedCommand {encoded}",)
 
 
+def _wrap_posix_watched_command(
+    child_command: str,
+    *,
+    sudo_path: str | None = None,
+    cleanup_path_var: str | None = None,
+) -> str:
+    """Run ``child_command`` as a child of the outer shell and stop its process group on stdin EOF.
+
+    - Keeps the outer shell alive as parent (never ``exec``) so ``sudo``'s non-TTY
+      ``TS_PPID`` timestamp matches across validation, command execution, and
+      revocation cleanup.
+    - Redirects the command's own stdin to ``/dev/null`` while a tiny watcher
+      subshell monitors the SSH channel's stdin on fd 3; closing SSH stdin or
+      losing the connection signals the outer shell (``USR1``), which sends
+      ``SIGTERM`` then ``SIGKILL`` to the remote process group (via ``sudo -n``
+      when running as root).
+    """
+
+    cleanup_snippet = (
+        f"[ -n \"${{{cleanup_path_var}:-}}\" ] && rm -f -- \"${cleanup_path_var}\"; "
+        if cleanup_path_var
+        else ""
+    )
+    if sudo_path is not None:
+        quoted_sudo = shlex.quote(sudo_path)
+        pgid_capture = "_ua_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' '); "
+        term_cmd = (
+            f"{quoted_sudo} -n -- sh -c "
+            "'trap \"\" TERM; kill -TERM \"$1\" 2>/dev/null; "
+            "[ -n \"$2\" ] && kill -TERM \"-$2\" 2>/dev/null; exit 0' "
+            "_ \"$_ua_cpid\" \"$_ua_pgid\" </dev/null >/dev/null 2>&1 || true; "
+            "kill -TERM 0 2>/dev/null || kill -TERM \"$_ua_cpid\" 2>/dev/null || true; "
+        )
+        kill_cmd = (
+            f"{quoted_sudo} -n -- sh -c "
+            "'kill -KILL \"$1\" 2>/dev/null; "
+            "[ -n \"$2\" ] && kill -KILL \"-$2\" 2>/dev/null; exit 0' "
+            "_ \"$_ua_cpid\" \"$_ua_pgid\" </dev/null >/dev/null 2>&1 || true; "
+            "kill -KILL 0 2>/dev/null || kill -KILL \"$_ua_cpid\" 2>/dev/null || true; "
+        )
+    else:
+        pgid_capture = ""
+        term_cmd = "kill -TERM 0 2>/dev/null || kill -TERM \"$_ua_cpid\" 2>/dev/null || true; "
+        kill_cmd = "kill -KILL 0 2>/dev/null || kill -KILL \"$_ua_cpid\" 2>/dev/null || true; "
+
+    return (
+        "exec 3<&0; "
+        "_ua_stop=0; "
+        "trap '_ua_stop=1' USR1; "
+        f"{pgid_capture}"
+        f"{child_command} </dev/null 3<&- & "
+        "_ua_cpid=$!; "
+        "( IFS= read -r _ua_eof <&3; "
+        "while kill -0 $$ 2>/dev/null; do kill -USR1 $$ 2>/dev/null; "
+        "sleep 0.2 2>/dev/null || sleep 1; done "
+        ") </dev/null >/dev/null 2>&1 & "
+        "_ua_wpid=$!; "
+        "exec 3<&-; "
+        "_ua_rc=0; "
+        "if [ \"$_ua_stop\" -eq 0 ]; then wait \"$_ua_cpid\"; _ua_rc=$?; fi; "
+        "if [ \"$_ua_stop\" -eq 1 ]; then "
+        "trap '' TERM; "
+        f"{term_cmd}"
+        "sleep 0.2 2>/dev/null || sleep 1; "
+        f"{cleanup_snippet}"
+        f"{kill_cmd}"
+        "wait \"$_ua_cpid\" 2>/dev/null; "
+        "_ua_rc=143; "
+        "fi; "
+        "kill \"$_ua_wpid\" 2>/dev/null; "
+        "wait \"$_ua_wpid\" 2>/dev/null; "
+        "exit \"$_ua_rc\""
+    )
+
+
 def build_remote_shell_command(command: str, platform: SSHTargetPlatform) -> tuple[str, ...]:
     """Wrap an agent-supplied remote command safely for the target platform."""
 
@@ -312,7 +389,7 @@ def build_remote_shell_command(command: str, platform: SSHTargetPlatform) -> tup
         raise ValueError("SSH command must not be empty.")
     if platform == SSHTargetPlatform.WINDOWS:
         return _windows_powershell_command(command)
-    return _posix_sh_command(command)
+    return _posix_sh_command(_wrap_posix_watched_command(f"sh -c {shlex.quote(command)}"))
 
 
 def build_key_install_command(platform: SSHTargetPlatform) -> tuple[str, ...]:
@@ -340,7 +417,7 @@ def build_key_install_command(platform: SSHTargetPlatform) -> tuple[str, ...]:
             "if (Test-Path -LiteralPath $file) { $existing=Get-Content -LiteralPath $file }; "
             "if ($existing -notcontains $key) { Add-Content -LiteralPath $file -Value $key -Encoding ascii }; "
             "if ($isAdmin) { "
-            "  icacls $file /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null; "
+            "  icacls $file /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null; "
             "}"
         )
         return _windows_powershell_command(ps_script)
@@ -404,9 +481,11 @@ def build_sudo_free_command(
     """Build a broker-controlled sudo command that NEVER shares stdin with the agent command.
 
     When ``needs_password`` is True, line 1 of SSH stdin is read into a shell
-    variable, piped alone to ``<sudo_path> -S -k -p '' -v`` (one attempt, no
-    retries), unset immediately, verified with ``<sudo_path> -n true``, and then
-    the agent command runs via ``<sudo_path> -n -- sh -c <command> </dev/null``.
+    variable, piped alone to ``<sudo_path> -S -p '' -v`` (one attempt, no
+    retries, without ``-k`` so ``sudo`` records its ``TS_PPID`` timestamp for
+    this outer shell), unset immediately, verified with ``<sudo_path> -n true``,
+    and then the agent command runs as a direct child of this same shell via
+    ``<sudo_path> -n -- sh -c <command> </dev/null`` under the stdin-EOF watcher.
     """
 
     validate_trusted_bin_paths((sudo_path,), label="sudo")
@@ -414,16 +493,20 @@ def build_sudo_free_command(
         raise ValueError("Sudo command must not be empty.")
     quoted_sudo = shlex.quote(sudo_path)
     quoted_cmd = shlex.quote(command)
+    watched_sudo = _wrap_posix_watched_command(
+        f"{quoted_sudo} -n -- sh -c {quoted_cmd}",
+        sudo_path=sudo_path,
+    )
     if not needs_password:
-        return _posix_sh_command(f"exec {quoted_sudo} -n -- sh -c {quoted_cmd} </dev/null")
+        return _posix_sh_command(watched_sudo)
     script = (
         "IFS= read -r _ua_pw || exit 71; "
-        f"printf '%s\\n' \"$_ua_pw\" | {quoted_sudo} -S -k -p '' -v >/dev/null 2>&1; "
+        f"printf '%s\\n' \"$_ua_pw\" | {quoted_sudo} -S -p '' -v >/dev/null 2>&1; "
         "_ua_rc=$?; _ua_pw=''; unset _ua_pw; "
         f"if [ \"$_ua_rc\" -ne 0 ]; then printf '{SUDO_AUTH_FAILED_MARKER}\\n' >&2; exit 72; fi; "
         f"if ! {quoted_sudo} -n true </dev/null >/dev/null 2>&1; then "
         f"printf '{SUDO_NO_TIMESTAMP_MARKER}\\n' >&2; exit 73; fi; "
-        f"exec {quoted_sudo} -n -- sh -c {quoted_cmd} </dev/null"
+        f"{watched_sudo}"
     )
     return _posix_sh_command(script)
 
@@ -504,13 +587,18 @@ def build_sudo_secret_recipe_command(
         parts.extend(
             [
                 "IFS= read -r _ua_pw || exit 71",
-                f"printf '%s\\n' \"$_ua_pw\" | {quoted_sudo} -S -k -p '' -v >/dev/null 2>&1",
+                f"printf '%s\\n' \"$_ua_pw\" | {quoted_sudo} -S -p '' -v >/dev/null 2>&1",
                 "_ua_rc=$?; _ua_pw=''; unset _ua_pw",
                 f"if [ \"$_ua_rc\" -ne 0 ]; then printf '{SUDO_AUTH_FAILED_MARKER}\\n' >&2; exit 72; fi",
                 f"if ! {quoted_sudo} -n true </dev/null >/dev/null 2>&1; then "
                 f"printf '{SUDO_NO_TIMESTAMP_MARKER}\\n' >&2; exit 73; fi",
             ]
         )
+    watched_tailscale = _wrap_posix_watched_command(
+        f"{quoted_sudo} -n -- \"$_ua_ts\" up --auth-key=\"file:$_ua_keyfile\"{quoted_flags}",
+        sudo_path=sudo_path,
+        cleanup_path_var="_ua_keyfile",
+    )
     parts.extend(
         [
             "IFS= read -r _ua_tskey || exit 74",
@@ -523,14 +611,14 @@ def build_sudo_secret_recipe_command(
             "chmod 600 \"$_ua_keyfile\" || exit 76",
             "printf '%s\\n' \"$_ua_tskey\" > \"$_ua_keyfile\"",
             "_ua_tskey=''; unset _ua_tskey",
-            f"{quoted_sudo} -n -- \"$_ua_ts\" up --auth-key=\"file:$_ua_keyfile\"{quoted_flags} </dev/null",
+            watched_tailscale,
         ]
     )
     return _posix_sh_command("; ".join(parts))
 
 
 def validate_remote_destination(destination: str) -> str:
-    """Reject control characters, leading dashes, and empty remote destinations."""
+    """Reject control characters, leading dashes, ``~user`` paths, and empty remote destinations."""
 
     cleaned = str(destination or "").strip()
     if not cleaned or len(cleaned) > 512:
@@ -538,6 +626,10 @@ def validate_remote_destination(destination: str) -> str:
     if cleaned.startswith("-") or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
         raise ValueError(
             "Remote destination path must not start with '-' or contain control characters."
+        )
+    if cleaned.startswith("~") and cleaned != "~" and not cleaned.startswith(("~/", "~\\")):
+        raise ValueError(
+            "Remote destination path must not use '~user' syntax; use '~/', an absolute path, or a relative path."
         )
     return cleaned
 
@@ -547,15 +639,31 @@ def build_bundle_extract_command(destination: str, platform: SSHTargetPlatform) 
 
     cleaned = validate_remote_destination(destination)
     if platform == SSHTargetPlatform.WINDOWS:
-        escaped = cleaned.replace("'", "''")
+        if cleaned == "~":
+            dest_expr = "$env:USERPROFILE"
+        elif cleaned.startswith(("~/", "~\\")):
+            sub = cleaned[2:].replace("'", "''")
+            dest_expr = f"(Join-Path $env:USERPROFILE '{sub}')" if sub else "$env:USERPROFILE"
+        else:
+            escaped = cleaned.replace("'", "''")
+            dest_expr = f"'{escaped}'"
         ps_script = (
             "$ErrorActionPreference='Stop'; "
-            f"New-Item -ItemType Directory -Force -Path '{escaped}' | Out-Null; "
-            f"tar -xzf - -C '{escaped}'"
+            f"$dest={dest_expr}; "
+            "New-Item -ItemType Directory -Force -Path $dest | Out-Null; "
+            "tar -xzf - -C $dest"
         )
         return _windows_powershell_command(ps_script)
-    quoted = shlex.quote(cleaned)
-    return _posix_sh_command(f"mkdir -p -- {quoted} && tar -xzf - --no-same-owner -C {quoted}")
+    if cleaned == "~":
+        dest_expr = '"$HOME"'
+    elif cleaned.startswith("~/"):
+        sub = cleaned[2:]
+        dest_expr = f'"$HOME"/{shlex.quote(sub)}' if sub else '"$HOME"'
+    elif cleaned.startswith("~\\"):
+        raise ValueError("POSIX remote destinations must use '~/' rather than '~\\'.")
+    else:
+        dest_expr = shlex.quote(cleaned)
+    return _posix_sh_command(f"mkdir -p -- {dest_expr} && tar -xzf - --no-same-owner -C {dest_expr}")
 
 
 def build_tar_gz_bundle(
