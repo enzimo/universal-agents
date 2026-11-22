@@ -56,6 +56,12 @@ _IMAGE_CONTENT_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
+_COMPRESSED_ENCODING_CONTENT_TYPES = {
+    "gzip": "application/gzip",
+    "bzip2": "application/x-bzip2",
+    "xz": "application/x-xz",
+    "compress": "application/x-compress",
+}
 
 WorkspacePreviewKind = Literal[
     "markdown",
@@ -456,7 +462,12 @@ class WebsiteWorkspaceBrowser:
             return _IMAGE_CONTENT_TYPES[suffix]
         if suffix in _PDF_SUFFIXES:
             return "application/pdf"
-        guessed_type, _encoding = mimetypes.guess_type(lowered_name)
+        guessed_type, encoding = mimetypes.guess_type(lowered_name)
+        if encoding is not None:
+            return _COMPRESSED_ENCODING_CONTENT_TYPES.get(
+                encoding.casefold(),
+                "application/octet-stream",
+            )
         return guessed_type or "application/octet-stream"
 
     @staticmethod

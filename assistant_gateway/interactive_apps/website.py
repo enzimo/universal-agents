@@ -396,6 +396,16 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
                     ),
                     (
                         "GET",
+                        "/api/web-chat/workspace/download",
+                        self.workspace._handle_web_chat_workspace_download,
+                    ),
+                    (
+                        "HEAD",
+                        "/api/web-chat/workspace/download",
+                        self.workspace._handle_web_chat_workspace_download,
+                    ),
+                    (
+                        "GET",
                         "/api/web-chat/objectives",
                         self.controls._handle_web_chat_objectives,
                     ),

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 from typing import NoReturn
 from aiohttp import web
@@ -10,6 +11,7 @@ from assistant_gateway.application.workspace_browser import (
     WorkspacePreviewUnavailableError,
 )
 from assistant_gateway.application.website_application import (
+    GatewayWorkspaceFileDownload,
     WebsiteGatewayApplication,
 )
 from assistant_gateway.interactive_apps.website_support import (
@@ -17,6 +19,18 @@ from assistant_gateway.interactive_apps.website_support import (
     _WORKSPACE_HTML_PREVIEW_CSP,
 )
 from .operations import WebsiteWorkspaceHandlersOperations
+from .workspace_download import (
+    DOWNLOAD_CHUNK_BYTES,
+    accepts_html_navigation,
+    build_attachment_disposition,
+    download_security_headers,
+    parse_byte_range,
+    unauthenticated_download_redirect_location,
+)
+
+
+class _InactiveWorkspaceMemberError(PermissionError):
+    """Raised when a signed-in session no longer maps to an active team member."""
 
 
 class WebsiteWorkspaceHandlers:
@@ -35,7 +49,7 @@ class WebsiteWorkspaceHandlers:
     ) -> tuple[str, tuple[str, ...]]:
         """The signed-in person and their current team roles (never from the browser).
 
-        Members browse their own folder; administrators also see team/ and
+        Members browse their own folder and team/; administrators also see
         agents/ (access_control.ownership decides each path).
         """
 
@@ -172,3 +186,214 @@ class WebsiteWorkspaceHandlers:
             content_type=content.content_type,
             headers=headers,
         )
+
+    def _open_workspace_download_sync(
+        self,
+        *,
+        canonical_user_id: str,
+        requested_path: str,
+    ) -> GatewayWorkspaceFileDownload:
+        """Resolve member roles and open the download descriptor off the event loop."""
+
+        person = self.application.access_inbox.person(canonical_user_id)
+        if person is None:
+            raise _InactiveWorkspaceMemberError(
+                "You are not an active member of this team."
+            )
+        return self.application.operations.open_web_chat_workspace_download(
+            canonical_user_id=canonical_user_id,
+            roles=tuple(person.roles),
+            path=requested_path,
+        )
+
+    @staticmethod
+    async def _close_download_safely(download: GatewayWorkspaceFileDownload) -> None:
+        """Close the download descriptor off-loop, with a locked sync fallback on cancel."""
+
+        try:
+            await asyncio.shield(asyncio.to_thread(download.close))
+        except BaseException:
+            download.close()
+            raise
+
+    def _unauthenticated_download_response(
+        self,
+        request: web.Request,
+        requested_path: str,
+    ) -> web.Response | None:
+        if request.method != "GET" or not accepts_html_navigation(
+            request.headers.get("Accept")
+        ):
+            return None
+        location = unauthenticated_download_redirect_location(requested_path)
+        self._logger.info(
+            "event=workspace_download_auth_redirect path=%r location=%r",
+            requested_path,
+            location,
+        )
+        return web.Response(
+            status=302,
+            headers={
+                "Location": location,
+                "Cache-Control": "no-store",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
+    @staticmethod
+    def _unsatisfiable_range_response(
+        request: web.Request,
+        size_bytes: int,
+    ) -> web.Response:
+        headers = {
+            **download_security_headers(),
+            "Accept-Ranges": "bytes",
+            "Content-Range": f"bytes */{size_bytes}",
+        }
+        if request.method == "HEAD":
+            return web.Response(status=416, body=b"", headers=headers)
+        return web.Response(
+            status=416,
+            text="Requested byte range is not satisfiable.",
+            headers=headers,
+        )
+
+    async def _stream_download_body(
+        self,
+        *,
+        request: web.Request,
+        response: web.StreamResponse,
+        download: GatewayWorkspaceFileDownload,
+        start: int,
+        length: int,
+        canonical_user_id: str,
+        requested_path: str,
+    ) -> web.StreamResponse:
+        offset = start
+        remaining = length
+        try:
+            while remaining > 0:
+                chunk = await asyncio.to_thread(
+                    download.read_at,
+                    offset,
+                    min(DOWNLOAD_CHUNK_BYTES, remaining),
+                )
+                if not chunk:
+                    self._logger.warning(
+                        "event=workspace_download_truncated actor=%s path=%r "
+                        "offset=%d remaining_bytes=%d expected_size=%d",
+                        canonical_user_id,
+                        requested_path,
+                        offset,
+                        remaining,
+                        download.size_bytes,
+                    )
+                    response.force_close()
+                    if request.transport is not None:
+                        request.transport.close()
+                    return response
+                await response.write(chunk)
+                offset += len(chunk)
+                remaining -= len(chunk)
+            await response.write_eof()
+        except ConnectionResetError:
+            self._logger.info(
+                "event=workspace_download_client_disconnected actor=%s path=%r "
+                "offset=%d remaining_bytes=%d",
+                canonical_user_id,
+                requested_path,
+                offset,
+                remaining,
+            )
+        except OSError as exc:
+            self._logger.warning(
+                "event=workspace_download_read_failed actor=%s path=%r "
+                "offset=%d remaining_bytes=%d error=%s",
+                canonical_user_id,
+                requested_path,
+                offset,
+                remaining,
+                exc,
+            )
+            response.force_close()
+            if request.transport is not None:
+                request.transport.close()
+        return response
+
+    async def _handle_web_chat_workspace_download(
+        self,
+        request: web.Request,
+    ) -> web.StreamResponse:
+        """Stream an authenticated workspace file download with byte-range support."""
+
+        requested_path = str(request.query.get("path") or "")
+        try:
+            web_session = self.operations._require_web_chat_session(request)
+        except web.HTTPUnauthorized:
+            redirect = self._unauthenticated_download_response(request, requested_path)
+            if redirect is not None:
+                return redirect
+            raise
+        canonical_user_id = str(web_session.canonical_user_id or "").strip()
+        if not canonical_user_id:
+            raise web.HTTPForbidden(
+                text="Workspace files need a signed-in team member."
+            )
+        try:
+            download = await asyncio.to_thread(
+                self._open_workspace_download_sync,
+                canonical_user_id=canonical_user_id,
+                requested_path=requested_path,
+            )
+        except _InactiveWorkspaceMemberError as exc:
+            raise web.HTTPForbidden(text=str(exc)) from exc
+        except (PermissionError, WorkspaceBrowserError) as exc:
+            self._raise_workspace_http_error(
+                error=exc,
+                canonical_user_id=canonical_user_id,
+                requested_path=requested_path,
+            )
+        try:
+            range_result = parse_byte_range(
+                request.headers.get("Range"),
+                download.size_bytes,
+            )
+            if range_result.status == "unsatisfiable":
+                return self._unsatisfiable_range_response(request, download.size_bytes)
+
+            headers = {
+                **download_security_headers(),
+                "Accept-Ranges": "bytes",
+                "Content-Disposition": build_attachment_disposition(download.name),
+            }
+            if range_result.status == "satisfiable" and range_result.byte_range is not None:
+                start = range_result.byte_range.start
+                length = range_result.byte_range.length
+                status = 206
+                headers["Content-Range"] = (
+                    f"bytes {range_result.byte_range.start}-"
+                    f"{range_result.byte_range.end}/{download.size_bytes}"
+                )
+            else:
+                start = 0
+                length = download.size_bytes
+                status = 200
+
+            response = web.StreamResponse(status=status, headers=headers)
+            response.content_type = download.content_type
+            response.content_length = length
+            await response.prepare(request)
+            if request.method == "HEAD":
+                await response.write_eof()
+                return response
+            return await self._stream_download_body(
+                request=request,
+                response=response,
+                download=download,
+                start=start,
+                length=length,
+                canonical_user_id=canonical_user_id,
+                requested_path=requested_path,
+            )
+        finally:
+            await self._close_download_safely(download)

@@ -275,6 +275,17 @@ def test_workspace_browser_open_file_download_streams_large_binary_and_closes_sa
         assert binary.content_type == "application/octet-stream"
         assert binary.read_at(1, 2) == b"\x02\x03"
 
+    compressed_expectations = (
+        ("bundle.tar.gz", "application/gzip"),
+        ("notes.txt.gz", "application/gzip"),
+        ("archive.tar.bz2", "application/x-bzip2"),
+        ("snapshot.tar.xz", "application/x-xz"),
+    )
+    for filename, expected_type in compressed_expectations:
+        (workspace / filename).write_bytes(b"\x1f\x8b\x08\x00")
+        with browser.open_file_download(access=ADMIN_ACCESS, path=filename) as archive:
+            assert archive.content_type == expected_type
+
 
 def test_workspace_browser_open_file_download_serializes_concurrent_read_and_close(
     tmp_path: Path,
