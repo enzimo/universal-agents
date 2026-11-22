@@ -480,6 +480,12 @@ def test_enrolled_target_credential_scope_key_length_and_connection_target_propa
     with pytest.raises(ValidationError, match="credential owner scope"):
         _make_enrolled(owner=team_scope, cred_scope=alice_scope)
 
+    # C51(c): EnrolledSSHTargetV1 requires credential_public_key_fingerprint.
+    raw = enrolled.model_dump(mode="python")
+    raw.pop("credential_public_key_fingerprint")
+    with pytest.raises(ValidationError, match="credential_public_key_fingerprint"):
+        EnrolledSSHTargetV1.model_validate(raw)
+
     # User Alice's target cannot point to User Bob's private credential scope.
     with pytest.raises(ValidationError, match="credential owner scope"):
         _make_enrolled(owner=alice_scope, cred_scope=bob_scope)

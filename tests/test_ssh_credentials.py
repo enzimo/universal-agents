@@ -27,7 +27,7 @@ from custom_tools.code_sandbox import (
     release_sandboxed_command,
 )
 from runtime_hosting.artifacts import FilesystemArtifactStore
-from runtime_hosting.authorization import ExecutionAccessGuard
+from runtime_hosting.authorization import ExecutionAccessGuard, SSHCallerContext
 from runtime_hosting.execution_contracts import (
     ExecutionActivationKind,
     InteractiveSessionStatus,
@@ -35,6 +35,7 @@ from runtime_hosting.execution_contracts import (
     OwnerScopeKind,
     OwnerScopeV1,
     SSHConnectionTargetV1,
+    ssh_public_key_sha256_fingerprint,
 )
 from runtime_hosting.ssh import (
     CatalogSSHCredentialMaterialProvider,
@@ -69,6 +70,13 @@ from secure_tool_broker.credential_templates import (
 from storage.execution_control_repository import SqliteExecutionControlRepository
 from tests.execution_access_support import activation as build_activation
 from tests.execution_access_support import fake_ssh, host_key_fingerprint, team_owner, write_ssh_material
+
+
+_TEST_CALLER = SSHCallerContext(
+    agent_type="TeamArchitect",
+    task_id="task_change",
+    person_id="user_alice",
+)
 
 
 def _free_local_port() -> int:
@@ -270,6 +278,7 @@ def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
     host_pub_parts = host_key.with_suffix(".pub").read_text(encoding="utf-8").strip().split()
     host_algo, host_b64 = host_pub_parts[0], host_pub_parts[1]
     host_fp = host_key_fingerprint(base64.b64decode(host_b64))
+    _, client_pub_fp = ssh_public_key_sha256_fingerprint(public_key_line)
     target = SSHConnectionTargetV1(
         host="bootstrap.internal",
         port=port,
@@ -277,6 +286,7 @@ def test_catalog_provider_real_sshd_passphrase_agent_and_landlock_isolation(
         host_key_algorithm=host_algo,
         host_key_fingerprint=host_fp,
         credential_binding_id="catalog:build_mac_ssh_key",
+        credential_public_key_fingerprint=client_pub_fp,
     )
     digest = target.calculate_digest()
     session = InteractiveSessionV1(
@@ -881,6 +891,7 @@ def test_collect_credential_optional_blank_secrets_and_default_resolver(
     saved_key_cred = credential_catalog.load_catalog(scope=alice_scope).credentials[key_req["credential_key"]]
     assert "ssh_passphrase" not in saved_key_cred.fields
 
+    _, unenc_pub_fp = ssh_public_key_sha256_fingerprint(unenc_pub)
     target = SSHConnectionTargetV1(
         host="box.internal",
         port=22,
@@ -888,6 +899,7 @@ def test_collect_credential_optional_blank_secrets_and_default_resolver(
         host_key_algorithm="ssh-ed25519",
         host_key_fingerprint=host_key_fingerprint(b"hostkey"),
         credential_binding_id=f"catalog:{key_req['credential_key']}",
+        credential_public_key_fingerprint=unenc_pub_fp,
     )
     session = InteractiveSessionV1(
         session_id="ssh_sess_unenc_catalog",
@@ -906,6 +918,7 @@ def test_collect_credential_optional_blank_secrets_and_default_resolver(
     )
     enc_pem = enc_key.read_text(encoding="utf-8")
     enc_pub = enc_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    _, enc_pub_fp = ssh_public_key_sha256_fingerprint(enc_pub)
     enc_rendered = render_credential_template_request(
         {"template_id": "ssh_private_key", "service_name": "Enc Box"}
     )
@@ -921,10 +934,17 @@ def test_collect_credential_optional_blank_secrets_and_default_resolver(
         scope=alice_scope,
     )
     assert enc_saved.status == "success", enc_saved.error
+    enc_target = target.model_copy(
+        update={
+            "credential_binding_id": f"catalog:{enc_req['credential_key']}",
+            "credential_public_key_fingerprint": enc_pub_fp,
+        }
+    )
     enc_session = session.model_copy(
         update={
             "session_id": "ssh_sess_enc_catalog",
-            "target": target.model_copy(update={"credential_binding_id": f"catalog:{enc_req['credential_key']}"}),
+            "target": enc_target,
+            "target_digest": enc_target.calculate_digest(),
         }
     )
     with provider.prepare(enc_session) as mat:
@@ -1143,7 +1163,7 @@ async def test_broker_open_and_close_do_not_block_event_loop_and_scrub_split_out
 
     tick_task = asyncio.create_task(ticker())
     try:
-        await broker.open(session_id=session.session_id, lease_token="lease-1")
+        await broker.open(session_id=session.session_id, lease_token="lease-1", caller=_TEST_CALLER)
     finally:
         stop_ticking.set()
         await tick_task
@@ -1154,7 +1174,7 @@ async def test_broker_open_and_close_do_not_block_event_loop_and_scrub_split_out
     for _ in range(20):
         if session.session_id not in broker._sessions:
             break
-        chunk = await broker.read(session_id=session.session_id, timeout_seconds=0.05)
+        chunk = await broker.read(session_id=session.session_id, timeout_seconds=0.05, caller=_TEST_CALLER)
         if chunk:
             assert exact_secret.encode() not in chunk
             assert split_token[:14].encode() not in chunk
@@ -1198,7 +1218,7 @@ async def test_broker_open_and_close_do_not_block_event_loop_and_scrub_split_out
         broker_id="broker-async-test-2",
         ssh_executable=str(fake_ssh(tmp_path / "bin2")),
     )
-    await broker2.open(session_id=session2.session_id, lease_token="lease-2")
+    await broker2.open(session_id=session2.session_id, lease_token="lease-2", caller=_TEST_CALLER)
 
     close_ticks = 0
     stop_close_ticking = asyncio.Event()
@@ -1529,17 +1549,17 @@ async def test_broker_read_releases_word_prompts_and_handles_delayed_split_token
         ssh_executable=str(prompt_ssh),
     )
 
-    await broker.open(session_id=session.session_id, lease_token="lease-p")
+    await broker.open(session_id=session.session_id, lease_token="lease-p", caller=_TEST_CALLER)
     try:
         collected = b""
         deadline = time.monotonic() + 2.5
         while b"Enter the new hostname" not in collected and time.monotonic() < deadline:
-            collected += await broker.read(session_id=session.session_id, timeout_seconds=0.5)
+            collected += await broker.read(session_id=session.session_id, timeout_seconds=0.5, caller=_TEST_CALLER)
         assert b"Enter the new hostname" in collected
 
         deadline = time.monotonic() + 2.5
         while b"Username" not in collected and time.monotonic() < deadline:
-            collected += await broker.read(session_id=session.session_id, timeout_seconds=0.5)
+            collected += await broker.read(session_id=session.session_id, timeout_seconds=0.5, caller=_TEST_CALLER)
         assert b"Username" in collected
 
         # Wait until both halves are sitting in the PTY buffer, then read only the
@@ -1551,10 +1571,11 @@ async def test_broker_read_releases_word_prompts_and_handles_delayed_split_token
             session_id=session.session_id,
             maximum_bytes=14,  # "\r\n" + first 12 bytes of split_token
             timeout_seconds=0.1,
+            caller=_TEST_CALLER,
         )
         assert split_token[:12].encode("ascii") not in first_chunk
         await asyncio.sleep(0.4)
-        token_chunk = await broker.read(session_id=session.session_id, timeout_seconds=0.2)
+        token_chunk = await broker.read(session_id=session.session_id, timeout_seconds=0.2, caller=_TEST_CALLER)
         assert split_token.encode("ascii") not in (first_chunk + token_chunk)
         assert split_token[:12].encode("ascii") not in (first_chunk + token_chunk)
         assert b"[REDACTED]" in (first_chunk + token_chunk)
@@ -1628,7 +1649,7 @@ async def test_broker_open_and_close_cancellation_cleans_up_material_and_persist
         ssh_executable=str(fake_ssh(tmp_path / "bin-open")),
     )
     open_task = asyncio.create_task(
-        broker_open.open(session_id=sess_open.session_id, lease_token="lease-cancel-1")
+        broker_open.open(session_id=sess_open.session_id, lease_token="lease-cancel-1", caller=_TEST_CALLER)
     )
     await asyncio.sleep(0.1)
     open_task.cancel()
@@ -1668,7 +1689,7 @@ async def test_broker_open_and_close_cancellation_cleans_up_material_and_persist
         broker_id="broker-cancel-close",
         ssh_executable=str(fake_ssh(tmp_path / "bin-close")),
     )
-    await broker_close.open(session_id=sess_close.session_id, lease_token="lease-cancel-2")
+    await broker_close.open(session_id=sess_close.session_id, lease_token="lease-cancel-2", caller=_TEST_CALLER)
     repository.put_ssh_interaction(
         build_activation(
             ExecutionActivationKind.SSH_INTERACT,
@@ -1677,10 +1698,10 @@ async def test_broker_open_and_close_cancellation_cleans_up_material_and_persist
             function="change:execution_ssh_interaction",
         )
     )
-    await broker_close.write(session_id=sess_close.session_id, payload=b"keep-transcript\n")
+    await broker_close.write(session_id=sess_close.session_id, payload=b"keep-transcript\n", caller=_TEST_CALLER)
     out = b""
     for _ in range(5):
-        out += await broker_close.read(session_id=sess_close.session_id, timeout_seconds=0.5)
+        out += await broker_close.read(session_id=sess_close.session_id, timeout_seconds=0.5, caller=_TEST_CALLER)
         if b"remote:keep-transcript" in out:
             break
     assert b"remote:keep-transcript" in out
@@ -1784,8 +1805,8 @@ async def test_dot_leading_paths_truncated_secret_transcript_and_repr_hiding(
         transcript_limit_bytes=18,  # cuts 15 bytes into the 22-byte secret ("pw=SuperSecretBrok")
     )
 
-    await broker.open(session_id=session.session_id, lease_token="lease-trunc")
-    chunk = await broker.read(session_id=session.session_id, timeout_seconds=1.0)
+    await broker.open(session_id=session.session_id, lease_token="lease-trunc", caller=_TEST_CALLER)
+    chunk = await broker.read(session_id=session.session_id, timeout_seconds=1.0, caller=_TEST_CALLER)
     assert secret_pw.encode("ascii") not in chunk
     live = broker._sessions[session.session_id]
     assert "SuperSecret" not in repr(live)
@@ -1868,7 +1889,7 @@ async def test_broker_loop_shutdown_cancellation_does_not_spin_on_open_or_close(
     current = asyncio.current_task()
     before_open_tasks = set(asyncio.all_tasks())
     open_task = asyncio.create_task(
-        broker_open.open(session_id=sess_open.session_id, lease_token="lease-sd-open")
+        broker_open.open(session_id=sess_open.session_id, lease_token="lease-sd-open", caller=_TEST_CALLER)
     )
     await asyncio.sleep(0.08)
     spawned_open = [t for t in (asyncio.all_tasks() - before_open_tasks) if t is not current]
@@ -1916,7 +1937,7 @@ async def test_broker_loop_shutdown_cancellation_does_not_spin_on_open_or_close(
         broker_id="broker-shutdown-close",
         ssh_executable=str(fake_ssh(tmp_path / "bin-shutdown-close")),
     )
-    await broker_close.open(session_id=sess_close.session_id, lease_token="lease-sd-close")
+    await broker_close.open(session_id=sess_close.session_id, lease_token="lease-sd-close", caller=_TEST_CALLER)
     before_close_tasks = set(asyncio.all_tasks())
     close_task = asyncio.create_task(broker_close.close(session_id=sess_close.session_id))
     await asyncio.sleep(0.08)
@@ -2073,6 +2094,27 @@ def test_catalog_provider_uses_approved_credential_scope_and_verifies_fingerprin
     )
     with pytest.raises(PermissionError, match="fingerprint does not match"):
         with provider.prepare(wrong_session):
+            pass
+
+    # C51(c): Missing credential_public_key_fingerprint fails closed instead of skipping verification.
+    no_fp_target = target.model_copy(update={"credential_public_key_fingerprint": None})
+    no_fp_digest = no_fp_target.calculate_digest()
+    no_fp_session = InteractiveSessionV1(
+        session_id="ssh_sess_no_fp",
+        owner=alice_scope,
+        target=no_fp_target,
+        target_digest=no_fp_digest,
+        connect_activation=build_activation(
+            ExecutionActivationKind.SSH_CONNECT,
+            resource_id="ssh_sess_no_fp",
+            resource_digest=no_fp_digest,
+            owner_scope=alice_scope,
+            function="create_execution_ssh_session",
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        ),
+    )
+    with pytest.raises(PermissionError, match="missing a pinned credential_public_key_fingerprint"):
+        with provider.prepare(no_fp_session):
             pass
 
 

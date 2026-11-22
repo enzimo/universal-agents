@@ -30,7 +30,11 @@ from custom_tools.providers import execution_control as tools
 from custom_tools.providers.changes import apply_change
 from tests.task_work_support import set_agent_ref
 from runtime_hosting.artifacts import FilesystemArtifactStore
-from runtime_hosting.authorization import ExecutionAccessGuard, ExecutionAuthorizationDenied
+from runtime_hosting.authorization import (
+    ExecutionAccessGuard,
+    ExecutionAuthorizationDenied,
+    SSHCallerContext,
+)
 from runtime_hosting.execution_contracts import (
     ActivationRecordV2,
     ExecutionActivationKind,
@@ -66,6 +70,11 @@ from tests.execution_access_support import (
 )
 
 _AGREEMENT_GUARD = ExecutionAccessGuard(authorization_enabled=False)
+_DEFAULT_CALLER = SSHCallerContext(
+    agent_type="TeamArchitect",
+    task_id="task_change",
+    person_id="user_alice",
+)
 
 
 def _session(key_bytes: bytes, *, session_id: str = "ssh_sess_test") -> InteractiveSessionV1:
@@ -146,7 +155,12 @@ def _broker(
 async def _read_until(broker: SSHSessionBroker, session_id: str, expected: bytes) -> bytes:
     output = b""
     for _ in range(3):
-        output += await broker.read(session_id=session_id, maximum_bytes=4096, timeout_seconds=2)
+        output += await broker.read(
+            session_id=session_id,
+            maximum_bytes=4096,
+            timeout_seconds=2,
+            caller=_DEFAULT_CALLER,
+        )
         if expected in output:
             break
     return output
@@ -160,14 +174,18 @@ async def test_typing_needs_an_approved_interaction_and_the_transcript_is_kept(t
     repository.create_interactive_session(session)
     broker = _broker(tmp_path, repository, key_bytes=key_bytes)
 
-    opened = await broker.open(session_id=session.session_id, lease_token="lease-token")
+    opened = await broker.open(
+        session_id=session.session_id,
+        lease_token="lease-token",
+        caller=_DEFAULT_CALLER,
+    )
     assert opened.status == InteractiveSessionStatus.OPEN
     assert opened.fence == 1
     with pytest.raises(ExecutionAuthorizationDenied, match="needs a person's approval"):
-        await broker.write(session_id=session.session_id, payload=b"hello\n")
+        await broker.write(session_id=session.session_id, payload=b"hello\n", caller=_DEFAULT_CALLER)
     repository.put_ssh_interaction(_typing_approval(session))
 
-    await broker.write(session_id=session.session_id, payload=b"hello\n")
+    await broker.write(session_id=session.session_id, payload=b"hello\n", caller=_DEFAULT_CALLER)
     output = await _read_until(broker, session.session_id, b"remote:hello")
     closed = await broker.close(session_id=session.session_id)
 
@@ -185,13 +203,14 @@ async def test_a_typing_approval_for_another_session_does_not_count(tmp_path: Pa
     session = _session(key_bytes)
     repository.create_interactive_session(session)
     broker = _broker(tmp_path, repository, key_bytes=key_bytes)
-    await broker.open(session_id=session.session_id, lease_token="lease-token")
+    await broker.open(session_id=session.session_id, lease_token="lease-token", caller=_DEFAULT_CALLER)
     other = _session(key_bytes, session_id="ssh_sess_other")
 
     with pytest.raises(ExecutionAuthorizationDenied, match="another session"):
         broker.authorization_guard.require_ssh_interact(
             broker._sessions[session.session_id].session,
             SSHInteractionRecordV1(activation=_typing_approval(other)),
+            caller=_DEFAULT_CALLER,
         )
     await broker.close(session_id=session.session_id)
 
@@ -206,7 +225,7 @@ async def test_ssh_broker_fails_closed_on_host_key_mismatch_and_releases_lease(
     broker = _broker(tmp_path, repository, key_bytes=b"different-key")
 
     with pytest.raises(PermissionError, match="pinned host key"):
-        await broker.open(session_id=session.session_id, lease_token="lease-token")
+        await broker.open(session_id=session.session_id, lease_token="lease-token", caller=_DEFAULT_CALLER)
 
     failed = repository.get_interactive_session(team_id="team_alpha", session_id=session.session_id)
     assert failed is not None
@@ -224,7 +243,7 @@ async def test_ssh_broker_releases_connecting_lease_when_material_is_unavailable
     broker = _broker(tmp_path, repository, material_provider=_UnavailableMaterialProvider())
 
     with pytest.raises(PermissionError, match="material unavailable"):
-        await broker.open(session_id=session.session_id, lease_token="lease-token")
+        await broker.open(session_id=session.session_id, lease_token="lease-token", caller=_DEFAULT_CALLER)
 
     failed = repository.get_interactive_session(team_id="team_alpha", session_id=session.session_id)
     assert failed is not None
@@ -250,7 +269,7 @@ async def test_an_agreement_session_is_refused_once_authorization_is_on(tmp_path
     broker.authorization_guard = ExecutionAccessGuard(authorization_enabled=True, access=access, catalogs=catalogs)
 
     with pytest.raises(ExecutionAuthorizationDenied, match="Authorization is on now"):
-        await broker.open(session_id=session.session_id, lease_token="lease-token")
+        await broker.open(session_id=session.session_id, lease_token="lease-token", caller=_DEFAULT_CALLER)
 
 
 @pytest.mark.asyncio
@@ -260,7 +279,7 @@ async def test_ssh_broker_disconnects_an_idle_expired_lease(tmp_path: Path) -> N
     session = _session(key_bytes)
     repository.create_interactive_session(session)
     broker = _broker(tmp_path, repository, key_bytes=key_bytes, lease_ttl_seconds=1)
-    await broker.open(session_id=session.session_id, lease_token="lease-token")
+    await broker.open(session_id=session.session_id, lease_token="lease-token", caller=_DEFAULT_CALLER)
 
     disconnected = None
     for _ in range(30):
@@ -307,6 +326,13 @@ def test_ssh_broker_restart_marks_non_replayable_live_pty_lost(tmp_path: Path) -
 @pytest.fixture
 def lead(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
     use_signed_contexts(monkeypatch)
+    from custom_tools import agent_team_port
+
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}, "WebResearchAgent": {}},
+    )
     tools._SSH_BROKERS.clear()
     agent = execution_lead(execution_instance(tmp_path, authorization_enabled=getattr(request, "param", True)))
     set_agent_ref(agent)
@@ -555,6 +581,13 @@ async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real
     )
 
     use_signed_contexts(monkeypatch)
+    from custom_tools import agent_team_port
+
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}, "WebResearchAgent": {}},
+    )
     tools._SSH_BROKERS.clear()
     instance = execution_instance(tmp_path, authorization_enabled=True)
     instance.config.user.display_name = "Alice Smith"
@@ -800,7 +833,7 @@ async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real
                 session,
                 stored_interaction,
                 capability=SSHCapability.COMMAND,
-                caller=bad_caller,
+                caller=bad_caller,  # type: ignore[arg-type]
                 enrolled_target=stored_target,
             )
 
@@ -888,6 +921,7 @@ def test_execution_access_guard_password_bootstrap_latch_and_host_key_mismatch()
         "host_key_public_key": host_pub,
         "credential_key": "win_ssh_key",
         "credential_owner_scope": owner_scope,
+        "credential_public_key_fingerprint": fp,
         "bootstrap_credential_key": "win_boot_cred",
         "bootstrap_credential_owner_scope": owner_scope,
         "lifecycle": SSHTargetLifecycle.PERSISTENT,
@@ -1013,6 +1047,13 @@ def test_ssh_delegation_expiry_runs_from_approval_time_and_rechecks_lowered_cap(
     from custom_agents.execution_control_service import ExecutionControlService
 
     use_signed_contexts(monkeypatch)
+    from custom_tools import agent_team_port
+
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}},
+    )
     instance = execution_instance(tmp_path, authorization_enabled=False)
     instance.config.execution_control.ssh.max_delegation_ttl_seconds = 1800
     instance.config.save(instance.config_path)
@@ -1099,6 +1140,13 @@ def test_ssh_target_enrollment_rejects_bad_credential_shapes_and_uses_readonly_c
     from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 
     use_signed_contexts(monkeypatch)
+    from custom_tools import agent_team_port
+
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}},
+    )
     instance = execution_instance(tmp_path, authorization_enabled=False)
     lead = execution_lead(instance)
     exec_service = ExecutionControlService(lead)
@@ -1110,7 +1158,7 @@ def test_ssh_target_enrollment_rejects_bad_credential_shapes_and_uses_readonly_c
     missing_env_db = tmp_path / "never_created_dir" / "missing_catalog.db"
     monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(missing_env_db))
     enroll_service = SSHTargetEnrollChangeService(lead)
-    with pytest.raises(LookupError, match="not registered"):
+    with pytest.raises(PermissionError, match="not registered"):
         enroll_service.stage(
             host="198.51.100.60",
             username="admin",
@@ -1319,6 +1367,13 @@ def test_ssh_delegation_rejects_unknown_agent_types_invalid_targets_expired_sess
     )
 
     use_signed_contexts(monkeypatch)
+    from custom_tools import agent_team_port
+
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}},
+    )
     instance = execution_instance(tmp_path, authorization_enabled=False)
     lead = execution_lead(instance)
     exec_service = ExecutionControlService(lead)
@@ -1565,9 +1620,11 @@ def test_execution_access_guard_requires_caller_and_strict_person_matching() -> 
         bounds=bounds,
     )
 
-    # caller=None must be refused on every new capability even without delegated_agent_type.
-    for new_cap in (
+    # caller=None must be refused on every capability (including CONNECT and TYPING).
+    for cap in (
+        SSHCapability.CONNECT,
         SSHCapability.COMMAND,
+        SSHCapability.TYPING,
         SSHCapability.PASSWORD_BOOTSTRAP,
         SSHCapability.BROKER_SUDO,
         SSHCapability.WORKSPACE_TRANSFER,
@@ -1576,11 +1633,24 @@ def test_execution_access_guard_requires_caller_and_strict_person_matching() -> 
             _AGREEMENT_GUARD.require_ssh_capability(
                 session,
                 interaction,
-                capability=new_cap,
-                caller=None,
+                capability=cap,
+                caller=None,  # type: ignore[arg-type]
                 enrolled_target=target,
                 allow_password_bootstrap_setting=True,
             )
+    with pytest.raises(ExecutionAuthorizationDenied, match="require verified caller identity"):
+        _AGREEMENT_GUARD.require_ssh_connect(
+            session,
+            caller=None,  # type: ignore[arg-type]
+            enrolled_target=target,
+        )
+    with pytest.raises(ExecutionAuthorizationDenied, match="requires verified caller identity"):
+        _AGREEMENT_GUARD.require_ssh_interact(
+            session,
+            interaction,
+            caller=None,  # type: ignore[arg-type]
+            enrolled_target=target,
+        )
 
     # Caller with person_id=None must be refused on person-owned session/delegation.
     no_person_caller = SSHCallerContext(agent_type="TeamArchitect", task_id="task_change", person_id=None)
@@ -1715,3 +1785,348 @@ async def test_ssh_target_enrollment_with_authorization_off_requires_agreement(
     opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session["session_id"]))
     assert opened["error_code"] == "execution_access_refused"
     assert "Enrolled SSH target record is missing" in opened["error"]
+
+
+# -- Checkpoint 8: C48-C51 Hardening Tests -----------------------------------------
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_ssh_delegation_second_request_behavior_for_default_and_single_request_scopes(
+    lead: Any,
+) -> None:
+    """C48: Default lead approval works across follow-up messages; single-request approval guides cleanly."""
+
+    from custom_agents.execution_control_service import ExecutionControlService
+
+    grant_execution(lead)
+
+    # 1. Default without delegated_agent_type -> this_request_only defaults to False (0.9 behavior).
+    session1 = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
+    s1_id = session1["session_id"]
+    opened1 = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=s1_id))
+    assert opened1["status"] == "open", opened1
+
+    staged1 = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=s1_id,
+            reason="Interactive deployment across messages",
+            ttl_seconds=600,
+            allow_typing=True,
+        )
+    )
+    assert staged1["status"] == "staged", staged1
+    assert any("any request by this person" in line for line in staged1["effect"])
+    call1 = ToolCall("tooluse_c48_default")
+    with pytest.raises(InterruptException):
+        await _apply(staged1["change_id"], call1)
+    decide(lead, call1)
+    applied1 = await _apply(staged1["change_id"], call1)
+    assert applied1["status"] == "applied", applied1
+    assert applied1["result"]["bounds"]["delegated_task_id"] is None
+    assert (await _type(s1_id, "first\n"))["written_bytes"] == 6
+
+    # 2. Explicit this_request_only=True binds to request 1's signed context work_id.
+    session2 = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
+    s2_id = session2["session_id"]
+    opened2 = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=s2_id))
+    assert opened2["status"] == "open", opened2
+
+    staged2 = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=s2_id,
+            reason="One-request interactive step",
+            ttl_seconds=600,
+            this_request_only=True,
+            allow_typing=True,
+        )
+    )
+    assert staged2["status"] == "staged", staged2
+    assert any("this request only" in line for line in staged2["effect"])
+    call2 = ToolCall("tooluse_c48_single")
+    with pytest.raises(InterruptException):
+        await _apply(staged2["change_id"], call2)
+    decide(lead, call2)
+    applied2 = await _apply(staged2["change_id"], call2)
+    assert applied2["status"] == "applied", applied2
+    req1_work_id = ExecutionControlService(lead).actor.agent.work_id
+    assert applied2["result"]["bounds"]["delegated_task_id"] == req1_work_id
+    assert (await _type(s2_id, "one\n"))["written_bytes"] == 4
+
+    # 3. Default when delegated_agent_type is provided -> this_request_only defaults to True.
+    session3 = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
+    staged3 = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=session3["session_id"],
+            reason="Delegate to worker",
+            ttl_seconds=600,
+            delegated_agent_type="CodeWritingAgent",
+            allow_commands=True,
+        )
+    )
+    assert staged3["status"] == "staged", staged3
+    assert any("this request only" in line for line in staged3["effect"])
+
+    # In request 1, both s1 and s2 are usable_in_this_request=True.
+    listed_req1 = json.loads(tools.list_execution_ssh_sessions._tool_func())
+    by_id_req1 = {entry["session_id"]: entry for entry in listed_req1["sessions"]}
+    assert by_id_req1[s1_id]["usable_in_this_request"] is True
+    assert by_id_req1[s1_id]["typing_approved"] is True
+    assert by_id_req1[s2_id]["usable_in_this_request"] is True
+    assert by_id_req1[s2_id]["typing_approved"] is True
+
+    # Simulate the same person sending a second chat message (new gateway-signed context -> new work_id).
+    lead.task_manager = SignedTaskManager(
+        team_id=lead.team_id,
+        person_id="user_alice",
+        storage_settings=lead.task_manager.storage_settings,
+        task_id="task_second_message",
+    )
+    req2_work_id = ExecutionControlService(lead).actor.agent.work_id
+    assert req2_work_id != req1_work_id
+
+    # Session 1 (default lead scope) continues working seamlessly in message 2.
+    assert (await _type(s1_id, "again\n"))["written_bytes"] == 6
+
+    # Session 2 (this_request_only=True) is refused cleanly, reported in listing, and re-staging guides the agent.
+    refused_write = await _type(s2_id, "two\n")
+    assert refused_write["error_code"] == "execution_access_refused"
+    assert "This approval was for one request, which has ended" in refused_write["error"]
+    assert "this_request_only=false" in refused_write["error"]
+
+    listed_req2 = json.loads(tools.list_execution_ssh_sessions._tool_func())
+    by_id_req2 = {entry["session_id"]: entry for entry in listed_req2["sessions"]}
+    assert by_id_req2[s1_id]["delegation_active"] is True
+    assert by_id_req2[s1_id]["usable_in_this_request"] is True
+    assert by_id_req2[s1_id]["typing_approved"] is True
+    assert by_id_req2[s2_id]["delegation_active"] is True
+    assert by_id_req2[s2_id]["usable_in_this_request"] is False
+    assert by_id_req2[s2_id]["typing_approved"] is False
+
+    replan_s2 = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=s2_id,
+            reason="Try to re-stage in second message",
+            ttl_seconds=600,
+            allow_typing=True,
+        )
+    )
+    assert replan_s2["error_code"] == "execution_access_refused"
+    assert "This approval was for one request, which has ended" in replan_s2["error"]
+    assert "this_request_only=false" in replan_s2["error"]
+
+    await tools.close_execution_ssh_session._tool_func(session_id=s1_id)
+    await tools.close_execution_ssh_session._tool_func(session_id=s2_id)
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_ssh_deleted_credential_at_apply_and_unreadable_catalog_report_clean_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C49: Deleted credentials close the approved request cleanly; unreadable catalogs log and fail cleanly."""
+
+    import logging
+    import sqlite3
+    from custom_agents import access_runtime
+    from custom_agents.execution_changes import (
+        SSHInteractionChangeService,
+        SSHTargetEnrollChangeService,
+    )
+    from custom_agents.execution_control_service import ExecutionControlService
+    from runtime_hosting.execution_contracts import SSHTargetLifecycle, SSHTargetPlatform
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import CredentialCatalog
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogReadError,
+        CredentialOwnerScope,
+        load_scope_readonly,
+    )
+
+    use_signed_contexts(monkeypatch)
+    tools._SSH_BROKERS.clear()
+    instance = execution_instance(tmp_path, authorization_enabled=True)
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+    grant_execution(lead)
+    exec_service = ExecutionControlService(lead)
+    db_path = instance.config.credential_catalog_database_path
+    host_pub = _framed_ed25519_pub(b"\x91" * 32)
+    _seed_ssh_catalog(db_path, monkeypatch, owner_scope=exec_service.owner)
+
+    # (a1) Admin approves target enrollment, then credential is deleted before apply_change runs.
+    enroll_service = SSHTargetEnrollChangeService(lead)
+    staged_enroll = enroll_service.stage(
+        target_id="c49_deleted_key_target",
+        host="198.51.100.95",
+        username="admin",
+        platform=SSHTargetPlatform.LINUX,
+        host_key_public_key=host_pub,
+        credential_key="build_mac_ssh_key",
+        lifecycle=SSHTargetLifecycle.PERSISTENT,
+        reason="Test deleted key at apply",
+    )
+    enroll_call = ToolCall("tooluse_c49_enroll")
+    with pytest.raises(InterruptException):
+        await _apply(staged_enroll["change_id"], enroll_call)
+    decide(lead, enroll_call)
+
+    # Delete the credential before apply_change claims & applies it.
+    user_scope = CredentialOwnerScope.user(exec_service.owner.owner_id)
+    credential_catalog.save_catalog(CredentialCatalog(credentials={}), scope=user_scope)
+
+    refused_enroll = await _apply(staged_enroll["change_id"], enroll_call)
+    assert refused_enroll["status"] == "refused", refused_enroll
+    assert "not registered" in refused_enroll["reason"]
+    closed_req = access_runtime.runtime_requests(lead).service.store.get_request(enroll_call.request_id)
+    assert closed_req is not None
+    assert closed_req.applied_at_utc is not None
+    assert closed_req.apply_error and "not registered" in closed_req.apply_error
+
+    # (a2) Same check for a deleted bootstrap credential at delegation apply_change time.
+    _seed_ssh_catalog(db_path, monkeypatch, owner_scope=exec_service.owner)
+    staged_enroll2 = enroll_service.stage(
+        target_id="c49_deleted_boot_target",
+        host="198.51.100.96",
+        username="admin",
+        platform=SSHTargetPlatform.LINUX,
+        host_key_public_key=host_pub,
+        credential_key="build_mac_ssh_key",
+        bootstrap_credential_key="build_mac_ssh_bootstrap",
+        lifecycle=SSHTargetLifecycle.PERSISTENT,
+        reason="Test deleted bootstrap key at delegation apply",
+    )
+    enroll_call2 = ToolCall("tooluse_c49_enroll2")
+    with pytest.raises(InterruptException):
+        await _apply(staged_enroll2["change_id"], enroll_call2)
+    decide(lead, enroll_call2)
+    applied_enroll2 = await _apply(staged_enroll2["change_id"], enroll_call2)
+    assert applied_enroll2["status"] == "applied"
+
+    sess = exec_service.create_ssh_session(target_id="c49_deleted_boot_target")
+    staged_sudo = SSHInteractionChangeService(lead).stage(
+        session_id=sess.session_id,
+        reason="Sudo before bootstrap deletion",
+        ttl_seconds=600,
+        allow_broker_sudo=True,
+    )
+    sudo_call = ToolCall("tooluse_c49_sudo")
+    with pytest.raises(InterruptException):
+        await _apply(staged_sudo["change_id"], sudo_call)
+    decide(lead, sudo_call)
+
+    # Delete the bootstrap credential before apply_change runs.
+    catalog_now = credential_catalog.load_catalog(scope=user_scope)
+    catalog_now.credentials.pop("build_mac_ssh_bootstrap", None)
+    credential_catalog.save_catalog(catalog_now, scope=user_scope)
+
+    refused_sudo = await _apply(staged_sudo["change_id"], sudo_call)
+    assert refused_sudo["status"] == "refused", refused_sudo
+    assert "not registered" in refused_sudo["reason"]
+    closed_sudo_req = access_runtime.runtime_requests(lead).service.store.get_request(sudo_call.request_id)
+    assert closed_sudo_req is not None
+    assert closed_sudo_req.applied_at_utc is not None
+    assert closed_sudo_req.apply_error and "not registered" in closed_sudo_req.apply_error
+
+    # (b) Empty SQLite DB with no table still returns {}, whereas unreadable/corrupt DB logs and raises.
+    empty_db = tmp_path / "empty_no_table.db"
+    sqlite3.connect(str(empty_db)).close()
+    assert load_scope_readonly(empty_db, user_scope) == {}
+
+    corrupt_db = tmp_path / "corrupt_catalog.db"
+    corrupt_db.write_bytes(b"not a valid sqlite database file at all")
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(corrupt_db))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(CredentialCatalogReadError, match="The credential catalog could not be read"):
+            enroll_service.stage(
+                target_id="c49_corrupt_target",
+                host="198.51.100.97",
+                username="admin",
+                platform=SSHTargetPlatform.LINUX,
+                host_key_public_key=host_pub,
+                credential_key="build_mac_ssh_key",
+                lifecycle=SSHTargetLifecycle.PERSISTENT,
+                reason="Corrupt catalog check",
+            )
+    assert "event=credential_catalog_readonly_failed" in caplog.text
+    assert str(corrupt_db.resolve()) in caplog.text
+
+    # Unreadable permissions (0o000) when not running as root also log and raise CredentialCatalogReadError.
+    import os
+
+    if os.geteuid() != 0:
+        locked_db = tmp_path / "unreadable_catalog.db"
+        locked_db.write_bytes(db_path.read_bytes())
+        locked_db.chmod(0o000)
+        try:
+            monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(locked_db))
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                with pytest.raises(CredentialCatalogReadError, match="The credential catalog could not be read"):
+                    enroll_service.stage(
+                        target_id="c49_unreadable_target",
+                        host="198.51.100.98",
+                        username="admin",
+                        platform=SSHTargetPlatform.LINUX,
+                        host_key_public_key=host_pub,
+                        credential_key="build_mac_ssh_key",
+                        lifecycle=SSHTargetLifecycle.PERSISTENT,
+                        reason="Unreadable catalog check",
+                    )
+            assert "event=credential_catalog_readonly_failed" in caplog.text
+            assert str(locked_db.resolve()) in caplog.text
+        finally:
+            locked_db.chmod(0o600)
+
+    set_agent_ref(None)
+    tools._SSH_BROKERS.clear()
+
+
+def test_ssh_delegation_uses_agent_type_port_and_refuses_when_unconfigured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C50: Worker agent-type validation reads current_agent_type_map() only, with no YAML fallback."""
+
+    from custom_agents.execution_changes import SSHInteractionChangeService
+    from custom_agents.execution_control_service import ExecutionControlService
+    from custom_tools import agent_team_port
+
+    use_signed_contexts(monkeypatch)
+    instance = execution_instance(tmp_path, authorization_enabled=False)
+    lead = execution_lead(instance)
+    exec_service = ExecutionControlService(lead)
+    session = exec_service.create_ssh_session(target_id=SSH_TARGET_ID, agreement_confirmed=True)
+
+    # Unconfigured agent-type source refuses delegation instead of scanning YAML files.
+    monkeypatch.setattr(agent_team_port, "_agent_type_source", None)
+    with pytest.raises(RuntimeError, match="Agent types are not configured"):
+        SSHInteractionChangeService(lead).stage(
+            session_id=session.session_id,
+            reason="Delegate without configured port",
+            ttl_seconds=300,
+            delegated_agent_type="CodeWritingAgent",
+            allow_commands=True,
+        )
+
+    # Configured agent-type source is the single authority (accepts configured types, rejects others).
+    monkeypatch.setattr(agent_team_port, "_agent_type_source", lambda: {"CustomOpsWorker": {}})
+    with pytest.raises(ValueError, match="Unknown agent type"):
+        SSHInteractionChangeService(lead).stage(
+            session_id=session.session_id,
+            reason="Builtin YAML type absent from configured port",
+            ttl_seconds=300,
+            delegated_agent_type="CodeWritingAgent",
+            allow_commands=True,
+        )
+    staged = SSHInteractionChangeService(lead).stage(
+        session_id=session.session_id,
+        reason="Configured specialist type",
+        ttl_seconds=300,
+        delegated_agent_type="CustomOpsWorker",
+        allow_commands=True,
+    )
+    assert staged["status"] == "staged"

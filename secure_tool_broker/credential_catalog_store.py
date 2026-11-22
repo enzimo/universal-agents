@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +14,12 @@ from typing import Any, Mapping
 from urllib.parse import quote
 
 from storage import sqlite_connection
+
+logger = logging.getLogger(__name__)
+
+
+class CredentialCatalogReadError(RuntimeError):
+    """Raised when an existing credential catalog database cannot be read."""
 
 
 _SCOPE_KINDS = {"user", "team", "system"}
@@ -289,16 +297,45 @@ def load_scope_readonly(
     path: str | os.PathLike[str],
     scope: CredentialOwnerScope,
 ) -> dict[str, dict[str, Any]]:
-    """Read one owner's catalog rows read-only without creating files, folders, or tables."""
+    """Read one owner's catalog rows read-only without creating files, folders, or tables.
+
+    Returns ``{}`` only when the catalog file does not exist or has not yet
+    created the ``credential_catalog_entries`` table. Any permission error,
+    corrupt/locked database, non-file path, or unreadable JSON logs a warning
+    with the path and raises ``CredentialCatalogReadError``.
+    """
 
     resolved = Path(path).expanduser().resolve()
-    if not resolved.is_file():
+    try:
+        file_stat = os.stat(resolved)
+    except FileNotFoundError:
         return {}
+    except OSError as exc:
+        logger.warning(
+            "Credential catalog could not be accessed read-only. "
+            "event=credential_catalog_readonly_failed path=%s error=%s",
+            resolved,
+            exc,
+        )
+        raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
+    if not stat.S_ISREG(file_stat.st_mode):
+        logger.warning(
+            "Credential catalog path is not a regular file. "
+            "event=credential_catalog_readonly_failed path=%s",
+            resolved,
+        )
+        raise CredentialCatalogReadError("The credential catalog could not be read.")
     uri = f"file:{quote(str(resolved), safe='/')}?mode=ro"
     try:
         conn = sqlite3.connect(uri, uri=True, timeout=_LOCK_WAIT_MS / 1000)
-    except sqlite3.OperationalError:
-        return {}
+    except sqlite3.Error as exc:
+        logger.warning(
+            "Credential catalog could not be opened read-only. "
+            "event=credential_catalog_readonly_failed path=%s error=%s",
+            resolved,
+            exc,
+        )
+        raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
     try:
         conn.row_factory = sqlite3.Row
         conn.execute(f"PRAGMA busy_timeout={_LOCK_WAIT_MS}")
@@ -312,17 +349,36 @@ def load_scope_readonly(
                 """,
                 (scope.scope_kind, scope.owner_id),
             ).fetchall()
-        except sqlite3.OperationalError:
-            return {}
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            logger.warning(
+                "Credential catalog query failed in read-only mode. "
+                "event=credential_catalog_readonly_failed path=%s error=%s",
+                resolved,
+                exc,
+            )
+            raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
         return {
             str(row["credential_key"]): dict(json.loads(str(row["credential_json"])))
             for row in rows
         }
+    except CredentialCatalogReadError:
+        raise
+    except (sqlite3.Error, json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Credential catalog could not be decoded in read-only mode. "
+            "event=credential_catalog_readonly_failed path=%s error=%s",
+            resolved,
+            exc,
+        )
+        raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
     finally:
         conn.close()
 
 
 __all__ = [
+    "CredentialCatalogReadError",
     "CredentialCatalogStore",
     "CredentialOwnerScope",
     "SealboxTenantMapping",

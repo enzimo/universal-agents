@@ -69,6 +69,12 @@ class ExecutionAuthorizationDenied(PermissionError):
     pass
 
 
+SSH_SINGLE_REQUEST_ENDED_MESSAGE = (
+    "This approval was for one request, which has ended. "
+    "Create a new session, or stage with this_request_only=false to keep the approval until it expires."
+)
+
+
 class SSHCapability(StrEnum):
     """Granular SSH operations checked by ``ExecutionAccessGuard`` before every call."""
 
@@ -229,14 +235,16 @@ class ExecutionAccessGuard:
         self,
         session: InteractiveSessionV1,
         *,
+        caller: SSHCallerContext,
         enrolled_target: EnrolledSSHTargetV1 | None = None,
         session_revocation: SSHRevocationStateV1 | None = None,
         interaction: SSHInteractionRecordV1 | None = None,
-        caller: SSHCallerContext | None = None,
         now: datetime | None = None,
     ) -> None:
-        """Opening, reading and resizing: session, target, and connect authority still hold."""
+        """Opening, reading and resizing: session, target, caller, and connect authority still hold."""
 
+        if caller is None:
+            raise ExecutionAuthorizationDenied("SSH operations require verified caller identity.")
         current = now or utc_now()
         if session_revocation is not None:
             raise ExecutionAuthorizationDenied("SSH session has been revoked.")
@@ -255,14 +263,13 @@ class ExecutionAccessGuard:
         if not activation.binds_session(session):
             raise ExecutionAuthorizationDenied("SSH activation does not bind the exact session target.")
         self.require_authority(activation)
-        if caller is not None:
-            self._require_connect_caller(
-                session=session,
-                connect_activation=activation,
-                interaction=interaction,
-                caller=caller,
-                now=current,
-            )
+        self._require_connect_caller(
+            session=session,
+            connect_activation=activation,
+            interaction=interaction,
+            caller=caller,
+            now=current,
+        )
 
     def _require_connect_caller(
         self,
@@ -297,9 +304,7 @@ class ExecutionAccessGuard:
             interaction.bounds.delegated_task_id is not None
             and caller.task_id != interaction.bounds.delegated_task_id
         ):
-            raise ExecutionAuthorizationDenied(
-                "This SSH session is delegated only for one specific request."
-            )
+            raise ExecutionAuthorizationDenied(SSH_SINGLE_REQUEST_ENDED_MESSAGE)
 
     def require_ssh_capability(
         self,
@@ -307,7 +312,7 @@ class ExecutionAccessGuard:
         interaction: SSHInteractionRecordV1 | None,
         *,
         capability: SSHCapability,
-        caller: SSHCallerContext | None = None,
+        caller: SSHCallerContext,
         enrolled_target: EnrolledSSHTargetV1 | None = None,
         session_revocation: SSHRevocationStateV1 | None = None,
         allow_password_bootstrap_setting: bool = False,
@@ -316,21 +321,21 @@ class ExecutionAccessGuard:
     ) -> None:
         """Enforce connect authority, delegation bounds, capability flags, and caller scope."""
 
+        if caller is None:
+            raise ExecutionAuthorizationDenied(
+                f"SSH capability {capability.value!r} requires verified caller identity."
+            )
         current = now or utc_now()
         self.require_ssh_connect(
             session,
+            caller=caller,
             enrolled_target=enrolled_target,
             session_revocation=session_revocation,
             interaction=interaction,
-            caller=caller if capability is SSHCapability.CONNECT else None,
             now=current,
         )
         if capability is SSHCapability.CONNECT:
             return
-        if capability not in {SSHCapability.CONNECT, SSHCapability.TYPING} and caller is None:
-            raise ExecutionAuthorizationDenied(
-                f"SSH capability {capability.value!r} requires verified caller identity."
-            )
         if interaction is None:
             raise ExecutionAuthorizationDenied(
                 "This SSH operation needs a person's approval. Call "
@@ -349,9 +354,8 @@ class ExecutionAccessGuard:
                 "The SSH approval is for another session, owner, target, or delegation scope."
             )
         self.require_authority(activation)
-        if caller is not None and activation.holder.person_id is not None:
-            if caller.person_id != activation.holder.person_id:
-                raise ExecutionAuthorizationDenied("SSH delegation belongs to another person.")
+        if activation.holder.person_id is not None and caller.person_id != activation.holder.person_id:
+            raise ExecutionAuthorizationDenied("SSH delegation belongs to another person.")
 
         bounds = interaction.bounds
         if bounds is None:
@@ -360,26 +364,23 @@ class ExecutionAccessGuard:
                 raise ExecutionAuthorizationDenied(
                     f"SSH capability {capability.value!r} requires a bounded delegation approval."
                 )
-            if caller is not None and caller.agent_type != activation.holder.agent_type:
+            if caller.agent_type != activation.holder.agent_type:
                 raise ExecutionAuthorizationDenied(
                     "This SSH typing approval belongs to another agent type."
                 )
             return
 
         if bounds.delegated_agent_type is not None:
-            if caller is None or caller.agent_type != bounds.delegated_agent_type:
+            if caller.agent_type != bounds.delegated_agent_type:
                 raise ExecutionAuthorizationDenied(
                     f"This SSH session is delegated only to agent type {bounds.delegated_agent_type!r}."
                 )
-        elif caller is not None and caller.agent_type != activation.holder.agent_type:
+        elif caller.agent_type != activation.holder.agent_type:
             raise ExecutionAuthorizationDenied(
                 "This SSH delegation was approved only for its requesting agent type."
             )
-        if bounds.delegated_task_id is not None:
-            if caller is None or caller.task_id != bounds.delegated_task_id:
-                raise ExecutionAuthorizationDenied(
-                    "This SSH session is delegated only for one specific request."
-                )
+        if bounds.delegated_task_id is not None and caller.task_id != bounds.delegated_task_id:
+            raise ExecutionAuthorizationDenied(SSH_SINGLE_REQUEST_ENDED_MESSAGE)
 
         if capability is SSHCapability.COMMAND:
             if not bounds.allow_commands:
@@ -436,7 +437,7 @@ class ExecutionAccessGuard:
         session: InteractiveSessionV1,
         interaction: SSHInteractionRecordV1 | None,
         *,
-        caller: SSHCallerContext | None = None,
+        caller: SSHCallerContext,
         enrolled_target: EnrolledSSHTargetV1 | None = None,
         session_revocation: SSHRevocationStateV1 | None = None,
         now: datetime | None = None,
@@ -559,6 +560,7 @@ class ExecutionAccessGuard:
 __all__ = [
     "ExecutionAccessGuard",
     "ExecutionAuthorizationDenied",
+    "SSH_SINGLE_REQUEST_ENDED_MESSAGE",
     "SSHCallerContext",
     "SSHCapability",
 ]

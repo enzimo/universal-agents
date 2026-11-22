@@ -239,7 +239,7 @@ def enrolled_ssh_target_digest(
     host_key_public_key: str,
     credential_key: str,
     credential_owner_scope: OwnerScopeV1,
-    credential_public_key_fingerprint: str | None,
+    credential_public_key_fingerprint: str,
     bootstrap_credential_key: str | None,
     bootstrap_credential_owner_scope: OwnerScopeV1 | None,
     lifecycle: SSHTargetLifecycle,
@@ -1232,8 +1232,8 @@ class EnrolledSSHTargetV1(BaseModel):
     host_key_public_key: str = Field(min_length=16, max_length=4096)
     credential_key: str = Field(min_length=1, max_length=232)
     credential_owner_scope: OwnerScopeV1
-    credential_public_key_fingerprint: str | None = Field(
-        default=None, pattern=r"^SHA256:[A-Za-z0-9+/]{16,}={0,2}$"
+    credential_public_key_fingerprint: str = Field(
+        pattern=r"^SHA256:[A-Za-z0-9+/]{16,}={0,2}$"
     )
     bootstrap_credential_key: str | None = Field(default=None, min_length=1, max_length=232)
     bootstrap_credential_owner_scope: OwnerScopeV1 | None = None

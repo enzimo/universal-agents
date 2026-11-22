@@ -1093,17 +1093,21 @@ class CatalogSSHCredentialMaterialProvider:
                 public_key_line = sanitized_stored
             else:
                 public_key_line = agent_public_key
-            if session.target.credential_public_key_fingerprint is not None:
-                try:
-                    _algo, actual_fingerprint = ssh_public_key_sha256_fingerprint(public_key_line)
-                except ValueError as exc:
-                    raise PermissionError(
-                        "Unlocked SSH credential public key is invalid."
-                    ) from exc
-                if actual_fingerprint != session.target.credential_public_key_fingerprint:
-                    raise PermissionError(
-                        "Resolved SSH credential public key fingerprint does not match the approved target."
-                    )
+            expected_fingerprint = session.target.credential_public_key_fingerprint
+            if not expected_fingerprint:
+                raise PermissionError(
+                    "Catalog SSH target is missing a pinned credential_public_key_fingerprint."
+                )
+            try:
+                _algo, actual_fingerprint = ssh_public_key_sha256_fingerprint(public_key_line)
+            except ValueError as exc:
+                raise PermissionError(
+                    "Unlocked SSH credential public key is invalid."
+                ) from exc
+            if actual_fingerprint != expected_fingerprint:
+                raise PermissionError(
+                    "Resolved SSH credential public key fingerprint does not match the approved target."
+                )
 
             pub_path = session_dir / "id.pub"
             _write_private_file(pub_path, f"{public_key_line}\n".encode("utf-8"), mode=0o600)

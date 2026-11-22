@@ -37,12 +37,10 @@ import re
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-import yaml
 
 from access_catalog.catalog import change_operation
 from access_control.changes import ChangeApproval
 from access_control.entities import operation_id
-from access_control.system_agents import RELEASE_DEFINITION_ROOT
 from custom_agents.execution_control_service import EXECUTION_TOOL_ID, ExecutionControlService
 from custom_agents.governance.authorized_operations import FilePlanStore, GovernanceAuditEvent, model_digest
 from custom_agents.governance.runtime_adapters import LoggingGovernanceAuditSink
@@ -52,6 +50,7 @@ from custom_messages.contracts.runtime_v1 import (
     AUTHORITY_MODE_PERSON_APPROVAL,
 )
 from id_generation import new_id
+from runtime_hosting.authorization import SSH_SINGLE_REQUEST_ENDED_MESSAGE
 from runtime_hosting.execution_contracts import (
     AccessHolderV1,
     ActivationRecordV2,
@@ -83,11 +82,7 @@ from runtime_hosting.ssh_network import (
     SSHNetworkPolicy,
     validate_ssh_host,
 )
-from runtime_settings.instance_layout import (
-    AGENT_BUNDLES_DIRNAME,
-    AGENT_DEFINITIONS_DIRNAME,
-    RUNTIME_DIRNAME,
-)
+from runtime_settings.instance_layout import RUNTIME_DIRNAME
 from secure_tool_broker.credential_catalog import read_credential_metadata_readonly
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 
@@ -676,71 +671,6 @@ def _credential_owner_label(agent: Any, config: Any, scope: OwnerScopeV1) -> str
     return "the requesting person"
 
 
-def _agent_types_in_yaml_files(paths: Iterable[Path]) -> set[str]:
-    found: set[str] = set()
-    for path in paths:
-        if not path.is_file():
-            continue
-        try:
-            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            continue
-        agent_types = doc.get("agent_types") if isinstance(doc, dict) else None
-        if isinstance(agent_types, dict):
-            for name in agent_types:
-                cleaned = str(name or "").strip()
-                if cleaned:
-                    found.add(cleaned)
-    return found
-
-
-def _discover_known_agent_types(agent: Any, config: Any) -> frozenset[str]:
-    """Resolve the team's registered agent types without importing agent_catalog."""
-
-    runtime = getattr(agent, "_local_team_runtime", None)
-    if runtime is not None and callable(getattr(runtime, "agent_types", None)):
-        return frozenset(str(item).strip() for item in runtime.agent_types() if str(item).strip())
-    from custom_tools.agent_team_port import current_agent_type_map
-
-    try:
-        return frozenset(str(key).strip() for key in current_agent_type_map() if str(key).strip())
-    except RuntimeError:
-        pass
-
-    candidate_files: list[Path] = []
-    builtin_file = RELEASE_DEFINITION_ROOT / "agent_definitions" / "builtins.yaml"
-    if builtin_file.is_file():
-        candidate_files.append(builtin_file)
-    builtin_bundles = RELEASE_DEFINITION_ROOT / "agent_bundles"
-    if builtin_bundles.is_dir():
-        candidate_files.extend(
-            sorted(p for p in builtin_bundles.rglob("*") if p.suffix.lower() in {".yaml", ".yml"})
-        )
-    layout = getattr(config, "layout", None)
-    control_dir = getattr(layout, "control_dir", None)
-    if isinstance(control_dir, Path):
-        for dirname in (AGENT_DEFINITIONS_DIRNAME, AGENT_BUNDLES_DIRNAME):
-            folder = control_dir / dirname
-            if folder.is_dir():
-                candidate_files.extend(
-                    sorted(p for p in folder.rglob("*") if p.suffix.lower() in {".yaml", ".yml"})
-                )
-    agent_cfg = getattr(config, "agent", None)
-    extra_paths = getattr(agent_cfg, "agent_definition_paths", None) or ()
-    instance_root = getattr(config, "instance_root_path", None)
-    for raw_path in extra_paths:
-        p = Path(str(raw_path)).expanduser()
-        if not p.is_absolute() and isinstance(instance_root, Path):
-            p = (instance_root / p).resolve()
-        if p.is_file():
-            candidate_files.append(p)
-        elif p.is_dir():
-            candidate_files.extend(
-                sorted(item for item in p.rglob("*") if item.suffix.lower() in {".yaml", ".yml"})
-            )
-    return frozenset(_agent_types_in_yaml_files(candidate_files))
-
-
 @dataclass(frozen=True)
 class _InspectedSSHCredentials:
     credential_display_name: str
@@ -889,7 +819,7 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
             scope=_catalog_scope(credential_owner_scope),
         )
         if metadata is None:
-            raise LookupError(
+            raise PermissionError(
                 f"SSH credential {credential_key!r} is not registered in the "
                 f"{credential_owner_scope.scope_kind.value} credential catalog."
             )
@@ -924,7 +854,7 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
                 scope=_catalog_scope(bootstrap_credential_owner_scope),
             )
             if boot_meta is None:
-                raise LookupError(
+                raise PermissionError(
                     f"Bootstrap credential {bootstrap_credential_key!r} is not registered in the "
                     f"{bootstrap_credential_owner_scope.scope_kind.value} credential catalog."
                 )
@@ -1281,7 +1211,9 @@ class SSHInteractionChangeService(_ExecutionChanges):
             return frozenset(
                 str(item).strip() for item in self._known_agent_types_loader() if str(item).strip()
             )
-        return _discover_known_agent_types(self.agent, self.execution.config)
+        from custom_tools.agent_team_port import current_agent_type_map
+
+        return frozenset(str(key).strip() for key in current_agent_type_map() if str(key).strip())
 
     def _plan_store(self) -> FilePlanStore[SSHInteractionChangePlan]:
         return FilePlanStore(
@@ -1345,6 +1277,13 @@ class SSHInteractionChangeService(_ExecutionChanges):
             raise PermissionError(
                 "This SSH session's approval expired; create a new session."
             )
+        current_work_id = str(self.execution.actor.agent.work_id or "").strip() or None
+        if (
+            existing.bounds is not None
+            and existing.bounds.delegated_task_id is not None
+            and existing.bounds.delegated_task_id != current_work_id
+        ):
+            raise PermissionError(SSH_SINGLE_REQUEST_ENDED_MESSAGE)
         if change_id is not None:
             raise FileExistsError(f"SSH delegation change {change_id} was already applied.")
         raise ValueError("Delegation for this SSH session is already approved.")
@@ -1405,7 +1344,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
                 scope=_catalog_scope(enrolled_target.bootstrap_credential_owner_scope),
             )
             if boot_meta is None:
-                raise LookupError(
+                raise PermissionError(
                     f"Bootstrap credential {enrolled_target.bootstrap_credential_key!r} is not registered in the "
                     f"{enrolled_target.bootstrap_credential_owner_scope.scope_kind.value} credential catalog."
                 )
@@ -1429,7 +1368,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
         ttl_seconds: int | None = None,
         expires_at_utc: datetime | None = None,
         delegated_agent_type: str | None = None,
-        this_request_only: bool = True,
+        this_request_only: bool | None = None,
         allow_commands: bool = False,
         allow_typing: bool = False,
         allow_password_bootstrap: bool = False,
@@ -1451,8 +1390,13 @@ class SSHInteractionChangeService(_ExecutionChanges):
                 raise ValueError(
                     f"Unknown agent type {normalized_agent_type!r}. Choose a registered agent type for this team."
                 )
+        restrict_to_request = (
+            normalized_agent_type is not None
+            if this_request_only is None
+            else bool(this_request_only)
+        )
         delegated_work_id: str | None = None
-        if this_request_only:
+        if restrict_to_request:
             work_id = str(self.execution.actor.agent.work_id or "").strip()
             if not work_id:
                 raise PermissionError(

@@ -115,7 +115,7 @@ class SSHSessionBroker:
         *,
         session_id: str,
         lease_token: str,
-        caller: SSHCallerContext | None = None,
+        caller: SSHCallerContext,
     ) -> InteractiveSessionV1:
         claimed = self.repository.claim_interactive_session(
             team_id=self.team_id,
@@ -317,7 +317,7 @@ class SSHSessionBroker:
         *,
         session_id: str,
         payload: bytes,
-        caller: SSHCallerContext | None = None,
+        caller: SSHCallerContext,
     ) -> int:
         """Type into the session: needs a person's approval for this session (trusted record)."""
 
@@ -334,7 +334,7 @@ class SSHSessionBroker:
         session_id: str,
         maximum_bytes: int = 65_536,
         timeout_seconds: float = 1.0,
-        caller: SSHCallerContext | None = None,
+        caller: SSHCallerContext,
     ) -> bytes:
         live = self._require_live(session_id)
         self.authorization_guard.require_ssh_connect(live.session, caller=caller)
@@ -406,7 +406,7 @@ class SSHSessionBroker:
         session_id: str,
         rows: int,
         columns: int,
-        caller: SSHCallerContext | None = None,
+        caller: SSHCallerContext,
     ) -> None:
         live = self._require_live(session_id)
         self.authorization_guard.require_ssh_connect(live.session, caller=caller)

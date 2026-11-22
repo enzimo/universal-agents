@@ -476,7 +476,7 @@ def plan_execution_ssh_interaction(
     ttl_seconds: int = 0,
     expires_at_utc: str = "",
     delegated_agent_type: str = "",
-    this_request_only: bool = True,
+    this_request_only: bool | None = None,
     allow_commands: bool = False,
     allow_typing: bool = False,
     allow_password_bootstrap: bool = False,
@@ -489,9 +489,12 @@ def plan_execution_ssh_interaction(
     Requires ttl_seconds (duration from administrator approval, capped by
     execution_control.ssh.max_delegation_ttl_seconds) and/or expires_at_utc
     (ISO 8601 UTC hard deadline), plus at least one explicit capability flag.
-    When this_request_only is true, trusted code binds the delegation to the
-    current verified request id so delegated workers on this request can use it
-    and no other request can. An administrator approves the exact bounds in the Inbox.
+    When this_request_only is omitted, it defaults to true when
+    delegated_agent_type is set (single-request worker delegation) and false
+    otherwise (usable across follow-up messages from the same person on this
+    session until it expires or is revoked). Pass this_request_only=true or
+    this_request_only=false to override that default. An administrator approves
+    the exact bounds in the Inbox.
     """
     try:
         agent, error = _manager_agent("plan_execution_ssh_interaction")
@@ -507,7 +510,7 @@ def plan_execution_ssh_interaction(
             ),
             ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
             delegated_agent_type=delegated_agent_type or None,
-            this_request_only=bool(this_request_only),
+            this_request_only=this_request_only,
             allow_commands=allow_commands,
             allow_typing=allow_typing,
             allow_password_bootstrap=allow_password_bootstrap,
@@ -654,6 +657,7 @@ def list_execution_ssh_sessions() -> str:
             return json.dumps({"error": error})
         assert service is not None
         sessions = service.list_ssh_sessions()
+        caller = _ssh_caller(service)
         payloads: list[dict[str, Any]] = []
         for item in sessions:
             interaction = service.ssh_interaction(item.session_id)
@@ -663,8 +667,17 @@ def list_execution_ssh_sessions() -> str:
             delegation_active = bool(
                 revocation is None and interaction is not None and interaction.is_active()
             )
-            typing_approved = bool(
+            usable_in_this_request = bool(
                 delegation_active
+                and interaction is not None
+                and (
+                    interaction.bounds is None
+                    or interaction.bounds.delegated_task_id is None
+                    or interaction.bounds.delegated_task_id == caller.task_id
+                )
+            )
+            typing_approved = bool(
+                usable_in_this_request
                 and interaction is not None
                 and (interaction.bounds is None or interaction.bounds.allow_typing)
             )
@@ -673,6 +686,7 @@ def list_execution_ssh_sessions() -> str:
                     **item.model_dump(mode="json"),
                     "revoked": revocation is not None,
                     "delegation_active": delegation_active,
+                    "usable_in_this_request": usable_in_this_request,
                     "typing_approved": typing_approved,
                     "delegation": (
                         interaction.bounds.model_dump(mode="json")

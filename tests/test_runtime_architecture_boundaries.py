@@ -1105,29 +1105,40 @@ def test_only_the_team_lead_reads_retired_gateway_commands_and_nothing_sends_the
     assert naming == _RETIRED_GATEWAY_COMMAND_READERS
 
 
-# Credential catalog ownership (C43): only modules inside secure_tool_broker/ may
-# construct or import CredentialCatalogStore. Trusted manager code that needs
-# non-secret SSH credential metadata (display name, purpose, field shapes, public
-# key) calls secure_tool_broker.credential_catalog.read_credential_metadata_readonly
-# instead, which opens the broker's resolved catalog path read-only and never
-# creates directories, files, or tables.
+# Credential catalog ownership (C43 & C51): only modules inside secure_tool_broker/
+# may construct or import CredentialCatalogStore or load_scope_readonly (which
+# returns raw catalog rows including secret source locations). Trusted manager
+# code that needs sanitized non-secret SSH credential metadata calls
+# secure_tool_broker.credential_catalog.read_credential_metadata_readonly, and
+# only custom_agents/execution_changes.py is allowed to call it outside the broker.
 _CREDENTIAL_CATALOG_STORE_PREFIX = "secure_tool_broker/"
+_BROKER_ONLY_CATALOG_SYMBOLS = frozenset({"CredentialCatalogStore", "load_scope_readonly"})
+_READONLY_METADATA_CALLERS = frozenset({"custom_agents/execution_changes.py"})
 
 
 def test_only_broker_modules_use_credential_catalog_store() -> None:
-    offenders: list[str] = []
+    store_offenders: list[str] = []
+    metadata_offenders: list[str] = []
     for path in _production_python_files():
         relative = path.relative_to(REPO_ROOT).as_posix()
         if relative.startswith(_CREDENTIAL_CATALOG_STORE_PREFIX):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and node.id == "CredentialCatalogStore":
-                offenders.append(f"{relative}:{node.lineno}")
-            elif isinstance(node, ast.Attribute) and node.attr == "CredentialCatalogStore":
-                offenders.append(f"{relative}:{node.lineno}")
-            elif isinstance(node, ast.ImportFrom) and any(
-                alias.name == "CredentialCatalogStore" for alias in node.names
-            ):
-                offenders.append(f"{relative}:{node.lineno}")
-    assert offenders == []
+            names: list[str] = []
+            if isinstance(node, ast.Name):
+                names.append(node.id)
+            elif isinstance(node, ast.Attribute):
+                names.append(node.attr)
+            elif isinstance(node, ast.ImportFrom):
+                names.extend(alias.name for alias in node.names)
+            for name in names:
+                if name in _BROKER_ONLY_CATALOG_SYMBOLS:
+                    store_offenders.append(f"{relative}:{node.lineno} {name}")
+                elif (
+                    name == "read_credential_metadata_readonly"
+                    and relative not in _READONLY_METADATA_CALLERS
+                ):
+                    metadata_offenders.append(f"{relative}:{node.lineno} {name}")
+    assert store_offenders == []
+    assert metadata_offenders == []
