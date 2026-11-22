@@ -56,6 +56,8 @@ _TOKEN_BYTES = frozenset(
     b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.=-"
 )
 _MAX_PATTERN_HOLDBACK_BYTES = 1024
+_DEFAULT_QUIET_RELEASE_SECONDS = 0.3
+_DEFAULT_AGENT_START_TIMEOUT_SECONDS = 5.0
 _AGENT_KEEPER_CODE = (
     "import os, sys; "
     "print(os.environ['SSH_AGENT_PID'], flush=True); "
@@ -108,12 +110,12 @@ def _resolve_material_path(path: Path, working_dir: Path | None) -> Path:
 
 def _format_relative_ssh_path(path: Path, working_dir: Path | None) -> str:
     if working_dir is not None and not path.is_absolute():
-        if ".." in path.parts:
+        parts = path.parts
+        if ".." in parts:
             raise PermissionError("Relative SSH material path must not traverse parent directories.")
-        clean = path.as_posix().lstrip("./")
-        if not clean:
+        if not parts:
             raise PermissionError("Relative SSH material path must not be empty.")
-        return f"./{clean}"
+        return f"./{'/'.join(parts)}"
     return str(path)
 
 
@@ -152,7 +154,7 @@ class SSHAskpassContext:
 
 @dataclass
 class _EphemeralAgentHandle:
-    keeper_proc: subprocess.Popen[str]
+    keeper_proc: subprocess.Popen[bytes]
     agent_pid: int
     agent_start_time: int | None
 
@@ -295,10 +297,31 @@ class SessionSecretScrubber:
             return redacted.encode("utf-8", errors="surrogateescape")
         return result
 
-    def new_stream_scrubber(self) -> "StreamSecretScrubber":
+    def strip_trailing_secret_prefix(self, data: bytes) -> bytes:
+        """Drop any trailing suffix that strictly prefixes a registered exact secret."""
+
+        if not data:
+            return data
+        prefix_len = _trailing_prefix_holdback(data, self.byte_patterns)
+        if prefix_len > 0:
+            return data[:-prefix_len]
+        return data
+
+    def new_stream_scrubber(
+        self,
+        *,
+        max_pattern_holdback: int = _MAX_PATTERN_HOLDBACK_BYTES,
+        quiet_release_seconds: float = _DEFAULT_QUIET_RELEASE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> "StreamSecretScrubber":
         """Create a chunk-safe streaming scrubber for PTY or command output."""
 
-        return StreamSecretScrubber(self)
+        return StreamSecretScrubber(
+            self,
+            max_pattern_holdback=max_pattern_holdback,
+            quiet_release_seconds=quiet_release_seconds,
+            clock=clock,
+        )
 
 
 class StreamSecretScrubber:
@@ -307,15 +330,25 @@ class StreamSecretScrubber:
     Holds back the larger of:
     1. the longest trailing suffix that strictly prefixes any registered exact
        secret, and
-    2. the trailing run of token characters (``[A-Za-z0-9_.=-]``, capped at
+    2. the trailing run of token characters (``[A-Za-z0-9_.=-]``, bounded by
        ``max_pattern_holdback`` bytes) so token patterns recognized by
        ``redact_text`` (GitHub/GitLab/Slack/broker tokens, API keys, JWTs)
        are scrubbed even when split across arbitrary read boundaries.
 
-    Ordinary interactive prompts ending in whitespace, newlines, or prompt
-    punctuation (such as ``deploy@box:~$ `` or ``Password: ``) are emitted
-    immediately with zero extra holdback; any held tail is released when a
-    non-token boundary arrives or on ``flush()``.
+    Interactive output that ends in a word (such as ``Enter the new hostname``,
+    ``Username``, ``--More--``, typed echoes, or trailing terminal escape
+    sequences) is released by ``release_quiet()`` once no new bytes arrive for
+    ``quiet_release_seconds`` (default 300 ms), after passing through
+    ``scrub_bytes()`` and while still retaining any trailing prefix of a
+    registered exact secret. Because programs emit a token in one burst, a
+    transport stall longer than ``quiet_release_seconds`` inside an
+    unregistered pattern token is the accepted trade-off for prompt liveness.
+
+    Fail-closed bound for long runs: when a trailing run of token characters
+    reaches ``max_pattern_holdback`` bytes (default 1024), the entire run is
+    replaced with ``[REDACTED]`` and any remaining contiguous token bytes are
+    dropped until a non-token boundary arrives (or ``flush()``), so no prefix
+    or suffix of an overlong split token (such as a 2 KB JWT) can leak.
     """
 
     def __init__(
@@ -323,14 +356,31 @@ class StreamSecretScrubber:
         scrubber: SessionSecretScrubber,
         *,
         max_pattern_holdback: int = _MAX_PATTERN_HOLDBACK_BYTES,
+        quiet_release_seconds: float = _DEFAULT_QUIET_RELEASE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._scrubber = scrubber
         self._max_pattern_holdback = max(0, int(max_pattern_holdback))
+        self._quiet_release_seconds = max(0.0, float(quiet_release_seconds))
+        self._clock = clock
         self._pending = bytearray()
+        self._last_feed_at: float | None = None
+        self._dropping_overlong_token = False
 
     def feed(self, chunk: bytes) -> bytes:
         if not chunk:
             return b""
+        self._last_feed_at = self._clock()
+        if self._dropping_overlong_token:
+            idx = 0
+            chunk_len = len(chunk)
+            while idx < chunk_len and chunk[idx] in _TOKEN_BYTES:
+                idx += 1
+            if idx >= chunk_len:
+                return b""
+            self._dropping_overlong_token = False
+            chunk = chunk[idx:]
+
         self._pending.extend(chunk)
         # Replace any complete exact matches already present in the pending buffer.
         buf = bytes(self._pending)
@@ -339,9 +389,19 @@ class StreamSecretScrubber:
             if pattern in buf:
                 buf = buf.replace(pattern, _REDACTED_BYTES)
 
+        trailing_token_run = (
+            _trailing_token_run_length(buf) if self._max_pattern_holdback > 0 else 0
+        )
+        if self._max_pattern_holdback > 0 and trailing_token_run >= self._max_pattern_holdback:
+            emit_prefix = buf[:-trailing_token_run]
+            self._pending.clear()
+            self._dropping_overlong_token = True
+            scrubbed_prefix = self._scrubber.scrub_bytes(emit_prefix) if emit_prefix else b""
+            return scrubbed_prefix + _REDACTED_BYTES
+
         holdback = max(
             _trailing_prefix_holdback(buf, patterns),
-            _trailing_token_holdback(buf, max_holdback=self._max_pattern_holdback),
+            trailing_token_run,
         )
         if holdback > 0:
             emit_raw = buf[:-holdback]
@@ -351,7 +411,43 @@ class StreamSecretScrubber:
             self._pending.clear()
         return self._scrubber.scrub_bytes(emit_raw) if emit_raw else b""
 
+    def time_until_quiet_release(self) -> float | None:
+        """Return seconds until held token bytes can release, or None if none are releasable."""
+
+        if not self._pending or self._last_feed_at is None or self._dropping_overlong_token:
+            return None
+        prefix_holdback = _trailing_prefix_holdback(
+            bytes(self._pending),
+            self._scrubber.byte_patterns,
+        )
+        if len(self._pending) <= prefix_holdback:
+            return None
+        elapsed = self._clock() - self._last_feed_at
+        return max(0.0, self._quiet_release_seconds - elapsed)
+
+    def release_quiet(self) -> bytes:
+        """Release held non-secret token bytes after ``quiet_release_seconds`` of silence."""
+
+        if not self._pending or self._last_feed_at is None or self._dropping_overlong_token:
+            return b""
+        if (self._clock() - self._last_feed_at) < self._quiet_release_seconds:
+            return b""
+        buf = bytes(self._pending)
+        patterns = self._scrubber.byte_patterns
+        for pattern in patterns:
+            if pattern in buf:
+                buf = buf.replace(pattern, _REDACTED_BYTES)
+        prefix_holdback = _trailing_prefix_holdback(buf, patterns)
+        if prefix_holdback > 0:
+            emit_raw = buf[:-prefix_holdback]
+            self._pending = bytearray(buf[-prefix_holdback:])
+        else:
+            emit_raw = buf
+            self._pending.clear()
+        return self._scrubber.scrub_bytes(emit_raw) if emit_raw else b""
+
     def flush(self) -> bytes:
+        self._dropping_overlong_token = False
         if not self._pending:
             return b""
         remaining = bytes(self._pending)
@@ -377,14 +473,13 @@ def _trailing_prefix_holdback(buf: bytes, patterns: tuple[bytes, ...]) -> int:
     return holdback
 
 
-def _trailing_token_holdback(buf: bytes, *, max_holdback: int) -> int:
-    """Return the length of a trailing token-character run, capped at ``max_holdback``."""
+def _trailing_token_run_length(buf: bytes) -> int:
+    """Return the full length of any trailing run of token characters."""
 
-    if not buf or max_holdback <= 0:
+    if not buf:
         return 0
-    limit = min(len(buf), max_holdback)
     held = 0
-    for idx in range(len(buf) - 1, len(buf) - 1 - limit, -1):
+    for idx in range(len(buf) - 1, -1, -1):
         if buf[idx] in _TOKEN_BYTES:
             held += 1
         else:
@@ -489,6 +584,106 @@ def _wipe_tree(directory: Path) -> None:
             except OSError:
                 pass
     shutil.rmtree(directory, ignore_errors=True)
+
+
+def _read_line_with_deadline(fd: int, deadline: float) -> tuple[str | None, bool]:
+    """Read one newline-terminated line from ``fd`` without blocking past ``deadline``.
+
+    Returns ``(line, timed_out)``. ``line`` is None when the deadline expires
+    before a newline or EOF arrives or when a line exceeds 256 bytes without a
+    newline.
+    """
+
+    buf = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, True
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            return None, True
+        try:
+            chunk = os.read(fd, 256)
+        except OSError:
+            return None, False
+        if not chunk:
+            first_line = bytes(buf).split(b"\n", 1)[0].decode("utf-8", errors="replace").strip()
+            return first_line, False
+        buf.extend(chunk)
+        if b"\n" in buf:
+            first_line = bytes(buf).split(b"\n", 1)[0].decode("utf-8", errors="replace").strip()
+            return first_line, False
+        if len(buf) >= 256:
+            return None, False
+
+
+def _drain_fd_with_timeout(
+    fd: int,
+    *,
+    timeout_seconds: float = 0.3,
+    max_bytes: int = 4096,
+) -> str:
+    """Read buffered bytes from ``fd`` without blocking past ``timeout_seconds``."""
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    buf = bytearray()
+    while len(buf) < max_bytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining)
+        except (OSError, ValueError):
+            break
+        if not ready:
+            break
+        try:
+            chunk = os.read(fd, min(1024, max_bytes - len(buf)))
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf.extend(chunk)
+    return bytes(buf).decode("utf-8", errors="replace")
+
+
+def _find_child_ssh_agents(parent_pid: int) -> list[tuple[int, int | None]]:
+    """Return ``(pid, start_time)`` for direct ``ssh-agent`` children of ``parent_pid`` on Linux."""
+
+    if sys.platform != "linux" or parent_pid <= 1:
+        return []
+    child_pids: set[int] = set()
+    used_children_file = False
+    task_root = Path(f"/proc/{parent_pid}/task")
+    try:
+        for task_dir in task_root.iterdir():
+            children_file = task_dir / "children"
+            try:
+                raw = children_file.read_text(encoding="utf-8", errors="ignore")
+                used_children_file = True
+            except OSError:
+                continue
+            for token in raw.split():
+                if token.isdigit():
+                    child_pids.add(int(token))
+    except OSError:
+        pass
+    if not used_children_file:
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                pid = int(entry)
+                fields = _read_proc_stat_fields(pid)
+                if fields is not None and len(fields) > 1 and fields[1] == str(parent_pid):
+                    child_pids.add(pid)
+        except OSError:
+            return []
+    found: list[tuple[int, int | None]] = []
+    for child_pid in sorted(child_pids):
+        if _pid_is_ssh_agent(child_pid):
+            found.append((child_pid, _read_proc_start_time(child_pid)))
+    return found
 
 
 def _read_proc_stat_fields(pid: int) -> list[str] | None:
@@ -791,6 +986,7 @@ class CatalogSSHCredentialMaterialProvider:
     ssh_add_executable: str = "ssh-add"
     python_executable: str = field(default_factory=lambda: sys.executable)
     default_key_lifetime_seconds: int = 60
+    agent_start_timeout_seconds: float = _DEFAULT_AGENT_START_TIMEOUT_SECONDS
     logger: logging.Logger = field(default_factory=lambda: _LOGGER)
     _active_dirs: set[Path] = field(default_factory=set, init=False, repr=False)
     _active_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -997,29 +1193,62 @@ class CatalogSSHCredentialMaterialProvider:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            bufsize=0,
             close_fds=True,
         )
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + max(0.1, float(self.agent_start_timeout_seconds))
         agent_pid: int | None = None
+        stopped = False
         try:
             assert proc.stdout is not None
-            remaining = max(0.0, deadline - time.monotonic())
-            ready, _, _ = select.select([proc.stdout], [], [], remaining)
-            if ready:
-                line = proc.stdout.readline().strip()
-                if line:
+            line, timed_out = _read_line_with_deadline(proc.stdout.fileno(), deadline)
+            if line:
+                try:
                     agent_pid = int(line)
+                except ValueError:
+                    agent_pid = None
             if agent_pid is None or agent_pid <= 1:
-                stderr = proc.stderr.read() if proc.stderr else ""
-                raise RuntimeError(
-                    f"Private ssh-agent failed to start (exit {proc.poll()}): {redact_text(stderr).strip()}"
+                stderr = self._stop_ephemeral_agent(
+                    _EphemeralAgentHandle(
+                        keeper_proc=proc,
+                        agent_pid=0,
+                        agent_start_time=None,
+                    ),
+                    collect_stderr=True,
+                    fast_terminate=True,
                 )
+                stopped = True
+                reason = (
+                    "timed out waiting for ssh-agent pid"
+                    if timed_out
+                    else f"exit {proc.poll()}"
+                )
+                detail = redact_text(stderr).strip()
+                msg = f"Private ssh-agent failed to start ({reason})"
+                if detail:
+                    msg = f"{msg}: {detail}"
+                raise RuntimeError(msg)
             socket_path = session_dir / "s"
             while time.monotonic() < deadline and not socket_path.exists():
+                if proc.poll() is not None:
+                    break
                 time.sleep(0.02)
             if not socket_path.exists():
-                raise RuntimeError("Timed out waiting for private ssh-agent socket.")
+                stderr = self._stop_ephemeral_agent(
+                    _EphemeralAgentHandle(
+                        keeper_proc=proc,
+                        agent_pid=agent_pid,
+                        agent_start_time=_read_proc_start_time(agent_pid),
+                    ),
+                    collect_stderr=True,
+                    fast_terminate=True,
+                )
+                stopped = True
+                detail = redact_text(stderr).strip()
+                msg = "Timed out waiting for private ssh-agent socket."
+                if detail:
+                    msg = f"{msg} ({detail})"
+                raise RuntimeError(msg)
             start_time = _read_proc_start_time(agent_pid)
             pid_payload = (
                 f"{agent_pid} {start_time}\n"
@@ -1037,42 +1266,66 @@ class CatalogSSHCredentialMaterialProvider:
                 agent_start_time=start_time,
             )
         except Exception:
-            self._stop_ephemeral_agent(
-                _EphemeralAgentHandle(
-                    keeper_proc=proc,
-                    agent_pid=agent_pid or 0,
-                    agent_start_time=_read_proc_start_time(agent_pid) if agent_pid else None,
+            if not stopped:
+                self._stop_ephemeral_agent(
+                    _EphemeralAgentHandle(
+                        keeper_proc=proc,
+                        agent_pid=agent_pid or 0,
+                        agent_start_time=_read_proc_start_time(agent_pid) if agent_pid else None,
+                    )
                 )
-            )
             raise
 
-    def _stop_ephemeral_agent(self, handle: _EphemeralAgentHandle | None) -> None:
+    def _stop_ephemeral_agent(
+        self,
+        handle: _EphemeralAgentHandle | None,
+        *,
+        collect_stderr: bool = False,
+        fast_terminate: bool = False,
+    ) -> str:
         if handle is None:
-            return
+            return ""
         proc = handle.keeper_proc
         if proc.stdin is not None:
             try:
                 proc.stdin.close()
             except OSError:
                 pass
+        # If startup failed before the keeper reported SSH_AGENT_PID (for example a
+        # slow Python interpreter after real ssh-agent already forked its daemon),
+        # find and stop any direct ssh-agent child before stopping the keeper.
+        agent_targets: list[tuple[int, int | None]] = []
         if handle.agent_pid > 1:
-            _terminate_pid(handle.agent_pid, expected_start_time=handle.agent_start_time)
+            agent_targets.append((handle.agent_pid, handle.agent_start_time))
+        elif proc.poll() is None:
+            agent_targets.extend(_find_child_ssh_agents(proc.pid))
+        for target_pid, target_start_time in agent_targets:
+            _terminate_pid(target_pid, expected_start_time=target_start_time)
         if proc.poll() is None:
+            wait_eof = 0.2 if fast_terminate else 2.0
+            wait_term = 1.0 if fast_terminate else 2.0
             try:
-                proc.wait(timeout=2)
+                proc.wait(timeout=wait_eof)
             except subprocess.TimeoutExpired:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=2)
+                    proc.wait(timeout=wait_term)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait(timeout=2)
+                    try:
+                        proc.wait(timeout=wait_term)
+                    except subprocess.TimeoutExpired:
+                        pass
+        stderr_text = ""
+        if collect_stderr and proc.stderr is not None:
+            stderr_text = _drain_fd_with_timeout(proc.stderr.fileno(), timeout_seconds=0.3)
         for stream in (proc.stdout, proc.stderr):
             if stream is not None:
                 try:
                     stream.close()
                 except OSError:
                     pass
+        return stderr_text
 
     def _load_key_into_agent(
         self,

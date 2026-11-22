@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from collections.abc import Awaitable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -20,6 +21,8 @@ import stat
 import struct
 import subprocess
 import termios
+import time
+from typing import TypeVar
 
 from runtime_hosting.artifacts import ArtifactStore
 from runtime_hosting.authorization import ExecutionAccessGuard
@@ -42,17 +45,31 @@ from runtime_hosting.ssh_credentials import (
 from runtime_hosting.ssh_network import ValidatedSSHHost, ssh_host_key_alias
 from storage.execution_control_repository import ExecutionControlRepository
 
+_T = TypeVar("_T")
+
+
+async def _await_uninterruptibly(awaitable: Awaitable[_T]) -> _T:
+    """Wait for cleanup work to finish even if additional cancellations arrive."""
+
+    task = asyncio.ensure_future(awaitable)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+
 
 @dataclass
 class _LiveSSHSession:
     session: InteractiveSessionV1
-    lease_token: str
+    lease_token: str = field(repr=False)
     process: subprocess.Popen[bytes]
     master_fd: int
     material_context: AbstractContextManager[SSHCredentialMaterial]
-    scrubber: SessionSecretScrubber
-    stream_scrubber: StreamSecretScrubber
-    raw_transcript: bytearray = field(default_factory=bytearray)
+    scrubber: SessionSecretScrubber = field(repr=False)
+    stream_scrubber: StreamSecretScrubber = field(repr=False)
+    raw_transcript: bytearray = field(default_factory=bytearray, repr=False)
+    transcript_truncated: bool = False
     expiry_monitor: asyncio.Task[None] | None = None
 
 
@@ -72,7 +89,7 @@ class SSHSessionBroker:
     lease_ttl_seconds: int = 300
     transcript_limit_bytes: int = 4_194_304
     logger: logging.Logger = logging.getLogger(__name__)
-    _sessions: dict[str, _LiveSSHSession] = field(default_factory=dict, init=False)
+    _sessions: dict[str, _LiveSSHSession] = field(default_factory=dict, init=False, repr=False)
 
     async def open(self, *, session_id: str, lease_token: str) -> InteractiveSessionV1:
         claimed = self.repository.claim_interactive_session(
@@ -110,6 +127,9 @@ class SSHSessionBroker:
         slave_fd = -1
         process: subprocess.Popen[bytes] | None = None
         context_entered = False
+        prepare_task: asyncio.Task[
+            tuple[AbstractContextManager[SSHCredentialMaterial], SSHCredentialMaterial]
+        ] | None = None
         try:
             def _prepare_and_verify() -> tuple[
                 AbstractContextManager[SSHCredentialMaterial],
@@ -124,7 +144,8 @@ class SSHSessionBroker:
                     raise
                 return prepared_ctx, prepared_material
 
-            prepared_context, material = await asyncio.to_thread(_prepare_and_verify)
+            prepare_task = asyncio.create_task(asyncio.to_thread(_prepare_and_verify))
+            prepared_context, material = await asyncio.shield(prepare_task)
             context = prepared_context
             context_entered = True
             scrubber = SessionSecretScrubber(material.touched_secrets, logger=self.logger)
@@ -175,7 +196,37 @@ class SSHSessionBroker:
                 name=f"ssh-session-expiry:{session_id}",
             )
             return opened
-        except Exception:
+        except BaseException:
+            if not context_entered and prepare_task is not None:
+                try:
+                    prepared_context, _ = await _await_uninterruptibly(prepare_task)
+                    context = prepared_context
+                    context_entered = True
+                except BaseException:
+                    pass
+            await _await_uninterruptibly(
+                self._cleanup_failed_open(
+                    claimed=claimed,
+                    lease_token=lease_token,
+                    process=process,
+                    master_fd=master_fd,
+                    slave_fd=slave_fd,
+                    context=context if context_entered else None,
+                )
+            )
+            raise
+
+    async def _cleanup_failed_open(
+        self,
+        *,
+        claimed: InteractiveSessionV1,
+        lease_token: str,
+        process: subprocess.Popen[bytes] | None,
+        master_fd: int,
+        slave_fd: int,
+        context: AbstractContextManager[SSHCredentialMaterial] | None,
+    ) -> None:
+        try:
             if process is not None and process.poll() is None:
                 process.terminate()
                 try:
@@ -186,12 +237,26 @@ class SSHSessionBroker:
                 except TimeoutError:
                     process.kill()
                     await asyncio.to_thread(process.wait)
+        finally:
             if master_fd >= 0:
-                os.close(master_fd)
+                try:
+                    os.close(master_fd)
+                except OSError:
+                    pass
             if slave_fd >= 0:
-                os.close(slave_fd)
-            if context_entered and context is not None:
-                await asyncio.to_thread(context.__exit__, None, None, None)
+                try:
+                    os.close(slave_fd)
+                except OSError:
+                    pass
+            if context is not None:
+                try:
+                    await asyncio.to_thread(context.__exit__, None, None, None)
+                except Exception:
+                    self.logger.exception(
+                        "Failed to clean up SSH credential material after aborted open. "
+                        "event=ssh_open_cleanup_failed session_id=%s",
+                        claimed.session_id,
+                    )
             failed = claimed.model_copy(
                 update={
                     "status": InteractiveSessionStatus.FAILED,
@@ -205,7 +270,6 @@ class SSHSessionBroker:
                 fence=claimed.fence,
                 release=True,
             )
-            raise
 
     async def write(self, *, session_id: str, payload: bytes) -> int:
         """Type into the session: needs a person's approval for this session (trusted record)."""
@@ -227,27 +291,58 @@ class SSHSessionBroker:
         live = self._require_live(session_id)
         self.authorization_guard.require_ssh_connect(live.session)
 
-        def read_ready() -> bytes:
-            readable, _, _ = select.select([live.master_fd], [], [], timeout_seconds)
+        def read_ready(wait_seconds: float) -> tuple[bytes, bool]:
+            readable, _, _ = select.select([live.master_fd], [], [], max(0.0, wait_seconds))
             if not readable:
-                return b""
+                return b"", False
             try:
-                return os.read(live.master_fd, maximum_bytes)
+                data = os.read(live.master_fd, maximum_bytes)
             except OSError:
-                return b""
+                return b"", True
+            return data, (len(data) == 0)
 
-        payload = await asyncio.to_thread(read_ready)
-        if payload and len(live.raw_transcript) < self.transcript_limit_bytes:
-            live.raw_transcript.extend(
-                payload[: self.transcript_limit_bytes - len(live.raw_transcript)]
-            )
-        scrubbed = live.stream_scrubber.feed(payload) if payload else b""
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        scrubbed_parts: list[bytes] = []
+        received_any_payload = False
+        fd_eof = False
+        while True:
+            quiet_wait = live.stream_scrubber.time_until_quiet_release()
+            remaining = max(0.0, deadline - time.monotonic())
+            if quiet_wait is None:
+                wait_for = remaining
+            elif quiet_wait == 0.0:
+                wait_for = 0.0
+            else:
+                wait_for = min(remaining, quiet_wait + 0.002)
+            payload, fd_eof = await asyncio.to_thread(read_ready, wait_for)
+            if payload:
+                received_any_payload = True
+                remaining_cap = self.transcript_limit_bytes - len(live.raw_transcript)
+                if remaining_cap > 0:
+                    live.raw_transcript.extend(payload[:remaining_cap])
+                if len(payload) > remaining_cap or len(live.raw_transcript) >= self.transcript_limit_bytes:
+                    live.transcript_truncated = True
+                fed = live.stream_scrubber.feed(payload)
+                if fed:
+                    scrubbed_parts.append(fed)
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                continue
+            released = live.stream_scrubber.release_quiet()
+            if released:
+                scrubbed_parts.append(released)
+                break
+            if fd_eof or live.process.poll() is not None or time.monotonic() >= deadline:
+                break
+
+        scrubbed = b"".join(scrubbed_parts)
         if scrubbed:
             live.session = live.session.model_copy(
                 update={"transcript_bytes": live.session.transcript_bytes + len(scrubbed)}
             )
         self._touch(live)
-        if live.process.poll() is not None and not payload:
+        if live.process.poll() is not None and (not received_any_payload or (fd_eof and not scrubbed_parts)):
             flushed = live.stream_scrubber.flush()
             if flushed:
                 live.session = live.session.model_copy(
@@ -293,20 +388,63 @@ class SSHSessionBroker:
                 raise SSHSessionUnavailable(f"SSH session {session_id!r} does not exist.")
             return existing
         self._sessions.pop(session_id)
+        caller_task = asyncio.current_task()
+        close_task = asyncio.create_task(
+            self._finish_close(
+                live=live,
+                disconnected=disconnected,
+                cancel_expiry_monitor=(live.expiry_monitor is not caller_task),
+            )
+        )
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(close_task)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _finish_close(
+        self,
+        *,
+        live: _LiveSSHSession,
+        disconnected: bool,
+        cancel_expiry_monitor: bool = True,
+    ) -> InteractiveSessionV1:
         monitor = live.expiry_monitor
-        current_task = asyncio.current_task()
-        if monitor is not None and monitor is not current_task:
+        if cancel_expiry_monitor and monitor is not None:
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
-        if live.process.poll() is None:
-            os.killpg(live.process.pid, signal.SIGTERM)
+        try:
+            if live.process.poll() is None:
+                try:
+                    os.killpg(live.process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(live.process.wait), timeout=5)
+                except TimeoutError:
+                    try:
+                        os.killpg(live.process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await asyncio.to_thread(live.process.wait)
+        finally:
             try:
-                await asyncio.wait_for(asyncio.to_thread(live.process.wait), timeout=5)
-            except TimeoutError:
-                os.killpg(live.process.pid, signal.SIGKILL)
-                await asyncio.to_thread(live.process.wait)
-        os.close(live.master_fd)
-        await asyncio.to_thread(live.material_context.__exit__, None, None, None)
+                os.close(live.master_fd)
+            except OSError:
+                pass
+            try:
+                await asyncio.to_thread(live.material_context.__exit__, None, None, None)
+            except Exception:
+                self.logger.exception(
+                    "Failed to clean up SSH credential material on close. "
+                    "event=ssh_close_material_cleanup_failed session_id=%s",
+                    live.session.session_id,
+                )
         # Scrub the entire stored transcript as a whole so read chunk boundaries
         # never leave split secrets or held tail bytes behind.
         live.stream_scrubber.flush()
@@ -315,6 +453,8 @@ class SSHSessionBroker:
             if live.raw_transcript
             else b""
         )
+        if live.transcript_truncated and scrubbed_transcript:
+            scrubbed_transcript = live.scrubber.strip_trailing_secret_prefix(scrubbed_transcript)
         live.raw_transcript.clear()
         transcript_artifact = (
             self.artifact_store.put_bytes(
