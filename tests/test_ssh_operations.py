@@ -2070,34 +2070,6 @@ async def test_c62_and_c65_real_sshd_background_jobs_sigint_and_termination_note
             with pytest.raises(ProcessLookupError):
                 os.kill(bg_ign_pid, 0)
 
-            # C67: A script logging through an output helper pipeline (process substitution + tee)
-            # keeps all trailing output (including its final error line) in stdout and its log file.
-            bash_bin = shutil.which("bash")
-            if bash_bin is not None:
-                for run_idx in range(3):
-                    helper_log = tmp_path / f"helper_{run_idx}.log"
-                    helper_script = (
-                        f'exec > >(while IFS= read -r l; do printf "%s %s\\n" "$(date +%T)" "$l"; done '
-                        f'| tee -a "{helper_log}") 2>&1; '
-                        'for i in 1 2 3 4 5 6 7 8; do echo "step $i"; done; '
-                        'echo "FATAL: disk full, aborting"; exit 3'
-                    )
-                    helper_res = await broker.run_command(
-                        session_id=session.session_id,
-                        command=f'{bash_bin} -c {shlex.quote(helper_script)}',
-                        caller=_LEAD_CALLER,
-                        timeout_seconds=10.0,
-                        wait_seconds=5.0,
-                    )
-                    assert helper_res.status == SSHCommandStatus.FAILED, helper_res
-                    assert helper_res.exit_code == 3
-                    assert "FATAL: disk full, aborting" in helper_res.stdout, helper_res
-                    log_text = helper_log.read_text(encoding="utf-8")
-                    assert "FATAL: disk full, aborting" in log_text, log_text
-                    for step_num in range(1, 9):
-                        assert f"step {step_num}" in helper_res.stdout
-                        assert f"step {step_num}" in log_text
-
             # C62 (Windows wording): Non-watched Windows target must not claim "remote process group signalled".
             win_target = _make_enrolled_target(
                 target_id="c62_win_host",
@@ -2493,12 +2465,13 @@ async def test_c66_password_sudo_and_recipe_succeed_when_sh_is_bash_5_1_plus(
 
     # Prove `sh` on PATH actually executes bash >= 5.1 in this test.
     probe = subprocess.run(
-        ["sh", "-c", 'printf "%s" "$BASH_VERSION"'],
+        ["sh", "-c", 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert probe.stdout.startswith("5.")
+    major_s, minor_s = probe.stdout.strip().split(".", 1)
+    assert (int(major_s), int(minor_s)) >= (5, 1)
 
     _, _, host_pub = _generate_ed25519_keypair(tmp_path / "host", name="host_ed25519")
     _, client_priv, client_pub = _generate_ed25519_keypair(tmp_path / "client", name="client_ed25519")
@@ -2698,3 +2671,127 @@ async def test_c68_multiline_secrets_refused_and_watcher_waits_for_true_eof(
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=2.0)
+
+
+@pytest.mark.skipif(
+    _sshd_binary() is None or shutil.which("ssh") is None or shutil.which("bash") is None,
+    reason="Real OpenSSH sshd/ssh and bash binaries are required for the C67 output-helper drain test.",
+)
+@pytest.mark.asyncio
+async def test_c67_real_sshd_output_helper_pipeline_flushes_on_normal_exit(
+    tmp_path: Path,
+) -> None:
+    """C67 & C70(b): Real sshd with a bash process-substitution output helper preserves trailing output and log lines."""
+
+    sshd_bin = _sshd_binary()
+    bash_bin = shutil.which("bash")
+    assert sshd_bin is not None and bash_bin is not None
+    sshd_dir = tmp_path / "sshd_c67"
+    sshd_dir.mkdir(mode=0o700)
+    host_key_path, _, host_pub = _generate_ed25519_keypair(sshd_dir, name="ssh_host_ed25519_key")
+    host_key_path.chmod(0o600)
+    _, client_priv, client_pub = _generate_ed25519_keypair(tmp_path / "client_c67", name="id_ed25519")
+    auth_keys = sshd_dir / "authorized_keys"
+    auth_keys.write_text(f"{client_pub}\n", encoding="utf-8")
+    auth_keys.chmod(0o600)
+    port = _free_tcp_port()
+    current_user = os.environ.get("USER") or subprocess.check_output(["id", "-un"], text=True).strip()
+    sshd_config = sshd_dir / "sshd_config"
+    sshd_config.write_text(
+        f"Port {port}\n"
+        "ListenAddress 127.0.0.1\n"
+        f"HostKey {host_key_path}\n"
+        f"AuthorizedKeysFile {auth_keys}\n"
+        f"PidFile {sshd_dir / 'sshd.pid'}\n"
+        "PubkeyAuthentication yes\n"
+        "PasswordAuthentication no\n"
+        "KbdInteractiveAuthentication no\n"
+        "ChallengeResponseAuthentication no\n"
+        "UsePAM no\n"
+        "StrictModes no\n"
+        "PermitRootLogin yes\n"
+        "LogLevel ERROR\n",
+        encoding="utf-8",
+    )
+    sshd_proc = subprocess.Popen(
+        [str(sshd_bin), "-D", "-e", "-f", str(sshd_config)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        ready = False
+        for _ in range(50):
+            if sshd_proc.poll() is not None:
+                break
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                    ready = True
+                    break
+            except OSError:
+                time.sleep(0.05)
+        if not ready:
+            pytest.skip("Local unprivileged sshd could not bind/start.")
+
+        repository = SqliteExecutionControlRepository(str(tmp_path / "execution.db"))
+        target = _make_enrolled_target(
+            target_id="c67_helper_host",
+            host="127.0.0.1",
+            port=port,
+            username=current_user,
+            platform=SSHTargetPlatform.LINUX,
+            host_pub=host_pub,
+            credential_key="real_key",
+            credential_pub=client_pub,
+        )
+        repository.put_ssh_target(target)
+        bounds = SSHDelegationBoundsV1(allow_commands=True)
+        session = _create_session_and_delegation(repository, target, bounds, session_id="ssh_sess_c67")
+        loopback_policy = SSHNetworkPolicy(
+            allowed_cidrs=(ipaddress.ip_network("127.0.0.1/32"),),
+            allowed_domains=("localtest.example",),
+            denied_cidrs=(),
+        )
+        broker = _catalog_broker(
+            tmp_path,
+            repository,
+            secrets_map={
+                ("real_key", "ssh_private_key"): client_priv,
+                ("real_key", "ssh_public_key"): client_pub,
+            },
+            ssh_executable=shutil.which("ssh") or "ssh",
+            network_policy=loopback_policy,
+        )
+        try:
+            for run_idx in range(3):
+                helper_log = tmp_path / f"helper_{run_idx}.log"
+                helper_script = (
+                    f'exec > >(while IFS= read -r l; do printf "%s %s\\n" "$(date +%T)" "$l"; done '
+                    f'| tee -a "{helper_log}") 2>&1; '
+                    'for i in 1 2 3 4 5 6 7 8; do echo "step $i"; done; '
+                    'echo "FATAL: disk full, aborting"; exit 3'
+                )
+                helper_res = await broker.run_command(
+                    session_id=session.session_id,
+                    command=f"{bash_bin} -c {shlex.quote(helper_script)}",
+                    caller=_LEAD_CALLER,
+                    timeout_seconds=10.0,
+                    wait_seconds=5.0,
+                )
+                assert helper_res.status == SSHCommandStatus.FAILED, helper_res
+                assert helper_res.exit_code == 3
+                assert "FATAL: disk full, aborting" in helper_res.stdout, helper_res
+                log_text = helper_log.read_text(encoding="utf-8")
+                assert "FATAL: disk full, aborting" in log_text, log_text
+                for step_num in range(1, 9):
+                    assert f"step {step_num}" in helper_res.stdout
+                    assert f"step {step_num}" in log_text
+        finally:
+            await broker.shutdown()
+    finally:
+        sshd_proc.terminate()
+        try:
+            sshd_proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            sshd_proc.kill()
+            sshd_proc.wait(timeout=2.0)

@@ -4977,6 +4977,17 @@ class UniversalAgent(BaseModel):
     ) -> None:
         self._cancel_scheduler_pass()
         await close_pending_work(self)
+        try:
+            from custom_tools.providers._execution_ssh import shutdown_agent_ssh_broker
+
+            await shutdown_agent_ssh_broker(str(self.id))
+        except Exception as exc:
+            self._logger.warning(
+                "[%s] Failed to shut down SSH session broker on exit: %s "
+                "event=ssh_broker_exit_cleanup_failed",
+                self.id,
+                exc,
+            )
         unregister_local_worker(self.id)
         if self._local_schedule_task is not None:
             self._local_schedule_task.cancel()

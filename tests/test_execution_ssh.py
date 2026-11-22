@@ -1782,11 +1782,11 @@ async def test_ssh_target_enrollment_with_authorization_off_requires_agreement(
 
     session = json.loads(tools.create_execution_ssh_session._tool_func(target_id="auth_off_host", confirmed=True))
     assert session["target"]["target_id"] == "auth_off_host"
-    # Broker now verifies the enrolled target via ExecutionAccessGuard; the in-process
-    # disk-key broker only refuses because Sealbox catalog routing lands in the next step.
+    # Broker verifies the enrolled target via ExecutionAccessGuard and routes catalog:<key>
+    # through CatalogSSHCredentialMaterialProvider (here the seeded Sealbox item has no secret).
     opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session["session_id"]))
     assert opened["error_code"] == "execution_access_refused"
-    assert "SSH credential binding is not installed in this broker" in opened["error"]
+    assert "Could not resolve SSH credential 'build_mac_ssh_key'.ssh_private_key" in opened["error"]
 
 
 # -- Checkpoint 8: C48-C51 Hardening Tests -----------------------------------------
@@ -2147,3 +2147,534 @@ def test_ssh_delegation_uses_agent_type_port_and_refuses_when_unconfigured(
         allow_commands=True,
     )
     assert staged["status"] == "staged"
+
+
+def _make_worker_agent(lead: Any, *, agent_id: str, agent_type: str) -> Any:
+    """Create a worker agent sharing the manager's instance, access store, and signed task context."""
+
+    from types import SimpleNamespace
+
+    fields = dict(vars(lead))
+    fields["id"] = agent_id
+    fields["agent_id"] = agent_id
+    fields["named_agent_type"] = agent_type
+    return SimpleNamespace(**fields)
+
+
+def _write_fake_keyscan(directory: Path, *, public_key: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "fake-ssh-keyscan"
+    script.write_text(
+        f"#!/bin/sh\nprintf '198.51.100.77 {public_key}\\n'\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _write_fake_tool_ssh(directory: Path, *, extract_root: Path, state_dir: Path) -> Path:
+    """Fake ssh binary supporting -T command/sudo/bootstrap/tar-extract and -tt interactive PTY."""
+
+    import sys
+
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "fake-tool-ssh"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, subprocess, sys\n"
+        f"extract_root = pathlib.Path({str(extract_root)!r})\n"
+        f"state_dir = pathlib.Path({str(state_dir)!r})\n"
+        "state_dir.mkdir(parents=True, exist_ok=True)\n"
+        "argv = sys.argv[1:]\n"
+        "if '-tt' in argv:\n"
+        "    line = sys.stdin.readline()\n"
+        "    sys.stdout.write(f'pty:{line}')\n"
+        "    sys.stdout.flush()\n"
+        "    import time; time.sleep(10)\n"
+        "    sys.exit(0)\n"
+        "if '--' not in argv:\n"
+        "    sys.exit(2)\n"
+        "idx = argv.index('--')\n"
+        "remote_parts = argv[idx + 2 :]\n"
+        "remote_cmd = ' '.join(remote_parts)\n"
+        "if os.environ.get('SSH_ASKPASS') and 'authorized_keys' in remote_cmd:\n"
+        "    pw = subprocess.check_output([os.environ['SSH_ASKPASS']], text=True).strip()\n"
+        "    pub = sys.stdin.readline().strip()\n"
+        "    (state_dir / 'askpass_pw.txt').write_text(pw, encoding='utf-8')\n"
+        "    (state_dir / 'enrolled_pub.txt').write_text(pub, encoding='utf-8')\n"
+        "    sys.exit(0)\n"
+        "if 'tar -xzf -' in remote_cmd:\n"
+        "    extract_root.mkdir(parents=True, exist_ok=True)\n"
+        "    data = sys.stdin.buffer.read()\n"
+        "    proc = subprocess.run(['tar', '-xzf', '-', '-C', str(extract_root)], input=data)\n"
+        "    sys.exit(proc.returncode)\n"
+        "env = dict(os.environ)\n"
+        "env['HOME'] = str(state_dir)\n"
+        "proc = subprocess.run(['sh', '-c', remote_cmd], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=env)\n"
+        "sys.exit(proc.returncode)\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _write_fake_tool_sudo(directory: Path, *, expected_password: str) -> Path:
+    import sys
+
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "fake-tool-sudo"
+    stamp_dir = directory / "stamps"
+    stamp_dir.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, subprocess, sys\n"
+        f"stamp = pathlib.Path({str(stamp_dir)!r}) / f'ppid_{{os.getppid()}}'\n"
+        f"expected = {expected_password!r}\n"
+        "args = sys.argv[1:]\n"
+        "if '-S' in args and '-v' in args:\n"
+        "    pw = sys.stdin.readline().rstrip('\\r\\n')\n"
+        "    if pw != expected:\n"
+        "        sys.stderr.write('Sorry, try again.\\n')\n"
+        "        sys.exit(1)\n"
+        "    stamp.write_text('ok', encoding='utf-8')\n"
+        "    sys.exit(0)\n"
+        "if '-n' in args and args[-1] == 'true':\n"
+        "    sys.exit(0 if stamp.exists() else 1)\n"
+        "if '-n' in args and '--' in args:\n"
+        "    if not stamp.exists():\n"
+        "        sys.stderr.write('sudo: a password is required\\n')\n"
+        "        sys.exit(1)\n"
+        "    cmd = args[args.index('--') + 1 :]\n"
+        "    sys.exit(subprocess.run(cmd).returncode)\n"
+        "sys.exit(2)\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _write_fake_tool_tailscale(directory: Path, record_file: Path) -> Path:
+    import sys
+
+    directory.mkdir(parents=True, exist_ok=True)
+    script = directory / "fake-tool-tailscale"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        f"record = pathlib.Path({str(record_file)!r})\n"
+        "args = sys.argv[1:]\n"
+        "auth_key = ''\n"
+        "for item in args:\n"
+        "    if item.startswith('--auth-key=file:'):\n"
+        "        auth_key = pathlib.Path(item.split('file:', 1)[1]).read_text(encoding='utf-8').strip()\n"
+        "record.write_text(json.dumps({'args': args, 'auth_key': auth_key}), encoding='utf-8')\n"
+        "print('tailscale-connected')\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_agent_ssh_tools_end_to_end_delegated_worker_primitives_and_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end real Cedar + SQLite test of all new SSH agent tools, worker delegation, bundle safety, and broker shutdown."""
+
+    import subprocess
+    from custom_agents.execution_control_service import ExecutionControlService
+    from custom_messages.contracts.access_v2 import AccessLevel, GrantLifetime, GrantV1, SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
+    from custom_tools import agent_team_port
+    from custom_tools.providers import _execution_ssh
+    from custom_tools.workspace_scope import current_workspace_scope
+    from runtime_hosting.execution_contracts import ssh_public_key_sha256_fingerprint
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        CredentialCatalog,
+    )
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from tests.change_approval_support import owner
+
+    use_signed_contexts(monkeypatch)
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {"TeamArchitect": {}, "CodeWritingAgent": {}, "WebResearchAgent": {}},
+    )
+    tools._SSH_BROKERS.clear()
+
+    # Generate a real ed25519 keypair so ssh-agent / ssh-add unlock it cleanly.
+    keygen_dir = tmp_path / "keys"
+    keygen_dir.mkdir()
+    client_key = keygen_dir / "client_ed25519"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(client_key)],
+        check=True,
+    )
+    client_priv = client_key.read_text(encoding="utf-8")
+    client_pub = client_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    _, client_pub_fp = ssh_public_key_sha256_fingerprint(client_pub)
+
+    host_pub = _framed_ed25519_pub(b"\x55" * 32)
+    _, host_fp = ssh_public_key_sha256_fingerprint(host_pub)
+
+    extract_root = tmp_path / "remote_extract"
+    remote_state = tmp_path / "remote_state"
+    fake_ssh_bin = _write_fake_tool_ssh(tmp_path / "tool_bin", extract_root=extract_root, state_dir=remote_state)
+    fake_keyscan_bin = _write_fake_keyscan(tmp_path / "tool_bin", public_key=host_pub)
+    admin_pw = "ToolE2EAdminPass!99"
+    ts_key = "tskey-auth-tool-e2e-secret-99"
+    fake_sudo_bin = _write_fake_tool_sudo(tmp_path / "tool_sudo", expected_password=admin_pw)
+    ts_record = tmp_path / "ts_record.json"
+    fake_ts_bin = _write_fake_tool_tailscale(tmp_path / "tool_ts", ts_record)
+
+    instance = execution_instance(tmp_path, authorization_enabled=True)
+    instance.config.user.display_name = "Alice Smith"
+    instance.config.execution_control.ssh.ssh_executable = str(fake_ssh_bin)
+    instance.config.execution_control.ssh.allow_password_bootstrap = True
+    instance.config.execution_control.ssh.max_delegation_ttl_seconds = 1800
+    instance.config.save(instance.config_path)
+
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+    grant_execution(lead)
+
+    # Grant CodeWritingAgent and WebResearchAgent fn:execution_control write access in real Cedar
+    # so ExecutionAccessGuard (not missing Cedar grants) is what separates authorized vs unauthorized workers.
+    from custom_agents import access_runtime
+
+    for worker_type in ("CodeWritingAgent", "WebResearchAgent"):
+        access_runtime.runtime_access(lead).service.grant_by_person(
+            owner(lead),
+            GrantV1(
+                grant_id="new",
+                team_id=lead.team_id,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{lead.team_id}/{worker_type}"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="fn:execution_control"),
+                level=AccessLevel.WRITE,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner(lead).person_id),
+                created_at_utc=datetime.now(timezone.utc),
+            ),
+        )
+
+    exec_service = ExecutionControlService(lead)
+    monkeypatch.setenv(
+        "SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH",
+        str(instance.config.credential_catalog_database_path),
+    )
+    monkeypatch.setenv("TEST_E2E_SSH_PRIV", client_priv)
+    monkeypatch.setenv("TEST_E2E_ADMIN_PW", admin_pw)
+    monkeypatch.setenv("TEST_E2E_TS_KEY", ts_key)
+    scope = CredentialOwnerScope.user(exec_service.owner.owner_id)
+    credential_catalog.save_catalog(
+        CredentialCatalog(
+            credentials={
+                "e2e_ssh_key": CatalogCredential(
+                    display_name="E2E SSH Key",
+                    purpose="Deploy E2E host",
+                    fields={
+                        "ssh_public_key": CatalogCredentialField(
+                            kind="custom",
+                            visibility="metadata_visible",
+                            value_source="user_provided",
+                            value=client_pub,
+                        ),
+                        "ssh_private_key": CatalogCredentialField(
+                            kind="credential_file",
+                            visibility="secret",
+                            value_source="existing_source",
+                            resolution_order=[CatalogSourceRef(source="env", env_var="TEST_E2E_SSH_PRIV")],
+                        ),
+                    },
+                ),
+                "e2e_boot": CatalogCredential(
+                    display_name="E2E Host Bootstrap",
+                    purpose="Bootstrap admin account",
+                    fields={
+                        "username": CatalogCredentialField(
+                            kind="username",
+                            visibility="metadata_visible",
+                            value_source="user_provided",
+                            value="ops",
+                        ),
+                        "admin_password": CatalogCredentialField(
+                            kind="password",
+                            visibility="secret",
+                            value_source="existing_source",
+                            resolution_order=[CatalogSourceRef(source="env", env_var="TEST_E2E_ADMIN_PW")],
+                        ),
+                        "tailscale_auth_key": CatalogCredentialField(
+                            kind="token",
+                            visibility="secret",
+                            value_source="existing_source",
+                            resolution_order=[CatalogSourceRef(source="env", env_var="TEST_E2E_TS_KEY")],
+                        ),
+                    },
+                ),
+            }
+        ),
+        scope=scope,
+    )
+
+    # Wire fake keyscan, sudo, and tailscale paths onto the shared broker once created.
+    broker = tools._ssh_broker(exec_service)
+    broker.ssh_keyscan_executable = str(fake_keyscan_bin)
+    broker.sudo_search_paths = (str(fake_sudo_bin),)
+    broker.tailscale_search_paths = (str(fake_ts_bin),)
+
+    # 1. probe_execution_ssh_host_key enforces guardrails and returns fingerprint + verification commands.
+    denied_probe = json.loads(
+        await tools.probe_execution_ssh_host_key._tool_func(host="127.0.0.1", port=22)
+    )
+    assert denied_probe["error_code"] == "execution_access_refused"
+
+    probed = json.loads(
+        await tools.probe_execution_ssh_host_key._tool_func(host="198.51.100.77", port=2222)
+    )
+    assert probed["host"] == "198.51.100.77"
+    assert probed["port"] == 2222
+    assert probed["host_key_algorithm"] == "ssh-ed25519"
+    assert probed["host_key_fingerprint"] == host_fp
+    assert "linux" in probed["verification_commands"]
+
+    # 2. plan_execution_ssh_target + apply_change enrolls the target under real Cedar.
+    target_expiry = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    staged_target = json.loads(
+        tools.plan_execution_ssh_target._tool_func(
+            target_id="e2e_host_01",
+            host="198.51.100.77",
+            port=2222,
+            username="ops",
+            platform="linux",
+            host_key_public_key=probed["host_key_public_key"],
+            host_key_fingerprint=probed["host_key_fingerprint"],
+            credential_key="e2e_ssh_key",
+            credential_public_key_fingerprint=client_pub_fp,
+            bootstrap_credential_key="e2e_boot",
+            lifecycle="temporary",
+            expires_at_utc=target_expiry,
+            reason="Bootstrap E2E build host",
+        )
+    )
+    assert staged_target["status"] == "staged", staged_target
+    call_enroll = ToolCall("tooluse_e2e_enroll")
+    with pytest.raises(InterruptException):
+        await _apply(staged_target["change_id"], call_enroll)
+    decide(lead, call_enroll)
+    applied_enroll = await _apply(staged_target["change_id"], call_enroll)
+    assert applied_enroll["status"] == "applied", applied_enroll
+
+    # 3. Create session and delegate all operational capabilities to CodeWritingAgent for this request.
+    created_session = json.loads(
+        tools.create_execution_ssh_session._tool_func(target_id="e2e_host_01")
+    )
+    session_id = created_session["session_id"]
+
+    staged_deleg = json.loads(
+        tools.plan_execution_ssh_interaction._tool_func(
+            session_id=session_id,
+            reason="Run bootstrap commands, key enrollment, sudo recipe, and bundle upload",
+            ttl_seconds=600,
+            delegated_agent_type="CodeWritingAgent",
+            allow_commands=True,
+            allow_password_bootstrap=True,
+            allow_broker_sudo=True,
+            allow_workspace_transfer=True,
+            allowed_secret_recipes_json=json.dumps(["tailscale_up"]),
+        )
+    )
+    assert staged_deleg["status"] == "staged", staged_deleg
+    call_deleg = ToolCall("tooluse_e2e_deleg")
+    with pytest.raises(InterruptException):
+        await _apply(staged_deleg["change_id"], call_deleg)
+    decide(lead, call_deleg)
+    applied_deleg = await _apply(staged_deleg["change_id"], call_deleg)
+    assert applied_deleg["status"] == "applied", applied_deleg
+
+    # 4. Switch to delegated CodeWritingAgent worker.
+    worker = _make_worker_agent(lead, agent_id="worker_code_1", agent_type="CodeWritingAgent")
+    other_worker = _make_worker_agent(lead, agent_id="worker_web_1", agent_type="WebResearchAgent")
+    set_agent_ref(worker)
+
+    # Manager-only tools are refused for workers.
+    mgr_only = json.loads(await tools.probe_execution_ssh_host_key._tool_func(host="198.51.100.77"))
+    assert "manager-only" in mgr_only["error"]
+    mgr_only_plan = json.loads(
+        tools.plan_execution_ssh_target._tool_func(
+            host="198.51.100.77",
+            username="ops",
+            platform="linux",
+            host_key_public_key=host_pub,
+            credential_key="e2e_ssh_key",
+            reason="worker attempt",
+        )
+    )
+    assert "manager-only" in mgr_only_plan["error"]
+
+    # Worker lists sessions and sees usable_in_this_request=True.
+    worker_sessions = json.loads(tools.list_execution_ssh_sessions._tool_func())
+    matched = [s for s in worker_sessions["sessions"] if s["session_id"] == session_id]
+    assert len(matched) == 1 and matched[0]["usable_in_this_request"] is True
+
+    # Worker runs an async command and polls it via get_execution_ssh_command.
+    started_cmd = json.loads(
+        await tools.run_execution_ssh_command._tool_func(
+            session_id=session_id,
+            command="sleep 0.25; echo worker-async-done",
+            timeout_seconds=15.0,
+            wait_seconds=0.05,
+        )
+    )
+    assert started_cmd["status"] == "running", started_cmd
+    polled_cmd = json.loads(
+        await tools.get_execution_ssh_command._tool_func(
+            session_id=session_id,
+            command_id=started_cmd["command_id"],
+            wait_seconds=5.0,
+        )
+    )
+    assert polled_cmd["status"] == "completed", polled_cmd
+    assert "worker-async-done" in polled_cmd["stdout"]
+
+    # Worker runs one-time enroll_execution_ssh_key and sees it latch off permanently.
+    enrolled_key = json.loads(
+        await tools.enroll_execution_ssh_key._tool_func(session_id=session_id, timeout_seconds=30.0)
+    )
+    assert enrolled_key["verified_key_login"] is True, enrolled_key
+    assert (remote_state / "askpass_pw.txt").read_text(encoding="utf-8") == admin_pw
+    assert (remote_state / "enrolled_pub.txt").read_text(encoding="utf-8") == client_pub
+    second_enroll = json.loads(
+        await tools.enroll_execution_ssh_key._tool_func(session_id=session_id, timeout_seconds=30.0)
+    )
+    assert second_enroll["error_code"] == "execution_access_refused"
+    assert "latched" in second_enroll["error"]
+
+    # Worker runs run_execution_ssh_sudo (free command + tailscale_up recipe).
+    sudo_free = json.loads(
+        await tools.run_execution_ssh_sudo._tool_func(
+            session_id=session_id,
+            command="echo sudo-worker-ok",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+    )
+    assert sudo_free["status"] == "completed", sudo_free
+    assert "sudo-worker-ok" in sudo_free["stdout"]
+    assert admin_pw not in sudo_free["stdout"]
+
+    sudo_ts = json.loads(
+        await tools.run_execution_ssh_sudo._tool_func(
+            session_id=session_id,
+            secret_recipe="tailscale_up",
+            recipe_params_json=json.dumps({"hostname": "build-node-1", "ssh": True}),
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+    )
+    assert sudo_ts["status"] == "completed", sudo_ts
+    assert ts_key not in sudo_ts["stdout"]
+    ts_data = json.loads(ts_record.read_text(encoding="utf-8"))
+    assert ts_data["auth_key"] == ts_key
+    assert "--hostname" in ts_data["args"] and "--ssh" in ts_data["args"]
+
+    # Critic Note #1: Multiline stored credential returns structured invalid_credential_value without leaking secret.
+    monkeypatch.setenv("TEST_E2E_TS_KEY", "tskey-bad-line1\nline2-secret")
+    bad_cred_res = json.loads(
+        await tools.run_execution_ssh_sudo._tool_func(
+            session_id=session_id,
+            secret_recipe="tailscale_up",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+    )
+    assert bad_cred_res["error_code"] == "invalid_credential_value", bad_cred_res
+    assert bad_cred_res["credential_key"] == "e2e_boot"
+    assert bad_cred_res["field_name"] == "tailscale_auth_key"
+    assert "next_step" in bad_cred_res
+    assert "line2-secret" not in json.dumps(bad_cred_res)
+    monkeypatch.setenv("TEST_E2E_TS_KEY", ts_key)
+
+    # Worker uploads non-sensitive workspace files via upload_execution_ssh_bundle; sensitive files & symlinks refused.
+    ws_home = current_workspace_scope(worker).home
+    deploy_dir = ws_home / "deploy"
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    (deploy_dir / "install.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    (deploy_dir / "config.yaml").write_text("mode: prod\n", encoding="utf-8")
+
+    uploaded = json.loads(
+        await tools.upload_execution_ssh_bundle._tool_func(
+            session_id=session_id,
+            paths_json=json.dumps(["deploy"]),
+            remote_destination="~/bundle",
+        )
+    )
+    assert uploaded["file_count"] == 2, uploaded
+    assert (extract_root / "deploy" / "install.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho hi\n"
+    assert (extract_root / "deploy" / "config.yaml").read_text(encoding="utf-8") == "mode: prod\n"
+
+    # Sensitive .env inside a folder is refused before upload.
+    bad_dir = ws_home / "with_secret"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    (bad_dir / "ok.txt").write_text("ok\n", encoding="utf-8")
+    (bad_dir / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
+    env_refused = json.loads(
+        await tools.upload_execution_ssh_bundle._tool_func(
+            session_id=session_id,
+            paths_json=json.dumps(["with_secret"]),
+            remote_destination="~/bundle",
+        )
+    )
+    assert env_refused["error_code"] == "execution_access_refused", env_refused
+
+    # Symlink inside a folder is refused without following.
+    sym_dir = ws_home / "with_link"
+    sym_dir.mkdir(parents=True, exist_ok=True)
+    (sym_dir / "link.txt").symlink_to(deploy_dir / "config.yaml")
+    sym_refused = json.loads(
+        await tools.upload_execution_ssh_bundle._tool_func(
+            session_id=session_id,
+            paths_json=json.dumps(["with_link"]),
+            remote_destination="~/bundle",
+        )
+    )
+    assert sym_refused["error_code"] == "execution_access_refused", sym_refused
+
+    # 5. Unauthorized worker (WebResearchAgent) is refused on every operational tool, including close.
+    set_agent_ref(other_worker)
+    for fn, kwargs in (
+        (tools.run_execution_ssh_command, {"session_id": session_id, "command": "echo nope"}),
+        (tools.get_execution_ssh_command, {"session_id": session_id, "command_id": started_cmd["command_id"]}),
+        (tools.run_execution_ssh_sudo, {"session_id": session_id, "command": "echo nope"}),
+        (tools.upload_execution_ssh_bundle, {"session_id": session_id, "paths_json": json.dumps(["deploy"]), "remote_destination": "~/bundle"}),
+        (tools.close_execution_ssh_session, {"session_id": session_id}),
+    ):
+        denied = json.loads(await fn._tool_func(**kwargs))
+        assert denied["error_code"] == "execution_access_refused", (fn.__name__, denied)
+
+    # 6. Shared broker lifecycle: worker exit keeps manager's broker alive; manager exit shuts it down cleanly.
+    set_agent_ref(worker)
+    running_cmd = json.loads(
+        await tools.run_execution_ssh_command._tool_func(
+            session_id=session_id,
+            command="sleep 30",
+            timeout_seconds=30.0,
+            wait_seconds=0.1,
+        )
+    )
+    assert running_cmd["status"] == "running"
+    await _execution_ssh.shutdown_agent_ssh_broker(worker.id)
+    assert len(_execution_ssh.active_ssh_brokers(team_id=lead.team_id)) == 1
+    assert not broker._shutting_down
+
+    await _execution_ssh.shutdown_agent_ssh_broker(lead.id)
+    assert len(_execution_ssh.active_ssh_brokers(team_id=lead.team_id)) == 0
+    assert broker._shutting_down
+
+    set_agent_ref(None)
+    tools._SSH_BROKERS.clear()

@@ -14,6 +14,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import errno
+import fcntl
 import logging
 import os
 from pathlib import Path
@@ -193,15 +194,28 @@ def is_short_secret(value: str) -> bool:
     return len(value.strip()) < MIN_EXACT_SCRUB_SECRET_LENGTH
 
 
-def _validate_single_line_secret(
+class InvalidSSHCredentialValueError(ValueError):
+    """Raised when a stored Sealbox SSH secret violates single-line stdin framing."""
+
+    def __init__(self, *, credential_key: str, field_name: str, message: str) -> None:
+        super().__init__(message)
+        self.credential_key = credential_key
+        self.field_name = field_name
+
+
+def validate_single_line_secret(
     value: str, *, credential_key: str, field_name: str
 ) -> None:
     """Refuse line breaks or NUL bytes in secrets framed as single stdin lines."""
 
     if "\n" in value or "\r" in value or "\x00" in value:
-        raise ValueError(
-            f"SSH credential {credential_key!r} field {field_name!r} must be a single line "
-            "without line breaks or NUL bytes; update the stored credential and retry."
+        raise InvalidSSHCredentialValueError(
+            credential_key=credential_key,
+            field_name=field_name,
+            message=(
+                f"SSH credential {credential_key!r} field {field_name!r} must be a single line "
+                "without line breaks or NUL bytes; update the stored credential and retry."
+            ),
         )
 
 
@@ -987,6 +1001,56 @@ def _terminate_recorded_ssh_pid(
     return True
 
 
+def _acquire_dir_owner_lock(session_dir: Path) -> int:
+    """Hold a non-blocking exclusive flock directly on ``session_dir`` for this process's lifetime.
+
+    Locking the directory descriptor itself leaves zero extra files inside
+    ``session_dir``. The kernel releases the lock automatically if the broker
+    crashes or receives ``SIGKILL``, while preventing another live broker
+    process (for example a concurrent worker process) from sweeping an active
+    ephemeral directory.
+    """
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(session_dir, flags)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _is_dir_locked_by_other_process(session_dir: Path) -> bool:
+    """Return True if another live process currently holds an exclusive flock on ``session_dir``."""
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(session_dir, flags)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError as exc:
+            if exc.errno in {errno.EAGAIN, errno.EACCES}:
+                return True
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        os.close(fd)
+
+
 def sweep_stale_ssh_ephemeral_dirs(
     base_dir: Path,
     *,
@@ -1016,6 +1080,8 @@ def sweep_stale_ssh_ephemeral_dirs(
             )
             continue
         if entry.resolve() in active_resolved:
+            continue
+        if _is_dir_locked_by_other_process(entry):
             continue
         killed_ssh = False
         parsed_ssh = _parse_ssh_pid_file(entry / _SSH_PID_FILENAME)
@@ -1047,13 +1113,20 @@ def _default_catalog_secret_resolver(
     credential_key: str,
     field_name: str,
     owner: OwnerScopeV1,
+    *,
+    fallback_db_path: Path | None = None,
 ) -> str | None:
     scope = (
         CredentialOwnerScope.user(owner.owner_id)
         if owner.scope_kind == OwnerScopeKind.USER
         else CredentialOwnerScope.team(owner.team_id)
     )
-    resolved = resolve_secret_field(credential_key, field_name, scope=scope)
+    resolved = resolve_secret_field(
+        credential_key,
+        field_name,
+        scope=scope,
+        fallback_db_path=fallback_db_path,
+    )
     if isinstance(resolved, ToolResult):
         error_code = (resolved.content or {}).get("error_code") if isinstance(resolved.content, dict) else None
         if error_code == "credential_field_missing":
@@ -1063,6 +1136,22 @@ def _default_catalog_secret_resolver(
         )
     assert isinstance(resolved, ResolvedCredentialField)
     return resolved.value or None
+
+
+def make_catalog_secret_resolver(
+    *, fallback_db_path: Path | None = None
+) -> SecretFieldResolver:
+    """Build a catalog secret resolver that falls back to ``fallback_db_path`` when the env override is unset."""
+
+    def _resolve(credential_key: str, field_name: str, owner: OwnerScopeV1) -> str | None:
+        return _default_catalog_secret_resolver(
+            credential_key,
+            field_name,
+            owner,
+            fallback_db_path=fallback_db_path,
+        )
+
+    return _resolve
 
 
 def _serve_oneshot_fifo(
@@ -1239,8 +1328,10 @@ class CatalogSSHCredentialMaterialProvider:
         with self._active_lock:
             self._active_dirs.add(session_dir)
 
+        owner_lock_fd: int | None = None
         agent_handle: _EphemeralAgentHandle | None = None
         try:
+            owner_lock_fd = _acquire_dir_owner_lock(session_dir)
             known_hosts_path = session_dir / "known_hosts"
             _write_private_file(known_hosts_path, known_hosts_line.encode("utf-8"), mode=0o600)
 
@@ -1291,6 +1382,11 @@ class CatalogSSHCredentialMaterialProvider:
             )
         finally:
             self._stop_ephemeral_agent(agent_handle)
+            if owner_lock_fd is not None:
+                try:
+                    os.close(owner_lock_fd)
+                except OSError:
+                    pass
             _wipe_tree(session_dir)
             with self._active_lock:
                 self._active_dirs.discard(session_dir)
@@ -1316,7 +1412,9 @@ class CatalogSSHCredentialMaterialProvider:
         fifo_path = session_dir / "pw.fifo"
         stop_event = threading.Event()
         writer_thread: threading.Thread | None = None
+        owner_lock_fd: int | None = None
         try:
+            owner_lock_fd = _acquire_dir_owner_lock(session_dir)
             os.mkfifo(fifo_path, 0o600)
             os.chmod(fifo_path, 0o600)
             writer_thread = threading.Thread(
@@ -1340,6 +1438,11 @@ class CatalogSSHCredentialMaterialProvider:
             stop_event.set()
             if writer_thread is not None:
                 writer_thread.join(timeout=2.0)
+            if owner_lock_fd is not None:
+                try:
+                    os.close(owner_lock_fd)
+                except OSError:
+                    pass
             _wipe_tree(session_dir)
             with self._active_lock:
                 self._active_dirs.discard(session_dir)
@@ -1358,7 +1461,7 @@ class CatalogSSHCredentialMaterialProvider:
             raise PermissionError(
                 f"SSH credential {credential_key!r} is missing required field 'admin_password'."
             )
-        _validate_single_line_secret(
+        validate_single_line_secret(
             password,
             credential_key=credential_key,
             field_name="admin_password",
@@ -1387,7 +1490,7 @@ class CatalogSSHCredentialMaterialProvider:
             raise PermissionError(
                 f"SSH credential {credential_key!r} is missing secret field {normalized!r}."
             )
-        _validate_single_line_secret(
+        validate_single_line_secret(
             value,
             credential_key=credential_key,
             field_name=normalized,
@@ -1690,6 +1793,7 @@ __all__ = [
     "CatalogSSHCredentialMaterialProvider",
     "CompositeSSHCredentialMaterialProvider",
     "ConfiguredSSHCredentialMaterialProvider",
+    "InvalidSSHCredentialValueError",
     "KnownHostsLineProvider",
     "SSHAskpassContext",
     "SSHCredentialMaterial",
@@ -1699,6 +1803,8 @@ __all__ = [
     "StreamSecretScrubber",
     "build_ssh_subprocess_env",
     "is_short_secret",
+    "make_catalog_secret_resolver",
     "record_ssh_child_pid",
     "sweep_stale_ssh_ephemeral_dirs",
+    "validate_single_line_secret",
 ]

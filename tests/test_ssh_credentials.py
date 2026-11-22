@@ -2160,3 +2160,53 @@ def test_ssh_command_separates_options_from_destination_with_double_dash(tmp_pat
     dest_idx = argv.index("deploy@ops.internal")
     assert argv[dest_idx - 1] == "--"
     assert argv[dest_idx + 1 :] == ("tmux", "new-session", "-A", "-s", "work")
+
+
+def test_sweep_stale_ssh_ephemeral_dirs_respects_cross_process_owner_lock(tmp_path: Path) -> None:
+    """A directory locked by another live process is skipped; after SIGKILL it is swept cleanly."""
+
+    import subprocess
+    import sys
+    import time
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    base_dir = layout.ssh_ephemeral_dir
+    base_dir.mkdir(parents=True, exist_ok=True)
+    live_dir = base_dir / "ua-ssh-other-process-live"
+    live_dir.mkdir(mode=0o700)
+    ready_file = tmp_path / "lock_ready"
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, pathlib, time\n"
+                f"fd = os.open({str(live_dir)!r}, os.O_RDONLY | os.O_DIRECTORY)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                f"pathlib.Path({str(ready_file)!r}).write_text('ready', encoding='utf-8')\n"
+                "time.sleep(30)\n"
+            ),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not ready_file.exists():
+            time.sleep(0.02)
+        assert ready_file.exists()
+
+        # While the other process holds .owner.lock, sweeping must NOT touch live_dir.
+        assert sweep_stale_ssh_ephemeral_dirs(base_dir) == 0
+        assert live_dir.exists()
+
+        # After SIGKILL, the kernel releases .owner.lock so sweep_stale reclaims live_dir.
+        holder.kill()
+        holder.wait(timeout=5.0)
+        assert sweep_stale_ssh_ephemeral_dirs(base_dir) == 1
+        assert not live_dir.exists()
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5.0)

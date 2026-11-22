@@ -481,3 +481,30 @@ def test_tools_without_record_kinds_need_none(tmp_path):
     catalog = _function_tool_catalog(tmp_path, "      note_file: write\n      note_delete: full\n")
 
     assert catalog.record_kind("note_file") is None
+
+
+def test_execution_ssh_tools_and_change_kinds_have_expected_catalog_levels(catalog):
+    expected_functions = {
+        "probe_execution_ssh_host_key": READ,
+        "plan_execution_ssh_target": WRITE,
+        "list_execution_ssh_targets": READ,
+        "create_execution_ssh_session": WRITE,
+        "open_execution_ssh_session": WRITE,
+        "read_execution_ssh_session": READ,
+        "plan_execution_ssh_interaction": WRITE,
+        "write_execution_ssh_session": WRITE,
+        "resize_execution_ssh_session": WRITE,
+        "close_execution_ssh_session": WRITE,
+        "list_execution_ssh_sessions": READ,
+        "run_execution_ssh_command": WRITE,
+        "get_execution_ssh_command": READ,
+        "enroll_execution_ssh_key": WRITE,
+        "run_execution_ssh_sudo": WRITE,
+        "upload_execution_ssh_bundle": WRITE,
+    }
+    for fn_name, expected_level in expected_functions.items():
+        resolved = catalog.resolve_function(fn_name)
+        assert resolved.tool_id == "fn:execution_control", fn_name
+        assert resolved.level is expected_level, (fn_name, resolved.level, expected_level)
+    assert catalog.changes["execution_ssh_target_enroll"] == ("fn:execution_control", FULL)
+    assert catalog.changes["execution_ssh_interaction"] == ("fn:execution_control", FULL)

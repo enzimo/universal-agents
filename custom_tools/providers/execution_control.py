@@ -1,75 +1,62 @@
-"""Immutable deterministic execution tools for TeamArchitect.
+"""Immutable deterministic execution and brokered SSH tools.
 
 Jobs and SSH sessions are ``write`` operations decided by the access decision
 hook; the activations they create record who held access, and the runtime
-decides again before each run and SSH use. Managed services and typing into an
-SSH session are exact changes a person approves: the ``plan_*`` tools stage
-them and ``apply_change`` applies them (``custom_agents.execution_changes``).
+decides again before each run and SSH use. Managed services, SSH target
+enrollment, and bounded SSH delegations are exact changes an administrator
+approves: the ``plan_*`` tools stage them and ``apply_change`` applies them
+(``custom_agents.execution_changes``). Operational SSH tools live in
+``custom_tools.providers._execution_ssh`` so this provider stays well under the
+statement budget while allowing delegated worker types to use approved sessions
+under real Cedar and ``ExecutionAccessGuard``.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import base64
 import json
-from pathlib import Path
 from typing import Any
 
 from strands import tool
 
-from custom_agents.execution_changes import ManagedServiceChangeService, SSHInteractionChangeService
-from custom_agents.execution_control_service import ExecutionControlService
-from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
+from custom_agents.execution_changes import ManagedServiceChangeService
 from custom_tools.provider_contract import ToolProvider
-from custom_tools.providers._runtime import _require_manager_tool
-from custom_tools.runtime_context import get_agent_ref
-from id_generation import new_id
-from runtime_hosting.authorization import (
-    ExecutionAuthorizationDenied,
-    SSHCallerContext,
-    SSHCapability,
-)
-from runtime_hosting.ssh import (
-    ConfiguredSSHCredentialMaterialProvider,
-    SSHCredentialMaterial,
-    SSHSessionBroker,
+from custom_tools.providers._execution_ssh import (
+    SSH_TOOLS,
+    _SSH_BROKERS,
+    _error_payload,
+    _json_strings,
+    _manager_agent,
+    _manager_service,
+    _ssh_broker,
+    _ssh_caller,
+    _utc,
+    close_execution_ssh_session,
+    create_execution_ssh_session,
+    enroll_execution_ssh_key,
+    get_execution_ssh_command,
+    list_execution_ssh_sessions,
+    list_execution_ssh_targets,
+    open_execution_ssh_session,
+    plan_execution_ssh_interaction,
+    plan_execution_ssh_target,
+    probe_execution_ssh_host_key,
+    read_execution_ssh_session,
+    resize_execution_ssh_session,
+    run_execution_ssh_command,
+    run_execution_ssh_sudo,
+    upload_execution_ssh_bundle,
+    write_execution_ssh_session,
 )
 from runtime_hosting.execution_contracts import (
     AutomationScheduleKind,
     AutomationScheduleV1,
     MissedRunPolicy,
     OverlapPolicy,
-    ServiceKind,
     ServiceDesiredState,
+    ServiceKind,
     ServiceRestartPolicy,
 )
-
-
-_SSH_BROKERS: dict[str, SSHSessionBroker] = {}
-
-
-def _error_payload(exc: Exception) -> str:
-    payload: dict[str, Any] = {"error": str(exc)}
-    if isinstance(exc, PermissionError):
-        payload["error_code"] = "execution_access_refused"
-    return json.dumps(payload)
-
-
-def _manager_agent(tool_name: str) -> tuple[Any, str | None]:
-    agent = get_agent_ref()
-    if agent is None:
-        return None, "Agent reference not set"
-    manager_error = _require_manager_tool(agent, tool_name)
-    if manager_error:
-        return None, f"{manager_error} Escalate to {TEAM_ARCHITECT_AGENT_TYPE}."
-    return agent, None
-
-
-def _service(tool_name: str) -> tuple[ExecutionControlService | None, str | None]:
-    agent, error = _manager_agent(tool_name)
-    if error:
-        return None, error
-    return ExecutionControlService(agent), None
 
 
 def _json_object(value: str, *, field_name: str) -> dict[str, str]:
@@ -79,25 +66,6 @@ def _json_object(value: str, *, field_name: str) -> dict[str, str]:
     if not isinstance(parsed, dict):
         raise ValueError(f"{field_name} must be a JSON object.")
     return {str(key): str(item) for key, item in parsed.items()}
-
-
-def _json_strings(value: str, *, field_name: str) -> tuple[str, ...]:
-    if not str(value or "").strip():
-        return ()
-    parsed = json.loads(value)
-    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        raise ValueError(f"{field_name} must be a JSON list of strings.")
-    return tuple(parsed)
-
-
-def _utc(value: str, *, field_name: str) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError(f"{field_name} must be an ISO 8601 timestamp.") from exc
-    if parsed.tzinfo is None:
-        raise ValueError(f"{field_name} must include a timezone.")
-    return parsed.astimezone(timezone.utc)
 
 
 def _schedule(
@@ -137,60 +105,11 @@ def _job_payload(job: Any) -> dict[str, Any]:
     }
 
 
-def _ssh_broker(service: ExecutionControlService) -> SSHSessionBroker:
-    agent_id = str(service.agent.id)
-    existing = _SSH_BROKERS.get(agent_id)
-    if existing is not None:
-        return existing
-    ssh_settings = service.config.execution_control.ssh
-    if not ssh_settings.enabled:
-        raise RuntimeError("execution_control.ssh.enabled is false.")
-    materials: dict[str, SSHCredentialMaterial] = {}
-    for target in ssh_settings.targets:
-        identity = _broker_material_path(service, target.identity_file)
-        known_hosts = _broker_material_path(service, target.known_hosts_file)
-        material = SSHCredentialMaterial(
-            identity_file=identity,
-            known_hosts_file=known_hosts,
-        )
-        prior = materials.get(target.credential_binding_id)
-        if prior is not None and prior != material:
-            raise ValueError(
-                "An SSH credential binding id maps to inconsistent operator key paths."
-            )
-        materials[target.credential_binding_id] = material
-    broker = SSHSessionBroker(
-        repository=service.repository,
-        # The same checks as the execution controller, with this agent's access service.
-        authorization_guard=service.access_guard(),
-        material_provider=ConfiguredSSHCredentialMaterialProvider(materials),
-        artifact_store=service.artifact_store,
-        team_id=service.owner.team_id,
-        broker_id=f"{service.config.instance_name}.agent-ssh-broker.{agent_id}",
-        ssh_executable=ssh_settings.ssh_executable,
-        lease_ttl_seconds=ssh_settings.lease_ttl_seconds,
-        transcript_limit_bytes=ssh_settings.transcript_limit_bytes,
-    )
-    broker.recover_after_restart()
-    _SSH_BROKERS[agent_id] = broker
-    return broker
-
-
-def _broker_material_path(service: ExecutionControlService, value: str) -> Path:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = service.config.instance_root_path / path
-    resolved = path.resolve()
-    if resolved.is_relative_to(service.config.workspace_path):
-        raise PermissionError("SSH key material must stay outside the agent workspace.")
-    return resolved
-
-
 @tool
 def list_execution_profiles() -> str:
     """List operator-installed deterministic build and runtime profiles."""
     try:
-        service, error = _service("list_execution_profiles")
+        service, error = _manager_service("list_execution_profiles")
         if error:
             return json.dumps({"error": error})
         assert service is not None
@@ -212,7 +131,7 @@ def promote_execution_revision(
 ) -> str:
     """Compile source under an exact profile and persist an immutable runnable revision."""
     try:
-        service, error = _service("promote_execution_revision")
+        service, error = _manager_service("promote_execution_revision")
         if error:
             return json.dumps({"error": error})
         assert service is not None
@@ -259,7 +178,7 @@ def create_execution_job(
     off, get the person's agreement first and pass confirmed=true.
     """
     try:
-        service, error = _service("create_execution_job")
+        service, error = _manager_service("create_execution_job")
         if error:
             return json.dumps({"error": error})
         assert service is not None
@@ -299,7 +218,7 @@ def set_execution_job_enabled(
     With authorization off, get the person's agreement first and pass confirmed=true.
     """
     try:
-        service, error = _service("set_execution_job_enabled")
+        service, error = _manager_service("set_execution_job_enabled")
         if error:
             return json.dumps({"error": error})
         assert service is not None
@@ -317,7 +236,7 @@ def set_execution_job_enabled(
 def list_execution_jobs(limit: int = 100) -> str:
     """List owner-scoped immutable jobs and their exact activation targets."""
     try:
-        service, error = _service("list_execution_jobs")
+        service, error = _manager_service("list_execution_jobs")
         if error:
             return json.dumps({"error": error})
         assert service is not None
@@ -331,7 +250,7 @@ def list_execution_jobs(limit: int = 100) -> str:
 def list_execution_runs(job_id: str = "", limit: int = 100) -> str:
     """List fenced attempt status and output artifact references for an owner-scoped job."""
     try:
-        service, error = _service("list_execution_runs")
+        service, error = _manager_service("list_execution_runs")
         if error:
             return json.dumps({"error": error})
         assert service is not None
@@ -391,7 +310,7 @@ def plan_managed_execution_service(
 def list_managed_execution_services() -> str:
     """List owner-scoped managed process and MCP service state."""
     try:
-        service, error = _service("list_managed_execution_services")
+        service, error = _manager_service("list_managed_execution_services")
         if error:
             return json.dumps({"error": error})
         assert service is not None
@@ -430,333 +349,6 @@ def plan_managed_execution_service_state(
         return _error_payload(exc)
 
 
-@tool
-def list_execution_ssh_targets() -> str:
-    """List installed SSH targets without exposing key-file paths or key material."""
-    try:
-        service, error = _service("list_execution_ssh_targets")
-        if error:
-            return json.dumps({"error": error})
-        assert service is not None
-        targets = service.list_ssh_targets()
-        return json.dumps({"returned": len(targets), "targets": targets})
-    except Exception as exc:
-        return _error_payload(exc)
-
-
-@tool
-def create_execution_ssh_session(
-    target_id: str,
-    terminal_rows: int = 24,
-    terminal_columns: int = 80,
-    confirmed: bool = False,
-) -> str:
-    """Create a session for one installed SSH target that you can open, read and resize.
-
-    Typing needs a person's approval for the session: plan_execution_ssh_interaction,
-    then apply_change. With authorization off, get the person's agreement first and
-    pass confirmed=true.
-    """
-    try:
-        service, error = _service("create_execution_ssh_session")
-        if error:
-            return json.dumps({"error": error})
-        assert service is not None
-        session = service.create_ssh_session(
-            target_id=target_id,
-            terminal_rows=terminal_rows,
-            terminal_columns=terminal_columns,
-            agreement_confirmed=confirmed,
-        )
-        return session.model_dump_json()
-    except Exception as exc:
-        return _error_payload(exc)
-
-
-@tool
-def plan_execution_ssh_interaction(
-    session_id: str,
-    reason: str,
-    ttl_seconds: int = 0,
-    expires_at_utc: str = "",
-    delegated_agent_type: str = "",
-    this_request_only: bool | None = None,
-    allow_commands: bool = False,
-    allow_typing: bool = False,
-    allow_password_bootstrap: bool = False,
-    allow_broker_sudo: bool = False,
-    allow_workspace_transfer: bool = False,
-    allowed_secret_recipes_json: str = "",
-) -> str:
-    """Stage time-bounded SSH capabilities and optional single-request worker delegation; apply with apply_change.
-
-    Requires ttl_seconds (duration from administrator approval, capped by
-    execution_control.ssh.max_delegation_ttl_seconds) and/or expires_at_utc
-    (ISO 8601 UTC hard deadline), plus at least one explicit capability flag.
-    When this_request_only is omitted, it defaults to true when
-    delegated_agent_type is set (single-request worker delegation) and false
-    otherwise (usable across follow-up messages from the same person on this
-    session until it expires or is revoked). Pass this_request_only=true or
-    this_request_only=false to override that default. An administrator approves
-    the exact bounds in the Inbox.
-    """
-    try:
-        agent, error = _manager_agent("plan_execution_ssh_interaction")
-        if error:
-            return json.dumps({"error": error})
-        staged = SSHInteractionChangeService(agent).stage(
-            session_id=session_id,
-            reason=reason,
-            expires_at_utc=(
-                _utc(expires_at_utc, field_name="expires_at_utc")
-                if str(expires_at_utc or "").strip()
-                else None
-            ),
-            ttl_seconds=ttl_seconds if ttl_seconds > 0 else None,
-            delegated_agent_type=delegated_agent_type or None,
-            this_request_only=this_request_only,
-            allow_commands=allow_commands,
-            allow_typing=allow_typing,
-            allow_password_bootstrap=allow_password_bootstrap,
-            allow_broker_sudo=allow_broker_sudo,
-            allow_workspace_transfer=allow_workspace_transfer,
-            allowed_secret_recipes=_json_strings(
-                allowed_secret_recipes_json,
-                field_name="allowed_secret_recipes_json",
-            ),
-        )
-        return json.dumps(staged)
-    except Exception as exc:
-        return _error_payload(exc)
-
-
-def _ssh_caller(service: ExecutionControlService) -> SSHCallerContext:
-    return SSHCallerContext(
-        agent_type=service.actor.agent.agent_type,
-        task_id=service.actor.agent.work_id,
-        person_id=service.actor.person_id,
-    )
-
-
-@tool
-async def open_execution_ssh_session(session_id: str) -> str:
-    """Open a created SSH session's PTY using broker-owned identity material."""
-    try:
-        service, error = _service("open_execution_ssh_session")
-        if error:
-            return json.dumps({"error": error})
-        assert service is not None
-        service.owned_session(session_id)  # only the person's own sessions
-        opened = await _ssh_broker(service).open(
-            session_id=session_id,
-            lease_token=new_id("ssh_lease"),
-            caller=_ssh_caller(service),
-        )
-        return opened.model_dump_json()
-    except Exception as exc:
-        return _error_payload(exc)
-
-
-@tool
-async def read_execution_ssh_session(
-    session_id: str,
-    maximum_bytes: int = 65536,
-    timeout_seconds: float = 1.0,
-) -> str:
-    """Read bounded output from a live SSH PTY and renew its fenced lease."""
-    try:
-        service, error = _service("read_execution_ssh_session")
-        if error:
-            return json.dumps({"error": error})
-        assert service is not None
-        service.owned_session(session_id)  # only the person's own sessions
-        payload = await _ssh_broker(service).read(
-            session_id=session_id,
-            maximum_bytes=max(1, min(int(maximum_bytes), 1_048_576)),
-            timeout_seconds=max(0.0, min(float(timeout_seconds), 30.0)),
-            caller=_ssh_caller(service),
-        )
-        return json.dumps(
-            {
-                "session_id": session_id,
-                "bytes": len(payload),
-                "text": payload.decode("utf-8", errors="replace"),
-                "base64": base64.b64encode(payload).decode("ascii"),
-            }
-        )
-    except Exception as exc:
-        return _error_payload(exc)
-
-
-@tool
-async def write_execution_ssh_session(session_id: str, text: str) -> str:
-    """Type UTF-8 input into a live SSH PTY; needs a person's approval for this session."""
-    try:
-        service, error = _service("write_execution_ssh_session")
-        if error:
-            return json.dumps({"error": error})
-        assert service is not None
-        service.owned_session(session_id)  # only the person's own sessions
-        written = await _ssh_broker(service).write(
-            session_id=session_id,
-            payload=text.encode("utf-8"),
-            caller=_ssh_caller(service),
-        )
-        return json.dumps({"session_id": session_id, "written_bytes": written})
-    except Exception as exc:
-        return _error_payload(exc)
-
-
-@tool
-async def resize_execution_ssh_session(
-    session_id: str,
-    terminal_rows: int,
-    terminal_columns: int,
-) -> str:
-    """Resize a live SSH PTY and renew its fenced lease."""
-    try:
-        service, error = _service("resize_execution_ssh_session")
-        if error:
-            return json.dumps({"error": error})
-        assert service is not None
-        service.owned_session(session_id)  # only the person's own sessions
-        await _ssh_broker(service).resize(
-            session_id=session_id,
-            rows=terminal_rows,
-            columns=terminal_columns,
-            caller=_ssh_caller(service),
-        )
-        return json.dumps(
-            {
-                "session_id": session_id,
-                "terminal_rows": terminal_rows,
-                "terminal_columns": terminal_columns,
-            }
-        )
-    except Exception as exc:
-        return _error_payload(exc)
-
-
-@tool
-async def close_execution_ssh_session(session_id: str) -> str:
-    """Close a live SSH PTY and persist its bounded transcript artifact."""
-    try:
-        service, error = _service("close_execution_ssh_session")
-        if error:
-            return json.dumps({"error": error})
-        assert service is not None
-        service.owned_session(session_id)  # only the person's own sessions
-        closed = await _ssh_broker(service).close(session_id=session_id)
-        return closed.model_dump_json()
-    except Exception as exc:
-        return _error_payload(exc)
-
-
-def _enabled_delegation_capabilities(interaction: Any) -> tuple[SSHCapability, ...]:
-    if interaction is None:
-        return ()
-    bounds = interaction.bounds
-    if bounds is None:
-        return (SSHCapability.TYPING,)
-    capabilities: list[SSHCapability] = []
-    if bounds.allow_commands:
-        capabilities.append(SSHCapability.COMMAND)
-    if bounds.allow_typing:
-        capabilities.append(SSHCapability.TYPING)
-    if bounds.allow_password_bootstrap:
-        capabilities.append(SSHCapability.PASSWORD_BOOTSTRAP)
-    if bounds.allow_broker_sudo:
-        capabilities.append(SSHCapability.BROKER_SUDO)
-    if bounds.allow_workspace_transfer:
-        capabilities.append(SSHCapability.WORKSPACE_TRANSFER)
-    return tuple(capabilities)
-
-
-def _session_capability_view(
-    service: ExecutionControlService,
-    session: Any,
-    interaction: Any,
-    revocation: Any,
-    caller: SSHCallerContext,
-) -> tuple[bool, bool, str | None]:
-    """Derive ``usable_in_this_request`` and ``typing_approved`` directly from ``ExecutionAccessGuard``."""
-
-    guard = service.access_guard()
-    enrolled_target = (
-        service.repository.get_ssh_target(
-            team_id=service.owner.team_id, target_id=session.target.target_id
-        )
-        if session.target.target_id is not None
-        else None
-    )
-    allow_pw = service.config.execution_control.ssh.allow_password_bootstrap
-    enabled = _enabled_delegation_capabilities(interaction)
-    usable = False
-    first_refusal: str | None = None
-    typing_approved = False
-    for capability in enabled:
-        try:
-            guard.require_ssh_capability(
-                session,
-                interaction,
-                capability=capability,
-                caller=caller,
-                enrolled_target=enrolled_target,
-                session_revocation=revocation,
-                allow_password_bootstrap_setting=allow_pw,
-            )
-        except ExecutionAuthorizationDenied as exc:
-            if first_refusal is None:
-                first_refusal = str(exc)
-        else:
-            usable = True
-            if capability is SSHCapability.TYPING:
-                typing_approved = True
-    return usable, typing_approved, (None if usable else first_refusal)
-
-
-@tool
-def list_execution_ssh_sessions() -> str:
-    """List owner-scoped SSH sessions, active delegation status, and transcript references."""
-    try:
-        service, error = _service("list_execution_ssh_sessions")
-        if error:
-            return json.dumps({"error": error})
-        assert service is not None
-        sessions = service.list_ssh_sessions()
-        caller = _ssh_caller(service)
-        payloads: list[dict[str, Any]] = []
-        for item in sessions:
-            interaction = service.ssh_interaction(item.session_id)
-            revocation = service.repository.get_interactive_session_revocation(
-                team_id=service.owner.team_id, session_id=item.session_id
-            )
-            delegation_active = bool(
-                revocation is None and interaction is not None and interaction.is_active()
-            )
-            usable_in_this_request, typing_approved, unusable_reason = _session_capability_view(
-                service, item, interaction, revocation, caller
-            )
-            entry: dict[str, Any] = {
-                **item.model_dump(mode="json"),
-                "revoked": revocation is not None,
-                "delegation_active": delegation_active,
-                "usable_in_this_request": usable_in_this_request,
-                "typing_approved": typing_approved,
-                "delegation": (
-                    interaction.bounds.model_dump(mode="json")
-                    if interaction is not None and interaction.bounds is not None
-                    else None
-                ),
-            }
-            if delegation_active and not usable_in_this_request and unusable_reason:
-                entry["unusable_reason"] = unusable_reason
-            payloads.append(entry)
-        return json.dumps({"returned": len(payloads), "sessions": payloads})
-    except Exception as exc:
-        return _error_payload(exc)
-
-
 PROVIDER = ToolProvider(
     name="execution_control",
     tools=(
@@ -769,37 +361,39 @@ PROVIDER = ToolProvider(
         plan_managed_execution_service,
         list_managed_execution_services,
         plan_managed_execution_service_state,
-        list_execution_ssh_targets,
-        create_execution_ssh_session,
-        open_execution_ssh_session,
-        read_execution_ssh_session,
-        plan_execution_ssh_interaction,
-        write_execution_ssh_session,
-        resize_execution_ssh_session,
-        close_execution_ssh_session,
-        list_execution_ssh_sessions,
+        *SSH_TOOLS,
     ),
 )
 
 
 __all__ = [
     "PROVIDER",
+    "_SSH_BROKERS",
+    "_ssh_broker",
+    "_ssh_caller",
+    "close_execution_ssh_session",
     "create_execution_job",
+    "create_execution_ssh_session",
+    "enroll_execution_ssh_key",
+    "get_execution_ssh_command",
     "list_execution_jobs",
     "list_execution_profiles",
     "list_execution_runs",
-    "list_managed_execution_services",
-    "plan_execution_ssh_interaction",
-    "plan_managed_execution_service",
-    "plan_managed_execution_service_state",
-    "promote_execution_revision",
-    "set_execution_job_enabled",
-    "close_execution_ssh_session",
-    "create_execution_ssh_session",
     "list_execution_ssh_sessions",
     "list_execution_ssh_targets",
+    "list_managed_execution_services",
     "open_execution_ssh_session",
+    "plan_execution_ssh_interaction",
+    "plan_execution_ssh_target",
+    "plan_managed_execution_service",
+    "plan_managed_execution_service_state",
+    "probe_execution_ssh_host_key",
+    "promote_execution_revision",
     "read_execution_ssh_session",
     "resize_execution_ssh_session",
+    "run_execution_ssh_command",
+    "run_execution_ssh_sudo",
+    "set_execution_job_enabled",
+    "upload_execution_ssh_bundle",
     "write_execution_ssh_session",
 ]

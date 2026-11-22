@@ -477,6 +477,25 @@ class SSHSessionBroker:
 
     # -- authorization and network validation ------------------------------------
 
+    def authorize_capability(
+        self,
+        *,
+        session_id: str,
+        capability: SSHCapability,
+        caller: SSHCallerContext,
+        secret_recipe: SSHSecretRecipe | None = None,
+    ) -> tuple[EnrolledSSHTargetV1 | None, SSHInteractionRecordV1 | None]:
+        """Verify session state and ``ExecutionAccessGuard`` before running side-effecting tool preflight."""
+
+        self._require_not_shutting_down()
+        session = self._session_for_operation(session_id)
+        return self._authorize_session(
+            session,
+            capability=capability,
+            caller=caller,
+            secret_recipe=secret_recipe,
+        )
+
     def _authorize_session(
         self,
         session: InteractiveSessionV1,
@@ -931,6 +950,24 @@ class SSHSessionBroker:
         else:
             if cmd.owner_person_id is not None and caller.person_id != cmd.owner_person_id:
                 raise ExecutionAuthorizationDenied("SSH command belongs to another person.")
+            owner_agent_type = (
+                session.connect_activation.holder.agent_type
+                if session.connect_activation is not None
+                else None
+            )
+            allowed_agent_types = {cmd.caller.agent_type}
+            if owner_agent_type:
+                allowed_agent_types.add(owner_agent_type)
+            if caller.agent_type not in allowed_agent_types:
+                raise ExecutionAuthorizationDenied(
+                    "Only the session's owning manager or the delegated agent that started this SSH command may read its result."
+                )
+            if (
+                caller.agent_type != owner_agent_type
+                and cmd.caller.task_id is not None
+                and caller.task_id != cmd.caller.task_id
+            ):
+                raise ExecutionAuthorizationDenied("SSH command belongs to another request.")
         return await self._wait_for_command(cmd, wait_seconds=wait_seconds)
 
     async def enroll_ssh_key(
@@ -1352,12 +1389,6 @@ class SSHSessionBroker:
                 needs_password=needs_password,
             )
 
-        for field_name, secret_line in stdin_lines:
-            if "\n" in secret_line or "\r" in secret_line or "\x00" in secret_line:
-                raise ValueError(
-                    f"SSH credential {boot_key!r} field {field_name!r} must be a single line "
-                    "without line breaks or NUL bytes; update the stored credential and retry."
-                )
         stdin_payload = (
             ("\n".join(secret_line for _, secret_line in stdin_lines) + "\n").encode("utf-8")
             if stdin_lines

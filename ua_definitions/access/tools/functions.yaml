@@ -458,6 +458,8 @@ tools:
       plan_managed_execution_service: write
       plan_managed_execution_service_state: write
       list_managed_execution_services: read
+      probe_execution_ssh_host_key: read
+      plan_execution_ssh_target: write
       list_execution_ssh_targets: read
       create_execution_ssh_session: write
       open_execution_ssh_session: write
@@ -472,6 +474,11 @@ tools:
       resize_execution_ssh_session: write
       close_execution_ssh_session: write
       list_execution_ssh_sessions: read
+      run_execution_ssh_command: write
+      get_execution_ssh_command: read
+      enroll_execution_ssh_key: write
+      run_execution_ssh_sudo: write
+      upload_execution_ssh_bundle: write
     changes:
       managed_execution_service: full
       execution_ssh_target_enroll: full
