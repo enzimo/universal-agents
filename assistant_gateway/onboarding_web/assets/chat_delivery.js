@@ -271,6 +271,15 @@
     }
   }
 
+  function followUpPageItemId(requestId, rawUrl, origin) {
+    var id = String(requestId || "").trim();
+    if (!id) {
+      return "";
+    }
+    var formKey = followUpFormKey(rawUrl, origin);
+    return formKey ? "account_link:" + id + ":" + formKey : "";
+  }
+
   // An approved access proposal's credential forms (access_inbox.mjs
   // followUpLinks) as broker card items placed after ``sessionSequence``:
   // one "account_link" item per form, built through normalizeTransientItem so
@@ -288,14 +297,14 @@
     }
     var position = Math.max(1, nonNegativeInteger(sessionSequence));
     return (Array.isArray(links) ? links : []).flatMap(function (link) {
-      var formKey = followUpFormKey(link && link.url, origin);
-      if (!formKey) {
+      var itemId = followUpPageItemId(id, link && link.url, origin);
+      if (!itemId) {
         return [];
       }
-      var pageId = id + ":" + formKey;
+      var pageId = itemId.slice("account_link:".length);
       var item = normalizeTransientItem({
         kind: "account_link",
-        item_id: "account_link:" + pageId,
+        item_id: itemId,
         request_id: pageId,
         correlation_id: id,
         session_sequence: position,
@@ -465,6 +474,7 @@
     clearErrorNotice: clearErrorNotice,
     create: create,
     createErrorNotice: createErrorNotice,
+    followUpPageItemId: followUpPageItemId,
     followUpPageItems: followUpPageItems,
     latestDurableSessionSequence: latestDurableSessionSequence,
     normalizeTransientItem: normalizeTransientItem,

@@ -6,7 +6,11 @@ import vm from "node:vm";
 import { byClass, byTag, fakeDocument } from "./fake_dom.mjs";
 import { FOLLOW_UP_AFTER_LATEST, FOLLOW_UP_AFTER_REVIEW } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 import {
+  BROKER_CARD_DECLINED,
+  BROKER_CARD_EXPIRED,
   BROKER_CARD_FINISHED,
+  BROKER_CARD_NOTES,
+  BROKER_CARD_UNAVAILABLE,
   CARD_MESSAGE_TYPE,
   brokerCardElement,
   createBrokerCards,
@@ -18,6 +22,8 @@ const EXPIRE_FN = CHAT_JS.split("function replaceTransientActionWithExpiredState
   .split("function updateTransientCountdown()")[0];
 const ADD_FOLLOW_UP_FNS = CHAT_JS.split("function isReviewOf(requestId)")[1]
   .split("function showFollowUpPages(requestId)")[0];
+const CLOSE_FOLLOW_UP_FNS = CHAT_JS.split("function isTerminalBrokerCardState(state)")[1]
+  .split("function setBrokerCardState(thread, itemId, state)")[0];
 const SET_BROKER_STATE_FN = CHAT_JS.split("function setBrokerCardState(thread, itemId, state)")[1]
   .split("function createTransientItemCard(thread, item)")[0];
 const CREATE_FN = CHAT_JS.split("function createTransientItemCard(thread, item)")[1]
@@ -340,4 +346,115 @@ test("cross-thread broker card outcome and expiry close the form in every thread
   assert.equal(thread1.brokerCardStates.get(expItem.itemId), "expired");
   assert.equal(thread2.brokerCardStates.get(expItem.itemId), "expired");
   assert.equal(thread3.brokerCardStates.get(expItem.itemId), undefined);
+});
+
+test("closeFollowUpPages closes live and unavailable inline broker cards across threads without overwriting declined or expired state", () => {
+  const document = fakeDocument();
+  const browser = {
+    innerHeight: 800,
+    console: { warn() {} },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  let nextTimer = 1;
+  const lifecycle = {
+    listen(node, event, handler) { node.addEventListener(event, handler); },
+    timeout(fn, delayMs) {
+      if (delayMs === 0) fn();
+      return nextTimer++;
+    },
+    clearTimeout() {},
+  };
+  const brokerCards = createBrokerCards({ browser, document, lifecycle });
+  const formA = {
+    label: "Choose the credential for Portainer",
+    url: "http://127.0.0.1:18600/account-link/token-a",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-a?view=card",
+    expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const formB = {
+    label: "Choose the credential for Gitea",
+    url: "http://127.0.0.1:18600/account-link/token-b",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-b?view=card",
+    expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const formC = {
+    label: "Choose the credential for Forgejo",
+    url: "http://127.0.0.1:18600/account-link/token-c",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-c?view=card",
+    expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const [pageA, pageB, pageC] = globalThis.UAChatDelivery.followUpPageItems(
+    "req-1", 4, [formA, formB, formC], "http://127.0.0.1:18090",
+  );
+  const thread1 = {
+    id: "t1",
+    transientItems: [{ ...pageA.item }, { ...pageB.item }, { ...pageC.item }],
+    brokerCardStates: new Map([
+      [pageB.item.itemId, BROKER_CARD_UNAVAILABLE],
+      [pageC.item.itemId, BROKER_CARD_DECLINED],
+    ]),
+  };
+  const thread2 = {
+    id: "t2",
+    transientItems: [{ ...pageA.item }, { ...pageC.item }],
+    brokerCardStates: new Map([
+      [pageC.item.itemId, BROKER_CARD_DECLINED],
+    ]),
+  };
+  let renders = 0;
+  const context = {
+    document,
+    brokerCards,
+    brokerCardElement,
+    BROKER_CARD_DECLINED,
+    BROKER_CARD_EXPIRED,
+    BROKER_CARD_FINISHED,
+    lifecycle,
+    sharedState: { threads: [thread1, thread2] },
+    activeThread: () => thread1,
+    window: {
+      UAChatDelivery: globalThis.UAChatDelivery,
+      location: { origin: "http://127.0.0.1:18090" },
+    },
+    shellState: { expiredSecureFormMessage: "This secure form link has expired." },
+    copyTextToClipboard: () => Promise.resolve(),
+    renderMessages: () => { renders += 1; },
+  };
+  vm.runInNewContext(
+    `function isTerminalBrokerCardState(state)${CLOSE_FOLLOW_UP_FNS}\n`
+    + `function setBrokerCardState(thread, itemId, state)${SET_BROKER_STATE_FN}\n`
+    + `function createTransientItemCard(thread, item)${CREATE_FN}\n`
+    + `this.closeFollowUpPages = closeFollowUpPages;\n`
+    + `this.createTransientItemCard = createTransientItemCard;`,
+    context,
+  );
+
+  // Open Form A as a live iframe in thread1.
+  const liveCardA = context.createTransientItemCard(thread1, thread1.transientItems[0]);
+  assert.equal(byTag(liveCardA, "iframe").length, 1);
+  assert.deepEqual(brokerCards.openItemIds(), [pageA.item.itemId]);
+
+  // External completion (e.g. via "Open in its own tab" or another device) closes Form A and Form B across threads.
+  context.closeFollowUpPages("req-1", [formA.url, formB.url]);
+  assert.deepEqual(brokerCards.openItemIds(), [], "live iframe closed immediately");
+  assert.equal(thread1.brokerCardStates.get(pageA.item.itemId), BROKER_CARD_FINISHED);
+  assert.equal(thread2.brokerCardStates.get(pageA.item.itemId), BROKER_CARD_FINISHED);
+  assert.equal(thread1.brokerCardStates.get(pageB.item.itemId), BROKER_CARD_FINISHED,
+    "unavailable fallback card also closes to finished");
+  assert.equal(renders, 1);
+
+  // Re-rendering Form A shrinks it to the closed one-line state with no iframe.
+  const closedA = context.createTransientItemCard(thread1, thread1.transientItems[0]);
+  assert.ok(closedA.classList.contains("is-closed"));
+  assert.equal(byTag(closedA, "iframe").length, 0);
+  assert.equal(closedA.textContent, BROKER_CARD_NOTES[BROKER_CARD_FINISHED]);
+  assert.deepEqual(brokerCards.openItemIds(), []);
+
+  // Re-calling for already-finished or already-declined forms preserves state and does not trigger an extra render.
+  context.closeFollowUpPages("req-1", [formA.url, formC.url]);
+  assert.equal(thread1.brokerCardStates.get(pageC.item.itemId), BROKER_CARD_DECLINED,
+    "existing declined state is preserved");
+  assert.equal(thread2.brokerCardStates.get(pageC.item.itemId), BROKER_CARD_DECLINED);
+  assert.equal(renders, 1, "no redundant render when cards are already in terminal states");
 });

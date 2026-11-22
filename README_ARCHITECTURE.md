@@ -3785,9 +3785,13 @@ page, the gateway, agents and models still never see what is typed.
   (where the Inbox placed it and under the review message), and stable
   URL-derived item ids (`account_link:<requestId>:<urlHash>`) let the
   page-wide card registry keep one live frame per id and propagate an outcome
-  to close every copy; once all forms finish or expire, the decided card
-  clears both the inline-card prompt and any fallback buttons in favor of
-  plain `follow_up_outcomes`. The Inbox
+  to close every copy. When a review refresh sees that a previously handed-off
+  form is no longer pending on the server and not settling (for example after
+  completion via **Open in its own tab** or another device), Web Chat closes
+  its live frame and marks every thread's copy finished while preserving any
+  existing declined or expired state; once all forms finish or expire, the
+  decided card clears both the inline-card prompt and any fallback buttons in
+  favor of plain `follow_up_outcomes`. The Inbox
   notice keeps the forms' links. The standalone workflow page is not Web Chat;
   its decided card shows no follow-up today (`workflow.mjs` passes no links),
   so an approver there reaches the forms through the Inbox notice (proposed

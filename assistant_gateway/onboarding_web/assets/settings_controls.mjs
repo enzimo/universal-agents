@@ -60,12 +60,14 @@ const ACCESS_WRITE_FALLBACK = "The change was not saved because the gateway retu
  * - `onClose()`, `onUnauthorized(response)`, `onAppearanceOpen()`: page callbacks.
  * - `onFollowUpPages(requestId, links, placement)`: shows an approved proposal's
  *   credential forms as broker cards in the conversation; returns the links it
- *   took. `onShowFollowUpPages(requestId)` brings those cards into view.
+ *   took. `onCloseFollowUpPages(requestId, urls)` closes inline broker cards
+ *   whose forms ended outside their frame. `onShowFollowUpPages(requestId)`
+ *   brings those cards into view.
  * - `createInbox`, `createCounts`, `createMap`, `createTasks`, `createChatReviews`: replaceable in tests.
  */
 export function createSettingsControls({
   browser = globalThis, returnFocus, onClose, onUnauthorized, onAppearanceOpen, teamActivity, onFollowUpPages,
-  onShowFollowUpPages,
+  onCloseFollowUpPages, onShowFollowUpPages,
   createInbox = createAccessInbox, createCounts = createInboxCounts, createMap = createAccessMap,
   createChatReviews = createChatAccessReviews,
   createTasks = options => browser.UATaskControls.createTeam(options),
@@ -118,6 +120,7 @@ export function createSettingsControls({
     paginate: client.paginate,
     // An approval's credential forms become broker cards in the conversation; this shows them.
     onFollowUpPages,
+    onCloseFollowUpPages,
     showConversation: requestId => {
       close();
       if (typeof onShowFollowUpPages === "function") onShowFollowUpPages(requestId);
@@ -173,6 +176,7 @@ export function createSettingsControls({
     // A decision in chat changes the Inbox list and its badge.
     onDecided: () => { accessInbox.load({ keepOutcomes: true }); },
     onFollowUpPages,
+    onCloseFollowUpPages,
     browser,
   });
 

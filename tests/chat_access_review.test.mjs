@@ -44,7 +44,7 @@ function message(id = "req-1") {
   return { role: "system", messageType: "access_review", accessRequestId: id, content: "announcement" };
 }
 
-function harness({ reviews = { "req-1": changeReview() }, decide, readError, onFollowUpPages, startClock = 1_000_000 } = {}) {
+function harness({ reviews = { "req-1": changeReview() }, decide, readError, onFollowUpPages, onCloseFollowUpPages, startClock = 1_000_000 } = {}) {
   const document = fakeDocument();
   document.hidden = false;
   const docListeners = new Map();
@@ -95,6 +95,7 @@ function harness({ reviews = { "req-1": changeReview() }, decide, readError, onF
     openInbox: id => calls.opened.push(id),
     onDecided: id => calls.decided.push(id),
     onFollowUpPages,
+    onCloseFollowUpPages,
   });
   const bubble = document.createElement("article");
   document.body.append(bubble);
@@ -693,4 +694,67 @@ test("refreshFollowUps redraws the decided card when a hand-off succeeds with an
   await settle();
   assert.equal(byTag(slot, "a").length, 0, "card redraws to remove fallback button");
   assert.equal(byClass(slot, "access-review-follow-up-note")[0].textContent, FOLLOW_UP_PAGES_BELOW);
+});
+
+test("review refresh notifies chat page to close handed-off inline broker cards once finished externally, skipping while settling", async () => {
+  const start = Date.parse("2026-11-21T12:00:00Z");
+  const expires = "2026-11-21T12:15:00+00:00";
+  const formA = {
+    label: "Choose the credential for Portainer", url: "http://127.0.0.1:18600/account-link/a",
+    frame_url: "http://127.0.0.1:18600/account-link/a?view=card", expires_at_utc: expires,
+  };
+  const formB = {
+    label: "Choose the credential for Gitea", url: "http://127.0.0.1:18600/account-link/b",
+    frame_url: "http://127.0.0.1:18600/account-link/b?view=card", expires_at_utc: expires,
+  };
+  const closed = [];
+  const h = harness({
+    startClock: start,
+    reviews: {
+      "req-1": changeReview({
+        status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+        follow_up_links: [formA, formB], follow_up_outcomes: [], follow_up_settling: false,
+      }),
+    },
+    onFollowUpPages: (_id, links) => links,
+    onCloseFollowUpPages: (id, urls) => closed.push({ id, urls }),
+  });
+
+  const slot = h.reviewer.mount(h.bubble, message());
+  await settle();
+  assert.equal(closed.length, 0);
+
+  // Form A finishes externally (e.g. via "Open in its own tab" or another device) while Form B stays open.
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [formB], follow_up_outcomes: ["The account link for Portainer is done."], follow_up_settling: false,
+  });
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.deepEqual(closed, [{ id: "req-1", urls: [formA.url] }]);
+
+  // Form B crosses expiry and enters watch grace (settling): do not close Form B yet.
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [], follow_up_outcomes: ["The account link for Portainer is done."],
+    follow_up_settling: true, follow_up_settling_until_utc: "2026-11-21T12:16:00+00:00",
+  });
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.equal(closed.length, 1, "does not close handed-off card while settling");
+
+  // Settling resolves with completion: now close Form B and stop polling.
+  h.reviews["req-1"] = changeReview({
+    status: "granted", decision: "approve", decided_by_name: "Ana", can_decide: false, choices: [],
+    follow_up_links: [], follow_up_outcomes: ["The account link for Portainer is done.", "The account link for Gitea is done."],
+    follow_up_settling: false, follow_up_settling_until_utc: null,
+  });
+  [...h.intervals.values()][0].callback();
+  await settle();
+  assert.deepEqual(closed, [
+    { id: "req-1", urls: [formA.url] },
+    { id: "req-1", urls: [formB.url] },
+  ]);
+  assert.equal(byClass(slot, "access-review-follow-up-note").length, 0);
+  assert.equal(h.intervals.size, 0);
 });

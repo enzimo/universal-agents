@@ -20,7 +20,14 @@ import { createActivityMesh } from "./activity_mesh.mjs";
 import { createTeamActivity } from "./team_activity.mjs";
 import { createSettingsClient } from "./settings_support.mjs";
 import { createChatSubmission } from "./chat_submission.mjs";
-import { brokerCardElement, createBrokerCards, replaceChildrenKeeping } from "./broker_card.mjs";
+import {
+  BROKER_CARD_DECLINED,
+  BROKER_CARD_EXPIRED,
+  BROKER_CARD_FINISHED,
+  brokerCardElement,
+  createBrokerCards,
+  replaceChildrenKeeping,
+} from "./broker_card.mjs";
 import {
   LIST_STATE,
   THREAD_PLACEMENT_ACTION,
@@ -540,6 +547,7 @@ const activityMesh = createActivityMesh({
 sharedState.settingsControls = createSettingsControls({
     teamActivity,
     onFollowUpPages: function (requestId, links, placement) { return addFollowUpPages(requestId, links, placement); },
+    onCloseFollowUpPages: function (requestId, urls) { closeFollowUpPages(requestId, urls); },
     onShowFollowUpPages: function (requestId) { showFollowUpPages(requestId); },
     onClose: function () { renderThreads(); },
     returnFocus: sharedState.settingsButton,
@@ -3036,6 +3044,62 @@ function showFollowUpPages(requestId) {
         card.scrollIntoView({ block: "center" });
       }
     }, 0);
+  }
+
+function isTerminalBrokerCardState(state) {
+    return state === BROKER_CARD_FINISHED || state === BROKER_CARD_DECLINED || state === BROKER_CARD_EXPIRED;
+  }
+
+// Close inline broker cards whose proposal follow-up forms ended outside the
+// iframe (for example via "Open in its own tab" or another device) so they
+// shrink to the closed one-line state instead of sitting open until expiry.
+// Existing terminal states (declined, expired, finished) are preserved.
+function closeFollowUpPages(requestId, urls) {
+    var id = String(requestId || "").trim();
+    if (!id || !Array.isArray(urls) || !urls.length) {
+      return;
+    }
+    var itemIds = [];
+    urls.forEach(function (url) {
+      var itemId = window.UAChatDelivery.followUpPageItemId(id, url, window.location.origin);
+      if (itemId && itemIds.indexOf(itemId) === -1) {
+        itemIds.push(itemId);
+      }
+    });
+    if (!itemIds.length) {
+      return;
+    }
+    var changed = false;
+    itemIds.forEach(function (itemId) {
+      var threads = (sharedState.threads || []).filter(function (candidate) {
+        var items = Array.isArray(candidate && candidate.transientItems) ? candidate.transientItems : [];
+        return items.some(function (item) { return item && item.itemId === itemId; });
+      });
+      if (brokerCards.live(itemId)) {
+        brokerCards.close(itemId);
+        changed = true;
+      }
+      var existingTerminal = "";
+      threads.forEach(function (candidate) {
+        if (existingTerminal) return;
+        var existing = candidate.brokerCardStates ? candidate.brokerCardStates.get(itemId) || "" : "";
+        if (isTerminalBrokerCardState(existing)) {
+          existingTerminal = existing;
+        }
+      });
+      var targetState = existingTerminal || BROKER_CARD_FINISHED;
+      var needsState = threads.some(function (candidate) {
+        var existing = candidate.brokerCardStates ? candidate.brokerCardStates.get(itemId) || "" : "";
+        return existing !== targetState;
+      });
+      if (needsState) {
+        setBrokerCardState(null, itemId, targetState);
+        changed = true;
+      }
+    });
+    if (changed) {
+      lifecycle.timeout(renderMessages, 0);
+    }
   }
 
 function setBrokerCardState(thread, itemId, state) {

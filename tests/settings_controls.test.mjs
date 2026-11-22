@@ -23,7 +23,7 @@ function pageFromChatHtml(skip = []) {
   return env;
 }
 
-function fixture() {
+function fixture(options = {}) {
   const env = pageFromChatHtml();
   const node = id => env.document.getElementById(id);
   const tasks = [], maps = [], closes = [], appearance = [];
@@ -39,6 +39,7 @@ function fixture() {
     browser: env.browser, returnFocus, teamActivity,
     onClose: () => closes.push(true),
     onAppearanceOpen: () => appearance.push(true),
+    ...options,
     createMap: () => ({
       load() { maps.push(["load"]); return Promise.resolve(); },
       open(agentType) { maps.push(["open", agentType]); return Promise.resolve(); },
@@ -346,7 +347,11 @@ test("sign-out forgets the CSRF token, so later writes are refused locally", asy
 });
 
 test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up links", async () => {
-  const f = fixture();
+  const closedPages = [];
+  const f = fixture({
+    onFollowUpPages: (_id, links) => links,
+    onCloseFollowUpPages: (id, urls) => closedPages.push({ id, urls }),
+  });
   const bubble = f.document.createElement("article");
   f.document.body.append(bubble);
   f.settings.mountAccessReview(bubble, {
@@ -355,7 +360,19 @@ test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up l
   await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
     review: review({
       request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
-      follow_up_links: [{ label: "Choose the credential for Portainer", url: "https://broker.example/link/1", expires_at_utc: "2099-01-01T00:15:00+00:00" }],
+      follow_up_links: [
+        {
+          label: "Choose the credential for Portainer",
+          url: "https://broker.example/link/1",
+          frame_url: "https://broker.example/link/1?view=card",
+          expires_at_utc: "2099-01-01T00:15:00+00:00",
+        },
+        {
+          label: "Choose the credential for Gitea",
+          url: "https://broker.example/link/2",
+          expires_at_utc: "2099-01-01T00:15:00+00:00",
+        },
+      ],
       follow_up_outcomes: [],
     }),
   }));
@@ -366,9 +383,10 @@ test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up l
     review: review({
       request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
       follow_up_links: [],
-      follow_up_outcomes: ["The account link for Portainer is done."],
+      follow_up_outcomes: ["The account link for Portainer is done.", "The account link for Gitea is done."],
     }),
   }));
   assert.equal(bubble.querySelectorAll("a").length, 0);
   assert.match(bubble.textContent, /The account link for Portainer is done\./);
+  assert.deepEqual(closedPages, [{ id: "req-follow", urls: ["https://broker.example/link/1"] }]);
 });

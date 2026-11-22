@@ -676,6 +676,23 @@ export function handOffFollowUpLinks(requestId, links, onFollowUpPages, placemen
 }
 
 /**
+ * Notify the chat page when previously handed-off follow-up forms are no longer
+ * pending on the server (for example after finishing via "Open in its own tab"
+ * or on another device) so their inline broker cards close instead of sitting
+ * open until expiry. Skips while the review is still settling in watch grace.
+ */
+export function closeEndedFollowUpLinks(requestId, review, onCloseFollowUpPages, handedOffUrls) {
+  if (typeof onCloseFollowUpPages !== "function") return false;
+  if (!review || !handedOffUrls || !handedOffUrls.size || isFollowUpSettling(review)) return false;
+  const pendingUrls = new Set(followUpLinks(review).map(link => link.url));
+  const ended = [...handedOffUrls].filter(url => !pendingUrls.has(url));
+  if (!ended.length) return false;
+  ended.forEach(url => handedOffUrls.delete(url));
+  onCloseFollowUpPages(requestId, ended);
+  return true;
+}
+
+/**
  * Splits a decided review's active follow-up links into fallback new-tab
  * buttons (``links``) and the inline broker-card prompt (``pages``), clearing
  * ``pages`` once every handed-off link has finished or expired.
@@ -1076,8 +1093,8 @@ export function createInboxCounts({ get, onChange, browser = globalThis, pollMs 
  * with only the parts that read knows (`decidableRequests`, `unreadNotices`).
  */
 export function createAccessInbox({
-  container, get, post, beginAction, failureMessage, onCounts, paginate, onFollowUpPages, showConversation,
-  browser = globalThis, formatTime = localTime, now = () => Date.now(), isVisible,
+  container, get, post, beginAction, failureMessage, onCounts, paginate, onFollowUpPages, onCloseFollowUpPages,
+  showConversation, browser = globalThis, formatTime = localTime, now = () => Date.now(), isVisible,
 }) {
   const document = browser.document;
   const warn = (event, detail) => browser.console && browser.console.warn(event, detail);
@@ -1140,6 +1157,7 @@ export function createAccessInbox({
           const handedOff = handOffFollowUpLinks(
             id, activeFollowUpLinks(entry.review, now()), onFollowUpPages, FOLLOW_UP_AFTER_LATEST, entry.handedOffUrls,
           );
+          closeEndedFollowUpLinks(id, entry.review, onCloseFollowUpPages, entry.handedOffUrls);
           if (handedOff || followUpSignature(entry.review, now()) !== entry.lastRenderedSignature) {
             redrawOutcomeCard(id, entry);
           }

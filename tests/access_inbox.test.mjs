@@ -6,8 +6,9 @@ import {
   ACCESS_REMOVED_LABEL, FOLLOW_UP_AFTER_LATEST, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_EXPIRY_GRACE_MS,
   FOLLOW_UP_PAGES_BELOW, FOLLOW_UP_PAGES_IN_CONVERSATION, FOLLOW_UP_SETTLING_TEXT, LACKS_ACCESS_NOTE,
   NEEDS_DECISION, SHOW_CONVERSATION_LABEL, WAITING_FOR_APPROVER, INBOX_COUNTS_PATH, NOTICES_READ_PATH,
-  activeFollowUpLinks, createAccessInbox, createFollowUpWatcher, createInboxCounts, decidableReviewCount,
-  decisionOutcome, emptyNoticesText, followUpCardParts, followUpLinks, followUpOutcomes, handOffFollowUpLinks,
+  activeFollowUpLinks, closeEndedFollowUpLinks, createAccessInbox, createFollowUpWatcher, createInboxCounts,
+  decidableReviewCount, decisionOutcome, emptyNoticesText, followUpCardParts, followUpLinks, followUpOutcomes,
+  handOffFollowUpLinks,
   inboxBadgeLabel, inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter, markedText, parseAccessRequestLink,
   renderDecidedCard, renderNoticeRow, renderReviewCard, reviewCardModel, unreadNoticeCount,
 } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
@@ -785,6 +786,38 @@ test("handOffFollowUpLinks hands framed forms once per URL and followUpCardParts
   assert.deepEqual(byTag(card, "a").map(anchor => anchor.textContent), ["Choose the credential for Gitea"]);
 });
 
+test("closeEndedFollowUpLinks notifies once per ended handed-off URL and skips while settling", () => {
+  const formA = { label: "Choose the credential for Portainer", url: "http://b.example/a", frame_url: "http://b.example/a?view=card" };
+  const formB = { label: "Choose the credential for Gitea", url: "http://b.example/b", frame_url: "http://b.example/b?view=card" };
+  const handedOff = new Set([formA.url, formB.url]);
+  const closed = [];
+  const onClose = (id, urls) => closed.push({ id, urls });
+
+  // While both remain pending on the server: nothing closes.
+  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [formA, formB], follow_up_settling: false }, onClose, handedOff), false);
+  assert.equal(closed.length, 0);
+
+  // While settling in watch grace: nothing closes yet.
+  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [], follow_up_settling: true }, onClose, handedOff), false);
+  assert.equal(closed.length, 0);
+  assert.deepEqual([...handedOff], [formA.url, formB.url]);
+
+  // Form A ends while form B stays pending: only form A is reported, once.
+  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [formB], follow_up_settling: false }, onClose, handedOff), true);
+  assert.deepEqual(closed, [{ id: "req-9", urls: [formA.url] }]);
+  assert.deepEqual([...handedOff], [formB.url]);
+  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [formB], follow_up_settling: false }, onClose, handedOff), false);
+  assert.equal(closed.length, 1);
+
+  // Form B ends: reported once and handedOff is empty.
+  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [], follow_up_settling: false }, onClose, handedOff), true);
+  assert.deepEqual(closed, [
+    { id: "req-9", urls: [formA.url] },
+    { id: "req-9", urls: [formB.url] },
+  ]);
+  assert.equal(handedOff.size, 0);
+});
+
 test("approving a proposal in the Inbox panel shows its forms in the conversation, not in a new tab", async () => {
   const handed = [];
   const shown = [];
@@ -1287,7 +1320,7 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
     readFileSync(new URL("../assistant_gateway/onboarding_web/assets/action_feedback.js", import.meta.url), "utf8"),
     { window },
   );
-  const gets = [], posts = [], intervals = new Map(), handed = [];
+  const gets = [], posts = [], intervals = new Map(), handed = [], closedPages = [];
   let timerId = 0;
   let allowHandOff = false;
   let clock = Date.parse("2026-11-21T12:00:00Z");
@@ -1307,6 +1340,7 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
       handed.push({ id, urls: links.map(l => l.url), placement });
       return allowHandOff ? links : [];
     },
+    onCloseFollowUpPages: (id, urls) => { closedPages.push({ id, urls }); },
     get: path => new Promise((resolve, reject) => gets.push({ path, resolve, reject })),
     post: (path, body) => new Promise((resolve, reject) => posts.push({ path, body, resolve, reject })),
     beginAction: (button, busyLabel, group) => window.UAActionFeedback.begin(button, { busyLabel, group }),
@@ -1366,6 +1400,8 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
   await settle();
   assert.equal(byClass(requestList.children[0], "access-review-follow-up-note").length, 0,
     "pages prompt clears as soon as handed-off form finishes");
+  assert.deepEqual(closedPages, [{ id: "req-1", urls: [framedLink.url] }],
+    "Settings Inbox notifies chat page to close the externally finished inline broker card");
   assert.deepEqual(byTag(requestList.children[0], "a").map(a => a.textContent), ["Choose the credential for Gitea"]);
   assert.match(requestList.children[0].textContent, /The account link for Portainer is done\./);
 
@@ -1383,5 +1419,6 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
   await settle();
   assert.equal(byTag(requestList.children[0], "a").length, 0);
   assert.equal(byClass(requestList.children[0], "access-review-follow-up-note").length, 0);
+  assert.equal(closedPages.length, 1, "does not re-notify for already closed or non-handed-off links");
   assert.equal(intervals.size, 0);
 });
