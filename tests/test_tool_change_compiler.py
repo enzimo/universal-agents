@@ -860,6 +860,7 @@ def test_tool_change_splits_long_credential_templates_and_descriptions_and_refus
     [
         "g\u0456tea.example.com",  # Cyrillic small letter i
         "gitea.ex\u0430mple.com",  # Cyrillic small letter a
+        "b\u00fccher.example.com",  # Unicode IDN (must be punycode)
         "gitea\u200b.example.com",  # zero-width space
         "gitea\u200d.example.com",  # zero-width joiner
         "\u202egitea.example.com",  # RTL override
@@ -867,14 +868,16 @@ def test_tool_change_splits_long_credential_templates_and_descriptions_and_refus
         ("a" * 60 + ".") * 4 + "b" * 10,  # total > 253 chars (254 chars)
         "-gitea.example.com",
         "gitea-.example.com",
+        "_gitea.example.com",
+        "gitea_.example.com",
         "gitea..example.com",
         ".gitea.example.com",
-        "gitea.example.com.",
+        "gitea.example.com..",
+        ".",
         "*.example.com",
         "gitea.example.com:8443",
         "gitea.example.com/api",
         "gitea .example.com",
-        "bad_host.example.com",
         "",
     ],
 )
@@ -908,15 +911,31 @@ def test_host_validation_rejects_homoglyphs_zero_width_and_invalid_names(bad_hos
         )
 
 
-def test_host_validation_accepts_punycode_ipv4_localhost_and_boundary_lengths() -> None:
-    """F3: valid ASCII punycode, IPv4, localhost, 63-char labels, and 253-char names remain accepted."""
+def test_host_validation_accepts_punycode_underscores_trailing_dot_and_boundary_lengths() -> None:
+    """F3 + C23: valid ASCII punycode, underscores inside labels, single trailing dot, IPv4, localhost, and limits work."""
 
     valid_63_label = f"{'a' * 63}.example.com"
     valid_253 = _max_valid_host("ok")
     tool = ProposedHttpToolV1(
         tool_id="http:valid_hosts",
         display_name="Valid Hosts",
-        hosts=("LOCALHOST", "10.0.0.5", "xn--bcher-kva.example", valid_63_label, valid_253),
+        hosts=(
+            "LOCALHOST",
+            "10.0.0.5",
+            "gitea_web",
+            "api.example.com.",
+            "xn--bcher-kva.example",
+            valid_63_label,
+            valid_253,
+        ),
         uses_credential=False,
     )
-    assert tool.hosts == ("localhost", "10.0.0.5", "xn--bcher-kva.example", valid_63_label, valid_253)
+    assert tool.hosts == (
+        "localhost",
+        "10.0.0.5",
+        "gitea_web",
+        "api.example.com",
+        "xn--bcher-kva.example",
+        valid_63_label,
+        valid_253,
+    )

@@ -841,3 +841,49 @@ def test_pre_upgrade_proposal_json_keeps_its_exact_digest():
         ),
     )
     assert proposal_digest(with_gate) != expected_digest
+
+
+def test_instance_tool_files_load_underscore_and_trailing_dot_hosts_and_guide_unicode_hosts(tmp_path) -> None:
+    """C23: existing instance tool files with Docker underscores or a trailing dot load; Unicode IDNs name punycode."""
+
+    from access_catalog.catalog import CatalogError
+
+    tools_dir = tmp_path / "control" / "access" / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "docker-gitea.yaml").write_text(
+        """
+tools:
+  - tool_id: http:gitea_local
+    display_name: Local Gitea
+    hosts: [gitea_web]
+    account: none
+  - tool_id: http:fqdn_api
+    display_name: FQDN API
+    hosts: [api.example.com.]
+    account: none
+""",
+        encoding="utf-8",
+    )
+
+    loaded = load_catalog(tmp_path)
+    assert loaded.tools["http:gitea_local"].hosts == ("gitea_web",)
+    assert loaded.resolve_http("GET", "http://gitea_web/api/v1/user").tool_id == "http:gitea_local"
+    assert loaded.tools["http:fqdn_api"].hosts == ("api.example.com",)
+    assert loaded.resolve_http("GET", "https://api.example.com/v1/items").tool_id == "http:fqdn_api"
+
+    idn_file = tools_dir / "unicode-host.yaml"
+    idn_file.write_text(
+        """
+tools:
+  - tool_id: http:books
+    display_name: Books
+    hosts: ["b\u00fccher.example.com"]
+    account: none
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(CatalogError) as caught:
+        load_catalog(tmp_path)
+    message = str(caught.value)
+    assert str(idn_file) in message
+    assert "xn--bcher-kva.example.com" in message

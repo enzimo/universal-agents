@@ -41,27 +41,58 @@ INJECTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _FILE_PART_PATTERN = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9_.-]{0,127}$")
 CREDENTIAL_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$")
 HOST_NAME_MAX_CHARS = 253
-HOST_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", re.ASCII)
+# Underscores are allowed inside labels for self-hosted Docker Compose service
+# names (such as ``gitea_web`` or ``my_api``); non-ASCII characters remain
+# refused to prevent look-alike hostnames.
+HOST_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$", re.ASCII)
 HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"})
+
+
+def _punycode_host_suggestion(host: str) -> str | None:
+    """Return the ASCII punycode form for a valid non-ASCII IDN, or None if not a clean IDN."""
+
+    try:
+        candidate = host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    if not candidate or len(candidate) > HOST_NAME_MAX_CHARS:
+        return None
+    labels = candidate.split(".")
+    if not any(label.startswith("xn--") for label in labels):
+        return None
+    if not all(HOST_LABEL_PATTERN.fullmatch(label) for label in labels):
+        return None
+    return candidate
 
 
 def validate_host_name(raw: str) -> str:
     """Normalize and validate an exact ASCII host name (labels <= 63, total <= 253).
 
-    Allows only ASCII letters, digits, hyphens, and dots so look-alike Unicode
-    domains (Cyrillic homoglyphs, zero-width characters) and oversized padding
-    hosts are refused before reaching a review card or the catalog.
+    Allows ASCII letters, digits, hyphens, underscores inside labels (Docker
+    Compose service names), and dots (dropping a single trailing dot), while
+    refusing look-alike Unicode domains (Cyrillic homoglyphs, zero-width
+    characters) and oversized padding hosts before reaching a review card or
+    the catalog.
     """
 
     host = raw.strip().lower()
+    if host.endswith(".") and not host.endswith(".."):
+        host = host[:-1]
     if not host or len(host) > HOST_NAME_MAX_CHARS:
         raise ValueError(
             f"Hosts are exact ASCII names up to {HOST_NAME_MAX_CHARS} characters (labels up to 63): {raw!r}"
         )
+    if not host.isascii():
+        punycode = _punycode_host_suggestion(host)
+        if punycode is not None:
+            raise ValueError(
+                f"Hosts must be written in ASCII. Replace {raw!r} with its punycode form "
+                f"{punycode!r} in the tool definition."
+            )
     if not all(HOST_LABEL_PATTERN.fullmatch(label) for label in host.split(".")):
         raise ValueError(
-            "Hosts are exact ASCII names (letters, digits, hyphens, dots; labels up to 63 characters) "
-            f"without wildcards, ports, or non-ASCII characters: {raw!r}"
+            "Hosts are exact ASCII names (letters, digits, hyphens, underscores inside labels, dots; "
+            f"labels up to 63 characters) without wildcards, ports, or non-ASCII characters: {raw!r}"
         )
     return host
 
