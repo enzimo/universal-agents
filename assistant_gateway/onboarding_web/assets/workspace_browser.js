@@ -2,19 +2,19 @@
  * Workspace Files (/webchat?view=files; ui/DESIGN.md "Workspace Files").
  *
  * A lazy, read-only file tree and one preview pane. The gateway lists only
- * what the signed-in person may read: members get their own folder (the top
- * level lists only users/, and users/ only their folder); administrators also
- * get team/ and agents/. The page title follows what the top level lists
- * ("Your files" or "Workspace"); it is display only.
+ * what the signed-in person may read: members get their own folder (under
+ * users/) and team/; administrators also get agents/. The page title follows
+ * what the top level lists ("Your files" or "Workspace"); it is display only.
  *
  * Clicking a row selects it: a file opens in the preview, a folder shows its
- * name there. `options.fileActions` (workspace_file_actions.mjs) adds Share…
- * and Send… for the selected item, when it is inside the person's own folder,
- * at the top right of the preview pane (`options.itemActions`), and the
- * "Shared" chips in the tree. The tree itself carries no buttons (owner's
+ * name there. `options.fileActions` (workspace_file_actions.mjs) adds Download
+ * for every readable file and Share… / Send… for items inside the person's own
+ * folder, at the top right of the preview pane (`options.itemActions`), plus
+ * the "Shared" chips in the tree. The tree itself carries no buttons (owner's
  * decision 2026-10-04). This script reports each folder listing to it so it
- * can learn which folder is the person's own, and shows each action's result
- * in the page's status line.
+ * can learn which folder is the person's own, supports file deep-links
+ * (?view=files&path=...&download=1), and shows each action's result in the
+ * page's status line.
  */
 (function () {
   "use strict";
@@ -58,6 +58,29 @@
     return "/api/web-chat/workspace/content?path=" + encodeURIComponent(path);
   }
 
+  function downloadUrl(path) {
+    return "/api/web-chat/workspace/download?path=" + encodeURIComponent(path);
+  }
+
+  function parseDeepLinkSegments(rawPath) {
+    var trimmed = String(rawPath || "").trim();
+    if (
+      !trimmed
+      || trimmed.indexOf("/") === 0
+      || trimmed.slice(-1) === "/"
+      || trimmed.indexOf("\\") !== -1
+    ) {
+      return null;
+    }
+    var segments = trimmed.split("/");
+    for (var i = 0; i < segments.length; i += 1) {
+      if (!segments[i] || segments[i] === "." || segments[i] === "..") {
+        return null;
+      }
+    }
+    return segments;
+  }
+
   function splitFileName(value) {
     var name = String(value || "");
     var extensionIndex = name.lastIndexOf(".");
@@ -84,18 +107,36 @@
     // The page title and the tree heading: "Your files" or "Workspace".
     var titleNodes = options.titleNodes || [];
     var fileActions = options.fileActions || null;
+    var onDownload = typeof options.onDownload === "function" ? options.onDownload : null;
     var selectedPath = "";
     var selectedRow = null;
-    var requestSequence = 0;
+    var loadGeneration = 0;
+    var selectionSequence = 0;
     var loadingRoot = false;
     var wrapTextFiles = true;
     var nameTooltip = null;
     var nameTooltipOwner = null;
     var nameTooltipTimer = 0;
     var viewTitle = DEFAULT_TITLE;
-    // Rows by workspace path, so "Shared" chips can be added when shares load.
+    // Rows by workspace path, so "Shared" chips and deep-links can find them.
     var rowsByPath = new Map();
     var sharedPaths = new Set();
+
+    function triggerDownload(entry) {
+      var url = downloadUrl(entry.path);
+      if (onDownload) {
+        onDownload(url, entry);
+        return;
+      }
+      var link = document.createElement("a");
+      link.href = url;
+      link.download = entry.name || "";
+      link.rel = "noopener";
+      link.hidden = true;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
 
     function setStatus(message, isError) {
       status.textContent = message || "";
@@ -129,12 +170,12 @@
       parts.row.appendChild(parts.chip);
     }
 
-    function loadSharedPaths(sequence) {
+    function loadSharedPaths(generation) {
       if (!fileActions) {
         return Promise.resolve();
       }
       return fileActions.sharedPaths().then(function (paths) {
-        if (sequence !== requestSequence) {
+        if (generation !== loadGeneration) {
           return;
         }
         paths.forEach(markShared);
@@ -433,21 +474,25 @@
       viewerTitle.textContent = entry.name;
       viewerMeta.textContent = "Loading preview...";
       viewer.replaceChildren(element("div", "workspace-loading", "Loading preview..."));
-      showItemActions(entry, row, item);
-      var sequence = ++requestSequence;
-      fetchFile(entry.path).then(function (file) {
-        if (sequence !== requestSequence || selectedPath !== entry.path) {
-          return;
+      hideItemActions();
+      var sequence = ++selectionSequence;
+      return fetchFile(entry.path).then(function (file) {
+        if (sequence !== selectionSequence || selectedPath !== entry.path) {
+          return { ok: false, aborted: true };
         }
         renderFile(file);
+        showItemActions(entry, row, item);
+        return { ok: true, file: file };
       }).catch(function (error) {
-        if (sequence !== requestSequence || selectedPath !== entry.path) {
-          return;
+        if (sequence !== selectionSequence || selectedPath !== entry.path) {
+          return { ok: false, aborted: true };
         }
+        hideItemActions();
         viewerMeta.textContent = "";
         viewer.replaceChildren(
           element("div", "workspace-empty-state is-error", error.message)
         );
+        return { ok: false, aborted: false };
       });
     }
 
@@ -455,7 +500,7 @@
     function selectFolder(entry, row, item) {
       selectRow(row);
       selectedPath = entry.path;
-      requestSequence += 1;
+      selectionSequence += 1;
       viewerTitle.textContent = entry.name;
       viewerMeta.textContent = "Folder";
       viewerTools.replaceChildren();
@@ -467,7 +512,9 @@
     }
 
     // 24x24 outline icons drawn with the thread buttons' stroke style:
-    // a person with a plus (share with someone) and a paper plane (send).
+    // a downward arrow into a tray (download), a person with a plus (share),
+    // and a paper plane (send).
+    var DOWNLOAD_ICON_PATHS = ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "M7 10l5 5 5-5", "M12 15V3"];
     var SHARE_ICON_PATHS = ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z",
       "M19 8v6", "M22 11h-6"];
     var SEND_ICON_PATHS = ["M22 2 11 13", "M22 2 15 22l-4-9-9-4 20-7z"];
@@ -504,19 +551,38 @@
     }
 
     /**
-     * Share… and Send… for the selected item, at the top right of the preview
-     * pane, when the gateway allows them (items inside the person's own
-     * folder; Send for files only). Results go to the page status line; a
-     * file moved to the team folder leaves this folder at once, so its row is
-     * removed and the preview cleared.
+     * Download, Share…, and Send… for the selected item, at the top right of
+     * the preview pane. Every readable file gets Download; items inside the
+     * person's own folder also get Share… (and Send… for files). Results go to
+     * the page status line; a file moved to the team folder leaves this folder
+     * at once, so its row is removed and the preview cleared.
      */
     function showItemActions(entry, row, item) {
       hideItemActions();
-      var allowed = fileActions && itemActions ? fileActions.actionsFor(entry) : null;
-      if (!allowed || (!allowed.share && !allowed.send)) {
+      if (!itemActions) {
+        return;
+      }
+      var allowed = fileActions
+        ? fileActions.actionsFor(entry)
+        : { download: entry.kind === "file", share: false, send: false };
+      if (!allowed || (!allowed.download && !allowed.share && !allowed.send)) {
         return;
       }
       itemActions.setAttribute("aria-label", "Actions for " + entry.name);
+      if (allowed.download) {
+        var downloadLabel = fileActions && fileActions.labels && fileActions.labels.download
+          ? fileActions.labels.download
+          : "Download";
+        var download = actionButton(
+          downloadLabel,
+          "Download " + entry.name,
+          DOWNLOAD_ICON_PATHS,
+          function () {
+            triggerDownload(entry);
+          }
+        );
+        itemActions.appendChild(download);
+      }
       if (allowed.share) {
         var share = actionButton(fileActions.labels.share, "Share " + entry.name, SHARE_ICON_PATHS, function () {
           setStatus("", false);
@@ -555,7 +621,7 @@
       itemActions.hidden = false;
     }
 
-    function renderEntries(container, entries, depth, parentPath) {
+    function renderEntries(container, entries, depth, parentPath, generation) {
       if (fileActions) {
         fileActions.noteListing(parentPath, entries);
       }
@@ -568,6 +634,7 @@
         var line = element("div", "workspace-tree-line");
         var row = element("button", "workspace-tree-row");
         var group = null;
+        var pendingExpand = null;
         row.type = "button";
         row.style.setProperty("--tree-indent", String((depth - 1) * 14) + "px");
         var disclosure = element(
@@ -587,6 +654,7 @@
         var renderedName = treeName(entry);
         row.appendChild(renderedName.node);
         bindNameTooltip(row, renderedName.clipTargets, entry.name);
+        var expandFolder = null;
         if (entry.kind === "file") {
           row.appendChild(
             element("span", "workspace-tree-size", formatBytes(entry.size_bytes))
@@ -595,30 +663,25 @@
             selectFile(entry, row, item);
           });
         } else {
-          row.setAttribute("aria-expanded", "false");
-          row.addEventListener("click", function () {
-            selectFolder(entry, row, item);
-            var expanded = row.getAttribute("aria-expanded") === "true";
-            if (expanded) {
-              row.setAttribute("aria-expanded", "false");
-              disclosure.textContent = "›";
-              if (group) {
-                group.hidden = true;
-              }
-              return;
-            }
+          expandFolder = function () {
             row.setAttribute("aria-expanded", "true");
             disclosure.textContent = "⌄";
             if (group) {
               group.hidden = false;
-              return;
+              return Promise.resolve(true);
+            }
+            if (pendingExpand) {
+              return pendingExpand;
             }
             row.classList.add("is-loading");
-            fetchDirectory(entry.path).then(function (payload) {
+            pendingExpand = fetchDirectory(entry.path).then(function (payload) {
+              if (generation !== loadGeneration) {
+                return false;
+              }
               group = element("div", "workspace-tree-group");
               group.setAttribute("role", "group");
               if ((payload.entries || []).length) {
-                renderEntries(group, payload.entries || [], depth + 1, entry.path);
+                renderEntries(group, payload.entries || [], depth + 1, entry.path, generation);
               } else {
                 group.appendChild(
                   element("div", "workspace-tree-empty", "This folder is empty.")
@@ -631,18 +694,44 @@
                   false
                 );
               }
+              return true;
             }).catch(function (error) {
-              row.setAttribute("aria-expanded", "false");
-              disclosure.textContent = "›";
-              setStatus(error.message, true);
+              if (generation === loadGeneration) {
+                row.setAttribute("aria-expanded", "false");
+                disclosure.textContent = "›";
+                setStatus(error.message, true);
+              }
+              return false;
             }).finally(function () {
+              pendingExpand = null;
               row.classList.remove("is-loading");
             });
+            return pendingExpand;
+          };
+          row.setAttribute("aria-expanded", "false");
+          row.addEventListener("click", function () {
+            selectFolder(entry, row, item);
+            var expanded = row.getAttribute("aria-expanded") === "true";
+            if (expanded) {
+              row.setAttribute("aria-expanded", "false");
+              disclosure.textContent = "›";
+              if (group) {
+                group.hidden = true;
+              }
+              return;
+            }
+            expandFolder();
           });
         }
         line.appendChild(row);
         item.appendChild(line);
-        rowsByPath.set(entry.path, { row: row, item: item, chip: null });
+        rowsByPath.set(entry.path, {
+          entry: entry,
+          row: row,
+          item: item,
+          chip: null,
+          expand: expandFolder,
+        });
         if (sharedPaths.has(entry.path)) {
           markShared(entry.path);
         }
@@ -650,26 +739,114 @@
       });
     }
 
-    function load() {
+    function openDeepLink(initialPath, autoDownload, onDownloadConsumed, generation, initialSelection) {
+      function consumeDownload() {
+        if (autoDownload && typeof onDownloadConsumed === "function") {
+          onDownloadConsumed();
+        }
+      }
+      var segments = parseDeepLinkSegments(initialPath);
+      if (!segments) {
+        setStatus("The requested workspace file path is not valid.", true);
+        consumeDownload();
+        return Promise.resolve();
+      }
+      var chain = Promise.resolve(true);
+      for (var i = 0; i < segments.length - 1; i += 1) {
+        (function (prefix) {
+          chain = chain.then(function (ok) {
+            if (!ok || generation !== loadGeneration) {
+              return false;
+            }
+            if (initialSelection !== selectionSequence) {
+              consumeDownload();
+              return false;
+            }
+            var folderNode = rowsByPath.get(prefix);
+            if (!folderNode || folderNode.entry.kind !== "directory" || typeof folderNode.expand !== "function") {
+              setStatus("The requested file \"" + initialPath + "\" could not be found.", true);
+              consumeDownload();
+              return false;
+            }
+            return folderNode.expand().then(function (expandedOk) {
+              if (!expandedOk) {
+                consumeDownload();
+              }
+              return expandedOk;
+            });
+          });
+        })(segments.slice(0, i + 1).join("/"));
+      }
+      return chain.then(function (ok) {
+        if (!ok || generation !== loadGeneration) {
+          return;
+        }
+        if (initialSelection !== selectionSequence) {
+          consumeDownload();
+          return;
+        }
+        var target = rowsByPath.get(initialPath);
+        if (!target) {
+          setStatus("The requested file \"" + initialPath + "\" could not be found.", true);
+          consumeDownload();
+          return;
+        }
+        if (target.entry.kind !== "file") {
+          selectFolder(target.entry, target.row, target.item);
+          if (autoDownload) {
+            setStatus("Folders cannot be downloaded. Select a file inside it to download.", false);
+            consumeDownload();
+          }
+          return;
+        }
+        return selectFile(target.entry, target.row, target.item).then(function (result) {
+          if (generation !== loadGeneration) {
+            return;
+          }
+          if (selectedPath !== target.entry.path) {
+            consumeDownload();
+            return;
+          }
+          if (autoDownload) {
+            consumeDownload();
+            if (result && result.ok) {
+              triggerDownload(target.entry);
+            }
+          }
+        });
+      });
+    }
+
+    function load(loadOptions) {
       if (loadingRoot) {
         return Promise.resolve();
       }
+      var opts = loadOptions && typeof loadOptions === "object" ? loadOptions : {};
+      var initialPath = typeof opts.initialPath === "string" ? opts.initialPath.trim() : "";
+      var autoDownload = Boolean(opts.autoDownload && initialPath);
+      var onDownloadConsumed = typeof opts.onDownloadConsumed === "function"
+        ? opts.onDownloadConsumed
+        : null;
       loadingRoot = true;
       hideNameTooltip();
       var finishRefresh = window.UAActionFeedback.beginRefresh(refreshButton);
-      var sequence = ++requestSequence;
+      var generation = ++loadGeneration;
+      var initialSelection = ++selectionSequence;
       clearViewer();
       rowsByPath = new Map();
       sharedPaths = new Set();
       selectedRow = null;
-      var shares = loadSharedPaths(sequence);
+      var shares = loadSharedPaths(generation);
       return fetchDirectory("").then(function (payload) {
+        if (generation !== loadGeneration) {
+          return;
+        }
         var entries = payload.entries || [];
         tree.replaceChildren();
         if (fileActions) {
           setViewTitle(fileActions.viewTitle(entries), true);
         }
-        renderEntries(tree, entries, 1, "");
+        renderEntries(tree, entries, 1, "", generation);
         if (!entries.length) {
           var memberView = fileActions && viewTitle === fileActions.labels.memberTitle;
           tree.appendChild(
@@ -688,7 +865,19 @@
         } else {
           setStatus("", false);
         }
+        if (initialPath) {
+          return openDeepLink(
+            initialPath,
+            autoDownload,
+            onDownloadConsumed,
+            generation,
+            initialSelection
+          );
+        }
       }).catch(function (error) {
+        if (generation !== loadGeneration) {
+          return;
+        }
         tree.replaceChildren(
           element("div", "workspace-tree-empty is-error", error.message)
         );
@@ -696,14 +885,18 @@
       }).then(function () {
         return shares;
       }).finally(function () {
-        loadingRoot = false;
+        if (generation === loadGeneration) {
+          loadingRoot = false;
+        }
         finishRefresh();
       });
     }
 
     function clear() {
       hideNameTooltip();
-      requestSequence += 1;
+      loadGeneration += 1;
+      selectionSequence += 1;
+      loadingRoot = false;
       selectedPath = "";
       selectedRow = null;
       rowsByPath = new Map();
@@ -717,7 +910,9 @@
       clearViewer();
     }
 
-    refreshButton.addEventListener("click", load);
+    refreshButton.addEventListener("click", function () {
+      load();
+    });
     tree.addEventListener("scroll", hideNameTooltip, { passive: true });
     window.addEventListener("resize", hideNameTooltip);
     clearViewer();

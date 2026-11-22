@@ -12,6 +12,7 @@ from assistant_gateway.interactive_apps.website_support import _WEB_CHAT_ROUTE
 
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
+_MAX_RANGE_DIGITS = 20
 _RFC5987_SAFE = "!#$&+-.^_`|~"
 _URL_PATH_QUERY_SAFE = "-_.~"
 
@@ -37,9 +38,17 @@ class ByteRangeResult:
 
 
 def _parse_ascii_uint(value: str) -> int | None:
-    if not value or not value.isascii() or not value.isdigit():
+    if (
+        not value
+        or len(value) > _MAX_RANGE_DIGITS
+        or not value.isascii()
+        or not value.isdigit()
+    ):
         return None
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _resolve_byte_range(

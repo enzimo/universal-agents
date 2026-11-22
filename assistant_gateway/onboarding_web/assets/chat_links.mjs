@@ -12,8 +12,11 @@ import { parseAccessRequestLink } from "./access_inbox.mjs";
 import { parseAccessMapLink } from "./access_map.mjs";
 
 export const VIEW_PARAM = "view";
+export const PATH_PARAM = "path";
+export const DOWNLOAD_PARAM = "download";
 export const INBOX_VIEW = "inbox";
 export const ACCESS_VIEW = "access";
+export const FILES_VIEW = "files";
 // Separate pages, like objectives and files: their address stays as it is.
 export const KNOWLEDGE_VIEW = "knowledge";
 const PANEL_VIEWS = Object.freeze([INBOX_VIEW, ACCESS_VIEW]);
@@ -37,4 +40,36 @@ export function readChatPageLink(location) {
     accessAgentType: view === ACCESS_VIEW ? parseAccessMapLink(location.hash) : "",
     cleanUrl: location.pathname + (query ? "?" + query : ""),
   };
+}
+
+/**
+ * Reads a Workspace Files deep-link (`/webchat?view=files&path=...&download=1`).
+ * `download` is true only when `view=files`, a non-empty `path` is present, and
+ * `download=1` (or `download=true`) was requested.
+ */
+export function readWorkspaceFileLink(location) {
+  const params = new URLSearchParams((location && location.search) || "");
+  if (params.get(VIEW_PARAM) !== FILES_VIEW) {
+    return { path: "", download: false };
+  }
+  const path = String(params.get(PATH_PARAM) || "").trim();
+  const rawDownload = String(params.get(DOWNLOAD_PARAM) || "").trim().toLowerCase();
+  const download = Boolean(path) && (rawDownload === "1" || rawDownload === "true");
+  return { path, download };
+}
+
+/**
+ * Returns the location URL with `download` removed (preserving `view=files`,
+ * `path`, other query params, and hash), or "" if `download` is not present.
+ */
+export function stripWorkspaceDownloadParam(location) {
+  const params = new URLSearchParams((location && location.search) || "");
+  if (!params.has(DOWNLOAD_PARAM)) {
+    return "";
+  }
+  params.delete(DOWNLOAD_PARAM);
+  const query = params.toString();
+  const pathname = String((location && location.pathname) || "");
+  const hash = String((location && location.hash) || "");
+  return pathname + (query ? "?" + query : "") + hash;
 }

@@ -1,4 +1,4 @@
-import { ACCESS_VIEW, INBOX_VIEW } from "./chat_links.mjs";
+import { ACCESS_VIEW, INBOX_VIEW, stripWorkspaceDownloadParam } from "./chat_links.mjs";
 
 export const SESSION_RESTORE_TIMEOUT_MS = 5000;
 
@@ -359,8 +359,27 @@ function unlockWorkspace() {
     authenticationState.authPanel.hidden = true;
     authenticationState.chatApp.hidden = true;
     authenticationState.objectivesApp.hidden = true;
+    authenticationState.statusApp.hidden = true;
+    authenticationState.knowledgeApp.hidden = true;
     authenticationState.workspaceApp.hidden = false;
-    authenticationState.workspaceControls.load();
+    var initialPath = authenticationState.pendingWorkspacePath || "";
+    var autoDownload = Boolean(authenticationState.pendingWorkspaceDownload && initialPath);
+    authenticationState.pendingWorkspacePath = "";
+    authenticationState.pendingWorkspaceDownload = false;
+    var stripDownloadParam = function () {
+      var cleanUrl = stripWorkspaceDownloadParam(window.location);
+      if (cleanUrl && window.history && typeof window.history.replaceState === "function") {
+        window.history.replaceState(null, document.title, cleanUrl);
+      }
+    };
+    if (!autoDownload) {
+      stripDownloadParam();
+    }
+    authenticationState.workspaceControls.load({
+      initialPath: initialPath,
+      autoDownload: autoDownload,
+      onDownloadConsumed: stripDownloadParam,
+    });
   }
 
 function unlockStatus() {

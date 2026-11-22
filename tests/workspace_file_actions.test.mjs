@@ -6,9 +6,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import {
-  ADMIN_VIEW_TITLE, MEMBER_VIEW_TITLE, SEND_NOTES, createWorkspaceFileActions, focusStops, renderShareDialog,
-  rowActions, sendRequestBody, shareRequestBody, teamFolderTarget, workspaceViewTitle,
+  ADMIN_VIEW_TITLE, DOWNLOAD_ACTION_LABEL, MEMBER_VIEW_TITLE, SEND_NOTES, createWorkspaceFileActions, focusStops,
+  renderShareDialog, rowActions, sendRequestBody, shareRequestBody, teamFolderTarget, workspaceViewTitle,
 } from "../assistant_gateway/onboarding_web/assets/workspace_file_actions.mjs";
+import { stripWorkspaceDownloadParam } from "../assistant_gateway/onboarding_web/assets/chat_links.mjs";
+import { createAuthentication } from "../assistant_gateway/onboarding_web/assets/chat_authentication.mjs";
 import {
   answer, byClass, byTag, descendants, errorResponse, fakeBrowser, fakeDocument, jsonResponse,
   openRequests, settle,
@@ -48,18 +50,24 @@ const openDialog = document => byClass(document.body, "workspace-file-overlay")[
 
 test("the page title follows what the gateway lists at the top", () => {
   assert.equal(workspaceViewTitle([{ name: "users" }]), MEMBER_VIEW_TITLE);
+  assert.equal(workspaceViewTitle([{ name: "team" }, { name: "users" }]), MEMBER_VIEW_TITLE);
   assert.equal(workspaceViewTitle([]), MEMBER_VIEW_TITLE);
   assert.equal(workspaceViewTitle([{ name: "agents" }, { name: "team" }, { name: "users" }]), ADMIN_VIEW_TITLE);
 });
 
-test("only items inside the person's own folder get Share, and only files get Send", () => {
+test("every readable file gets Download, only own items get Share, and only own files get Send", () => {
   const own = new Set([OWN]);
-  assert.deepEqual(rowActions(NOTES, own), { share: true, send: true });
-  assert.deepEqual(rowActions(REPORTS, own), { share: true, send: false });
-  assert.deepEqual(rowActions({ path: `users/${OWN}`, kind: "directory" }, own), { share: false, send: false },
-    "the folder itself is not shared from the tree");
-  assert.deepEqual(rowActions({ path: "users/someone-else/a.md", kind: "file" }, own), { share: false, send: false });
-  assert.deepEqual(rowActions({ path: "team/a.md", kind: "file" }, own), { share: false, send: false });
+  assert.deepEqual(rowActions(NOTES, own), { download: true, share: true, send: true });
+  assert.deepEqual(rowActions(REPORTS, own), { download: false, share: true, send: false });
+  assert.deepEqual(rowActions({ path: `users/${OWN}`, kind: "directory" }, own),
+    { download: false, share: false, send: false },
+    "the folder itself has no actions");
+  assert.deepEqual(rowActions({ path: "users/someone-else/a.md", kind: "file" }, own),
+    { download: true, share: false, send: false });
+  assert.deepEqual(rowActions({ path: "team/a.md", kind: "file" }, own),
+    { download: true, share: false, send: false });
+  assert.deepEqual(rowActions({ path: "team", kind: "directory" }, own),
+    { download: false, share: false, send: false });
 });
 
 test("request bodies carry the path, the person or folder, the level, how long and copy or move", () => {
@@ -267,14 +275,28 @@ test("server text in the dialogs stays text", async () => {
 
 /* -- the file tree (workspace_browser.js) ---------------------------------- */
 
-function treeFixture() {
+function treeFixture({ useDefaultDownload = false } = {}) {
   const harness = actionsFixture();
   const { document, browser } = harness;
+  const clickedAnchors = [];
+  const downloads = [];
   // The tree sets its indent with style.setProperty; the stand-in keeps it.
   const create = document.createElement;
   document.createElement = tagName => {
     const node = create(tagName);
     node.style = { values: {}, setProperty(name, value) { this.values[name] = value; } };
+    if (String(tagName).toLowerCase() === "a") {
+      const origClick = node.click.bind(node);
+      node.click = () => {
+        clickedAnchors.push({
+          href: node.href,
+          download: node.download,
+          rel: node.rel,
+          connectedDuringClick: node.isConnected,
+        });
+        origClick();
+      };
+    }
     return node;
   };
   document.title = "Workspace Files · Universal Agents";
@@ -290,29 +312,40 @@ function treeFixture() {
       nodes[name] = document.createElement(name === "refreshButton" ? "button" : "div");
       document.body.append(nodes[name]);
     });
-  const controls = window.UAWorkspaceBrowser.create({
+  const createOptions = {
     ...nodes, titleNodes: [nodes.title, nodes.heading], fileActions: harness.actions,
     markdownRenderer: { render: () => "" }, onUnauthorized: () => false,
-  });
-  return { ...harness, ...nodes, controls };
+  };
+  if (!useDefaultDownload) {
+    createOptions.onDownload = (url, entryObj) => downloads.push({ url, path: entryObj.path, name: entryObj.name });
+  }
+  const controls = window.UAWorkspaceBrowser.create(createOptions);
+  return { ...harness, ...nodes, controls, downloads, clickedAnchors };
 }
 
-const entry = (path, kind = "directory") => ({ path, name: path.split("/").at(-1), kind, size_bytes: kind === "file" ? 12 : null,
-  modified_at_utc: "2026-09-25T10:00:00+00:00" });
+const entry = (path, kind = "directory", sizeBytes = null) => ({
+  path,
+  name: path.split("/").at(-1),
+  kind,
+  size_bytes: kind === "file" ? (sizeBytes ?? 12) : null,
+  modified_at_utc: "2026-09-25T10:00:00+00:00",
+});
 const listing = (path, entries) => jsonResponse({ status: "ok", path, entries, truncated: false, entry_limit: 2000 });
 // A tree item is <div treeitem> > [<div line> > <button row>, <div group>?]; it carries no buttons.
 const treeItem = (f, name) => descendants(f.tree).find(node => node.classList.contains("workspace-tree-item")
   && byClass(node.children[0], "workspace-tree-name")[0].textContent === name);
 const rowOf = item => item.children[0].children[0];
-// Share… and Send… for the selected item, at the top right of the preview pane.
+// Download, Share… and Send… for the selected item, at the top right of the preview pane.
 const actionLabels = f => (f.itemActions.hidden ? [] : byClass(f.itemActions, "workspace-item-action").map(button => button.textContent));
-const fileReply = (path, name) => jsonResponse({ status: "ok", name, path, kind: "text", content: "hi" });
+const fileReply = (path, name, extra = {}) => jsonResponse({
+  status: "ok", name, path, preview_kind: "text", size_bytes: 12, content: "hi", ...extra,
+});
 const ROOT_LISTING = "/api/web-chat/workspace?path=";
 
-async function memberTree() {
+async function memberTree(rootEntries = [entry("team"), entry("users")]) {
   const f = treeFixture();
   const loading = f.controls.load();
-  await answer(f.requests, ROOT_LISTING, listing("", [entry("users")]));
+  await answer(f.requests, ROOT_LISTING, listing("", rootEntries));
   await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok",
     shared_by_you: [{ share_id: "s-1", target: `users/${OWN}/reports/q1.md` }] }));
   await loading;
@@ -347,8 +380,17 @@ test("members see 'Your files'; the selected item in their own folder offers Sha
   assert.equal(byClass(f.tree, "workspace-item-action").length, 0, "the tree carries no buttons");
 
   await selectOwnFile(f, "notes.md");
-  assert.deepEqual(actionLabels(f), ["Share…", "Send…"]);
+  assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL, "Share…", "Send…"]);
   assert.equal(f.itemActions.getAttribute("aria-label"), "Actions for notes.md");
+  const download = buttonNamed(f.itemActions, DOWNLOAD_ACTION_LABEL);
+  assert.equal(download.getAttribute("aria-label"), "Download notes.md");
+  assert.equal(byTag(download, "svg").length, 1, "Download is a labeled button with its icon");
+  download.click();
+  assert.deepEqual(f.downloads, [{
+    url: `/api/web-chat/workspace/download?path=users%2F${OWN}%2Fnotes.md`,
+    path: `users/${OWN}/notes.md`,
+    name: "notes.md",
+  }]);
   const share = buttonNamed(f.itemActions, "Share…");
   assert.equal(share.getAttribute("aria-label"), "Share notes.md");
   assert.equal(byTag(share, "svg").length, 1, "a labeled button with its icon");
@@ -357,7 +399,7 @@ test("members see 'Your files'; the selected item in their own folder offers Sha
   rowOf(treeItem(f, "reports")).click();
   await answer(f.requests, `/api/web-chat/workspace?path=users%2F${OWN}%2Freports`,
     listing(`users/${OWN}/reports`, [entry(`users/${OWN}/reports/q1.md`, "file")]));
-  assert.deepEqual(actionLabels(f), ["Share…"], "a folder can be shared, not sent");
+  assert.deepEqual(actionLabels(f), ["Share…"], "a folder can be shared, not downloaded or sent");
   assert.equal(f.viewerTitle.textContent, "reports");
   assert.equal(rowOf(treeItem(f, "notes.md")).classList.contains("is-selected"), false, "one selected item at a time");
   assert.deepEqual(byClass(treeItem(f, "q1.md"), "workspace-tree-chip").map(node => node.textContent), ["Shared"],
@@ -417,7 +459,7 @@ test("moving the selected file to the team folder removes its row and clears the
   assert.deepEqual(actionLabels(f), []);
 });
 
-test("administrators see 'Workspace' and no actions outside their own folder", async () => {
+test("administrators see 'Workspace' and Download on files outside their own folder, no Share/Send", async () => {
   const f = treeFixture();
   const loading = f.controls.load();
   await answer(f.requests, ROOT_LISTING, listing("", [entry("agents"), entry("team"), entry("users")]));
@@ -431,10 +473,10 @@ test("administrators see 'Workspace' and no actions outside their own folder", a
   assert.deepEqual(actionLabels(f), [], "the team folder has no actions");
   rowOf(treeItem(f, "plan.md")).click();
   await answer(f.requests, "/api/web-chat/workspace/file?path=team%2Fplan.md", fileReply("team/plan.md", "plan.md"));
-  assert.deepEqual(actionLabels(f), []);
+  assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL]);
   await openOwnFolder(f, [entry(`users/${OWN}/notes.md`, "file")]);
   await selectOwnFile(f, "notes.md");
-  assert.deepEqual(actionLabels(f), ["Share…", "Send…"], "their own folder works as for members");
+  assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL, "Share…", "Send…"], "their own folder works as for members");
 });
 
 test("a member with no files is told so in plain words", async () => {
@@ -460,6 +502,224 @@ test("signing out resets the title and closes an open dialog", async () => {
   assert.equal(f.title.textContent, "Workspace Files");
   assert.equal(f.document.title, "(2) Chat · Universal Agents", "sign-out on the chat page keeps the chat's tab title");
   assert.equal(f.tree.children.length, 0);
-  assert.deepEqual(f.actions.actionsFor(NOTES), { share: false, send: false }, "the person's folder is forgotten");
+  assert.deepEqual(f.actions.actionsFor(NOTES), { download: true, share: false, send: false },
+    "the person's own folder is forgotten");
   await settle();
+});
+
+test("Download works for >5 MB non-previewable files, team/ files for members, and hides on fetchFile errors", async () => {
+  const f = treeFixture({ useDefaultDownload: true });
+  const loading = f.controls.load();
+  await answer(f.requests, ROOT_LISTING, listing("", [entry("team"), entry("users")]));
+  await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+  await loading;
+  assert.equal(f.title.textContent, MEMBER_VIEW_TITLE, "members seeing team/ and users/ still see 'Your files'");
+
+  rowOf(treeItem(f, "team")).click();
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace?path=team",
+    listing("team", [
+      entry("team/recording.mp3", "file", 12 * 1024 * 1024),
+      entry("team/unreadable.zip", "file", 9 * 1024 * 1024),
+    ]),
+  );
+  assert.deepEqual(actionLabels(f), [], "folders get no Download button");
+
+  rowOf(treeItem(f, "recording.mp3")).click();
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace/file?path=team%2Frecording.mp3",
+    fileReply("team/recording.mp3", "recording.mp3", {
+      preview_kind: "unavailable",
+      size_bytes: 12 * 1024 * 1024,
+      message: "Files larger than 5 MB are not previewed in the browser.",
+    }),
+  );
+  assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL]);
+  const downloadBtn = buttonNamed(f.itemActions, DOWNLOAD_ACTION_LABEL);
+  assert.equal(downloadBtn.getAttribute("aria-label"), "Download recording.mp3");
+  downloadBtn.click();
+  assert.deepEqual(f.clickedAnchors, [{
+    href: "/api/web-chat/workspace/download?path=team%2Frecording.mp3",
+    download: "recording.mp3",
+    rel: "noopener",
+    connectedDuringClick: true,
+  }]);
+  assert.equal(byTag(f.document.body, "a").length, 0, "temporary download anchor is removed after click");
+
+  rowOf(treeItem(f, "unreadable.zip")).click();
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace/file?path=team%2Funreadable.zip",
+    errorResponse(403, "This workspace path is not available."),
+  );
+  assert.deepEqual(actionLabels(f), [], "item actions are hidden if fetchFile fails");
+});
+
+test("deep-link expands parent folders, selects the file, triggers auto-download once, and refresh clears it", async () => {
+  const f = treeFixture();
+  let consumedCount = 0;
+  let currentUrl = "/webchat?view=files&path=team%2Fguides%2Fhandbook.pdf&download=1";
+  const loading = f.controls.load({
+    initialPath: "team/guides/handbook.pdf",
+    autoDownload: true,
+    onDownloadConsumed: () => {
+      consumedCount += 1;
+      const [pathname, searchPart = ""] = currentUrl.split("?");
+      const cleaned = stripWorkspaceDownloadParam({ pathname, search: searchPart ? `?${searchPart}` : "", hash: "" });
+      if (cleaned) currentUrl = cleaned;
+    },
+  });
+  await answer(f.requests, ROOT_LISTING, listing("", [entry("team"), entry("users")]));
+  await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+  await answer(f.requests, "/api/web-chat/workspace?path=team", listing("team", [entry("team/guides")]));
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace?path=team%2Fguides",
+    listing("team/guides", [entry("team/guides/handbook.pdf", "file", 8 * 1024 * 1024)]),
+  );
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace/file?path=team%2Fguides%2Fhandbook.pdf",
+    fileReply("team/guides/handbook.pdf", "handbook.pdf", {
+      preview_kind: "unavailable",
+      size_bytes: 8 * 1024 * 1024,
+    }),
+  );
+  await loading;
+
+  assert.equal(f.viewerTitle.textContent, "handbook.pdf");
+  assert.ok(rowOf(treeItem(f, "handbook.pdf")).classList.contains("is-selected"));
+  assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL]);
+  assert.equal(consumedCount, 1);
+  assert.equal(currentUrl, "/webchat?view=files&path=team%2Fguides%2Fhandbook.pdf");
+  assert.deepEqual(f.downloads, [{
+    url: "/api/web-chat/workspace/download?path=team%2Fguides%2Fhandbook.pdf",
+    path: "team/guides/handbook.pdf",
+    name: "handbook.pdf",
+  }]);
+
+  // Clicking Refresh calls load() cleanly without re-running deep-link or download.
+  f.refreshButton.click();
+  await answer(f.requests, ROOT_LISTING, listing("", [entry("team"), entry("users")]));
+  await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+  assert.equal(f.downloads.length, 1);
+  assert.equal(f.viewerTitle.textContent, "Select a file");
+});
+
+test("invalid, missing, and folder deep-links show status and strip download without downloading", async () => {
+  // Invalid traversal path
+  const f1 = treeFixture();
+  let consumed = 0;
+  const loadInvalid = f1.controls.load({
+    initialPath: "../secret.txt",
+    autoDownload: true,
+    onDownloadConsumed: () => { consumed += 1; },
+  });
+  await answer(f1.requests, ROOT_LISTING, listing("", [entry("team"), entry("users")]));
+  await answer(f1.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+  await loadInvalid;
+  assert.equal(consumed, 1);
+  assert.equal(f1.downloads.length, 0);
+  assert.match(f1.status.textContent, /not valid/i);
+  assert.ok(f1.status.classList.contains("is-error"));
+
+  // Missing target file
+  const f2 = treeFixture();
+  consumed = 0;
+  const loadMissing = f2.controls.load({
+    initialPath: "team/missing.mp3",
+    autoDownload: true,
+    onDownloadConsumed: () => { consumed += 1; },
+  });
+  await answer(f2.requests, ROOT_LISTING, listing("", [entry("team")]));
+  await answer(f2.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+  await answer(f2.requests, "/api/web-chat/workspace?path=team", listing("team", []));
+  await loadMissing;
+  assert.equal(consumed, 1);
+  assert.equal(f2.downloads.length, 0);
+  assert.match(f2.status.textContent, /could not be found/i);
+
+  // Folder deep-link with autoDownload=true selects folder, strips download, does not download
+  const f3 = treeFixture();
+  consumed = 0;
+  const loadFolder = f3.controls.load({
+    initialPath: "team/guides",
+    autoDownload: true,
+    onDownloadConsumed: () => { consumed += 1; },
+  });
+  await answer(f3.requests, ROOT_LISTING, listing("", [entry("team")]));
+  await answer(f3.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+  await answer(f3.requests, "/api/web-chat/workspace?path=team", listing("team", [entry("team/guides")]));
+  await loadFolder;
+  assert.equal(consumed, 1);
+  assert.equal(f3.downloads.length, 0);
+  assert.equal(f3.viewerTitle.textContent, "guides");
+  assert.deepEqual(actionLabels(f3), []);
+  assert.match(f3.status.textContent, /Folders cannot be downloaded/i);
+});
+
+test("unlockWorkspace passes deep-link options once and strips download=1 with history.replaceState", () => {
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const replaced = [];
+  const loadCalls = [];
+  globalThis.window = {
+    location: {
+      pathname: "/webchat",
+      search: "?view=files&path=team%2Fclip.mp4&download=1",
+      hash: "",
+    },
+    history: {
+      replaceState(_state, _title, url) {
+        replaced.push(url);
+        const [pathname, searchPart = ""] = url.split("?");
+        globalThis.window.location = { pathname, search: searchPart ? `?${searchPart}` : "", hash: "" };
+      },
+    },
+  };
+  globalThis.document = { title: "Workspace Files · Universal Agents" };
+  try {
+    const authenticationState = {
+      authPanel: { hidden: false },
+      chatApp: { hidden: false },
+      objectivesApp: { hidden: false },
+      statusApp: { hidden: false },
+      knowledgeApp: { hidden: false },
+      workspaceApp: { hidden: true },
+      pendingWorkspacePath: "team/clip.mp4",
+      pendingWorkspaceDownload: true,
+      workspaceControls: {
+        load(opts) {
+          loadCalls.push(opts);
+        },
+      },
+    };
+    const auth = createAuthentication({
+      authenticationState,
+      sharedState: {},
+      operations: {},
+      lifecycle: {},
+      requestClient: {},
+    });
+    auth.unlockWorkspace();
+    assert.equal(authenticationState.workspaceApp.hidden, false);
+    assert.equal(loadCalls.length, 1);
+    assert.equal(loadCalls[0].initialPath, "team/clip.mp4");
+    assert.equal(loadCalls[0].autoDownload, true);
+    assert.equal(replaced.length, 0, "download=1 stays until onDownloadConsumed fires");
+
+    loadCalls[0].onDownloadConsumed();
+    assert.deepEqual(replaced, ["/webchat?view=files&path=team%2Fclip.mp4"]);
+
+    // Subsequent unlock in the same page session does not re-trigger download.
+    auth.unlockWorkspace();
+    assert.equal(loadCalls.length, 2);
+    assert.equal(loadCalls[1].initialPath, "");
+    assert.equal(loadCalls[1].autoDownload, false);
+  } finally {
+    globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
+  }
 });

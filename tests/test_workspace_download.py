@@ -73,6 +73,10 @@ def test_parse_byte_range_covers_valid_unsatisfiable_and_ignored_headers() -> No
         "bytes=-",
         "bytes=0 - 5",
         "bytes=²-5",
+        "bytes=0-" + ("9" * 21),
+        "bytes=0-" + ("9" * 5000),
+        "bytes=" + ("9" * 5000) + "-",
+        "bytes=-" + ("9" * 5000),
         "malformed",
     ):
         assert parse_byte_range(ignored, 100).status == "none"
@@ -304,14 +308,32 @@ async def test_workspace_download_streams_large_binary_ranges_head_and_utf8(
             assert r416.headers["Content-Length"] == str(len(body_416))
             _assert_download_security_headers(r416.headers)
 
-        # Malformed and multi-range headers are ignored and serve 200 full file
-        for ignored_range in ("bytes=abc-def", "bytes=0-1, 2-3", "items=0-3"):
+        # Malformed, overlong-digit, and multi-range headers are ignored and serve 200 full file
+        for ignored_range in (
+            "bytes=abc-def",
+            "bytes=0-1, 2-3",
+            "items=0-3",
+            "bytes=0-" + ("9" * 5000),
+        ):
             r200 = await client.get(
                 f"/api/web-chat/workspace/download?path={utf8_path}",
                 headers={**headers, "Range": ignored_range},
             )
             assert r200.status == 200
             assert await r200.read() == utf8_bytes
+
+        # Duplicate Range header fields combine per RFC 9110 into multi-range -> 200 full file
+        dup_range_headers = [
+            *headers.items(),
+            ("Range", "bytes=0-3"),
+            ("Range", "bytes=4-7"),
+        ]
+        dup_resp = await client.get(
+            f"/api/web-chat/workspace/download?path={utf8_path}",
+            headers=dup_range_headers,
+        )
+        assert dup_resp.status == 200
+        assert await dup_resp.read() == utf8_bytes
 
         # 0-byte file: GET -> 200 empty, Range -> 416 bytes */0
         empty_get = await client.get(
@@ -531,12 +553,14 @@ async def test_workspace_download_forces_close_on_midstream_truncation(
 @pytest.mark.asyncio
 async def test_close_download_safely_closes_descriptor_even_when_cancelled(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     target = tmp_path / "sample.bin"
     target.write_bytes(b"hello")
     fd = os.open(target, os.O_RDONLY)
     started = threading.Event()
     release = threading.Event()
+    finished = threading.Event()
     close_calls = 0
 
     def slow_close() -> None:
@@ -545,6 +569,7 @@ async def test_close_download_safely_closes_descriptor_even_when_cancelled(
         release.wait(timeout=2.0)
         close_calls += 1
         os.close(fd)
+        finished.set()
 
     download = GatewayWorkspaceFileDownload(
         path="team/sample.bin",
@@ -555,13 +580,113 @@ async def test_close_download_safely_closes_descriptor_even_when_cancelled(
         close_callback=slow_close,
     )
 
+    loop = asyncio.get_running_loop()
+    heartbeat_ticks: list[float] = []
     task = asyncio.create_task(WebsiteWorkspaceHandlers._close_download_safely(download))
     await asyncio.to_thread(started.wait, 2.0)
+
+    # Cancel while the off-loop close holds download._lock; schedule release and a
+    # heartbeat on the event loop to prove cancellation never blocks the loop thread.
     task.cancel()
-    release.set()
+    loop.call_later(0.01, lambda: heartbeat_ticks.append(loop.time()))
+    loop.call_later(0.05, release.set)
     with pytest.raises(asyncio.CancelledError):
         await task
 
+    # CancelledError must return immediately while slow_close is still waiting on release.
+    assert not finished.is_set()
+    await asyncio.to_thread(finished.wait, 2.0)
+    await asyncio.sleep(0.02)
+
+    assert heartbeat_ticks
     assert download.closed is True
     assert close_calls == 1
+
+    # A background close failure after cancellation is logged and consumed cleanly.
+    fd2 = os.open(target, os.O_RDONLY)
+    err_started = threading.Event()
+    err_release = threading.Event()
+    err_done = threading.Event()
+
+    def failing_close() -> None:
+        err_started.set()
+        err_release.wait(timeout=2.0)
+        os.close(fd2)
+        err_done.set()
+        raise OSError("simulated close error")
+
+    failing_download = GatewayWorkspaceFileDownload(
+        path="team/sample.bin",
+        name="sample.bin",
+        size_bytes=5,
+        content_type="application/octet-stream",
+        file_descriptor=fd2,
+        close_callback=failing_close,
+    )
+    caplog.set_level(logging.WARNING)
+    err_task = asyncio.create_task(
+        WebsiteWorkspaceHandlers._close_download_safely(failing_download)
+    )
+    await asyncio.to_thread(err_started.wait, 2.0)
+    err_task.cancel()
+    loop.call_later(0.02, err_release.set)
+    with pytest.raises(asyncio.CancelledError):
+        await err_task
+    await asyncio.to_thread(err_done.wait, 2.0)
+    await asyncio.sleep(0.02)
+    assert any(
+        "event=workspace_download_close_failed" in rec.message
+        for rec in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_open_download_off_loop_closes_descriptor_when_cancelled_in_flight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, workspace, admin_id, _roles = _setup_workspace_app(tmp_path, monkeypatch)
+    team_folder = workspace / "team"
+    team_folder.mkdir(parents=True)
+    (team_folder / "slow.bin").write_bytes(b"payload")
+
+    original_open = app.application.operations.open_web_chat_workspace_download
+    entered = threading.Event()
+    release = threading.Event()
+    returned_downloads: list[GatewayWorkspaceFileDownload] = []
+
+    def slow_open(**kwargs) -> GatewayWorkspaceFileDownload:
+        entered.set()
+        release.wait(timeout=2.0)
+        download = original_open(**kwargs)
+        returned_downloads.append(download)
+        return download
+
+    monkeypatch.setattr(
+        app.application.operations,
+        "open_web_chat_workspace_download",
+        slow_open,
+    )
+
+    handlers = WebsiteWorkspaceHandlers(application=app.application, logger=None)
+    task = asyncio.create_task(
+        handlers._open_download_off_loop(
+            canonical_user_id=admin_id,
+            requested_path="team/slow.bin",
+        )
+    )
+    await asyncio.to_thread(entered.wait, 2.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release.set()
+    # Wait briefly for the worker thread to finish opening and immediately close it.
+    for _ in range(40):
+        if returned_downloads and returned_downloads[0].closed:
+            break
+        await asyncio.sleep(0.02)
+
+    assert len(returned_downloads) == 1
+    assert returned_downloads[0].closed is True
 

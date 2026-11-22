@@ -1,6 +1,8 @@
 from __future__ import annotations
 import asyncio
+import functools
 import logging
+import threading
 from typing import NoReturn
 from aiohttp import web
 from assistant_gateway.application.workspace_browser import (
@@ -31,6 +33,10 @@ from .workspace_download import (
 
 class _InactiveWorkspaceMemberError(PermissionError):
     """Raised when a signed-in session no longer maps to an active team member."""
+
+
+class _DownloadOpenCancelledError(Exception):
+    """Internal signal that a download open was cancelled before opening a descriptor."""
 
 
 class WebsiteWorkspaceHandlers:
@@ -192,28 +198,107 @@ class WebsiteWorkspaceHandlers:
         *,
         canonical_user_id: str,
         requested_path: str,
+        cancelled: threading.Event | None = None,
     ) -> GatewayWorkspaceFileDownload:
         """Resolve member roles and open the download descriptor off the event loop."""
 
+        if cancelled is not None and cancelled.is_set():
+            raise _DownloadOpenCancelledError()
         person = self.application.access_inbox.person(canonical_user_id)
         if person is None:
             raise _InactiveWorkspaceMemberError(
                 "You are not an active member of this team."
             )
-        return self.application.operations.open_web_chat_workspace_download(
+        if cancelled is not None and cancelled.is_set():
+            raise _DownloadOpenCancelledError()
+        download = self.application.operations.open_web_chat_workspace_download(
             canonical_user_id=canonical_user_id,
             roles=tuple(person.roles),
             path=requested_path,
         )
+        if cancelled is not None and cancelled.is_set():
+            download.close()
+        return download
 
     @staticmethod
-    async def _close_download_safely(download: GatewayWorkspaceFileDownload) -> None:
-        """Close the download descriptor off-loop, with a locked sync fallback on cancel."""
+    def _schedule_download_close(
+        loop: asyncio.AbstractEventLoop,
+        download: GatewayWorkspaceFileDownload,
+        logger: logging.Logger,
+    ) -> asyncio.Future[None] | None:
+        """Schedule download.close() off-loop and consume any background error."""
 
         try:
-            await asyncio.shield(asyncio.to_thread(download.close))
-        except BaseException:
+            close_future = loop.run_in_executor(None, download.close)
+        except RuntimeError:
             download.close()
+            return None
+
+        def _consume_close_error(future: asyncio.Future[None]) -> None:
+            if future.cancelled():
+                return
+            exc = future.exception()
+            if exc is not None:
+                logger.warning(
+                    "event=workspace_download_close_failed path=%r error=%s",
+                    download.path,
+                    exc,
+                )
+
+        close_future.add_done_callback(_consume_close_error)
+        return close_future
+
+    @classmethod
+    async def _close_download_safely(
+        cls,
+        download: GatewayWorkspaceFileDownload,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        """Close the download descriptor off-loop without blocking on cancellation."""
+
+        loop = asyncio.get_running_loop()
+        close_future = cls._schedule_download_close(
+            loop,
+            download,
+            logger or LOGGER,
+        )
+        if close_future is not None:
+            await asyncio.shield(close_future)
+
+    async def _open_download_off_loop(
+        self,
+        *,
+        canonical_user_id: str,
+        requested_path: str,
+    ) -> GatewayWorkspaceFileDownload:
+        """Open a download descriptor off-loop and close it immediately if cancelled."""
+
+        loop = asyncio.get_running_loop()
+        cancelled = threading.Event()
+        open_future = loop.run_in_executor(
+            None,
+            functools.partial(
+                self._open_workspace_download_sync,
+                canonical_user_id=canonical_user_id,
+                requested_path=requested_path,
+                cancelled=cancelled,
+            ),
+        )
+        try:
+            return await asyncio.shield(open_future)
+        except asyncio.CancelledError:
+            cancelled.set()
+
+            def _close_orphaned_open(
+                future: asyncio.Future[GatewayWorkspaceFileDownload],
+            ) -> None:
+                if future.cancelled() or future.exception() is not None:
+                    return
+                orphaned = future.result()
+                if not orphaned.closed:
+                    self._schedule_download_close(loop, orphaned, self._logger)
+
+            open_future.add_done_callback(_close_orphaned_open)
             raise
 
     def _unauthenticated_download_response(
@@ -340,8 +425,7 @@ class WebsiteWorkspaceHandlers:
                 text="Workspace files need a signed-in team member."
             )
         try:
-            download = await asyncio.to_thread(
-                self._open_workspace_download_sync,
+            download = await self._open_download_off_loop(
                 canonical_user_id=canonical_user_id,
                 requested_path=requested_path,
             )
@@ -354,8 +438,10 @@ class WebsiteWorkspaceHandlers:
                 requested_path=requested_path,
             )
         try:
+            range_headers = request.headers.getall("Range", ())
+            combined_range = ", ".join(range_headers) if range_headers else None
             range_result = parse_byte_range(
-                request.headers.get("Range"),
+                combined_range,
                 download.size_bytes,
             )
             if range_result.status == "unsatisfiable":
@@ -396,4 +482,4 @@ class WebsiteWorkspaceHandlers:
                 requested_path=requested_path,
             )
         finally:
-            await self._close_download_safely(download)
+            await self._close_download_safely(download, self._logger)
