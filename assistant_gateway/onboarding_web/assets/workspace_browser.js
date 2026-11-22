@@ -153,36 +153,55 @@
       return "Could not download " + label + ".";
     }
 
-    function triggerDownload(entry) {
+    function triggerDownload(entry, button) {
+      if (button && button.disabled) {
+        return Promise.resolve({ ok: false, unauthorized: false });
+      }
+      if (button) {
+        button.disabled = true;
+        button.setAttribute("aria-busy", "true");
+      }
       var url = downloadUrl(entry.path);
       var generation = loadGeneration;
+      function isCurrentTarget() {
+        return generation === loadGeneration && selectedPath === entry.path;
+      }
       return window.fetch(url, {
         method: "HEAD",
         cache: "no-store",
         credentials: "same-origin",
       }).then(function (response) {
         if (generation !== loadGeneration) {
-          return false;
+          return { ok: false, unauthorized: false };
         }
         if (response.status === 401) {
           var handled = typeof onUnauthorized === "function" && onUnauthorized(response);
-          if (!handled && generation === loadGeneration) {
+          if (!handled && isCurrentTarget()) {
             setStatus("Your Web Chat session ended.", true);
           }
-          return false;
+          return { ok: false, unauthorized: true };
         }
         if (!response.ok) {
-          setStatus(downloadFailureMessage(response.status, entry), true);
-          return false;
+          if (isCurrentTarget()) {
+            setStatus(downloadFailureMessage(response.status, entry), true);
+          }
+          return { ok: false, unauthorized: false };
         }
-        setStatus("", false);
+        if (isCurrentTarget()) {
+          setStatus("", false);
+        }
         startBrowserDownload(url, entry);
-        return true;
+        return { ok: true, unauthorized: false };
       }).catch(function () {
-        if (generation === loadGeneration) {
+        if (isCurrentTarget()) {
           setStatus(downloadFailureMessage(0, entry), true);
         }
-        return false;
+        return { ok: false, unauthorized: false };
+      }).finally(function () {
+        if (button) {
+          button.disabled = false;
+          button.removeAttribute("aria-busy");
+        }
       });
     }
 
@@ -231,8 +250,11 @@
     }
 
     function parseResponse(response, fallback) {
-      if (response.status === 401 && onUnauthorized(response)) {
-        throw new Error("Your Web Chat session ended.");
+      if (response.status === 401 && typeof onUnauthorized === "function" && onUnauthorized(response)) {
+        var sessionError = new Error("Your Web Chat session ended.");
+        sessionError.status = 401;
+        sessionError.unauthorized = true;
+        throw sessionError;
       }
       return response.text().then(function (rawText) {
         var payload = {};
@@ -244,7 +266,10 @@
           }
         }
         if (!response.ok) {
-          throw new Error(String(payload.message || rawText || fallback));
+          var requestError = new Error(String(payload.message || rawText || fallback));
+          requestError.status = response.status;
+          requestError.unauthorized = response.status === 401;
+          throw requestError;
         }
         return payload;
       });
@@ -512,8 +537,10 @@
       if (selectedRow) {
         selectedRow.classList.remove("is-selected");
       }
-      selectedRow = row;
-      row.classList.add("is-selected");
+      selectedRow = row || null;
+      if (selectedRow) {
+        selectedRow.classList.add("is-selected");
+      }
     }
 
     function selectFile(entry, row, item) {
@@ -526,21 +553,42 @@
       var sequence = ++selectionSequence;
       return fetchFile(entry.path).then(function (file) {
         if (sequence !== selectionSequence || selectedPath !== entry.path) {
-          return { ok: false, aborted: true };
+          return { ok: false, aborted: true, unauthorized: false };
         }
+        var resolvedEntry = row
+          ? entry
+          : {
+              path: file.path || entry.path,
+              name: file.name || entry.name,
+              kind: "file",
+              size_bytes: file.size_bytes,
+              modified_at_utc: file.modified_at_utc,
+              preview_kind: file.preview_kind,
+              content_type: file.content_type || null,
+            };
         renderFile(file);
-        showItemActions(entry, row, item);
-        return { ok: true, file: file };
+        showItemActions(resolvedEntry, row, item);
+        return { ok: true, file: file, entry: resolvedEntry };
       }).catch(function (error) {
         if (sequence !== selectionSequence || selectedPath !== entry.path) {
-          return { ok: false, aborted: true };
+          return {
+            ok: false,
+            aborted: true,
+            unauthorized: Boolean(error && error.unauthorized),
+          };
         }
         hideItemActions();
         viewerMeta.textContent = "";
         viewer.replaceChildren(
           element("div", "workspace-empty-state is-error", error.message)
         );
-        return { ok: false, aborted: false };
+        return {
+          ok: false,
+          aborted: false,
+          unauthorized: Boolean(error && error.unauthorized),
+          status: error && error.status,
+          message: error && error.message,
+        };
       });
     }
 
@@ -626,7 +674,7 @@
           "Download " + entry.name,
           DOWNLOAD_ICON_PATHS,
           function () {
-            triggerDownload(entry);
+            triggerDownload(entry, download);
           }
         );
         itemActions.appendChild(download);
@@ -653,12 +701,14 @@
             returnFocus: send,
             onDone: function (result) {
               if (result.movedAway) {
-                if (selectedRow === row) {
+                if ((row && selectedRow === row) || (!row && selectedPath === entry.path)) {
                   selectedRow = null;
                   clearViewer();
                 }
                 rowsByPath.delete(entry.path);
-                item.remove();
+                if (item) {
+                  item.remove();
+                }
               }
               setStatus(result.message, false);
             },
@@ -716,7 +766,7 @@
             disclosure.textContent = "⌄";
             if (group) {
               group.hidden = false;
-              return Promise.resolve(true);
+              return Promise.resolve({ ok: true, unauthorized: false });
             }
             if (pendingExpand) {
               return pendingExpand;
@@ -724,7 +774,7 @@
             row.classList.add("is-loading");
             pendingExpand = fetchDirectory(entry.path).then(function (payload) {
               if (generation !== loadGeneration) {
-                return false;
+                return { ok: false, unauthorized: false };
               }
               group = element("div", "workspace-tree-group");
               group.setAttribute("role", "group");
@@ -735,6 +785,7 @@
                   element("div", "workspace-tree-empty", "This folder is empty.")
                 );
               }
+              group.hidden = row.getAttribute("aria-expanded") !== "true";
               item.appendChild(group);
               if (payload.truncated) {
                 setStatus(
@@ -742,14 +793,14 @@
                   false
                 );
               }
-              return true;
+              return { ok: true, unauthorized: false };
             }).catch(function (error) {
               if (generation === loadGeneration) {
                 row.setAttribute("aria-expanded", "false");
                 disclosure.textContent = "›";
                 setStatus(error.message, true);
               }
-              return false;
+              return { ok: false, unauthorized: Boolean(error && error.unauthorized) };
             }).finally(function () {
               pendingExpand = null;
               row.classList.remove("is-loading");
@@ -787,80 +838,136 @@
       });
     }
 
-    function openDeepLink(initialPath, autoDownload, onDownloadConsumed, generation, initialSelection) {
+    function openDeepLink(
+      initialPath,
+      autoDownload,
+      onDownloadConsumed,
+      onDeepLinkConsumed,
+      generation,
+      initialSelection
+    ) {
+      function consumeDeepLink() {
+        if (generation === loadGeneration && typeof onDeepLinkConsumed === "function") {
+          onDeepLinkConsumed();
+        }
+      }
       function consumeDownload() {
-        if (autoDownload && typeof onDownloadConsumed === "function") {
+        if (generation === loadGeneration && autoDownload && typeof onDownloadConsumed === "function") {
           onDownloadConsumed();
         }
       }
       var segments = parseDeepLinkSegments(initialPath);
       if (!segments) {
         setStatus("The requested workspace file path is not valid.", true);
+        consumeDeepLink();
         consumeDownload();
         return Promise.resolve();
       }
-      var chain = Promise.resolve(true);
+      var chain = Promise.resolve({ continueWalk: true, failed: false });
       for (var i = 0; i < segments.length - 1; i += 1) {
         (function (prefix) {
-          chain = chain.then(function (ok) {
-            if (!ok || generation !== loadGeneration) {
-              return false;
+          chain = chain.then(function (state) {
+            if (!state.continueWalk || state.failed || generation !== loadGeneration) {
+              return state;
             }
             if (initialSelection !== selectionSequence) {
+              consumeDeepLink();
               consumeDownload();
-              return false;
+              return { continueWalk: false, failed: true };
             }
             var folderNode = rowsByPath.get(prefix);
-            if (!folderNode || folderNode.entry.kind !== "directory" || typeof folderNode.expand !== "function") {
-              setStatus("The requested file \"" + initialPath + "\" could not be found.", true);
-              consumeDownload();
-              return false;
+            if (!folderNode) {
+              // Ancestor may sit past the 2,000-entry display cap; fall back to direct fetchFile.
+              return { continueWalk: false, failed: false };
             }
-            return folderNode.expand().then(function (expandedOk) {
-              if (!expandedOk) {
-                consumeDownload();
+            if (folderNode.entry.kind !== "directory" || typeof folderNode.expand !== "function") {
+              setStatus("The requested file \"" + initialPath + "\" could not be found.", true);
+              consumeDeepLink();
+              consumeDownload();
+              return { continueWalk: false, failed: true };
+            }
+            return folderNode.expand().then(function (expandResult) {
+              if (generation !== loadGeneration || (expandResult && expandResult.unauthorized)) {
+                return { continueWalk: false, failed: true };
               }
-              return expandedOk;
+              if (!expandResult || !expandResult.ok) {
+                consumeDeepLink();
+                consumeDownload();
+                return { continueWalk: false, failed: true };
+              }
+              return { continueWalk: true, failed: false };
             });
           });
         })(segments.slice(0, i + 1).join("/"));
       }
-      return chain.then(function (ok) {
-        if (!ok || generation !== loadGeneration) {
+      return chain.then(function (state) {
+        if (state.failed || generation !== loadGeneration) {
           return;
         }
         if (initialSelection !== selectionSequence) {
+          consumeDeepLink();
           consumeDownload();
           return;
         }
         var target = rowsByPath.get(initialPath);
-        if (!target) {
-          setStatus("The requested file \"" + initialPath + "\" could not be found.", true);
-          consumeDownload();
-          return;
-        }
-        if (target.entry.kind !== "file") {
+        if (target && target.entry.kind !== "file") {
           selectFolder(target.entry, target.row, target.item);
+          consumeDeepLink();
           if (autoDownload) {
             setStatus("Folders cannot be downloaded. Select a file inside it to download.", false);
             consumeDownload();
           }
           return;
         }
-        return selectFile(target.entry, target.row, target.item).then(function (result) {
-          if (generation !== loadGeneration) {
+        var entryToSelect = target
+          ? target.entry
+          : {
+              path: initialPath,
+              name: segments[segments.length - 1],
+              kind: "file",
+              size_bytes: null,
+            };
+        return selectFile(
+          entryToSelect,
+          target ? target.row : null,
+          target ? target.item : null
+        ).then(function (result) {
+          if (generation !== loadGeneration || (result && result.unauthorized)) {
             return;
           }
-          if (selectedPath !== target.entry.path) {
+          if (selectedPath !== entryToSelect.path) {
+            consumeDeepLink();
             consumeDownload();
             return;
           }
-          if (autoDownload) {
-            consumeDownload();
-            if (result && result.ok) {
-              return triggerDownload(target.entry);
+          if (!result || !result.ok) {
+            if (!target) {
+              setStatus(
+                result && result.status === 404
+                  ? "The requested file \"" + initialPath + "\" could not be found."
+                  : (result && result.message)
+                    || ("The requested file \"" + initialPath + "\" could not be found."),
+                true
+              );
             }
+            consumeDeepLink();
+            consumeDownload();
+            return;
           }
+          if (!autoDownload) {
+            consumeDeepLink();
+            return;
+          }
+          var downloadTarget = result.entry || entryToSelect;
+          return triggerDownload(downloadTarget).then(function (downloadResult) {
+            if (generation !== loadGeneration || (downloadResult && downloadResult.unauthorized)) {
+              return;
+            }
+            if (downloadResult && downloadResult.ok) {
+              consumeDeepLink();
+              consumeDownload();
+            }
+          });
         });
       });
     }
@@ -874,6 +981,9 @@
       var autoDownload = Boolean(opts.autoDownload && initialPath);
       var onDownloadConsumed = typeof opts.onDownloadConsumed === "function"
         ? opts.onDownloadConsumed
+        : null;
+      var onDeepLinkConsumed = typeof opts.onDeepLinkConsumed === "function"
+        ? opts.onDeepLinkConsumed
         : null;
       loadingRoot = true;
       hideNameTooltip();
@@ -918,6 +1028,7 @@
             initialPath,
             autoDownload,
             onDownloadConsumed,
+            onDeepLinkConsumed,
             generation,
             initialSelection
           );

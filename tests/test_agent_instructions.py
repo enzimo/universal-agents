@@ -159,3 +159,13 @@ def test_no_agent_text_asks_for_an_object_store_mirror_for_a_file_this_host_cann
         assert "could not open the file" in flattened and "opens it itself" in flattened, name
         assert "cannot be opened here" in flattened, name
     assert "again" not in REMOTE_COPY_NEXT_STEP
+
+
+def test_delivery_context_prefers_workspace_file_link_for_downloads_and_large_files() -> None:
+    from assistant_gateway.config import DeliverySettings
+    from custom_agents.instance_delivery_context import render_delivery_settings_context
+
+    rendered = render_delivery_settings_context(DeliverySettings())
+    assert "workspace_file_link(path)" in rendered
+    assert "download_url" in rendered
+    assert "small inline binary items like screenshots" in rendered

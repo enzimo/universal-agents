@@ -199,6 +199,7 @@ def test_workspace_browser_shows_each_person_their_own_folder_and_team(
         layout.person_dir(person).mkdir(parents=True)
         (layout.person_dir(person) / "notes.md").write_text(person, encoding="utf-8")
     (layout.team_dir / "shared.md").write_text("shared", encoding="utf-8")
+    (layout.team_dir / "page.html").write_text("<h1>Team page</h1>", encoding="utf-8")
     (layout.agents_dir / "maintenance.log").write_text("agent log", encoding="utf-8")
     browser = _browser(layout.workspaces_dir)
 
@@ -229,6 +230,9 @@ def test_workspace_browser_shows_each_person_their_own_folder_and_team(
     assert own_notes.content == "usr_other"
     team_notes = browser.inspect_file(access=member, path="team/shared.md")
     assert team_notes.content == "shared"
+    team_html_preview = browser.read_file_content(access=member, path="team/page.html")
+    assert team_html_preview.preview_kind == "html"
+    assert team_html_preview.content == b"<h1>Team page</h1>"
     with browser.open_file_download(access=member, path="team/shared.md") as download:
         assert download.read_at(0, 64) == b"shared"
         assert download.content_type == "text/markdown"
@@ -236,6 +240,8 @@ def test_workspace_browser_shows_each_person_their_own_folder_and_team(
         browser.list_directory(access=member, path="agents")
     with pytest.raises(PermissionError, match="agents/ is for administrators"):
         browser.inspect_file(access=member, path="agents/maintenance.log")
+    with pytest.raises(PermissionError, match="agents/ is for administrators"):
+        browser.read_file_content(access=member, path="agents/maintenance.log")
     with pytest.raises(PermissionError, match="agents/ is for administrators"):
         browser.open_file_download(access=member, path="agents/maintenance.log")
     with pytest.raises(WorkspacePathRejectedError, match="private"):

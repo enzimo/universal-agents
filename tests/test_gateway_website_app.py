@@ -1295,6 +1295,10 @@ async def test_workspace_browser_shows_members_their_own_folder_and_renders_safe
     member_folder.mkdir(parents=True)
     (member_folder / "notes.md").write_text("# Alice's notes\n", encoding="utf-8")
     (workspace / "users" / person_folder_name(admin_id)).mkdir(parents=True)
+    team_folder = workspace / "team"
+    team_folder.mkdir(parents=True)
+    (team_folder / "guide.md").write_text("# Team Guide\n", encoding="utf-8")
+    (team_folder / "report.html").write_text("<h1>Team Report</h1>", encoding="utf-8")
     (workspace / "README.md").write_text("# Rendered Markdown\n", encoding="utf-8")
     json_content = '{"name":"<script>alert(1)</script>","enabled":true}\n'
     (workspace / "settings.json").write_text(json_content, encoding="utf-8")
@@ -1403,6 +1407,21 @@ async def test_workspace_browser_shows_members_their_own_folder_and_renders_safe
             headers=member_headers,
         )
         member_own_file_payload = await member_own_file.json()
+        member_team_dir = await client.get(
+            "/api/web-chat/workspace?path=team",
+            headers=member_headers,
+        )
+        member_team_dir_payload = await member_team_dir.json()
+        member_team_file = await client.get(
+            "/api/web-chat/workspace/file?path=team%2Fguide.md",
+            headers=member_headers,
+        )
+        member_team_file_payload = await member_team_file.json()
+        member_team_html = await client.get(
+            "/api/web-chat/workspace/content?path=team%2Freport.html",
+            headers=member_headers,
+        )
+        member_team_html_text = await member_team_html.text()
         member_shared_file = await client.get(
             "/api/web-chat/workspace/file?path=README.md",
             headers=member_headers,
@@ -1423,6 +1442,7 @@ async def test_workspace_browser_shows_members_their_own_folder_and_renders_safe
         "archive.bin",
         "page.html",
         "settings.json",
+        "team",
         "users",
     }
     # Administrators see only their own folder under users/; other people's stay private.
@@ -1430,14 +1450,24 @@ async def test_workspace_browser_shows_members_their_own_folder_and_renders_safe
         person_folder_name(admin_id)
     ]
     assert admin_other_folder.status == 403
-    # Members see only users/ at the top and only their own folder inside it.
+    # Members see users/ and team/ at the top, and only their own folder inside users/.
     assert member_root.status == 200
-    assert [entry["name"] for entry in member_root_payload["entries"]] == ["users"]
+    assert {entry["name"] for entry in member_root_payload["entries"]} == {"team", "users"}
     assert [entry["name"] for entry in member_users_payload["entries"]] == [
         person_folder_name("user_alpha")
     ]
     assert member_own_file.status == 200
     assert member_own_file_payload["content"] == "# Alice's notes\n"
+    assert member_team_dir.status == 200
+    assert {entry["name"] for entry in member_team_dir_payload["entries"]} == {
+        "guide.md",
+        "report.html",
+    }
+    assert member_team_file.status == 200
+    assert member_team_file_payload["content"] == "# Team Guide\n"
+    assert member_team_html.status == 200
+    assert member_team_html_text == "<h1>Team Report</h1>"
+    assert "sandbox" in member_team_html.headers["Content-Security-Policy"]
     assert member_shared_file.status == 403
     assert member_other_folder.status == 403
     assert former_member.status == 403

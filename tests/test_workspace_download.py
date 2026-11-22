@@ -15,7 +15,11 @@ from aiohttp.test_utils import TestClient, TestServer
 from assistant_gateway.application.website_application import (
     GatewayWorkspaceFileDownload,
 )
-from assistant_gateway.application.workspace_browser import WORKSPACE_PREVIEW_MAX_BYTES
+from assistant_gateway.application.website_services import WebsiteOperationsApplication
+from assistant_gateway.application.workspace_browser import (
+    WORKSPACE_PREVIEW_MAX_BYTES,
+    WebsiteWorkspaceBrowser,
+)
 from assistant_gateway.interactive_apps.website_handlers.workspace import (
     WebsiteWorkspaceHandlers,
 )
@@ -24,8 +28,10 @@ from assistant_gateway.interactive_apps.website_handlers.workspace_download impo
     accepts_html_navigation,
     build_attachment_disposition,
     parse_byte_range,
+    safe_download_content_type,
     unauthenticated_download_redirect_location,
 )
+from assistant_gateway.runtime_ports import OwnershipPrivateResourceAuthorizer
 from runtime_settings.instance_layout import person_folder_name
 from tests.test_gateway_website_app import (
     InternalWebsiteInteractiveApp,
@@ -101,6 +107,43 @@ def test_build_attachment_disposition_sanitizes_and_encodes_utf8() -> None:
     fallback = build_attachment_disposition("\r\n\x00")
     assert fallback == 'attachment; filename="download"; filename*=UTF-8\'\'download'
 
+    # F4: Dot-only names and Unicode Cc/Cf control characters are neutralized in both filename and filename*.
+    for dot_only in (".", "..", ".. ", "\x01..", "...\u202e"):
+        assert (
+            build_attachment_disposition(dot_only)
+            == 'attachment; filename="download"; filename*=UTF-8\'\'download'
+        )
+    bidi = build_attachment_disposition("report\u202efdp.exe")
+    assert "\u202e" not in bidi
+    assert "%E2%80%AE" not in bidi
+    assert bidi == 'attachment; filename="reportfdp.exe"; filename*=UTF-8\'\'reportfdp.exe'
+
+    c1_and_cf = build_attachment_disposition("note\x85\u200b.txt")
+    assert "%C2%85" not in c1_and_cf
+    assert "%E2%80%8B" not in c1_and_cf
+    assert c1_and_cf == 'attachment; filename="note.txt"; filename*=UTF-8\'\'note.txt'
+
+
+def test_safe_download_content_type_neutralizes_active_web_types() -> None:
+    for active in (
+        "text/javascript",
+        "text/javascript; charset=utf-8",
+        "application/javascript",
+        "application/ecmascript",
+        "text/html",
+        "application/xhtml+xml",
+        "image/svg+xml",
+        "text/xml",
+        "application/xml",
+        "text/css",
+        "",
+        None,
+    ):
+        assert safe_download_content_type(active) == "application/octet-stream"
+
+    for safe in ("audio/mpeg", "application/pdf", "image/png", "application/gzip", "text/plain"):
+        assert safe_download_content_type(safe) == safe
+
 
 def test_accepts_html_navigation_and_redirect_location() -> None:
     assert accepts_html_navigation(
@@ -165,6 +208,7 @@ async def _auth_headers(client: TestClient, token: str) -> dict[str, str]:
 def _assert_download_security_headers(headers: dict[str, str] | object) -> None:
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["Cache-Control"] == "no-store"
+    assert headers["Content-Security-Policy"] == "sandbox; default-src 'none'"
     assert headers["Cross-Origin-Resource-Policy"] == "same-origin"
     assert headers["Referrer-Policy"] == "no-referrer"
     assert headers["Accept-Ranges"] == "bytes"
@@ -689,4 +733,325 @@ async def test_open_download_off_loop_closes_descriptor_when_cancelled_in_flight
 
     assert len(returned_downloads) == 1
     assert returned_downloads[0].closed is True
+    await handlers.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_download_neutralizes_active_web_mime_types_with_sandbox_csp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, workspace, _admin_id, _roles = _setup_workspace_app(tmp_path, monkeypatch)
+    team_folder = workspace / "team"
+    team_folder.mkdir(parents=True)
+    web_files = {
+        "script.js": b"alert(1);\n",
+        "module.mjs": b"export const x = 1;\n",
+        "page.html": b"<!doctype html><script>alert(1)</script>",
+        "vector.svg": b"<svg xmlns='http://www.w3.org/2000/svg'></svg>",
+        "styles.css": b"body { color: red; }\n",
+        "data.xml": b"<root/>",
+    }
+    for name, body in web_files.items():
+        (team_folder / name).write_bytes(body)
+
+    async with TestClient(TestServer(app.build_app()), cookie_jar=DummyCookieJar()) as client:
+        headers = await _auth_headers(client, "uaweb_test_token")
+        for name, expected_body in web_files.items():
+            encoded = quote(f"team/{name}", safe="")
+            for method in ("HEAD", "GET"):
+                resp = await client.request(
+                    method,
+                    f"/api/web-chat/workspace/download?path={encoded}",
+                    headers=headers,
+                )
+                assert resp.status == 200
+                assert resp.headers["Content-Type"] == "application/octet-stream", name
+                _assert_download_security_headers(resp.headers)
+                body = await resp.read()
+                assert body == (b"" if method == "HEAD" else expected_body)
+
+
+@pytest.mark.asyncio
+async def test_workspace_download_uses_dedicated_executor_caps_concurrency_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, workspace, _admin_id, _roles = _setup_workspace_app(tmp_path, monkeypatch)
+    team_folder = workspace / "team"
+    team_folder.mkdir(parents=True)
+    (team_folder / "slow.bin").write_bytes(b"0123456789abcdef")
+
+    app.workspace = WebsiteWorkspaceHandlers(
+        application=app.application,
+        logger=None,
+        max_concurrent_downloads=1,
+        download_io_workers=2,
+    )
+    app.workspace.operations = app.workspace_operations if hasattr(app, "workspace_operations") else SimpleNamespace(
+        _require_web_chat_session=app.access._require_web_chat_session
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+    thread_names: set[str] = set()
+    original_open = app.application.operations.open_web_chat_workspace_download
+
+    def blocking_open(**kwargs) -> GatewayWorkspaceFileDownload:
+        thread_names.add(threading.current_thread().name)
+        download = original_open(**kwargs)
+        orig_read_at = download.read_at
+        orig_close = download.close
+        first_call = True
+
+        def gated_read(offset: int, max_bytes: int) -> bytes:
+            nonlocal first_call
+            thread_names.add(threading.current_thread().name)
+            if first_call:
+                first_call = False
+                entered.set()
+                release.wait(timeout=3.0)
+            return orig_read_at(offset, max_bytes)
+
+        def tracked_close() -> None:
+            thread_names.add(threading.current_thread().name)
+            orig_close()
+
+        download.read_at = gated_read  # type: ignore[method-assign]
+        download.close = tracked_close  # type: ignore[method-assign]
+        return download
+
+    monkeypatch.setattr(
+        app.application.operations,
+        "open_web_chat_workspace_download",
+        blocking_open,
+    )
+
+    web_app = app.build_app()
+    async with TestClient(TestServer(web_app), cookie_jar=DummyCookieJar()) as client:
+        headers = await _auth_headers(client, "uaweb_test_token")
+        first_task = asyncio.create_task(
+            client.get("/api/web-chat/workspace/download?path=team%2Fslow.bin", headers=headers)
+        )
+        await asyncio.to_thread(entered.wait, 3.0)
+
+        # While the single download slot is occupied, concurrent GET and HEAD get 503 + Retry-After.
+        saturated_get = await client.get(
+            "/api/web-chat/workspace/download?path=team%2Fslow.bin",
+            headers=headers,
+        )
+        assert saturated_get.status == 503
+        assert int(saturated_get.headers["Retry-After"]) > 0
+        assert saturated_get.headers["Content-Security-Policy"] == "sandbox; default-src 'none'"
+
+        saturated_head = await client.head(
+            "/api/web-chat/workspace/download?path=team%2Fslow.bin",
+            headers=headers,
+        )
+        assert saturated_head.status == 503
+        assert int(saturated_head.headers["Retry-After"]) > 0
+        assert await saturated_head.read() == b""
+
+        release.set()
+        first_resp = await first_task
+        assert first_resp.status == 200
+        assert await first_resp.read() == b"0123456789abcdef"
+
+        # Once released, downloads succeed again.
+        follow_up = await client.head(
+            "/api/web-chat/workspace/download?path=team%2Fslow.bin",
+            headers=headers,
+        )
+        assert follow_up.status == 200
+
+    assert thread_names and all(name.startswith("ua-workspace-download") for name in thread_names)
+    assert app.workspace._download_executor is None
+
+
+@pytest.mark.asyncio
+async def test_workspace_download_handles_disconnect_errors_and_disk_read_errors_separately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app, workspace, admin_id, _roles = _setup_workspace_app(tmp_path, monkeypatch)
+    team_folder = workspace / "team"
+    team_folder.mkdir(parents=True)
+    target = team_folder / "sample.bin"
+    target.write_bytes(b"payload-bytes")
+
+    handlers = WebsiteWorkspaceHandlers(application=app.application, logger=None)
+    caplog.set_level(logging.INFO)
+    try:
+        # 1. BrokenPipeError during write logs client_disconnected, NOT read_failed.
+        download = app.application.operations.open_web_chat_workspace_download(
+            canonical_user_id=admin_id,
+            roles=("owner",),
+            path="team/sample.bin",
+        )
+        try:
+            class _BrokenPipeResponse:
+                async def write(self, _chunk: bytes) -> None:
+                    raise BrokenPipeError("client gone")
+
+                async def write_eof(self) -> None:
+                    pass
+
+                def force_close(self) -> None:
+                    pass
+
+            await handlers._stream_download_body(
+                request=SimpleNamespace(transport=None),  # type: ignore[arg-type]
+                response=_BrokenPipeResponse(),  # type: ignore[arg-type]
+                download=download,
+                start=0,
+                length=download.size_bytes,
+                canonical_user_id=admin_id,
+                requested_path="team/sample.bin",
+            )
+        finally:
+            download.close()
+        assert any(
+            "event=workspace_download_client_disconnected" in rec.message
+            for rec in caplog.records
+        )
+        assert not any(
+            "event=workspace_download_read_failed" in rec.message
+            for rec in caplog.records
+        )
+
+        # 2. ConnectionAbortedError during prepare() and HEAD write_eof() do not escape unhandled.
+        caplog.clear()
+        download2 = app.application.operations.open_web_chat_workspace_download(
+            canonical_user_id=admin_id,
+            roles=("owner",),
+            path="team/sample.bin",
+        )
+        try:
+            class _FailingPrepareResponse:
+                content_type = ""
+                content_length = 0
+
+                async def prepare(self, _request) -> None:
+                    raise ConnectionAbortedError("peer aborted during headers")
+
+                async def write_eof(self) -> None:
+                    pass
+
+            monkeypatch.setattr(
+                handlers,
+                "_build_download_stream_response",
+                lambda _req, _dl: (_FailingPrepareResponse(), 0, download2.size_bytes, True),
+            )
+            await handlers._serve_opened_download(
+                request=SimpleNamespace(method="HEAD", headers={}, transport=None),  # type: ignore[arg-type]
+                download=download2,
+                canonical_user_id=admin_id,
+                requested_path="team/sample.bin",
+            )
+        finally:
+            download2.close()
+        assert any(
+            "event=workspace_download_client_disconnected" in rec.message
+            for rec in caplog.records
+        )
+
+        # 3. Disk read_at OSError closes the download BEFORE closing request.transport.
+        caplog.clear()
+        download3 = app.application.operations.open_web_chat_workspace_download(
+            canonical_user_id=admin_id,
+            roles=("owner",),
+            path="team/sample.bin",
+        )
+        closed_at_transport_close: list[bool] = []
+
+        def failing_read(_offset: int, _max_bytes: int) -> bytes:
+            raise OSError("simulated disk EIO")
+
+        download3.read_at = failing_read  # type: ignore[method-assign]
+
+        class _Transport:
+            def close(self) -> None:
+                closed_at_transport_close.append(download3.closed)
+
+        class _NoopResponse:
+            def force_close(self) -> None:
+                pass
+
+        await handlers._stream_download_body(
+            request=SimpleNamespace(transport=_Transport()),  # type: ignore[arg-type]
+            response=_NoopResponse(),  # type: ignore[arg-type]
+            download=download3,
+            start=0,
+            length=download3.size_bytes,
+            canonical_user_id=admin_id,
+            requested_path="team/sample.bin",
+        )
+        assert closed_at_transport_close == [True]
+        assert any(
+            "event=workspace_download_read_failed" in rec.message
+            for rec in caplog.records
+        )
+    finally:
+        await handlers.close()
+
+
+def test_production_website_operations_application_open_web_chat_workspace_download(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspaces"
+    alice_dir = workspace / "users" / person_folder_name("usr_alice")
+    bob_dir = workspace / "users" / person_folder_name("usr_bob")
+    team_dir = workspace / "team"
+    agents_dir = workspace / "agents"
+    for folder in (alice_dir, bob_dir, team_dir, agents_dir):
+        folder.mkdir(parents=True)
+    (alice_dir / "private.bin").write_bytes(b"alice-bytes")
+    (bob_dir / "secret.bin").write_bytes(b"bob-bytes")
+    (team_dir / "handbook.pdf").write_bytes(b"%PDF-1.7\n")
+    (agents_dir / "job.log").write_text("internal", encoding="utf-8")
+
+    browser = WebsiteWorkspaceBrowser(
+        workspace_root=workspace,
+        authorizer=OwnershipPrivateResourceAuthorizer(),
+        team_id="team_prod_download",
+    )
+    operations = WebsiteOperationsApplication(
+        team=None,  # type: ignore[arg-type]
+        mcp=None,  # type: ignore[arg-type]
+        event_output=None,  # type: ignore[arg-type]
+        operational_controls=None,  # type: ignore[arg-type]
+        schedules=None,  # type: ignore[arg-type]
+        memory_operations=None,  # type: ignore[arg-type]
+        workspace_browser=browser,
+    )
+
+    with operations.open_web_chat_workspace_download(
+        canonical_user_id="usr_alice",
+        roles=("member",),
+        path="team/handbook.pdf",
+    ) as team_dl:
+        assert team_dl.content_type == "application/pdf"
+        assert team_dl.read_at(0, 16) == b"%PDF-1.7\n"
+    assert team_dl.closed is True
+
+    with operations.open_web_chat_workspace_download(
+        canonical_user_id="usr_alice",
+        roles=("member",),
+        path=f"users/{person_folder_name('usr_alice')}/private.bin",
+    ) as own_dl:
+        assert own_dl.read_at(0, 16) == b"alice-bytes"
+
+    with pytest.raises(PermissionError):
+        operations.open_web_chat_workspace_download(
+            canonical_user_id="usr_alice",
+            roles=("member",),
+            path="agents/job.log",
+        )
+    with pytest.raises(Exception):
+        operations.open_web_chat_workspace_download(
+            canonical_user_id="usr_alice",
+            roles=("admin",),
+            path=f"users/{person_folder_name('usr_bob')}/secret.bin",
+        )
 

@@ -754,7 +754,7 @@ test("invalid, missing, and folder deep-links show status and strip download wit
   assert.match(f1.status.textContent, /not valid/i);
   assert.ok(f1.status.classList.contains("is-error"));
 
-  // Missing target file
+  // Missing target file falls back to direct fetchFile and shows not found after 404.
   const f2 = treeFixture();
   consumed = 0;
   const loadMissing = f2.controls.load({
@@ -765,6 +765,11 @@ test("invalid, missing, and folder deep-links show status and strip download wit
   await answer(f2.requests, ROOT_LISTING, listing("", [entry("team")]));
   await answer(f2.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
   await answer(f2.requests, "/api/web-chat/workspace?path=team", listing("team", []));
+  await answer(
+    f2.requests,
+    "/api/web-chat/workspace/file?path=team%2Fmissing.mp3",
+    errorResponse(404, "Workspace path was not found."),
+  );
   await loadMissing;
   assert.equal(consumed, 1);
   assert.equal(f2.downloads.length, 0);
@@ -851,4 +856,292 @@ test("unlockWorkspace passes deep-link options once and strips download=1 with h
     globalThis.window = prevWindow;
     globalThis.document = prevDocument;
   }
+});
+
+test("F5: mid-load 401 preserves pending deep-link state and download=1 across re-sign-in; explicit logout clears it", async () => {
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const replaced = [];
+  globalThis.window = {
+    location: {
+      pathname: "/webchat",
+      search: "?view=files&path=team%2Fguides%2Fclip.mp4&download=1",
+      hash: "",
+    },
+    history: {
+      replaceState(_state, _title, url) {
+        replaced.push(url);
+        const [pathname, searchPart = ""] = url.split("?");
+        globalThis.window.location = { pathname, search: searchPart ? `?${searchPart}` : "", hash: "" };
+      },
+    },
+  };
+  globalThis.document = {
+    title: "Workspace Files · Universal Agents",
+    getElementById: () => ({ replaceChildren() {} }),
+  };
+  try {
+    // 1. Test 401 during ancestor expansion, during fetchFile, and during HEAD preflight.
+    for (const failStage of ["expand", "file", "head"]) {
+      replaced.length = 0;
+      globalThis.window.location = {
+        pathname: "/webchat",
+        search: "?view=files&path=team%2Fguides%2Fclip.mp4&download=1",
+        hash: "",
+      };
+      let controlsRef = null;
+      const f = treeFixture({
+        onUnauthorized: () => {
+          controlsRef.clear();
+          return true;
+        },
+      });
+      controlsRef = f.controls;
+      const authenticationState = {
+        authPanel: { hidden: false },
+        authError: { textContent: "", hidden: true },
+        chatApp: { hidden: false },
+        objectivesApp: { hidden: false },
+        statusApp: { hidden: false },
+        knowledgeApp: { hidden: false },
+        workspaceApp: { hidden: true },
+        enrollmentOverlay: { classList: { remove() {} }, setAttribute() {}, hidden: true },
+        enrollmentToken: { value: "", type: "password" },
+        enrollmentReveal: { setAttribute() {}, disabled: false },
+        enrollmentCopyButton: { disabled: false, classList: { remove() {} } },
+        enrollmentCompleteButton: { disabled: false },
+        logoutButton: { disabled: false },
+        objectivesLogout: { disabled: false },
+        workspaceLogout: { disabled: false },
+        statusLogout: { disabled: false },
+        knowledgeLogout: { disabled: false },
+        enrollmentCancelButton: { disabled: false },
+        settingsWorkspaceLink: { hidden: false },
+        settingsStatusLink: { hidden: false },
+        settingsKnowledgeLink: { hidden: false },
+        knowledgeClient: { setCsrfToken() {} },
+        knowledgeControls: { clear() {} },
+        pendingWorkspacePath: "team/guides/clip.mp4",
+        pendingWorkspaceDownload: true,
+        workspaceControls: f.controls,
+      };
+      const auth = createAuthentication({
+        authenticationState,
+        sharedState: {
+          runtimeControlSnapshots: new Map(),
+          settingsControls: { clear() {} },
+          accountNameLabel: { textContent: "" },
+          threadList: { innerHTML: "" },
+          messageList: { innerHTML: "" },
+          messageInput: { value: "" },
+          objectivesContent: { replaceChildren() {} },
+          objectivesUpdatedAt: { textContent: "" },
+        },
+        operations: {
+          stopLiveEvents() {},
+          clearOptimisticDeliveries() {},
+          clearPendingAttachments() {},
+          setObjectivesStatus() {},
+          showSignIn() {},
+        },
+        lifecycle: { clearInterval() {} },
+        requestClient: { fetch: () => Promise.resolve({ ok: true }) },
+      });
+
+      auth.unlockWorkspace();
+      await answer(f.requests, ROOT_LISTING, listing("", [entry("team")]));
+      await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+      if (failStage === "expand") {
+        await answer(f.requests, "/api/web-chat/workspace?path=team", errorResponse(401, "Session expired."));
+      } else {
+        await answer(f.requests, "/api/web-chat/workspace?path=team", listing("team", [entry("team/guides")]));
+        await answer(
+          f.requests,
+          "/api/web-chat/workspace?path=team%2Fguides",
+          listing("team/guides", [entry("team/guides/clip.mp4", "file", 8 * 1024 * 1024)]),
+        );
+        if (failStage === "file") {
+          await answer(
+            f.requests,
+            "/api/web-chat/workspace/file?path=team%2Fguides%2Fclip.mp4",
+            errorResponse(401, "Session expired."),
+          );
+        } else {
+          await answer(
+            f.requests,
+            "/api/web-chat/workspace/file?path=team%2Fguides%2Fclip.mp4",
+            fileReply("team/guides/clip.mp4", "clip.mp4", { preview_kind: "too_large" }),
+          );
+          await answer(
+            f.requests,
+            "/api/web-chat/workspace/download?path=team%2Fguides%2Fclip.mp4",
+            headResponse(401),
+          );
+        }
+      }
+      await settle();
+
+      // Pending state and download=1 URL parameter must survive the mid-load 401.
+      assert.equal(authenticationState.pendingWorkspacePath, "team/guides/clip.mp4", failStage);
+      assert.equal(authenticationState.pendingWorkspaceDownload, true, failStage);
+      assert.deepEqual(replaced, [], `download=1 must not be stripped on 401 (${failStage})`);
+      assert.equal(f.downloads.length, 0, failStage);
+
+      // Re-signing in completes the preserved deep-link and strips download=1 only after HEAD 200.
+      auth.unlockWorkspace();
+      await answer(f.requests, ROOT_LISTING, listing("", [entry("team")]));
+      await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+      await answer(f.requests, "/api/web-chat/workspace?path=team", listing("team", [entry("team/guides")]));
+      await answer(
+        f.requests,
+        "/api/web-chat/workspace?path=team%2Fguides",
+        listing("team/guides", [entry("team/guides/clip.mp4", "file", 8 * 1024 * 1024)]),
+      );
+      await answer(
+        f.requests,
+        "/api/web-chat/workspace/file?path=team%2Fguides%2Fclip.mp4",
+        fileReply("team/guides/clip.mp4", "clip.mp4", { preview_kind: "too_large" }),
+      );
+      await answer(
+        f.requests,
+        "/api/web-chat/workspace/download?path=team%2Fguides%2Fclip.mp4",
+        headResponse(200),
+      );
+      await settle();
+      assert.equal(f.downloads.length, 1, failStage);
+      assert.equal(authenticationState.pendingWorkspacePath, "", failStage);
+      assert.equal(authenticationState.pendingWorkspaceDownload, false, failStage);
+      assert.deepEqual(replaced, ["/webchat?view=files&path=team%2Fguides%2Fclip.mp4"], failStage);
+
+      // Explicit logout clears pending deep-link state.
+      authenticationState.pendingWorkspacePath = "team/other.pdf";
+      authenticationState.pendingWorkspaceDownload = true;
+      auth.logoutChat();
+      await settle();
+      assert.equal(authenticationState.pendingWorkspacePath, "");
+      assert.equal(authenticationState.pendingWorkspaceDownload, false);
+    }
+  } finally {
+    globalThis.window = prevWindow;
+    globalThis.document = prevDocument;
+  }
+});
+
+test("F6: deep-link falls back to direct fetchFile when an ancestor folder exceeds the 2,000-entry cap", async () => {
+  const f = treeFixture();
+  let consumed = 0;
+  const loadTruncated = f.controls.load({
+    initialPath: "team/z_beyond_cap/report.pdf",
+    autoDownload: true,
+    onDownloadConsumed: () => { consumed += 1; },
+  });
+  await answer(f.requests, ROOT_LISTING, listing("", [entry("team")]));
+  await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+  // team/ listing is truncated and omits z_beyond_cap.
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace?path=team",
+    jsonResponse({
+      status: "ok",
+      path: "team",
+      entries: [entry("team/a_first.txt", "file")],
+      truncated: true,
+      entry_limit: 2000,
+    }),
+  );
+  // Falls back directly to /api/web-chat/workspace/file for the target path.
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace/file?path=team%2Fz_beyond_cap%2Freport.pdf",
+    fileReply("team/z_beyond_cap/report.pdf", "report.pdf", {
+      preview_kind: "pdf",
+      size_bytes: 2048,
+      content_type: "application/pdf",
+    }),
+  );
+  const headResp = await answer(
+    f.requests,
+    "/api/web-chat/workspace/download?path=team%2Fz_beyond_cap%2Freport.pdf",
+    headResponse(200),
+  );
+  assert.equal(headResp.method, "HEAD");
+  await loadTruncated;
+
+  assert.equal(f.viewerTitle.textContent, "report.pdf");
+  assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL]);
+  assert.equal(consumed, 1);
+  assert.deepEqual(f.downloads, [{
+    url: "/api/web-chat/workspace/download?path=team%2Fz_beyond_cap%2Freport.pdf",
+    path: "team/z_beyond_cap/report.pdf",
+    name: "report.pdf",
+  }]);
+});
+
+test("F9: Download button disables while HEAD preflight is in flight and guards status on selectedPath", async () => {
+  const f = await memberTree();
+  await openOwnFolder(f, [
+    entry(`users/${OWN}/first.bin`, "file"),
+    entry(`users/${OWN}/second.bin`, "file"),
+  ]);
+  await selectOwnFile(f, "first.bin");
+  const downloadBtn = buttonNamed(f.itemActions, DOWNLOAD_ACTION_LABEL);
+
+  // Double-clicking while HEAD is in flight sends only one HEAD request.
+  downloadBtn.click();
+  assert.equal(downloadBtn.disabled, true);
+  assert.equal(downloadBtn.getAttribute("aria-busy"), "true");
+  downloadBtn.click();
+  assert.equal(
+    openRequests(f.requests).filter(req => req.path.includes("/api/web-chat/workspace/download")).length,
+    1,
+  );
+  await answer(
+    f.requests,
+    `/api/web-chat/workspace/download?path=users%2F${OWN}%2Ffirst.bin`,
+    headResponse(200),
+  );
+  assert.equal(downloadBtn.disabled, false);
+  assert.equal(downloadBtn.getAttribute("aria-busy"), null);
+  assert.equal(f.downloads.length, 1);
+
+  // Switching to second.bin while first.bin's failing HEAD is in flight must not clobber status.
+  downloadBtn.click();
+  await selectOwnFile(f, "second.bin");
+  f.status.textContent = "";
+  f.status.hidden = true;
+  await answer(
+    f.requests,
+    `/api/web-chat/workspace/download?path=users%2F${OWN}%2Ffirst.bin`,
+    headResponse(404),
+  );
+  assert.equal(f.status.textContent, "");
+  assert.equal(f.status.hidden, true);
+});
+
+test("F13: collapsing a folder while its initial listing is in flight hides the resolved children group", async () => {
+  const f = await memberTree();
+  const teamItem = treeItem(f, "team");
+  const teamRow = rowOf(teamItem);
+
+  // Click once to expand (starts fetchDirectory), then click again before it resolves to collapse.
+  teamRow.click();
+  assert.equal(teamRow.getAttribute("aria-expanded"), "true");
+  teamRow.click();
+  assert.equal(teamRow.getAttribute("aria-expanded"), "false");
+
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace?path=team",
+    listing("team", [entry("team/guide.md", "file")]),
+  );
+  const group = byClass(teamItem, "workspace-tree-group")[0];
+  assert.ok(group);
+  assert.equal(teamRow.getAttribute("aria-expanded"), "false");
+  assert.equal(group.hidden, true, "children stay hidden when collapsed mid-load");
+
+  // Re-expanding shows the already-loaded group without re-fetching.
+  teamRow.click();
+  assert.equal(teamRow.getAttribute("aria-expanded"), "true");
+  assert.equal(group.hidden, false);
+  assert.equal(openRequests(f.requests).length, 0);
 });

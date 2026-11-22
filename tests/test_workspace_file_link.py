@@ -447,3 +447,66 @@ def test_relative_path_to_team_works_and_access_denied_is_surfaced(
     assert denied["status"] == "error"
     assert denied["reason_code"] == file_access.ACCESS_DENIED
 
+
+CEDAR_BINARY = Path(__file__).resolve().parents[1] / "target" / "debug" / "ua-cedar-authorizer"
+
+
+@pytest.mark.skipif(
+    not CEDAR_BINARY.is_file(),
+    reason="build ua-cedar-authorizer first (cargo build)",
+)
+def test_workspace_file_link_enforces_real_cedar_folder_authorization(
+    layout: InstanceLayout,
+) -> None:
+    from custom_agents import folder_access
+    from custom_agents.access_runtime import runtime_access
+    from custom_messages.contracts.access_v2 import (
+        GrantKind,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+
+    agent = _make_agent(layout, "alice", roles=("member",))
+    agent.authorization_config = {"enabled": True, "cedar_binary_path": str(CEDAR_BINARY)}
+    agent.named_agent_type = "WebResearchAgent"
+    set_agent_ref(agent)
+    folder_access.forget_kept_answers()
+
+    finance = layout.team_dir / "finance"
+    finance.mkdir()
+    budget = finance / "budget.md"
+    budget.write_text("quarterly numbers", encoding="utf-8")
+
+    # Before any block, real Cedar allows linking both own files and team/finance/.
+    own_data = _payload(workspace_file_link(path="notes.txt"))
+    assert own_data["workspace_path"] == f"users/{person_folder_name('alice')}/notes.txt"
+    finance_data = _payload(workspace_file_link(path=str(budget)))
+    assert finance_data["workspace_path"] == "team/finance/budget.md"
+
+    # A real Cedar block on team/finance for WebResearchAgent refuses workspace_file_link.
+    runtime_access(agent).service.grant_by_person(
+        PersonPrincipal("owner-1", TEAM, ("owner",)),
+        GrantV1(
+            grant_id="new",
+            team_id=TEAM,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance"),
+            level=AccessLevel.FULL,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id="owner-1"),
+            reason="Keep finance out of research links.",
+            created_at_utc=datetime.now(timezone.utc),
+        ),
+    )
+
+    refused = workspace_file_link(path=str(budget))
+    assert refused["status"] == "error"
+    assert refused["reason_code"] == file_access.ACCESS_DENIED
+    assert "download_url" not in json.dumps(refused)
+
+    # Own folder remains allowed under real Cedar.
+    assert workspace_file_link(path="notes.txt")["status"] == "success"
+

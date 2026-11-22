@@ -125,6 +125,18 @@ def test_members_browse_their_own_folder_and_team_while_administrators_also_see_
     assert browse("users/usr_x/notes.md", ()).reason == "team_member_required"
     assert browse("team/plan.md", ()).reason == "team_member_required"
 
+    # F10: Traversal segments, backslashes, and NUL bytes are refused directly.
+    for bad_path in (
+        "team/../users/usr_y/diary.md",
+        "users/usr_x/../usr_y/diary.md",
+        "..",
+        "team\\plan.md",
+        "team/plan.md\x00.txt",
+    ):
+        for role in (("member",), ("admin",)):
+            decision = browse(bad_path, role)
+            assert (decision.allowed, decision.reason) == (False, "invalid_workspace_path")
+
 
 def test_unknown_actions_are_refused() -> None:
     decision = private_access(person_id="usr_a", owner_id="usr_a", resource_type=RESOURCE_SCHEDULE, action="schedule.update")

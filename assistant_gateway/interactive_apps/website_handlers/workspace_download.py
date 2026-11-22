@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
+import unicodedata
 from urllib.parse import quote
 
 from assistant_gateway.interactive_apps.website_support import _WEB_CHAT_ROUTE
@@ -15,6 +16,20 @@ DOWNLOAD_CHUNK_BYTES = 64 * 1024
 _MAX_RANGE_DIGITS = 20
 _RFC5987_SAFE = "!#$&+-.^_`|~"
 _URL_PATH_QUERY_SAFE = "-_.~"
+_DOWNLOAD_SANDBOX_CSP = "sandbox; default-src 'none'"
+_ACTIVE_WEB_DOWNLOAD_MIME_TYPES = frozenset(
+    {
+        "text/javascript",
+        "application/javascript",
+        "application/ecmascript",
+        "text/html",
+        "application/xhtml+xml",
+        "image/svg+xml",
+        "text/xml",
+        "application/xml",
+        "text/css",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +66,19 @@ def _parse_ascii_uint(value: str) -> int | None:
         return None
 
 
+def _resolve_suffix_range(end_text: str, size_bytes: int) -> ByteRangeResult:
+    suffix_length = _parse_ascii_uint(end_text)
+    if suffix_length is None:
+        return ByteRangeResult(status="none")
+    if suffix_length == 0 or size_bytes <= 0:
+        return ByteRangeResult(status="unsatisfiable")
+    suffix_start = max(0, size_bytes - suffix_length)
+    return ByteRangeResult(
+        status="satisfiable",
+        byte_range=ByteRange(start=suffix_start, end=size_bytes - 1),
+    )
+
+
 def _resolve_byte_range(
     start_text: str,
     end_text: str,
@@ -59,16 +87,7 @@ def _resolve_byte_range(
     if not start_text and not end_text:
         return ByteRangeResult(status="none")
     if not start_text:
-        suffix_length = _parse_ascii_uint(end_text)
-        if suffix_length is None:
-            return ByteRangeResult(status="none")
-        if suffix_length == 0 or size_bytes <= 0:
-            return ByteRangeResult(status="unsatisfiable")
-        suffix_start = max(0, size_bytes - suffix_length)
-        return ByteRangeResult(
-            status="satisfiable",
-            byte_range=ByteRange(start=suffix_start, end=size_bytes - 1),
-        )
+        return _resolve_suffix_range(end_text, size_bytes)
     start = _parse_ascii_uint(start_text)
     if start is None:
         return ByteRangeResult(status="none")
@@ -118,10 +137,10 @@ def build_attachment_disposition(filename: str) -> str:
     cleaned_chars = [
         ch
         for ch in str(filename or "")
-        if ord(ch) >= 0x20 and ord(ch) != 0x7F and ch not in {"/", "\\"}
+        if unicodedata.category(ch) not in {"Cc", "Cf"} and ch not in {"/", "\\"}
     ]
     sanitized = "".join(cleaned_chars).strip()
-    if not sanitized:
+    if not sanitized or set(sanitized) <= {"."}:
         sanitized = "download"
 
     ascii_chars = [
@@ -176,11 +195,21 @@ def unauthenticated_download_redirect_location(requested_path: str) -> str:
     return f"{_WEB_CHAT_ROUTE}?view=files&path={encoded}&download=1"
 
 
+def safe_download_content_type(content_type: str | None) -> str:
+    """Neutralize browser-executable web MIME types on the Web Chat origin."""
+
+    normalized = str(content_type or "").split(";", 1)[0].strip().lower()
+    if not normalized or normalized in _ACTIVE_WEB_DOWNLOAD_MIME_TYPES:
+        return "application/octet-stream"
+    return normalized
+
+
 def download_security_headers() -> dict[str, str]:
     """Security headers attached to every workspace file download response."""
 
     return {
         "Cache-Control": "no-store",
+        "Content-Security-Policy": _DOWNLOAD_SANDBOX_CSP,
         "Cross-Origin-Resource-Policy": "same-origin",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",

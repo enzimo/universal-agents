@@ -498,7 +498,13 @@ def _workspace_read(
 
     if not (person_id and team_id and role_set):
         return _denied("team_member_required", person_id, RESOURCE_FILE_PATH, resource_id, WORKSPACE_FILE_READ)
-    parts = [part for part in resource_id.removeprefix("workspace/").split("/") if part not in {"", "."}]
+    raw_path = resource_id.removeprefix("workspace/")
+    if "\x00" in raw_path or "\\" in raw_path:
+        return _denied("invalid_workspace_path", person_id, RESOURCE_FILE_PATH, resource_id, WORKSPACE_FILE_READ)
+    raw_segments = raw_path.split("/")
+    if any(part == ".." for part in raw_segments):
+        return _denied("invalid_workspace_path", person_id, RESOURCE_FILE_PATH, resource_id, WORKSPACE_FILE_READ)
+    parts = [part for part in raw_segments if part not in {"", "."}]
     own = [USERS_DIRNAME, person_folder_name(person_id)]
     if parts[:2] == own or parts in ([], [USERS_DIRNAME]):
         return OwnershipDecision(True, "own_workspace_folder")

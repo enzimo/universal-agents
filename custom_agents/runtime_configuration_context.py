@@ -130,8 +130,10 @@ def _user_communication_payload(instance_config: Any) -> dict[str, Any]:
             "Use notify_user for proactive user-visible messages. Its default target='auto' follows "
             "notification_routing_mode: source_thread_or_default returns notifications to an active "
             "interactive chat/thread when one exists, while default_target uses the preferred channel "
-            "below. For screenshots or other binary outputs, save the file locally and pass "
-            "notify_user attachments with file paths; do not inline bytes or base64."
+            "below. For workspace files to share as download links or large binary files, save the "
+            "file in the workspace and use workspace_file_link(path) to share its download_url. "
+            "Reserve notify_user attachments (with local file paths) for small inline binary items "
+            "like screenshots; never inline bytes or base64."
         ),
     }
 

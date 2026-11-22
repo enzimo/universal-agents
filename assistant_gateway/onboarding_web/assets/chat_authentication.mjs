@@ -282,6 +282,8 @@ function handleUnauthorizedResponse(response) {
   }
 
 function logoutChat() {
+    authenticationState.pendingWorkspacePath = "";
+    authenticationState.pendingWorkspaceDownload = false;
     authenticationState.logoutButton.disabled = true;
     authenticationState.objectivesLogout.disabled = true;
     authenticationState.workspaceLogout.disabled = true;
@@ -364,21 +366,29 @@ function unlockWorkspace() {
     authenticationState.workspaceApp.hidden = false;
     var initialPath = authenticationState.pendingWorkspacePath || "";
     var autoDownload = Boolean(authenticationState.pendingWorkspaceDownload && initialPath);
-    authenticationState.pendingWorkspacePath = "";
-    authenticationState.pendingWorkspaceDownload = false;
     var stripDownloadParam = function () {
       var cleanUrl = stripWorkspaceDownloadParam(window.location);
       if (cleanUrl && window.history && typeof window.history.replaceState === "function") {
         window.history.replaceState(null, document.title, cleanUrl);
       }
     };
+    var consumeDeepLink = function () {
+      authenticationState.pendingWorkspacePath = "";
+    };
+    var consumeDownload = function () {
+      authenticationState.pendingWorkspacePath = "";
+      authenticationState.pendingWorkspaceDownload = false;
+      stripDownloadParam();
+    };
     if (!autoDownload) {
+      authenticationState.pendingWorkspaceDownload = false;
       stripDownloadParam();
     }
     authenticationState.workspaceControls.load({
       initialPath: initialPath,
       autoDownload: autoDownload,
-      onDownloadConsumed: stripDownloadParam,
+      onDeepLinkConsumed: consumeDeepLink,
+      onDownloadConsumed: consumeDownload,
     });
   }
 
