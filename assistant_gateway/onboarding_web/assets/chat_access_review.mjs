@@ -25,7 +25,7 @@
 
 import {
   ACCESS_INBOX_API, ACCESS_REVIEW_MESSAGE_TYPE, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_PAGES_BELOW, activeFollowUpLinks,
-  closeEndedFollowUpLinks, createFollowUpWatcher, decisionOutcome, decisionPath, decisionRequestBody,
+  createFollowUpWatcher, decisionOutcome, decisionPath, decisionRequestBody,
   followUpCardParts, followUpOutcomes, followUpSignature, followUpWatchTargets, handOffFollowUpLinks,
   hasPendingFollowUp, isFollowUpSettling, renderDecidedCard, renderReviewCard, setCardMessage, storedDecisionOutcome,
 } from "./access_inbox.mjs";
@@ -75,11 +75,9 @@ function findReviewSlots(document, id) {
  * `onFollowUpPages(requestId, links, placement)` hands an approved proposal's
  * credential forms to the conversation as broker cards and returns the links
  * it took (``access_inbox.handOffFollowUpLinks``).
- * `onCloseFollowUpPages(requestId, urls)` closes any inline broker cards for
- * previously handed-off links that are no longer pending on the server.
  */
 export function createChatAccessReviews({
-  get, post, beginAction, failureMessage, openInbox, onDecided, onFollowUpPages, onCloseFollowUpPages,
+  get, post, beginAction, failureMessage, openInbox, onDecided, onFollowUpPages,
   browser = globalThis, formatTime, now = () => Date.now(),
 }) {
   const document = browser.document;
@@ -142,9 +140,6 @@ export function createChatAccessReviews({
           const handedOff = isDecided(entry) && handOffFollowUpLinks(
             id, activeFollowUpLinks(entry.review, now()), onFollowUpPages, FOLLOW_UP_AFTER_REVIEW, entry.handedOffUrls,
           );
-          if (isDecided(entry)) {
-            closeEndedFollowUpLinks(id, entry.review, onCloseFollowUpPages, entry.handedOffUrls);
-          }
           if (handedOff || followUpSignature(entry.review, now()) !== entry.lastFollowUpSignature) drawAll(id);
           return;
         }
@@ -154,7 +149,6 @@ export function createChatAccessReviews({
           handOffFollowUpLinks(
             id, activeFollowUpLinks(entry.review, now()), onFollowUpPages, FOLLOW_UP_AFTER_REVIEW, entry.handedOffUrls,
           );
-          closeEndedFollowUpLinks(id, entry.review, onCloseFollowUpPages, entry.handedOffUrls);
         }
       }, error => {
         if (readGeneration !== generation) return;

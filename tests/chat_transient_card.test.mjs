@@ -6,6 +6,7 @@ import vm from "node:vm";
 import { byClass, byTag, fakeDocument } from "./fake_dom.mjs";
 import { FOLLOW_UP_AFTER_LATEST, FOLLOW_UP_AFTER_REVIEW } from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
 import {
+  BROKER_CARD_CLOSED,
   BROKER_CARD_DECLINED,
   BROKER_CARD_EXPIRED,
   BROKER_CARD_FINISHED,
@@ -285,6 +286,7 @@ test("cross-thread broker card outcome and expiry close the form in every thread
     document,
     brokerCards,
     brokerCardElement,
+    BROKER_CARD_EXPIRED,
     lifecycle,
     sharedState: { threads: [thread1, thread2, thread3] },
     activeThread: () => current,
@@ -348,7 +350,7 @@ test("cross-thread broker card outcome and expiry close the form in every thread
   assert.equal(thread3.brokerCardStates.get(expItem.itemId), undefined);
 });
 
-test("closeFollowUpPages closes live and unavailable inline broker cards across threads without overwriting declined or expired state", () => {
+test("closeFollowUpPages uses neutral closed note before expiry, expired state past expiry, and preserves frame-reported states (C15)", () => {
   const document = fakeDocument();
   const browser = {
     innerHeight: 800,
@@ -384,34 +386,62 @@ test("closeFollowUpPages closes live and unavailable inline broker cards across 
     frameUrl: "http://127.0.0.1:18600/account-link/token-c?view=card",
     expiresAtUtc: "2026-11-21T12:15:00Z",
   };
-  const [pageA, pageB, pageC] = globalThis.UAChatDelivery.followUpPageItems(
-    "req-1", 4, [formA, formB, formC], "http://127.0.0.1:18090",
+  const formD = {
+    label: "Choose the credential for GitHub",
+    url: "http://127.0.0.1:18600/account-link/token-d",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-d?view=card",
+    expiresAtUtc: "2026-11-21T12:10:00Z",
+  };
+  const formE = {
+    label: "Choose the credential for Linear",
+    url: "http://127.0.0.1:18600/account-link/token-e",
+    frameUrl: "http://127.0.0.1:18600/account-link/token-e?view=card",
+    expiresAtUtc: "2026-11-21T12:15:00Z",
+  };
+  const [pageA, pageB, pageC, pageD, pageE] = globalThis.UAChatDelivery.followUpPageItems(
+    "req-1", 4, [formA, formB, formC, formD, formE], "http://127.0.0.1:18090",
   );
+  const slashLinkItem = globalThis.UAChatDelivery.normalizeTransientItem({
+    kind: "account_link",
+    item_id: "account_link:cmd-1",
+    correlation_id: "cmd-1",
+    session_sequence: 5,
+    content: "Link Portainer",
+    action: { label: "Link", url: "http://127.0.0.1:18600/account-link/cmd", frame_url: "http://127.0.0.1:18600/account-link/cmd?view=card" },
+  }, "http://127.0.0.1:18090");
   const thread1 = {
     id: "t1",
-    transientItems: [{ ...pageA.item }, { ...pageB.item }, { ...pageC.item }],
+    transientItems: [{ ...pageA.item }, { ...pageB.item }, { ...pageC.item }, { ...pageE.item }, slashLinkItem],
     brokerCardStates: new Map([
       [pageB.item.itemId, BROKER_CARD_UNAVAILABLE],
       [pageC.item.itemId, BROKER_CARD_DECLINED],
+      [pageE.item.itemId, BROKER_CARD_FINISHED],
     ]),
   };
+  // Thread 2 holds Form A (shared with t1) and Form D (off-screen thread whose expiry passes before switching back).
   const thread2 = {
     id: "t2",
-    transientItems: [{ ...pageA.item }, { ...pageC.item }],
+    transientItems: [{ ...pageA.item }, { ...pageC.item }, { ...pageD.item }],
     brokerCardStates: new Map([
       [pageC.item.itemId, BROKER_CARD_DECLINED],
     ]),
   };
   let renders = 0;
+  let syncs = 0;
   const context = {
     document,
     brokerCards,
     brokerCardElement,
+    BROKER_CARD_CLOSED,
     BROKER_CARD_DECLINED,
     BROKER_CARD_EXPIRED,
     BROKER_CARD_FINISHED,
     lifecycle,
-    sharedState: { threads: [thread1, thread2] },
+    sharedState: {
+      authSessionActive: true,
+      threads: [thread1, thread2],
+      settingsControls: { syncFollowUpPages: () => { syncs += 1; } },
+    },
     activeThread: () => thread1,
     window: {
       UAChatDelivery: globalThis.UAChatDelivery,
@@ -425,9 +455,16 @@ test("closeFollowUpPages closes live and unavailable inline broker cards across 
     `function isTerminalBrokerCardState(state)${CLOSE_FOLLOW_UP_FNS}\n`
     + `function setBrokerCardState(thread, itemId, state)${SET_BROKER_STATE_FN}\n`
     + `function createTransientItemCard(thread, item)${CREATE_FN}\n`
+    + `this.openFollowUpPages = openFollowUpPages;\n`
     + `this.closeFollowUpPages = closeFollowUpPages;\n`
     + `this.createTransientItemCard = createTransientItemCard;`,
     context,
+  );
+
+  // openFollowUpPages lists only non-terminal proposal follow-up cards (deduplicated across threads, excluding /link).
+  assert.deepEqual(
+    Array.from(context.openFollowUpPages(), page => `${page.requestId}|${page.url}`).sort(),
+    [`req-1|${formA.url}`, `req-1|${formB.url}`, `req-1|${formD.url}`].sort(),
   );
 
   // Open Form A as a live iframe in thread1.
@@ -435,26 +472,45 @@ test("closeFollowUpPages closes live and unavailable inline broker cards across 
   assert.equal(byTag(liveCardA, "iframe").length, 1);
   assert.deepEqual(brokerCards.openItemIds(), [pageA.item.itemId]);
 
-  // External completion (e.g. via "Open in its own tab" or another device) closes Form A and Form B across threads.
-  context.closeFollowUpPages("req-1", [formA.url, formB.url]);
+  // 1) Before expiry (12:12): external ending closes Form A and unavailable Form B with neutral BROKER_CARD_CLOSED,
+  //    while Form D (expired at 12:10 in off-screen thread2) closes as BROKER_CARD_EXPIRED.
+  const nowAt1212 = Date.parse("2026-11-21T12:12:00Z");
+  context.closeFollowUpPages("req-1", [formA.url, formB.url, formD.url], nowAt1212);
   assert.deepEqual(brokerCards.openItemIds(), [], "live iframe closed immediately");
-  assert.equal(thread1.brokerCardStates.get(pageA.item.itemId), BROKER_CARD_FINISHED);
-  assert.equal(thread2.brokerCardStates.get(pageA.item.itemId), BROKER_CARD_FINISHED);
-  assert.equal(thread1.brokerCardStates.get(pageB.item.itemId), BROKER_CARD_FINISHED,
-    "unavailable fallback card also closes to finished");
+  assert.equal(thread1.brokerCardStates.get(pageA.item.itemId), BROKER_CARD_CLOSED);
+  assert.equal(thread2.brokerCardStates.get(pageA.item.itemId), BROKER_CARD_CLOSED);
+  assert.equal(thread1.brokerCardStates.get(pageB.item.itemId), BROKER_CARD_CLOSED,
+    "unavailable fallback card before expiry closes with neutral closed state");
+  assert.equal(thread2.brokerCardStates.get(pageD.item.itemId), BROKER_CARD_EXPIRED,
+    "card past its expiresAtUtc closes as expired even when off-screen");
   assert.equal(renders, 1);
+  assert.ok(syncs >= 1, "closing cards syncs the follow-up watcher");
+  assert.equal(context.openFollowUpPages().length, 0, "all proposal cards are now terminal");
 
-  // Re-rendering Form A shrinks it to the closed one-line state with no iframe.
+  // Re-rendering Form A shows the neutral closed note (never "Done."), and Form D shows the expired message.
   const closedA = context.createTransientItemCard(thread1, thread1.transientItems[0]);
   assert.ok(closedA.classList.contains("is-closed"));
   assert.equal(byTag(closedA, "iframe").length, 0);
-  assert.equal(closedA.textContent, BROKER_CARD_NOTES[BROKER_CARD_FINISHED]);
-  assert.deepEqual(brokerCards.openItemIds(), []);
+  assert.equal(closedA.textContent, BROKER_CARD_NOTES[BROKER_CARD_CLOSED]);
+  assert.equal(closedA.textContent, "This secure page is closed.");
 
-  // Re-calling for already-finished or already-declined forms preserves state and does not trigger an extra render.
-  context.closeFollowUpPages("req-1", [formA.url, formC.url]);
+  const expiredD = context.createTransientItemCard(thread2, thread2.transientItems[2]);
+  assert.ok(expiredD.classList.contains("is-closed"));
+  assert.equal(expiredD.textContent, "This secure form link has expired.");
+
+  // 2) Re-calling for already-closed, frame-reported finished, or declined forms preserves state with no extra render.
+  context.closeFollowUpPages("req-1", [formA.url, formC.url, formE.url], nowAt1212);
   assert.equal(thread1.brokerCardStates.get(pageC.item.itemId), BROKER_CARD_DECLINED,
     "existing declined state is preserved");
   assert.equal(thread2.brokerCardStates.get(pageC.item.itemId), BROKER_CARD_DECLINED);
+  assert.equal(thread1.brokerCardStates.get(pageE.item.itemId), BROKER_CARD_FINISHED,
+    "frame-reported finished state keeps Done. wording");
   assert.equal(renders, 1, "no redundant render when cards are already in terminal states");
+
+  // 3) Signed out: openFollowUpPages returns empty even if a non-terminal item exists.
+  thread1.brokerCardStates.delete(pageA.item.itemId);
+  thread2.brokerCardStates.delete(pageA.item.itemId);
+  assert.equal(context.openFollowUpPages().length, 1);
+  context.sharedState.authSessionActive = false;
+  assert.equal(context.openFollowUpPages().length, 0);
 });

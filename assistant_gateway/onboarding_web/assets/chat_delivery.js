@@ -280,6 +280,20 @@
     return formKey ? "account_link:" + id + ":" + formKey : "";
   }
 
+  // Whether a transient item is an inline proposal follow-up card (as opposed
+  // to a /link command's account_link card, whose itemId has no form hash).
+  function isFollowUpPageItem(item) {
+    var requestId = String(item && item.correlationId || "").trim();
+    var itemId = String(item && item.itemId || "");
+    return Boolean(
+      item
+      && item.kind === "account_link"
+      && requestId
+      && item.url
+      && itemId.indexOf("account_link:" + requestId + ":") === 0
+    );
+  }
+
   // An approved access proposal's credential forms (access_inbox.mjs
   // followUpLinks) as broker card items placed after ``sessionSequence``:
   // one "account_link" item per form, built through normalizeTransientItem so
@@ -476,6 +490,7 @@
     createErrorNotice: createErrorNotice,
     followUpPageItemId: followUpPageItemId,
     followUpPageItems: followUpPageItems,
+    isFollowUpPageItem: isFollowUpPageItem,
     latestDurableSessionSequence: latestDurableSessionSequence,
     normalizeTransientItem: normalizeTransientItem,
     reconcileMessages: reconcileMessages,

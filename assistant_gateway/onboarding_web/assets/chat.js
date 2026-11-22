@@ -21,6 +21,7 @@ import { createTeamActivity } from "./team_activity.mjs";
 import { createSettingsClient } from "./settings_support.mjs";
 import { createChatSubmission } from "./chat_submission.mjs";
 import {
+  BROKER_CARD_CLOSED,
   BROKER_CARD_DECLINED,
   BROKER_CARD_EXPIRED,
   BROKER_CARD_FINISHED,
@@ -547,6 +548,7 @@ const activityMesh = createActivityMesh({
 sharedState.settingsControls = createSettingsControls({
     teamActivity,
     onFollowUpPages: function (requestId, links, placement) { return addFollowUpPages(requestId, links, placement); },
+    getOpenFollowUpPages: function () { return openFollowUpPages(); },
     onCloseFollowUpPages: function (requestId, urls) { closeFollowUpPages(requestId, urls); },
     onShowFollowUpPages: function (requestId) { showFollowUpPages(requestId); },
     onClose: function () { renderThreads(); },
@@ -2920,7 +2922,7 @@ function replaceTransientActionWithExpiredState(countdown) {
     if (notice && notice.hasAttribute("data-broker-card")) {
       // An expired broker card closes its frame and keeps the expired line (no Dismiss).
       var itemId = notice.getAttribute("data-item-id") || "";
-      setBrokerCardState(activeThread(), itemId, "expired");
+      setBrokerCardState(activeThread(), itemId, BROKER_CARD_EXPIRED);
       brokerCards.close(itemId);
       lifecycle.timeout(renderMessages, 0);
       return;
@@ -3025,6 +3027,9 @@ function addFollowUpPages(requestId, links, placement) {
     });
     if (added) {
       thread.transientItems = window.UAChatDelivery.reconcileTransientItems(thread.transientItems, thread.messages);
+      if (sharedState.settingsControls && typeof sharedState.settingsControls.syncFollowUpPages === "function") {
+        sharedState.settingsControls.syncFollowUpPages();
+      }
       // Drawn on the next tick: the caller first saves the decided card that says where the forms are.
       lifecycle.timeout(renderMessages, 0);
     }
@@ -3047,18 +3052,76 @@ function showFollowUpPages(requestId) {
   }
 
 function isTerminalBrokerCardState(state) {
-    return state === BROKER_CARD_FINISHED || state === BROKER_CARD_DECLINED || state === BROKER_CARD_EXPIRED;
+    return state === BROKER_CARD_FINISHED
+      || state === BROKER_CARD_DECLINED
+      || state === BROKER_CARD_CLOSED
+      || state === BROKER_CARD_EXPIRED;
+  }
+
+function isFollowUpItemExpired(item, nowMs) {
+    var raw = String(item && item.expiresAtUtc || "").trim();
+    if (!raw) {
+      return false;
+    }
+    var parsed = Date.parse(raw);
+    return !Number.isNaN(parsed) && parsed <= nowMs;
+  }
+
+// Non-terminal inline proposal follow-up cards across all threads, used by the
+// page-level follow-up watcher so cards close when their form ends externally
+// even after Settings closes, the Inbox reloads, or no review card is on screen.
+function openFollowUpPages() {
+    if (!sharedState.authSessionActive) {
+      return [];
+    }
+    var terminalItemIds = new Set();
+    var threads = Array.isArray(sharedState.threads) ? sharedState.threads : [];
+    threads.forEach(function (thread) {
+      if (!thread || !thread.brokerCardStates) {
+        return;
+      }
+      thread.brokerCardStates.forEach(function (state, itemId) {
+        if (isTerminalBrokerCardState(state)) {
+          terminalItemIds.add(itemId);
+        }
+      });
+    });
+    var seen = new Set();
+    var pages = [];
+    threads.forEach(function (thread) {
+      var items = Array.isArray(thread && thread.transientItems) ? thread.transientItems : [];
+      items.forEach(function (item) {
+        if (!window.UAChatDelivery.isFollowUpPageItem(item) || terminalItemIds.has(item.itemId)) {
+          return;
+        }
+        var key = item.correlationId + "|" + item.url;
+        if (seen.has(key)) {
+          return;
+        }
+        seen.add(key);
+        pages.push({
+          requestId: item.correlationId,
+          url: item.url,
+          expiresAtUtc: item.expiresAtUtc || "",
+        });
+      });
+    });
+    return pages;
   }
 
 // Close inline broker cards whose proposal follow-up forms ended outside the
 // iframe (for example via "Open in its own tab" or another device) so they
 // shrink to the closed one-line state instead of sitting open until expiry.
-// Existing terminal states (declined, expired, finished) are preserved.
-function closeFollowUpPages(requestId, urls) {
+// Existing terminal states (finished, declined, closed, expired) are preserved;
+// otherwise an item past its expiry closes as expired and an item ended before
+// expiry uses the neutral closed note (the decided card's follow_up_outcomes
+// says whether it was done or declined).
+function closeFollowUpPages(requestId, urls, nowMs) {
     var id = String(requestId || "").trim();
     if (!id || !Array.isArray(urls) || !urls.length) {
       return;
     }
+    var currentNow = typeof nowMs === "number" ? nowMs : Date.now();
     var itemIds = [];
     urls.forEach(function (url) {
       var itemId = window.UAChatDelivery.followUpPageItemId(id, url, window.location.origin);
@@ -3071,9 +3134,14 @@ function closeFollowUpPages(requestId, urls) {
     }
     var changed = false;
     itemIds.forEach(function (itemId) {
+      var matchedItem = null;
       var threads = (sharedState.threads || []).filter(function (candidate) {
         var items = Array.isArray(candidate && candidate.transientItems) ? candidate.transientItems : [];
-        return items.some(function (item) { return item && item.itemId === itemId; });
+        var found = items.find(function (item) { return item && item.itemId === itemId; });
+        if (found && !matchedItem) {
+          matchedItem = found;
+        }
+        return Boolean(found);
       });
       if (brokerCards.live(itemId)) {
         brokerCards.close(itemId);
@@ -3087,7 +3155,8 @@ function closeFollowUpPages(requestId, urls) {
           existingTerminal = existing;
         }
       });
-      var targetState = existingTerminal || BROKER_CARD_FINISHED;
+      var targetState = existingTerminal
+        || (isFollowUpItemExpired(matchedItem, currentNow) ? BROKER_CARD_EXPIRED : BROKER_CARD_CLOSED);
       var needsState = threads.some(function (candidate) {
         var existing = candidate.brokerCardStates ? candidate.brokerCardStates.get(itemId) || "" : "";
         return existing !== targetState;
@@ -3127,6 +3196,9 @@ function setBrokerCardState(thread, itemId, state) {
       target.brokerCardStates = target.brokerCardStates || new Map();
       target.brokerCardStates.set(itemId, state);
     });
+    if (sharedState.settingsControls && typeof sharedState.settingsControls.syncFollowUpPages === "function") {
+      sharedState.settingsControls.syncFollowUpPages();
+    }
   }
 
 function createTransientItemCard(thread, item) {

@@ -271,4 +271,16 @@ test("an approval's credential forms get stable URL-derived account link card id
   // An Inbox approval while the open conversation has no messages yet (critique C13): the card starts it.
   const [first] = delivery.followUpPageItems("acc_req_1", 0, [portainer], "http://127.0.0.1:18090");
   assert.equal(first.item.sessionSequence, 1);
+
+  // isFollowUpPageItem identifies proposal follow-up items and excludes /link account_link items.
+  assert.equal(delivery.isFollowUpPageItem(firstItem), true);
+  const slashLinkItem = delivery.normalizeTransientItem({
+    kind: "account_link",
+    item_id: "account_link:cmd-1",
+    correlation_id: "cmd-1",
+    session_sequence: 3,
+    content: "Link Portainer",
+    action: { label: "Link", url: portainer.url, frame_url: portainer.frameUrl },
+  }, "http://127.0.0.1:18090");
+  assert.equal(delivery.isFollowUpPageItem(slashLinkItem), false);
 });

@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  FOLLOW_UP_POLL_MS, SHOW_CONVERSATION_LABEL,
+} from "../assistant_gateway/onboarding_web/assets/access_inbox.mjs";
+import {
   NEEDS_CONVERSATION_MESSAGE, SETTINGS_VIEWS, createSettingsControls,
 } from "../assistant_gateway/onboarding_web/assets/settings_controls.mjs";
 import { CSRF_HEADER } from "../assistant_gateway/onboarding_web/assets/settings_support.mjs";
@@ -347,10 +350,18 @@ test("sign-out forgets the CSRF token, so later writes are refused locally", asy
 });
 
 test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up links", async () => {
+  let openPages = [];
   const closedPages = [];
   const f = fixture({
-    onFollowUpPages: (_id, links) => links,
-    onCloseFollowUpPages: (id, urls) => closedPages.push({ id, urls }),
+    onFollowUpPages: (id, links) => {
+      links.forEach(link => openPages.push({ requestId: id, url: link.url, expiresAtUtc: link.expiresAtUtc }));
+      return links;
+    },
+    getOpenFollowUpPages: () => openPages,
+    onCloseFollowUpPages: (id, urls) => {
+      closedPages.push({ id, urls });
+      openPages = openPages.filter(page => !(page.requestId === id && urls.includes(page.url)));
+    },
   });
   const bubble = f.document.createElement("article");
   f.document.body.append(bubble);
@@ -378,7 +389,14 @@ test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up l
   }));
   assert.equal(bubble.querySelectorAll("a").length, 1);
 
+  const requestsBefore = f.requests.length;
   f.settings.noteAgentMessage();
+  await settle();
+  assert.equal(
+    f.requests.slice(requestsBefore).filter(req => req.path === "/api/web-chat/access-inbox/requests/req-follow").length,
+    1,
+    "concurrent chat-review and inline-card refreshes deduplicate into one request read",
+  );
   await answer(f.requests, "/api/web-chat/access-inbox/requests/req-follow", jsonResponse({
     review: review({
       request_id: "req-follow", status: "granted", decision: "approve", can_decide: false, choices: [],
@@ -389,4 +407,72 @@ test("noteAgentMessage refreshes both chat review and Settings Inbox follow-up l
   assert.equal(bubble.querySelectorAll("a").length, 0);
   assert.match(bubble.textContent, /The account link for Portainer is done\./);
   assert.deepEqual(closedPages, [{ id: "req-follow", urls: ["https://broker.example/link/1"] }]);
+});
+
+test("approving in Settings Inbox keeps watching its inline card after closing Settings and reopening the Inbox (C14)", async () => {
+  let openPages = [];
+  const closedPages = [];
+  const shownRequests = [];
+  const f = fixture({
+    onFollowUpPages: (id, links) => {
+      links.forEach(link => openPages.push({ requestId: id, url: link.url, expiresAtUtc: link.expiresAtUtc }));
+      return links;
+    },
+    getOpenFollowUpPages: () => openPages,
+    onCloseFollowUpPages: (id, urls) => {
+      closedPages.push({ id, urls });
+      openPages = openPages.filter(page => !(page.requestId === id && urls.includes(page.url)));
+    },
+    onShowFollowUpPages: id => shownRequests.push(id),
+  });
+  const framedLink = {
+    label: "Choose the credential for Portainer",
+    url: "https://broker.example/link/inbox-1",
+    frame_url: "https://broker.example/link/inbox-1?view=card",
+    expires_at_utc: "2099-01-01T00:15:00+00:00",
+  };
+  const proposal = review({ request_id: "req-inbox", title: "Connect Portainer" });
+
+  // 1) Open Settings -> Inbox (with no chat review card mounted) and approve the proposal.
+  const opened = f.settings.open("inbox", "session-1");
+  await answer(f.requests, "/api/web-chat/access-inbox", jsonResponse({ reviews: [proposal], notices: [] }));
+  await opened;
+  const inbox = f.node("settings-access-inbox");
+  byClass(inbox, "permission-choice-button").find(btn => btn.textContent === "Approve").click();
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-inbox/decision", jsonResponse({
+    review: {
+      ...proposal, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [framedLink], follow_up_outcomes: [],
+    },
+  }));
+  await answer(f.requests, "/api/web-chat/access-inbox", jsonResponse({ reviews: [], notices: [] }));
+  assert.equal(openPages.length, 1, "framed form was handed off as an inline card");
+
+  // 2) Click "Show in the conversation", which closes Settings.
+  byClass(inbox, "permission-choice-button").find(btn => btn.textContent === SHOW_CONVERSATION_LABEL).click();
+  assert.equal(f.overlay.hidden, true, "Settings is closed");
+  assert.deepEqual(shownRequests, ["req-inbox"]);
+  const followUpPolls = () => [...f.intervals.values()].filter(timer => timer.delay === FOLLOW_UP_POLL_MS);
+  assert.equal(followUpPolls().length, 1, "inline follow-up watcher stays active after Settings closes");
+
+  // 3) Reopening Settings -> Inbox reloads and clears Inbox outcomes, then closing Settings again keeps watching.
+  const reopened = f.settings.open("inbox", "session-1");
+  await answer(f.requests, "/api/web-chat/access-inbox", jsonResponse({ reviews: [], notices: [] }));
+  await reopened;
+  f.settings.close();
+  assert.equal(f.overlay.hidden, true);
+  assert.equal(followUpPolls().length, 1, "inline follow-up watcher survives Inbox reload and close");
+
+  // 4) Next review read drops the link (finished or declined in its own tab): inline card closes and polling stops.
+  followUpPolls()[0].callback();
+  await answer(f.requests, "/api/web-chat/access-inbox/requests/req-inbox", jsonResponse({
+    review: {
+      ...proposal, status: "granted", decision: "approve", can_decide: false, choices: [],
+      follow_up_links: [], follow_up_outcomes: ["The account link for Portainer was declined."],
+      follow_up_settling: false,
+    },
+  }));
+  assert.deepEqual(closedPages, [{ id: "req-inbox", urls: [framedLink.url] }]);
+  assert.equal(openPages.length, 0);
+  assert.equal(followUpPolls().length, 0, "watcher stops once the inline card is closed");
 });

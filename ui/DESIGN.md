@@ -2153,7 +2153,10 @@ its history. Steps with linked requests cannot use this correction.
   page is closed." or "Declined. Nothing was saved."; a declined sign-in that
   may have signed in just before reads "Done.", which claims nothing about
   saving). A page that ended in its other view, or is opened again after a
-  thread switch, shows how it ended and the card shrinks the same way. At expiry the frame
+  thread switch, shows how it ended and the card shrinks the same way; an
+  inline proposal card whose form ended outside its frame before expiry shrinks
+  to the neutral "This secure page is closed." line while the decided card's
+  `follow_up_outcomes` says whether it was done or declined. At expiry the frame
   closes and the existing expired line stays. A frame that never reports
   becomes "This secure page could not be shown here. Open it in its own tab."
   with the link and countdown. The frame follows the page's height up to 70%

@@ -675,21 +675,132 @@ export function handOffFollowUpLinks(requestId, links, onFollowUpPages, placemen
   return added;
 }
 
+function canonicalFollowUpUrl(raw) {
+  const value = text(raw);
+  if (!value) return "";
+  try {
+    return new URL(value).href;
+  } catch {
+    return value;
+  }
+}
+
 /**
- * Notify the chat page when previously handed-off follow-up forms are no longer
- * pending on the server (for example after finishing via "Open in its own tab"
- * or on another device) so their inline broker cards close instead of sitting
- * open until expiry. Skips while the review is still settling in watch grace.
+ * Watches open inline proposal follow-up cards across the chat page so a card
+ * whose form ended outside its iframe (for example via "Open in its own tab"
+ * or on another device) closes promptly even when Settings is closed, the
+ * Inbox reloads, or no review card is on screen.
+ *
+ * Gated only on document visibility (through `createFollowUpWatcher`), never on
+ * Settings panel or review-slot visibility. `getOpenPages()` returns the
+ * currently non-terminal proposal follow-up cards (`{ requestId, url,
+ * expiresAtUtc }`). While any are open, reads
+ * `/api/web-chat/access-inbox/requests/<id>` and calls
+ * `onClosePages(requestId, urls)` for URLs that left `follow_up_links`,
+ * skipping while `isFollowUpSettling(review)` is true.
  */
-export function closeEndedFollowUpLinks(requestId, review, onCloseFollowUpPages, handedOffUrls) {
-  if (typeof onCloseFollowUpPages !== "function") return false;
-  if (!review || !handedOffUrls || !handedOffUrls.size || isFollowUpSettling(review)) return false;
-  const pendingUrls = new Set(followUpLinks(review).map(link => link.url));
-  const ended = [...handedOffUrls].filter(url => !pendingUrls.has(url));
-  if (!ended.length) return false;
-  ended.forEach(url => handedOffUrls.delete(url));
-  onCloseFollowUpPages(requestId, ended);
-  return true;
+export function createFollowUpPageWatcher({
+  getOpenPages, get, onClosePages, browser = globalThis, now = () => Date.now(),
+  pollMs = FOLLOW_UP_POLL_MS, graceMs = FOLLOW_UP_EXPIRY_GRACE_MS, maxPolls = FOLLOW_UP_MAX_POLLS,
+}) {
+  const warn = (event, detail) => browser && browser.console && browser.console.warn(event, detail);
+  let generation = 0;
+  const inflight = new Map();
+  const stopped = new Set();
+  const settlingUntil = new Map();
+
+  function openByRequest() {
+    const grouped = new Map();
+    const pages = typeof getOpenPages === "function" ? getOpenPages() : [];
+    (Array.isArray(pages) ? pages : []).forEach(page => {
+      const requestId = text(page && page.requestId);
+      const url = text(page && page.url);
+      if (!requestId || !url || stopped.has(requestId)) return;
+      if (!grouped.has(requestId)) grouped.set(requestId, []);
+      grouped.get(requestId).push({ requestId, url, expiresAtUtc: text(page && page.expiresAtUtc) });
+    });
+    for (const id of [...settlingUntil.keys()]) {
+      if (!grouped.has(id)) settlingUntil.delete(id);
+    }
+    return grouped;
+  }
+
+  function getPendingLinks() {
+    const targets = [];
+    openByRequest().forEach((pages, requestId) => {
+      pages.forEach(page => {
+        targets.push({ key: `${requestId}|${page.url}`, url: page.url, expiresAtUtc: page.expiresAtUtc });
+      });
+      if (settlingUntil.has(requestId)) {
+        const until = settlingUntil.get(requestId);
+        targets.push(until ? { key: `settling:${requestId}`, expiresAtUtc: until } : { key: `settling:${requestId}` });
+      }
+    });
+    return targets;
+  }
+
+  function refresh() {
+    if (typeof get !== "function" || typeof onClosePages !== "function") return Promise.resolve([]);
+    const readGeneration = generation;
+    const reads = [];
+    openByRequest().forEach((_pages, requestId) => {
+      if (inflight.has(requestId)) return;
+      const pending = Promise.resolve()
+        .then(() => get(`${ACCESS_INBOX_API}/requests/${encodeURIComponent(requestId)}`))
+        .then(payload => {
+          if (readGeneration !== generation) return;
+          const review = (payload && payload.review) || null;
+          if (!review) return;
+          if (isFollowUpSettling(review)) {
+            settlingUntil.set(requestId, text(review.follow_up_settling_until_utc));
+            return;
+          }
+          settlingUntil.delete(requestId);
+          const pendingUrls = new Set(followUpLinks(review).map(link => canonicalFollowUpUrl(link.url)));
+          const current = openByRequest().get(requestId) || [];
+          const ended = [];
+          current.forEach(page => {
+            if (!pendingUrls.has(canonicalFollowUpUrl(page.url)) && !ended.includes(page.url)) {
+              ended.push(page.url);
+            }
+          });
+          if (ended.length) onClosePages(requestId, ended);
+        }, error => {
+          if (readGeneration !== generation) return;
+          if (error && (error.status === 403 || error.status === 404)) stopped.add(requestId);
+          warn("follow_up_page_read_failed", { request_id: requestId, status: error && error.status });
+        })
+        .finally(() => {
+          if (inflight.get(requestId) === pending) inflight.delete(requestId);
+          if (readGeneration === generation) watcher.sync();
+        });
+      inflight.set(requestId, pending);
+      reads.push(pending);
+    });
+    return Promise.all(reads);
+  }
+
+  const watcher = createFollowUpWatcher({
+    getPendingLinks,
+    onRefresh: refresh,
+    browser,
+    now,
+    pollMs,
+    graceMs,
+    maxPolls,
+  });
+
+  return {
+    sync: watcher.sync,
+    refresh,
+    clear() {
+      generation += 1;
+      inflight.clear();
+      stopped.clear();
+      settlingUntil.clear();
+      watcher.stop();
+    },
+  };
 }
 
 /**
@@ -1093,7 +1204,7 @@ export function createInboxCounts({ get, onChange, browser = globalThis, pollMs 
  * with only the parts that read knows (`decidableRequests`, `unreadNotices`).
  */
 export function createAccessInbox({
-  container, get, post, beginAction, failureMessage, onCounts, paginate, onFollowUpPages, onCloseFollowUpPages,
+  container, get, post, beginAction, failureMessage, onCounts, paginate, onFollowUpPages,
   showConversation, browser = globalThis, formatTime = localTime, now = () => Date.now(), isVisible,
 }) {
   const document = browser.document;
@@ -1157,7 +1268,6 @@ export function createAccessInbox({
           const handedOff = handOffFollowUpLinks(
             id, activeFollowUpLinks(entry.review, now()), onFollowUpPages, FOLLOW_UP_AFTER_LATEST, entry.handedOffUrls,
           );
-          closeEndedFollowUpLinks(id, entry.review, onCloseFollowUpPages, entry.handedOffUrls);
           if (handedOff || followUpSignature(entry.review, now()) !== entry.lastRenderedSignature) {
             redrawOutcomeCard(id, entry);
           }

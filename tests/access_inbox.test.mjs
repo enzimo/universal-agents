@@ -6,7 +6,7 @@ import {
   ACCESS_REMOVED_LABEL, FOLLOW_UP_AFTER_LATEST, FOLLOW_UP_AFTER_REVIEW, FOLLOW_UP_EXPIRY_GRACE_MS,
   FOLLOW_UP_PAGES_BELOW, FOLLOW_UP_PAGES_IN_CONVERSATION, FOLLOW_UP_SETTLING_TEXT, LACKS_ACCESS_NOTE,
   NEEDS_DECISION, SHOW_CONVERSATION_LABEL, WAITING_FOR_APPROVER, INBOX_COUNTS_PATH, NOTICES_READ_PATH,
-  activeFollowUpLinks, closeEndedFollowUpLinks, createAccessInbox, createFollowUpWatcher, createInboxCounts,
+  activeFollowUpLinks, createAccessInbox, createFollowUpPageWatcher, createFollowUpWatcher, createInboxCounts,
   decidableReviewCount, decisionOutcome, emptyNoticesText, followUpCardParts, followUpLinks, followUpOutcomes,
   handOffFollowUpLinks,
   inboxBadgeLabel, inboxBadgeText, inboxCounts, inboxPath, localTimeFormatter, markedText, parseAccessRequestLink,
@@ -786,36 +786,121 @@ test("handOffFollowUpLinks hands framed forms once per URL and followUpCardParts
   assert.deepEqual(byTag(card, "a").map(anchor => anchor.textContent), ["Choose the credential for Gitea"]);
 });
 
-test("closeEndedFollowUpLinks notifies once per ended handed-off URL and skips while settling", () => {
-  const formA = { label: "Choose the credential for Portainer", url: "http://b.example/a", frame_url: "http://b.example/a?view=card" };
-  const formB = { label: "Choose the credential for Gitea", url: "http://b.example/b", frame_url: "http://b.example/b?view=card" };
-  const handedOff = new Set([formA.url, formB.url]);
+test("createFollowUpPageWatcher watches open inline proposal cards by document visibility, skips settling, closes ended URLs, and stops on 403 or clear", async () => {
+  const document = fakeDocument();
+  document.hidden = false;
+  const docListeners = new Map();
+  document.addEventListener = (type, fn) => {
+    if (!docListeners.has(type)) docListeners.set(type, []);
+    docListeners.get(type).push(fn);
+  };
+  const winListeners = new Map();
+  const intervals = new Map();
+  let nextTimerId = 0;
+  let clock = Date.parse("2026-11-21T12:00:00Z");
+  const browser = {
+    document,
+    console: { warn() {} },
+    addEventListener(type, fn) {
+      if (!winListeners.has(type)) winListeners.set(type, []);
+      winListeners.get(type).push(fn);
+    },
+    setInterval(cb, delay) {
+      nextTimerId += 1;
+      intervals.set(nextTimerId, { cb, delay });
+      return nextTimerId;
+    },
+    clearInterval(id) { intervals.delete(id); },
+  };
+  const expires = "2026-11-21T12:15:00+00:00";
+  const formA = { label: "Choose Portainer", url: "http://b.example/a", expires_at_utc: expires };
+  const formB = { label: "Choose Gitea", url: "http://b.example/b", expires_at_utc: expires };
+  let openPages = [
+    { requestId: "req-9", url: formA.url, expiresAtUtc: expires },
+    { requestId: "req-9", url: formB.url, expiresAtUtc: expires },
+  ];
+  const gets = [];
   const closed = [];
-  const onClose = (id, urls) => closed.push({ id, urls });
+  const watcher = createFollowUpPageWatcher({
+    getOpenPages: () => openPages,
+    get: path => new Promise((resolve, reject) => gets.push({ path, resolve, reject })),
+    onClosePages: (requestId, urls) => {
+      closed.push({ requestId, urls });
+      openPages = openPages.filter(page => !(page.requestId === requestId && urls.includes(page.url)));
+    },
+    browser,
+    now: () => clock,
+  });
+
+  watcher.sync();
+  assert.equal(intervals.size, 1, "starts polling while open proposal cards exist");
 
   // While both remain pending on the server: nothing closes.
-  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [formA, formB], follow_up_settling: false }, onClose, handedOff), false);
+  [...intervals.values()][0].cb();
+  await settle();
+  assert.equal(gets.length, 1);
+  assert.equal(gets[0].path, "/api/web-chat/access-inbox/requests/req-9");
+  gets[0].resolve({ status: "ok", review: { follow_up_links: [formA, formB], follow_up_settling: false } });
+  await settle();
   assert.equal(closed.length, 0);
 
-  // While settling in watch grace: nothing closes yet.
-  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [], follow_up_settling: true }, onClose, handedOff), false);
-  assert.equal(closed.length, 0);
-  assert.deepEqual([...handedOff], [formA.url, formB.url]);
+  // Form A ends while Form B stays pending: only Form A closes.
+  [...intervals.values()][0].cb();
+  await settle();
+  gets[1].resolve({ status: "ok", review: { follow_up_links: [formB], follow_up_settling: false } });
+  await settle();
+  assert.deepEqual(closed, [{ requestId: "req-9", urls: [formA.url] }]);
+  assert.equal(intervals.size, 1, "keeps polling while Form B remains open");
 
-  // Form A ends while form B stays pending: only form A is reported, once.
-  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [formB], follow_up_settling: false }, onClose, handedOff), true);
-  assert.deepEqual(closed, [{ id: "req-9", urls: [formA.url] }]);
-  assert.deepEqual([...handedOff], [formB.url]);
-  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [formB], follow_up_settling: false }, onClose, handedOff), false);
-  assert.equal(closed.length, 1);
+  // Form B crosses expiry into settling: does not close yet and keeps polling until settling ends.
+  clock = Date.parse("2026-11-21T12:15:05Z");
+  [...intervals.values()][0].cb();
+  await settle();
+  gets[2].resolve({
+    status: "ok",
+    review: {
+      follow_up_links: [],
+      follow_up_settling: true,
+      follow_up_settling_until_utc: "2026-11-21T12:16:00+00:00",
+    },
+  });
+  await settle();
+  assert.equal(closed.length, 1, "skips closing while settling");
+  assert.equal(intervals.size, 1, "keeps polling while settling");
 
-  // Form B ends: reported once and handedOff is empty.
-  assert.equal(closeEndedFollowUpLinks("req-9", { follow_up_links: [], follow_up_settling: false }, onClose, handedOff), true);
+  // Settling ends: Form B closes and watcher stops immediately.
+  clock = Date.parse("2026-11-21T12:16:05Z");
+  [...intervals.values()][0].cb();
+  await settle();
+  gets[3].resolve({ status: "ok", review: { follow_up_links: [], follow_up_settling: false } });
+  await settle();
   assert.deepEqual(closed, [
-    { id: "req-9", urls: [formA.url] },
-    { id: "req-9", urls: [formB.url] },
+    { requestId: "req-9", urls: [formA.url] },
+    { requestId: "req-9", urls: [formB.url] },
   ]);
-  assert.equal(handedOff.size, 0);
+  assert.equal(intervals.size, 0, "stops once no open cards remain");
+
+  // 403 stops polling that request without throwing.
+  openPages = [{ requestId: "req-403", url: "http://b.example/c", expiresAtUtc: "2099-01-01T00:00:00Z" }];
+  watcher.sync();
+  assert.equal(intervals.size, 1);
+  [...intervals.values()][0].cb();
+  await settle();
+  gets[4].reject(Object.assign(new Error("Forbidden"), { status: 403 }));
+  await settle();
+  assert.equal(intervals.size, 0, "403 stops polling that request");
+
+  // clear() stops polling and ignores in-flight responses from before sign-out.
+  openPages = [{ requestId: "req-10", url: "http://b.example/d", expiresAtUtc: "2099-01-01T00:00:00Z" }];
+  watcher.sync();
+  assert.equal(intervals.size, 1);
+  watcher.refresh();
+  await settle();
+  watcher.clear();
+  assert.equal(intervals.size, 0);
+  gets[5].resolve({ status: "ok", review: { follow_up_links: [], follow_up_settling: false } });
+  await settle();
+  assert.equal(closed.length, 2, "stale response after clear() does not close anything");
 });
 
 test("approving a proposal in the Inbox panel shows its forms in the conversation, not in a new tab", async () => {
@@ -1320,7 +1405,7 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
     readFileSync(new URL("../assistant_gateway/onboarding_web/assets/action_feedback.js", import.meta.url), "utf8"),
     { window },
   );
-  const gets = [], posts = [], intervals = new Map(), handed = [], closedPages = [];
+  const gets = [], posts = [], intervals = new Map(), handed = [];
   let timerId = 0;
   let allowHandOff = false;
   let clock = Date.parse("2026-11-21T12:00:00Z");
@@ -1340,7 +1425,6 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
       handed.push({ id, urls: links.map(l => l.url), placement });
       return allowHandOff ? links : [];
     },
-    onCloseFollowUpPages: (id, urls) => { closedPages.push({ id, urls }); },
     get: path => new Promise((resolve, reject) => gets.push({ path, resolve, reject })),
     post: (path, body) => new Promise((resolve, reject) => posts.push({ path, body, resolve, reject })),
     beginAction: (button, busyLabel, group) => window.UAActionFeedback.begin(button, { busyLabel, group }),
@@ -1400,8 +1484,6 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
   await settle();
   assert.equal(byClass(requestList.children[0], "access-review-follow-up-note").length, 0,
     "pages prompt clears as soon as handed-off form finishes");
-  assert.deepEqual(closedPages, [{ id: "req-1", urls: [framedLink.url] }],
-    "Settings Inbox notifies chat page to close the externally finished inline broker card");
   assert.deepEqual(byTag(requestList.children[0], "a").map(a => a.textContent), ["Choose the credential for Gitea"]);
   assert.match(requestList.children[0].textContent, /The account link for Portainer is done\./);
 
@@ -1419,6 +1501,5 @@ test("Settings Inbox clears handed-off pages prompt when framed form finishes wh
   await settle();
   assert.equal(byTag(requestList.children[0], "a").length, 0);
   assert.equal(byClass(requestList.children[0], "access-review-follow-up-note").length, 0);
-  assert.equal(closedPages.length, 1, "does not re-notify for already closed or non-handed-off links");
   assert.equal(intervals.size, 0);
 });
