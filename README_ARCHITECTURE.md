@@ -2776,13 +2776,35 @@ works; if the first stalls past its limit and the second takes over, the
 first keeps the programs the second may rely on (see "Each request is decided
 once"). A tool with no
 grants gives nobody anything, which is why writing its file first is safe. Afterwards the gateway opens the broker's
-account link form for the approver, watches it with the tool setup watcher
-(`GatewayToolSetups.after_proposal_links`), and holds the decision message to
+account link form for the approver, tracks each opened form in memory by
+`request_id` scoped strictly to that approver (`assistant_gateway/proposal_follow_ups.py`,
+`ProposalFollowUpTracker`), watches it with the tool setup watcher
+(`GatewayToolSetups.after_proposal_links`, which reports each form's ending via
+`on_form_ended`), and holds the decision message to
 the waiting task until every form ended; the resumed `propose_access_change`
-then reports which links exist. Rationale: the task resumed before the link
-existed and called a tool still refused for a missing account. The hold lives
-in gateway memory; after a restart the Inbox loop sends the message and the
-tool reports the links as they are.
+then reports which links exist. Each tracked `PendingFollowUpLink` keeps its
+`frame_url` (`card_view_url(form.form_url)`) alongside `url` and
+`expires_at_utc`. While any form is open and unexpired,
+`GatewayAccessInbox.review_view` returns only those active `follow_up_links`
+for the approving person (never for other viewers) so reloading mid-flow keeps
+inline broker cards (or fallback link buttons), and replaces each finished form
+with plain-language `follow_up_outcomes` text so Web Chat and Settings Inbox
+automatically dismiss both inline-card prompts and completed credential buttons. When a form passes `expires_at_utc` before the
+broker watch reports an ending, `ProposalFollowUpTracker` hides the link from
+`follow_up_links` and returns `follow_up_settling: true` with
+`follow_up_settling_until_utc` (`expires_at_utc + WATCH_GRACE + SETTLING_BACKUP_BUFFER`,
+sharing `broker_session_watch.WATCH_GRACE` (60 s) plus a 15 s backup buffer covering
+`watch_broker_session`'s 2 s default poll interval and
+`HttpSecureBroker.get_account_link_status`'s 10 s read timeout so the final poll
+finishes before the tracker's backup expiry runs). Rationale: a submission claimed just before expiry may still finish while
+the broker watch is still checking, so both pages show "Checking whether the
+credential form finished…" and keep polling until `on_form_ended` records the
+real outcome; only if the backup deadline passes without a watch report does the
+tracker record the plain expiry line and log a warning. Also, the waiting task
+previously resumed before the link existed and called a tool still refused for a
+missing account, and finished broker links otherwise stayed visible on decided
+cards. The hold and follow-up tracker live in gateway memory; after a restart
+the Inbox loop sends the message and the tool reports the links as they are.
 
 People hold one team role each (`owner`, `admin` or `member`) in the gateway's
 membership records, read again at every decision, so a role change applies at
@@ -3756,7 +3778,32 @@ page, the gateway, agents and models still never see what is typed.
   latest message for a decision in the Inbox panel, whose decided card says
   where they are and has **Show in the conversation**. The Inbox list is
   redrawn after every decision, so a frame inside it would reload at once. The
-  cards live only in that browser tab, like every broker card; the Inbox
+  cards live only in that browser tab, like every broker card; while any form
+  remains open, `ProposalFollowUpTracker` preserves its `frame_url` and
+  `expires_at_utc` for the approving person so reloading mid-flow restores the
+  still-pending inline cards. One form may be held as a card in two threads
+  (where the Inbox placed it and under the review message), and stable
+  URL-derived item ids (`account_link:<requestId>:<urlHash>`) let the
+  page-wide card registry keep one live frame per id and propagate an outcome
+  to close every copy. While any inline proposal card remains non-terminal, a
+  page-level watcher (`access_inbox.mjs createFollowUpPageWatcher`, gated only
+  on document visibility so it outlives closing Settings, reloading the Inbox,
+  and threads without a review card) tracks them: review reads from the chat
+  card and Inbox feed into `noteReview` with the monotonic read sequence number
+  assigned when the read started so both cards update on the same read, except
+  that a read which started at or before a card was handed off is ignored for
+  that card (the server commits the decision before it opens the forms and
+  registers their links in `ProposalFollowUpTracker`, so a late pre-hand-off
+  read can return either `waiting` or `granted` with empty `follow_up_links`),
+  and the page watcher polls only requests no card watcher is actively polling,
+  closing cards whose URLs leave `follow_up_links` once settling ends: cards
+  past their expiry close as expired, cards ended before expiry show the neutral
+  `"This secure page is closed."` line (while the decided card's
+  `follow_up_outcomes` says
+  whether the form was done or declined), and frame-reported `finished` or
+  `declined` states stay intact; once all forms finish or expire, the decided
+  card clears both the inline-card prompt and any fallback buttons in favor of
+  plain `follow_up_outcomes`. The Inbox
   notice keeps the forms' links. The standalone workflow page is not Web Chat;
   its decided card shows no follow-up today (`workflow.mjs` passes no links),
   so an approver there reaches the forms through the Inbox notice (proposed

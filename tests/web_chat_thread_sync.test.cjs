@@ -598,17 +598,6 @@ const fakeDom = require("./fake_dom.mjs");
 function domHarness() {
   const document = fakeDom.fakeDocument();
   const proto = Object.getPrototypeOf(document.body);
-  const matches = (node, selector) => selector === "[hidden]" ? node.hidden : node.classList.contains(selector.slice(1));
-  if (!proto.closest) {
-    proto.closest = function (selector) {
-      for (let node = this; node; node = node.parentNode) if (node.classList && matches(node, selector)) return node;
-      return null;
-    };
-    proto.querySelectorAll = function (selector) {
-      return fakeDom.descendants(this).filter(node => matches(node, selector));
-    };
-    proto.querySelector = function (selector) { return this.querySelectorAll(selector)[0] || null; };
-  }
   // The rename buttons' icons are trusted markup from chat.js; this stand-in ignores it.
   Object.defineProperty(proto, "innerHTML", { configurable: true, set() {}, get() { return ""; } });
   const list = document.createElement("div");

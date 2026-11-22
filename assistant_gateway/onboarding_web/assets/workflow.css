@@ -60,8 +60,20 @@ html[data-color-mode="light"] .workflow-body select, html[data-color-mode="light
 html[data-color-mode="light"] .workflow-error { color: #a02530; }
 @media (max-width: 700px) { .workflow-shell { margin: 8px; padding: 16px; } .workflow-map { display: grid; overflow: visible; gap: 14px; } .workflow-column { min-width: 0; } .workflow-connections { display: none; } .workflow-lower { grid-template-columns: 1fr; } }
 
-.workflow-inline-card { padding: 16px 0; max-width: 100%; }
-.workflow-inline-card .workflow-map { width: 100%; }
+.workflow-inline-card { padding: 10px 0 4px; max-width: 100%; display: grid; gap: 6px; }
+.workflow-inline-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.workflow-inline-title { margin: 0; font-size: 0.96rem; line-height: 1.3; font-weight: 700; }
+.workflow-inline-open { flex-shrink: 0; text-decoration: none; }
+.workflow-inline-status { margin: 0; font-size: 0.84rem; line-height: 1.4; color: var(--muted); }
+.workflow-inline-card .workflow-map { width: 100%; padding: 8px 2px 10px; gap: 16px; }
+.workflow-inline-card .workflow-column { gap: 10px; flex-basis: 200px; }
+.workflow-inline-card .workflow-column-heading { font-size: 11px; }
+.workflow-inline-card .workflow-node { padding: 10px 12px; border-radius: 9px; }
+.workflow-inline-card .workflow-node h3 { margin: 0 28px 6px 0; font-size: 0.88rem; line-height: 1.3; }
+.workflow-inline-card .workflow-node p { margin: 4px 0; font-size: 0.8rem; line-height: 1.38; }
+.workflow-inline-card .workflow-node > .workflow-info { top: 8px; right: 8px; }
+.workflow-inline-card .workflow-requests { margin: 6px 0 0; gap: 6px; }
+.workflow-inline-card .workflow-request { padding: 6px 8px; font-size: 0.78rem; }
 .workflow-inline-info { max-width: min(520px, 90vw); padding: 24px; color: var(--ink); background: var(--panel, #10232d); border: 1px solid #367287; border-radius: 14px; }
 .workflow-inline-info::backdrop { background: rgba(0,0,0,.72); }
 

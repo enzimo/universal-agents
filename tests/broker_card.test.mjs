@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  BROKER_CARD_CLOSED,
   BROKER_CARD_NOTES,
   CARD_FRAME_SANDBOX,
   FIRST_MESSAGE_AFTER_LOAD_MS,
@@ -312,6 +313,7 @@ test("a closed card is one line, and an unavailable one offers its own tab", () 
   for (const [state, line] of [
     ["finished", BROKER_CARD_NOTES.finished],
     ["declined", BROKER_CARD_NOTES.declined],
+    [BROKER_CARD_CLOSED, BROKER_CARD_NOTES[BROKER_CARD_CLOSED]],
     ["expired", "This secure form link has expired."],
   ]) {
     const closed = render(state);
@@ -369,7 +371,7 @@ test("a focused card whose item leaves the conversation hands focus on too", () 
 test("a closed or unavailable card's line is a status, so it is announced", () => {
   const { document, cards } = harness();
   const item = { itemId: "tool_setup:req-1", url: "https://broker.example.test/x", frameUrl: FRAME_URL, label: "Page" };
-  for (const state of ["finished", "declined", "unavailable"]) {
+  for (const state of ["finished", "declined", BROKER_CARD_CLOSED, "unavailable"]) {
     const card = brokerCardElement({ document, cards, item, state, expiredMessage: "Expired.", onState() {} });
     assert.equal(byClass(card, "broker-card-note")[0].getAttribute("role"), "status", state);
   }
