@@ -275,11 +275,12 @@ test("server text in the dialogs stays text", async () => {
 
 /* -- the file tree (workspace_browser.js) ---------------------------------- */
 
-function treeFixture({ useDefaultDownload = false } = {}) {
+function treeFixture({ useDefaultDownload = false, onUnauthorized = null } = {}) {
   const harness = actionsFixture();
   const { document, browser } = harness;
   const clickedAnchors = [];
   const downloads = [];
+  const unauthorizedResponses = [];
   // The tree sets its indent with style.setProperty; the stand-in keeps it.
   const create = document.createElement;
   document.createElement = tagName => {
@@ -291,6 +292,7 @@ function treeFixture({ useDefaultDownload = false } = {}) {
         clickedAnchors.push({
           href: node.href,
           download: node.download,
+          downloadAttribute: node.getAttribute("download"),
           rel: node.rel,
           connectedDuringClick: node.isConnected,
         });
@@ -314,14 +316,24 @@ function treeFixture({ useDefaultDownload = false } = {}) {
     });
   const createOptions = {
     ...nodes, titleNodes: [nodes.title, nodes.heading], fileActions: harness.actions,
-    markdownRenderer: { render: () => "" }, onUnauthorized: () => false,
+    markdownRenderer: { render: () => "" },
+    onUnauthorized: response => {
+      unauthorizedResponses.push(response.status);
+      return typeof onUnauthorized === "function" ? onUnauthorized(response) : false;
+    },
   };
   if (!useDefaultDownload) {
     createOptions.onDownload = (url, entryObj) => downloads.push({ url, path: entryObj.path, name: entryObj.name });
   }
   const controls = window.UAWorkspaceBrowser.create(createOptions);
-  return { ...harness, ...nodes, controls, downloads, clickedAnchors };
+  return { ...harness, ...nodes, controls, downloads, clickedAnchors, unauthorizedResponses };
 }
+
+const headResponse = (status = 200) => ({
+  ok: status >= 200 && status < 300,
+  status,
+  text: async () => "",
+});
 
 const entry = (path, kind = "directory", sizeBytes = null) => ({
   path,
@@ -386,6 +398,12 @@ test("members see 'Your files'; the selected item in their own folder offers Sha
   assert.equal(download.getAttribute("aria-label"), "Download notes.md");
   assert.equal(byTag(download, "svg").length, 1, "Download is a labeled button with its icon");
   download.click();
+  const preflight = await answer(
+    f.requests,
+    `/api/web-chat/workspace/download?path=users%2F${OWN}%2Fnotes.md`,
+    headResponse(200),
+  );
+  assert.equal(preflight.method, "HEAD");
   assert.deepEqual(f.downloads, [{
     url: `/api/web-chat/workspace/download?path=users%2F${OWN}%2Fnotes.md`,
     path: `users/${OWN}/notes.md`,
@@ -507,7 +525,7 @@ test("signing out resets the title and closes an open dialog", async () => {
   await settle();
 });
 
-test("Download works for >5 MB non-previewable files, team/ files for members, and hides on fetchFile errors", async () => {
+test("Download preflights with HEAD, omits the download attribute, handles 401/403/404, and works for >5 MB and unsupported files", async () => {
   const f = treeFixture({ useDefaultDownload: true });
   const loading = f.controls.load();
   await answer(f.requests, ROOT_LISTING, listing("", [entry("team"), entry("users")]));
@@ -521,6 +539,7 @@ test("Download works for >5 MB non-previewable files, team/ files for members, a
     "/api/web-chat/workspace?path=team",
     listing("team", [
       entry("team/recording.mp3", "file", 12 * 1024 * 1024),
+      entry("team/archive.zip", "file", 48 * 1024),
       entry("team/unreadable.zip", "file", 9 * 1024 * 1024),
     ]),
   );
@@ -531,22 +550,66 @@ test("Download works for >5 MB non-previewable files, team/ files for members, a
     f.requests,
     "/api/web-chat/workspace/file?path=team%2Frecording.mp3",
     fileReply("team/recording.mp3", "recording.mp3", {
-      preview_kind: "unavailable",
+      preview_kind: "too_large",
       size_bytes: 12 * 1024 * 1024,
-      message: "Files larger than 5 MB are not previewed in the browser.",
+      message: "This file is larger than the 5 MB preview limit.",
     }),
   );
   assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL]);
   const downloadBtn = buttonNamed(f.itemActions, DOWNLOAD_ACTION_LABEL);
   assert.equal(downloadBtn.getAttribute("aria-label"), "Download recording.mp3");
+
+  // 200 OK on HEAD triggers in-place download without the download attribute.
   downloadBtn.click();
+  const headOk = await answer(
+    f.requests,
+    "/api/web-chat/workspace/download?path=team%2Frecording.mp3",
+    headResponse(200),
+  );
+  assert.equal(headOk.method, "HEAD");
+  assert.equal(headOk.init.cache, "no-store");
+  assert.equal(headOk.init.credentials, "same-origin");
   assert.deepEqual(f.clickedAnchors, [{
     href: "/api/web-chat/workspace/download?path=team%2Frecording.mp3",
-    download: "recording.mp3",
+    download: undefined,
+    downloadAttribute: null,
     rel: "noopener",
     connectedDuringClick: true,
   }]);
   assert.equal(byTag(f.document.body, "a").length, 0, "temporary download anchor is removed after click");
+
+  // 404 and 403 on HEAD show plain-language errors in status and do not trigger a download.
+  downloadBtn.click();
+  await answer(f.requests, "/api/web-chat/workspace/download?path=team%2Frecording.mp3", headResponse(404));
+  assert.equal(f.clickedAnchors.length, 1);
+  assert.ok(f.status.classList.contains("is-error"));
+  assert.match(f.status.textContent, /could not be found/i);
+
+  downloadBtn.click();
+  await answer(f.requests, "/api/web-chat/workspace/download?path=team%2Frecording.mp3", headResponse(403));
+  assert.equal(f.clickedAnchors.length, 1);
+  assert.ok(f.status.classList.contains("is-error"));
+  assert.match(f.status.textContent, /permission/i);
+
+  // Small unsupported binary file also offers Download.
+  rowOf(treeItem(f, "archive.zip")).click();
+  await answer(
+    f.requests,
+    "/api/web-chat/workspace/file?path=team%2Farchive.zip",
+    fileReply("team/archive.zip", "archive.zip", {
+      preview_kind: "unsupported",
+      size_bytes: 48 * 1024,
+      message: "Preview is not available for .zip files.",
+    }),
+  );
+  assert.deepEqual(actionLabels(f), [DOWNLOAD_ACTION_LABEL]);
+
+  // 401 on HEAD notifies onUnauthorized and aborts without downloading HTML.
+  buttonNamed(f.itemActions, DOWNLOAD_ACTION_LABEL).click();
+  await answer(f.requests, "/api/web-chat/workspace/download?path=team%2Farchive.zip", headResponse(401));
+  assert.deepEqual(f.unauthorizedResponses, [401]);
+  assert.equal(f.clickedAnchors.length, 1, "expired session never clicks the download anchor");
+  assert.match(f.status.textContent, /session ended/i);
 
   rowOf(treeItem(f, "unreadable.zip")).click();
   await answer(
@@ -583,10 +646,16 @@ test("deep-link expands parent folders, selects the file, triggers auto-download
     f.requests,
     "/api/web-chat/workspace/file?path=team%2Fguides%2Fhandbook.pdf",
     fileReply("team/guides/handbook.pdf", "handbook.pdf", {
-      preview_kind: "unavailable",
+      preview_kind: "too_large",
       size_bytes: 8 * 1024 * 1024,
     }),
   );
+  const headAuto = await answer(
+    f.requests,
+    "/api/web-chat/workspace/download?path=team%2Fguides%2Fhandbook.pdf",
+    headResponse(200),
+  );
+  assert.equal(headAuto.method, "HEAD");
   await loading;
 
   assert.equal(f.viewerTitle.textContent, "handbook.pdf");
@@ -606,6 +675,66 @@ test("deep-link expands parent folders, selects the file, triggers auto-download
   await answer(f.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
   assert.equal(f.downloads.length, 1);
   assert.equal(f.viewerTitle.textContent, "Select a file");
+});
+
+test("deep-link keeps late-arriving Shared chips and aborts auto-download when the user selects another row", async () => {
+  // 1. Late-arriving Shared chips after deep-link expansion and file selection still render.
+  const f1 = treeFixture();
+  const deepLinkLoad = f1.controls.load({
+    initialPath: `users/${OWN}/reports/q1.md`,
+    autoDownload: false,
+  });
+  await answer(f1.requests, ROOT_LISTING, listing("", [entry("team"), entry("users")]));
+  // Deliberately leave /api/web-chat/access-map?view=files pending while deep-link expands and selects.
+  await answer(f1.requests, "/api/web-chat/workspace?path=users", listing("users", [entry(`users/${OWN}`)]));
+  await answer(
+    f1.requests,
+    `/api/web-chat/workspace?path=users%2F${OWN}`,
+    listing(`users/${OWN}`, [entry(`users/${OWN}/reports`)]),
+  );
+  await answer(
+    f1.requests,
+    `/api/web-chat/workspace?path=users%2F${OWN}%2Freports`,
+    listing(`users/${OWN}/reports`, [entry(`users/${OWN}/reports/q1.md`, "file")]),
+  );
+  await answer(
+    f1.requests,
+    `/api/web-chat/workspace/file?path=users%2F${OWN}%2Freports%2Fq1.md`,
+    fileReply(`users/${OWN}/reports/q1.md`, "q1.md"),
+  );
+  assert.equal(f1.viewerTitle.textContent, "q1.md");
+  await answer(
+    f1.requests,
+    "/api/web-chat/access-map?view=files",
+    jsonResponse({ status: "ok", shared_by_you: [{ share_id: "s-1", target: `users/${OWN}/reports/q1.md` }] }),
+  );
+  await deepLinkLoad;
+  assert.deepEqual(
+    byClass(treeItem(f1, "q1.md"), "workspace-tree-chip").map(node => node.textContent),
+    ["Shared"],
+    "selecting a deep-linked file does not drop late-arriving Shared chips",
+  );
+
+  // 2. Clicking another row while openDeepLink is expanding aborts auto-download and still consumes download=1.
+  const f2 = treeFixture();
+  let consumed = 0;
+  const interruptedLoad = f2.controls.load({
+    initialPath: "team/guides/handbook.pdf",
+    autoDownload: true,
+    onDownloadConsumed: () => { consumed += 1; },
+  });
+  await answer(f2.requests, ROOT_LISTING, listing("", [entry("team"), entry("users")]));
+  await answer(f2.requests, "/api/web-chat/access-map?view=files", jsonResponse({ status: "ok", shared_by_you: [] }));
+  // While /api/web-chat/workspace?path=team is still in flight, the user clicks users/.
+  rowOf(treeItem(f2, "users")).click();
+  await answer(f2.requests, "/api/web-chat/workspace?path=users", listing("users", [entry(`users/${OWN}`)]));
+  // Now the team/ expansion finishes; deep-link should notice selection changed, consume download=1, and stop.
+  await answer(f2.requests, "/api/web-chat/workspace?path=team", listing("team", [entry("team/guides")]));
+  await interruptedLoad;
+  assert.equal(consumed, 1, "onDownloadConsumed still runs so download=1 is stripped");
+  assert.equal(f2.downloads.length, 0, "auto-download is aborted after user clicks another row");
+  assert.equal(f2.viewerTitle.textContent, "users", "the user's selected row stays active");
+  assert.equal(openRequests(f2.requests).length, 0, "no further deep-link requests are sent");
 });
 
 test("invalid, missing, and folder deep-links show status and strip download without downloading", async () => {

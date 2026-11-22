@@ -122,20 +122,68 @@
     var rowsByPath = new Map();
     var sharedPaths = new Set();
 
-    function triggerDownload(entry) {
-      var url = downloadUrl(entry.path);
+    function startBrowserDownload(url, entry) {
       if (onDownload) {
         onDownload(url, entry);
         return;
       }
+      // Omit link.download: the server sends Content-Disposition: attachment
+      // with the sanitized UTF-8 filename, and without the attribute even a
+      // race-window 302 redirect navigates to sign-in instead of saving HTML.
       var link = document.createElement("a");
       link.href = url;
-      link.download = entry.name || "";
       link.rel = "noopener";
       link.hidden = true;
       document.body.appendChild(link);
       link.click();
       link.remove();
+    }
+
+    function downloadFailureMessage(statusCode, entry) {
+      var label = entry && entry.name ? "\"" + entry.name + "\"" : "This file";
+      if (statusCode === 404) {
+        return label + " could not be found. It may have been moved or deleted.";
+      }
+      if (statusCode === 403) {
+        return "You do not have permission to download " + label + ".";
+      }
+      if (statusCode === 400) {
+        return label + " cannot be downloaded.";
+      }
+      return "Could not download " + label + ".";
+    }
+
+    function triggerDownload(entry) {
+      var url = downloadUrl(entry.path);
+      var generation = loadGeneration;
+      return window.fetch(url, {
+        method: "HEAD",
+        cache: "no-store",
+        credentials: "same-origin",
+      }).then(function (response) {
+        if (generation !== loadGeneration) {
+          return false;
+        }
+        if (response.status === 401) {
+          var handled = typeof onUnauthorized === "function" && onUnauthorized(response);
+          if (!handled && generation === loadGeneration) {
+            setStatus("Your Web Chat session ended.", true);
+          }
+          return false;
+        }
+        if (!response.ok) {
+          setStatus(downloadFailureMessage(response.status, entry), true);
+          return false;
+        }
+        setStatus("", false);
+        startBrowserDownload(url, entry);
+        return true;
+      }).catch(function () {
+        if (generation === loadGeneration) {
+          setStatus(downloadFailureMessage(0, entry), true);
+        }
+        return false;
+      });
     }
 
     function setStatus(message, isError) {
@@ -810,7 +858,7 @@
           if (autoDownload) {
             consumeDownload();
             if (result && result.ok) {
-              triggerDownload(target.entry);
+              return triggerDownload(target.entry);
             }
           }
         });
