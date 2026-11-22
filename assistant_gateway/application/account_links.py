@@ -83,11 +83,11 @@ GATE_LINK_FORM_ACTION_LABEL = "Open gate link form"
 
 
 def account_link_owner_label(
-    owner: str, *, purpose: LinkPurpose | AccountLinkPurpose = LinkPurpose.ACCOUNT
+    owner: str, *, purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT
 ) -> str:
     """Name whose account or gate credential the link is for, from the person's point of view."""
 
-    if LinkPurpose(purpose) is LinkPurpose.GATE:
+    if purpose == ACCOUNT_LINK_PURPOSE_GATE:
         return "the team's gate credential"
     return "the team's account" if owner == ACCOUNT_LINK_OWNER_TEAM else "your own account"
 
@@ -96,7 +96,7 @@ def account_link_restart_command(
     tool_id: str,
     owner: AccountLinkOwner,
     *,
-    purpose: LinkPurpose | AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
+    purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
 ) -> str:
     """The ``/link`` command that re-opens this form."""
 
@@ -172,7 +172,7 @@ class GatewayAccountLinks:
         tool_id: str,
         owner: AccountLinkOwner,
         reason: str,
-        purpose: LinkPurpose | AccountLinkPurpose = LinkPurpose.ACCOUNT,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> AccountLinkForm:
         """Open the form for ``person_id``; raise ``AccountLinkUnavailable`` if refused."""
 
@@ -184,14 +184,13 @@ class GatewayAccountLinks:
                 f"Account link forms are unavailable. {detail}",
                 reason_code=REASON_BROKER_UNAVAILABLE,
             )
-        resolved_purpose = LinkPurpose(purpose)
         try:
             request = AccountLinkRequestV1(
                 request_id=request_id,
                 team_id=self._team_id,
                 tool_id=tool_id,
                 owner_kind=LinkOwnerKind(owner),
-                purpose=resolved_purpose,
+                purpose=LinkPurpose(purpose),
                 person_id=person_id,
                 person_roles=person_roles,
                 reason=reason,
@@ -204,7 +203,7 @@ class GatewayAccountLinks:
                 request_id,
                 tool_id,
                 owner,
-                resolved_purpose.value,
+                purpose,
                 exc,
             )
             raise AccountLinkUnavailable(
@@ -239,7 +238,7 @@ class GatewayAccountLinks:
             request_id,
             tool_id,
             owner,
-            resolved_purpose.value,
+            request.purpose.value,
             person_id,
             session.session_id[:12],
         )
@@ -290,6 +289,8 @@ class GatewayAccountLinks:
 __all__ = [
     "ACCOUNT_LINK_FORM_ACTION_LABEL",
     "ACCOUNT_LINK_NO_ACCESS_NOTE",
+    "ACCOUNT_LINK_PURPOSE_ACCOUNT",
+    "ACCOUNT_LINK_PURPOSE_GATE",
     "GATE_LINK_FORM_ACTION_LABEL",
     "GATE_LINK_NO_ACCESS_NOTE",
     "ACCOUNT_LINK_OWNER_PERSON",
@@ -300,10 +301,12 @@ __all__ = [
     "ACCOUNT_LINK_TERMINAL_STATUSES",
     "AccountLinkForm",
     "AccountLinkOwner",
+    "AccountLinkPurpose",
     "AccountLinkUnavailable",
     "GatewayAccountLinks",
     "REASON_SESSION_EXPIRED",
     "REASON_TEAM_ADMIN_REQUIRED",
     "account_link_owner_label",
+    "account_link_restart_command",
     "account_link_status_is_final",
 ]

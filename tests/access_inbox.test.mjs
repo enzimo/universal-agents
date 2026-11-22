@@ -685,7 +685,7 @@ test("ticking Keep sends keep true, and a proposal sends the rows it keeps", asy
   const proposal = review({
     request_id: "req-p", kind: "change", title: "TeamArchitect asks to make a change: add Portainer",
     rows: [
-      { item_id: "tool-1", section: "tool", text: "New tool Portainer at portainer.example.test", flags: ["new_host"] },
+      { item_id: "tool-1", section: "tool", text: "New tool Portainer at portainer.example.test", flags: ["new_host", "credential_to_new_host"] },
       { item_id: "grant-1", section: "access", text: "TeamArchitect: read and change Portainer", keepable: true,
         flags: ["can_hand_on"] },
       { item_id: "grant-2", section: "access", text: "BackgroundOperationsAgent: read and change Portainer",
@@ -698,6 +698,8 @@ test("ticking Keep sends keep true, and a proposal sends the rows it keeps", asy
   const card = f.requestList.children[0];
   const sections = byClass(card, "access-review-row-section").map(node => node.textContent);
   assert.deepEqual(sections, ["New tools", "Access", "Credentials to link"]);
+  const flagTexts = byClass(card, "access-review-flag").map(node => node.textContent);
+  assert.ok(flagTexts.includes("Credentials to new host"));
   const boxes = byTag(card, "input");
   assert.equal(boxes.length, 2);
   assert.deepEqual(boxes.map(box => box.checked), [true, true], "each row asked to keep");

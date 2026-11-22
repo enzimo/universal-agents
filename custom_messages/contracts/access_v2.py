@@ -988,6 +988,7 @@ def summary_line(text: str) -> str:
 REVIEW_FLAGS = frozenset(
     {
         "new_host",
+        "credential_to_new_host",
         "private_address",
         "full_access",
         "can_hand_on",

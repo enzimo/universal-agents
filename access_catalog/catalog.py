@@ -20,6 +20,7 @@ decides who may use what.
 
 from __future__ import annotations
 
+import functools
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -856,6 +857,13 @@ def load_catalog(
     return catalog
 
 
+@functools.lru_cache(maxsize=1)
+def builtin_tool_ids() -> frozenset[str]:
+    """Tool ids shipped in ``ua_definitions``; these cannot be replaced by access proposals."""
+
+    return frozenset(load_catalog(instance_root=None).tools)
+
+
 def _instance_paths(instance_root: Path) -> tuple[Path, ...]:
     """Folders whose files change the catalog: team-added tools, MCP records and levels."""
 
@@ -933,6 +941,7 @@ __all__ = [
     "ToolCatalog",
     "UNLISTED_WEB_TOOL",
     "UNREGISTERED_FUNCTION_TOOL",
+    "builtin_tool_ids",
     "change_operation",
     "load_catalog",
     "mcp_tool_definition",

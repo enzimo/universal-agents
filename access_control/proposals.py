@@ -52,12 +52,21 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from access_catalog.catalog import MCP_SERVERS_TOOL_SET, CatalogError, CatalogSource, ToolCatalog
+from access_catalog.catalog import (
+    MCP_SERVERS_TOOL_SET,
+    CatalogError,
+    CatalogSource,
+    ToolCatalog,
+    builtin_tool_ids,
+)
 from access_control.account_sharing import TeamAccountSharing, team_account_private_text
 from access_catalog.instance_tools import (
+    ProposedToolFile,
     private_host_names,
     private_hosts,
+    read_proposed_tool_file,
     remove_instance_tool,
+    tool_definition,
     with_proposed_tools,
     write_instance_tool,
 )
@@ -65,6 +74,7 @@ from access_control.cli_binaries import Downloader, fetch_https, workspaces_root
 from access_control.data_folders import DataFolderRegistry, registration_problem
 from access_control.decision_effects import EffectJournal, OwnedFile
 from access_control.proposal_clis import cli_rows, install_programs
+from access_control.tool_change_diffs import describe_injections, tool_change_rows
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal, agent_type_id
 from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, grantable_folder_id
@@ -77,6 +87,7 @@ from custom_messages.contracts.access_v2 import (
     AccessProposalV1,
     AccessRequestStatus,
     AccessRequestV1,
+    AccountLinkV1,
     AccountMode,
     ChangeApprovalMode,
     ChangeApprovalRecordV1,
@@ -199,10 +210,91 @@ def _mcp_server_flags(record: MCPConnectionRecordV1) -> tuple[str, ...]:
     return tuple(flags)
 
 
+def load_changeable_tool_file(
+    instance_root: Path, catalog: ToolCatalog, tool_id: str
+) -> ProposedToolFile:
+    """Read and verify the single-tool ``proposed-*.yaml`` file that a ``tool_changes`` item may replace.
+
+    Built-in tools (``ua_definitions``), unknown tools, non-HTTP tools, and
+    operator hand-written catalog files are refused with a plain reason and
+    a structured warning log.
+    """
+
+    if tool_id in builtin_tool_ids():
+        logger.warning(
+            "Refused a proposed tool change for a built-in tool. event=proposal_tool_change_refused "
+            "reason=builtin_tool tool_id=%s",
+            tool_id,
+        )
+        raise ProposalRefused(f"{tool_id} is a built-in tool and cannot be changed through an access proposal.")
+    existing = catalog.tools.get(tool_id)
+    if existing is None:
+        logger.warning(
+            "Refused a proposed tool change for an unknown tool. event=proposal_tool_change_refused "
+            "reason=unknown_tool tool_id=%s",
+            tool_id,
+        )
+        raise ProposalRefused(f"{tool_id} is not in the tool catalog; propose it as a new tool instead.")
+    if existing.kind is not ToolKind.HTTP:
+        logger.warning(
+            "Refused a proposed tool change for a non-HTTP tool. event=proposal_tool_change_refused "
+            "reason=not_http_tool tool_id=%s kind=%s",
+            tool_id,
+            existing.kind.value,
+        )
+        raise ProposalRefused(f"Only web API tools (http:*) can be changed through tool_changes, not {tool_id}.")
+    try:
+        return read_proposed_tool_file(instance_root, tool_id)
+    except FileNotFoundError as exc:
+        logger.warning(
+            "Refused a proposed tool change for an operator-managed catalog file. event=proposal_tool_change_refused "
+            "reason=operator_managed_file tool_id=%s",
+            tool_id,
+        )
+        raise ProposalRefused(
+            f"{tool_id} is defined in an operator-managed catalog file, not a proposal-written file, "
+            "so it cannot be changed through an access proposal."
+        ) from exc
+    except CatalogError as exc:
+        logger.warning(
+            "Refused a proposed tool change because its catalog file is invalid. event=proposal_tool_change_refused "
+            "reason=invalid_proposed_file tool_id=%s error=%s",
+            tool_id,
+            exc,
+        )
+        raise ProposalRefused(f"{tool_id} cannot be changed: {exc}") from exc
+
+
+def with_tool_change_baselines(
+    proposal: AccessProposalV1, *, instance_root: Path, catalog: ToolCatalog
+) -> AccessProposalV1:
+    """Pin ``previous_definition_digest`` on every ``tool_changes`` item from its current file bytes.
+
+    Always overwrites any value supplied on the input so agents can never pin
+    their own digest; runs before compiling and storing the proposal.
+    """
+
+    if not proposal.tool_changes:
+        return proposal
+    new_tool_ids = {tool.tool_id for tool in proposal.tools}
+    seen: set[str] = set()
+    pinned = []
+    for item in proposal.tool_changes:
+        if item.tool_id in seen:
+            raise ProposalRefused(f"{item.tool_id} is listed more than once in tool_changes.")
+        if item.tool_id in new_tool_ids:
+            raise ProposalRefused(f"{item.tool_id} cannot be listed in both tools and tool_changes.")
+        seen.add(item.tool_id)
+        tool_file = load_changeable_tool_file(instance_root, catalog, item.tool_id)
+        pinned.append(item.model_copy(update={"previous_definition_digest": tool_file.sha256}))
+    return proposal.model_copy(update={"tool_changes": tuple(pinned)})
+
+
 # A proposal's one-line summary (ChangeProposalV1.summary), counted from its
 # review rows: what each section does, in the card's section order.
 _SUMMARY_SECTION_WORDS = {
     "tool": ("add {n} new tool", "add {n} new tools"),
+    "tool_change": ("change {n} tool", "change {n} tools"),
     "access": ("give {n} access", "give {n} accesses"),
     "restriction": ("add {n} restriction", "add {n} restrictions"),
     "folder": ("register {n} folder", "register {n} folders"),
@@ -212,6 +304,7 @@ _SUMMARY_SECTION_WORDS = {
 }
 _SUMMARY_FLAG_WORDS = {
     "new_host": "a new host",
+    "credential_to_new_host": "stored credentials sent to a new host",
     "private_address": "a private address",
     "full_access": "full access",
     "can_hand_on": "access that can be handed on",
@@ -224,12 +317,18 @@ _SUMMARY_FLAG_WORDS = {
 }
 
 
+def _summary_bucket(row: ReviewItemV1) -> str:
+    if row.section == "tool" and row.item_id.startswith("change-"):
+        return "tool_change"
+    return row.section
+
+
 def proposal_summary(rows: tuple[ReviewItemV1, ...]) -> str:
     """The proposal in one line from its review rows, such as "Access proposal: add 1 new tool, give 2 accesses"."""
 
-    # A tool's extra rows (its commands, its setup steps) are not more tools.
+    # A tool's extra rows (its commands, its setup steps, its change details) are not more tools.
     items = [row for row in rows if not (row.section == "tool" and row.item_id.count("-") > 1)]
-    counts = {section: sum(1 for row in items if row.section == section) for section in _SUMMARY_SECTION_WORDS}
+    counts = {section: sum(1 for row in items if _summary_bucket(row) == section) for section in _SUMMARY_SECTION_WORDS}
     parts = [
         _SUMMARY_SECTION_WORDS[section][count != 1].format(n=count) for section, count in counts.items() if count
     ]
@@ -268,6 +367,8 @@ def _tool_words(tool) -> str:
         "changes (POST, PUT, PATCH) need read-and-change, deleting (DELETE) needs full"
     )
     words = f"{base}; {routes}" if routes else base
+    if getattr(tool, "gate_injections", ()):
+        words += f". Uses a team gate credential ({describe_injections(tool.gate_injections)})"
     if tool.setup is not None and tool.setup.prerequisites:
         words += f". Set up first: {', '.join(tool.setup.prerequisites)}"
     return words
@@ -311,13 +412,20 @@ class ProposalCompiler:
     mcp_records: MCPRecordLookup = _no_mcp_records
     # The one agent type that keeps lasting access ("access follows the work").
     lead_agent_type: str = "TeamArchitect"
+    # Instance root for checking proposal-written tool files in tool_changes.
+    instance_root: Path | None = None
+    # Active links (account and gate) for one tool_id, used for re-link and new-host warnings.
+    links_for_tool: Callable[[str], list[AccountLinkV1]] = lambda _tool_id: []
 
     def compile(
         self, proposal: AccessProposalV1, *, person: PersonPrincipal | None, task_id: str | None
     ) -> CompiledProposal:
         servers = self._servers(proposal)
+        changed_files = self._tool_change_files(proposal)
         try:
-            candidate = with_proposed_tools(self.catalog, proposal.tools, proposal.clis)
+            candidate = with_proposed_tools(
+                self.catalog, proposal.tools, proposal.clis, proposal.tool_changes
+            )
             for record in servers:
                 candidate.add_mcp_tool(record)
             candidate.validate()
@@ -330,6 +438,7 @@ class ProposalCompiler:
             flags = ["new_host"] + (["private_address"] if private_hosts(tool) else [])
             rows.append(ReviewItemV1(item_id=f"tool-{index}", section="tool", text=_tool_words(tool), flags=tuple(flags)))
             rows += _setup_step_rows(index, tool)
+        rows += self._tool_change_rows(proposal, changed_files)
         for index, cli in enumerate(proposal.clis):
             rows += cli_rows(index, cli, _setup_step_rows)
         rows += [
@@ -400,6 +509,66 @@ class ProposalCompiler:
             raise ProposalRefused(f"{tool_id} is not in the tool catalog or in this proposal.")
         if target.kind is TargetKind.OPERATION and tool.operation(operation) is None:
             raise ProposalRefused(f"{tool_id} has no operation {operation!r}.")
+
+    def _tool_change_files(self, proposal: AccessProposalV1) -> list[ProposedToolFile]:
+        """Read and verify each ``tool_changes`` target file once against its pinned baseline."""
+
+        if not proposal.tool_changes:
+            return []
+        if self.instance_root is None:
+            raise ProposalRefused("Tool changes cannot be validated without an instance root.")
+        new_tool_ids = {tool.tool_id for tool in proposal.tools}
+        seen: set[str] = set()
+        files: list[ProposedToolFile] = []
+        for item in proposal.tool_changes:
+            if item.tool_id in seen:
+                raise ProposalRefused(f"{item.tool_id} is listed more than once in tool_changes.")
+            if item.tool_id in new_tool_ids:
+                raise ProposalRefused(f"{item.tool_id} cannot be listed in both tools and tool_changes.")
+            seen.add(item.tool_id)
+            tool_file = load_changeable_tool_file(self.instance_root, self.catalog, item.tool_id)
+            if item.previous_definition_digest is None:
+                logger.warning(
+                    "Refused a proposed tool change with no pinned baseline digest. "
+                    "event=proposal_tool_change_refused reason=missing_baseline tool_id=%s",
+                    item.tool_id,
+                )
+                raise ProposalRefused(f"The proposed change to {item.tool_id} is missing its baseline digest.")
+            if item.previous_definition_digest != tool_file.sha256:
+                logger.warning(
+                    "Refused a proposed tool change whose file changed after preparation. "
+                    "event=proposal_tool_change_refused reason=baseline_changed tool_id=%s",
+                    item.tool_id,
+                )
+                raise ProposalRefused(
+                    f"The catalog file for {item.tool_id} changed after the proposal was prepared; propose it again."
+                )
+            files.append(tool_file)
+        return files
+
+    def _tool_change_rows(
+        self, proposal: AccessProposalV1, changed_files: list[ProposedToolFile]
+    ) -> list[ReviewItemV1]:
+        rows: list[ReviewItemV1] = []
+        for index, (item, tool_file) in enumerate(zip(proposal.tool_changes, changed_files)):
+            proposed_def = tool_definition(item)
+            diff, item_rows = tool_change_rows(
+                index,
+                current=tool_file.definition,
+                proposed=proposed_def,
+                active_links=self.links_for_tool(item.tool_id),
+            )
+            if not diff.has_changes:
+                logger.warning(
+                    "Refused a proposed tool change with no effective differences. "
+                    "event=proposal_tool_change_refused reason=no_changes tool_id=%s",
+                    item.tool_id,
+                )
+                raise ProposalRefused(
+                    f"The proposed change to {item.tool_id} makes no changes to its current definition."
+                )
+            rows += item_rows
+        return rows
 
     def _servers(self, proposal: AccessProposalV1) -> list[MCPConnectionRecordV1]:
         """The pending MCP connections the proposal installs, each checked against its record."""
@@ -494,26 +663,43 @@ class ProposalCompiler:
         return rows
 
     def _account_rows(self, catalog: ToolCatalog, proposal: AccessProposalV1) -> list[ReviewItemV1]:
-        rows = []
-        for index, link in enumerate(proposal.account_links):
-            tool = catalog.tools.get(link.tool_id)
-            if tool is None or tool.account is not AccountMode.LINKED_CREDENTIAL:
-                raise ProposalRefused(f"{link.tool_id} does not use a linked credential.")
-            team = link.owner == LinkOwnerKind.TEAM
-            if link.owner not in tool.link_owners:
-                whose = "the team's account" if not team else "each person's own account"
-                raise ProposalRefused(f"{tool.display_name} uses only {whose}.")
-            if team and not self.account_sharing.team_account_used(tool):
-                raise ProposalRefused(team_account_private_text(tool))
-            owner = "the team's account" if team else "the account of the person this task works for"
-            rows.append(
-                ReviewItemV1(
-                    item_id=f"account-{index}",
-                    section="account",
-                    text=f"After approval you choose the credential {tool.display_name} uses ({owner}): {link.purpose}",
-                )
-            )
-        return rows
+        return [
+            self._gate_link_row(index, catalog, link)
+            if link.link_purpose is LinkPurpose.GATE
+            else self._account_link_row(index, catalog, link)
+            for index, link in enumerate(proposal.account_links)
+        ]
+
+    @staticmethod
+    def _gate_link_row(index: int, catalog: ToolCatalog, link: ProposedAccountLinkV1) -> ReviewItemV1:
+        tool = catalog.tools.get(link.tool_id)
+        if tool is None or tool.kind is not ToolKind.HTTP or not tool.gate_injections:
+            raise ProposalRefused(f"{link.tool_id} does not use a team gate credential.")
+        return ReviewItemV1(
+            item_id=f"account-{index}",
+            section="account",
+            text=(
+                f"After approval you choose the team's gate credential {tool.display_name} sends on "
+                f"every request to its hosts: {link.purpose}"
+            ),
+        )
+
+    def _account_link_row(self, index: int, catalog: ToolCatalog, link: ProposedAccountLinkV1) -> ReviewItemV1:
+        tool = catalog.tools.get(link.tool_id)
+        if tool is None or tool.account is not AccountMode.LINKED_CREDENTIAL:
+            raise ProposalRefused(f"{link.tool_id} does not use a linked credential.")
+        team = link.owner == LinkOwnerKind.TEAM.value
+        if link.owner not in tool.link_owners:
+            whose = "the team's account" if not team else "each person's own account"
+            raise ProposalRefused(f"{tool.display_name} uses only {whose}.")
+        if team and not self.account_sharing.team_account_used(tool):
+            raise ProposalRefused(team_account_private_text(tool))
+        owner = "the team's account" if team else "the account of the person this task works for"
+        return ReviewItemV1(
+            item_id=f"account-{index}",
+            section="account",
+            text=f"After approval you choose the credential {tool.display_name} uses ({owner}): {link.purpose}",
+        )
 
     def _revocation_rows(self, proposal: AccessProposalV1) -> list[ReviewItemV1]:
         rows = []
@@ -571,6 +757,10 @@ class ProposalApplier:
             grant_exists=service.store.get,
             mcp_records=store.get if store is not None else _no_mcp_records,
             lead_agent_type=requests.lead_agent_type,
+            instance_root=self.instance_root,
+            links_for_tool=lambda tool_id: [
+                link for link in service.store.list_links(service.team_id, purpose=None) if link.tool_id == tool_id
+            ],
         )
 
     def stored_proposal(self, requests: AccessRequests, request: AccessRequestV1) -> AccessProposalV1:
@@ -641,7 +831,9 @@ class ProposalApplier:
         errors are raised again as they were.
         """
 
-        recovery = requests.recovery_record(claim, finished, {"tool_files": [], "programs": [], "servers": []})
+        recovery = requests.recovery_record(
+            claim, finished, {"tool_files": [], "replaced_tool_files": [], "programs": [], "servers": []}
+        )
         requests.service.store.save_decision_recovery(recovery)
         journal = EffectJournal(requests.service.store, recovery)
 
@@ -989,7 +1181,9 @@ __all__ = [
     "ProposalApplier",
     "ProposalCompiler",
     "ProposalRefused",
+    "load_changeable_tool_file",
     "proposal_digest",
     "proposal_summary",
     "with_mcp_defaults",
+    "with_tool_change_baselines",
 ]

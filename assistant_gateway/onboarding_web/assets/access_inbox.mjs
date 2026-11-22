@@ -53,9 +53,9 @@ export const ROW_SECTIONS = Object.freeze({
   account: "Credentials to link", revocation: "Access to remove", delivery: "Delivery",
 });
 export const ROW_FLAGS = Object.freeze({
-  new_host: "New host", private_address: "Private address", full_access: "Full access",
-  can_hand_on: "Can hand on", runs_code: "Runs code", new_folder: "New folder", setup_steps: "Steps for people",
-  new_program: "New program", download_host: "Download", team_account: "Team account",
+  new_host: "New host", credential_to_new_host: "Credentials to new host", private_address: "Private address",
+  full_access: "Full access", can_hand_on: "Can hand on", runs_code: "Runs code", new_folder: "New folder",
+  setup_steps: "Steps for people", new_program: "New program", download_host: "Download", team_account: "Team account",
 });
 export const REMOVE_ACCESS_LABEL = "Remove access";
 // Notices: the Unread / All switch (the server's `?notices=` values), page size and bulk actions.
