@@ -35,6 +35,10 @@ class SSHNetworkPolicyError(PermissionError):
     """Raised when an SSH target host violates the operator network policy."""
 
 
+class SSHHostResolutionError(SSHNetworkPolicyError):
+    """Raised when DNS resolution fails or returns no addresses for an SSH target host."""
+
+
 @dataclass(frozen=True)
 class SSHNetworkPolicy:
     """Compiled operator network policy for SSH probing and dynamic targets."""
@@ -374,9 +378,9 @@ def _resolve_host_ips(
     try:
         raw_addresses = resolver(host, port)
     except OSError as exc:
-        raise SSHNetworkPolicyError(f"Could not resolve SSH target host {host!r}.") from exc
+        raise SSHHostResolutionError(f"Could not resolve SSH target host {host!r}.") from exc
     if not raw_addresses:
-        raise SSHNetworkPolicyError(f"SSH target host {host!r} resolved to no IP addresses.")
+        raise SSHHostResolutionError(f"SSH target host {host!r} resolved to no IP addresses.")
     resolved: list[IPAddress] = []
     seen: set[str] = set()
     for raw in raw_addresses:
@@ -437,6 +441,7 @@ def _is_special_address(ip: IPAddress) -> bool:
 
 __all__ = [
     "LocalAddressChecker",
+    "SSHHostResolutionError",
     "SSHHostResolver",
     "SSHNetworkPolicy",
     "SSHNetworkPolicyError",

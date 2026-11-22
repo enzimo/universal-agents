@@ -24,7 +24,11 @@ from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers._runtime import _require_manager_tool
 from custom_tools.runtime_context import get_agent_ref
 from id_generation import new_id
-from runtime_hosting.authorization import SSHCallerContext
+from runtime_hosting.authorization import (
+    ExecutionAuthorizationDenied,
+    SSHCallerContext,
+    SSHCapability,
+)
 from runtime_hosting.ssh import (
     ConfiguredSSHCredentialMaterialProvider,
     SSHCredentialMaterial,
@@ -648,6 +652,69 @@ async def close_execution_ssh_session(session_id: str) -> str:
         return _error_payload(exc)
 
 
+def _enabled_delegation_capabilities(interaction: Any) -> tuple[SSHCapability, ...]:
+    if interaction is None:
+        return ()
+    bounds = interaction.bounds
+    if bounds is None:
+        return (SSHCapability.TYPING,)
+    capabilities: list[SSHCapability] = []
+    if bounds.allow_commands:
+        capabilities.append(SSHCapability.COMMAND)
+    if bounds.allow_typing:
+        capabilities.append(SSHCapability.TYPING)
+    if bounds.allow_password_bootstrap:
+        capabilities.append(SSHCapability.PASSWORD_BOOTSTRAP)
+    if bounds.allow_broker_sudo:
+        capabilities.append(SSHCapability.BROKER_SUDO)
+    if bounds.allow_workspace_transfer:
+        capabilities.append(SSHCapability.WORKSPACE_TRANSFER)
+    return tuple(capabilities)
+
+
+def _session_capability_view(
+    service: ExecutionControlService,
+    session: Any,
+    interaction: Any,
+    revocation: Any,
+    caller: SSHCallerContext,
+) -> tuple[bool, bool, str | None]:
+    """Derive ``usable_in_this_request`` and ``typing_approved`` directly from ``ExecutionAccessGuard``."""
+
+    guard = service.access_guard()
+    enrolled_target = (
+        service.repository.get_ssh_target(
+            team_id=service.owner.team_id, target_id=session.target.target_id
+        )
+        if session.target.target_id is not None
+        else None
+    )
+    allow_pw = service.config.execution_control.ssh.allow_password_bootstrap
+    enabled = _enabled_delegation_capabilities(interaction)
+    usable = False
+    first_refusal: str | None = None
+    typing_approved = False
+    for capability in enabled:
+        try:
+            guard.require_ssh_capability(
+                session,
+                interaction,
+                capability=capability,
+                caller=caller,
+                enrolled_target=enrolled_target,
+                session_revocation=revocation,
+                allow_password_bootstrap_setting=allow_pw,
+            )
+        except ExecutionAuthorizationDenied as exc:
+            if first_refusal is None:
+                first_refusal = str(exc)
+        else:
+            usable = True
+            if capability is SSHCapability.TYPING:
+                typing_approved = True
+    return usable, typing_approved, (None if usable else first_refusal)
+
+
 @tool
 def list_execution_ssh_sessions() -> str:
     """List owner-scoped SSH sessions, active delegation status, and transcript references."""
@@ -667,34 +734,24 @@ def list_execution_ssh_sessions() -> str:
             delegation_active = bool(
                 revocation is None and interaction is not None and interaction.is_active()
             )
-            usable_in_this_request = bool(
-                delegation_active
-                and interaction is not None
-                and (
-                    interaction.bounds is None
-                    or interaction.bounds.delegated_task_id is None
-                    or interaction.bounds.delegated_task_id == caller.task_id
-                )
+            usable_in_this_request, typing_approved, unusable_reason = _session_capability_view(
+                service, item, interaction, revocation, caller
             )
-            typing_approved = bool(
-                usable_in_this_request
-                and interaction is not None
-                and (interaction.bounds is None or interaction.bounds.allow_typing)
-            )
-            payloads.append(
-                {
-                    **item.model_dump(mode="json"),
-                    "revoked": revocation is not None,
-                    "delegation_active": delegation_active,
-                    "usable_in_this_request": usable_in_this_request,
-                    "typing_approved": typing_approved,
-                    "delegation": (
-                        interaction.bounds.model_dump(mode="json")
-                        if interaction is not None and interaction.bounds is not None
-                        else None
-                    ),
-                }
-            )
+            entry: dict[str, Any] = {
+                **item.model_dump(mode="json"),
+                "revoked": revocation is not None,
+                "delegation_active": delegation_active,
+                "usable_in_this_request": usable_in_this_request,
+                "typing_approved": typing_approved,
+                "delegation": (
+                    interaction.bounds.model_dump(mode="json")
+                    if interaction is not None and interaction.bounds is not None
+                    else None
+                ),
+            }
+            if delegation_active and not usable_in_this_request and unusable_reason:
+                entry["unusable_reason"] = unusable_reason
+            payloads.append(entry)
         return json.dumps({"returned": len(payloads), "sessions": payloads})
     except Exception as exc:
         return _error_payload(exc)

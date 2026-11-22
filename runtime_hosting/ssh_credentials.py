@@ -1484,14 +1484,22 @@ class CompositeSSHCredentialMaterialProvider:
         return self.catalog_provider.sweep_stale()
 
     def prepare(
-        self, session: InteractiveSessionV1
+        self,
+        session: InteractiveSessionV1,
+        *,
+        key_lifetime_seconds: int | None = None,
+        scrubber: SessionSecretScrubber | None = None,
     ) -> AbstractContextManager[SSHCredentialMaterial]:
         if session.target.credential_binding_id.startswith(CATALOG_BINDING_PREFIX):
             if self.catalog_provider is None:
                 raise PermissionError(
                     "Sealbox SSH credential provider is not enabled in this broker."
                 )
-            return self.catalog_provider.prepare(session)
+            return self.catalog_provider.prepare(
+                session,
+                key_lifetime_seconds=key_lifetime_seconds,
+                scrubber=scrubber,
+            )
         return self.configured_provider.prepare(session)
 
 

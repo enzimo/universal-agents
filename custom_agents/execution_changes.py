@@ -27,7 +27,6 @@ again in ``apply``.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
@@ -249,6 +248,15 @@ class _ExecutionChanges:
         path = self.execution.config.layout.root / RUNTIME_DIRNAME / "execution-changes" / name
         path.mkdir(parents=True, mode=0o700, exist_ok=True)
         return path
+
+    def _read_credential_metadata(
+        self, credential_key: str, *, scope: CredentialOwnerScope
+    ) -> dict[str, Any] | None:
+        return read_credential_metadata_readonly(
+            credential_key,
+            scope=scope,
+            fallback_db_path=self.execution.config.credential_catalog_database_path,
+        )
 
     def _authority_mode(self) -> str:
         return (
@@ -755,21 +763,10 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
         *,
         resolver: SSHHostResolver | None = None,
         local_address_checker: LocalAddressChecker | None = None,
-        metadata_loader: Callable[..., dict[str, Any] | None] | None = None,
     ) -> None:
         super().__init__(agent)
         self._resolver = resolver
         self._local_address_checker = local_address_checker
-        self._metadata_loader = metadata_loader or self._default_metadata_loader
-
-    def _default_metadata_loader(
-        self, credential_key: str, *, scope: CredentialOwnerScope
-    ) -> dict[str, Any] | None:
-        return read_credential_metadata_readonly(
-            credential_key,
-            scope=scope,
-            fallback_db_path=self.execution.config.credential_catalog_database_path,
-        )
 
     def _plan_store(self) -> FilePlanStore[SSHTargetEnrollChangePlan]:
         return FilePlanStore(
@@ -814,7 +811,7 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
     ) -> _InspectedSSHCredentials:
         if not _CREDENTIAL_KEY_PATTERN.fullmatch(credential_key):
             raise ValueError("credential_key contains invalid characters.")
-        metadata = self._metadata_loader(
+        metadata = self._read_credential_metadata(
             credential_key,
             scope=_catalog_scope(credential_owner_scope),
         )
@@ -849,7 +846,7 @@ class SSHTargetEnrollChangeService(_ExecutionChanges):
             if not _CREDENTIAL_KEY_PATTERN.fullmatch(bootstrap_credential_key):
                 raise ValueError("bootstrap_credential_key contains invalid characters.")
             assert bootstrap_credential_owner_scope is not None
-            boot_meta = self._metadata_loader(
+            boot_meta = self._read_credential_metadata(
                 bootstrap_credential_key,
                 scope=_catalog_scope(bootstrap_credential_owner_scope),
             )
@@ -1186,31 +1183,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
     kind = SSH_INTERACTION_CHANGE_KIND
     label = "SSH delegation change"
 
-    def __init__(
-        self,
-        agent: Any,
-        *,
-        metadata_loader: Callable[..., dict[str, Any] | None] | None = None,
-        known_agent_types_loader: Callable[[], Iterable[str]] | None = None,
-    ) -> None:
-        super().__init__(agent)
-        self._metadata_loader = metadata_loader or self._default_metadata_loader
-        self._known_agent_types_loader = known_agent_types_loader
-
-    def _default_metadata_loader(
-        self, credential_key: str, *, scope: CredentialOwnerScope
-    ) -> dict[str, Any] | None:
-        return read_credential_metadata_readonly(
-            credential_key,
-            scope=scope,
-            fallback_db_path=self.execution.config.credential_catalog_database_path,
-        )
-
     def _known_agent_types(self) -> frozenset[str]:
-        if self._known_agent_types_loader is not None:
-            return frozenset(
-                str(item).strip() for item in self._known_agent_types_loader() if str(item).strip()
-            )
         from custom_tools.agent_team_port import current_agent_type_map
 
         return frozenset(str(key).strip() for key in current_agent_type_map() if str(key).strip())
@@ -1339,7 +1312,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
             assert enrolled_target is not None
             assert enrolled_target.bootstrap_credential_key is not None
             assert enrolled_target.bootstrap_credential_owner_scope is not None
-            boot_meta = self._metadata_loader(
+            boot_meta = self._read_credential_metadata(
                 enrolled_target.bootstrap_credential_key,
                 scope=_catalog_scope(enrolled_target.bootstrap_credential_owner_scope),
             )

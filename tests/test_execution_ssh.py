@@ -1782,9 +1782,11 @@ async def test_ssh_target_enrollment_with_authorization_off_requires_agreement(
 
     session = json.loads(tools.create_execution_ssh_session._tool_func(target_id="auth_off_host", confirmed=True))
     assert session["target"]["target_id"] == "auth_off_host"
+    # Broker now verifies the enrolled target via ExecutionAccessGuard; the in-process
+    # disk-key broker only refuses because Sealbox catalog routing lands in the next step.
     opened = json.loads(await tools.open_execution_ssh_session._tool_func(session_id=session["session_id"]))
     assert opened["error_code"] == "execution_access_refused"
-    assert "Enrolled SSH target record is missing" in opened["error"]
+    assert "SSH credential binding is not installed in this broker" in opened["error"]
 
 
 # -- Checkpoint 8: C48-C51 Hardening Tests -----------------------------------------
@@ -1854,26 +1856,40 @@ async def test_ssh_delegation_second_request_behavior_for_default_and_single_req
     assert (await _type(s2_id, "one\n"))["written_bytes"] == 4
 
     # 3. Default when delegated_agent_type is provided -> this_request_only defaults to True.
+    # Approve it with allow_typing=True for CodeWritingAgent to verify C52(c):
+    # TeamArchitect's own listing must show usable_in_this_request=False and typing_approved=False.
     session3 = json.loads(tools.create_execution_ssh_session._tool_func(target_id=SSH_TARGET_ID))
+    s3_id = session3["session_id"]
     staged3 = json.loads(
         tools.plan_execution_ssh_interaction._tool_func(
-            session_id=session3["session_id"],
+            session_id=s3_id,
             reason="Delegate to worker",
             ttl_seconds=600,
             delegated_agent_type="CodeWritingAgent",
+            allow_typing=True,
             allow_commands=True,
         )
     )
     assert staged3["status"] == "staged", staged3
     assert any("this request only" in line for line in staged3["effect"])
+    call3 = ToolCall("tooluse_c52_worker_listing")
+    with pytest.raises(InterruptException):
+        await _apply(staged3["change_id"], call3)
+    decide(lead, call3)
+    applied3 = await _apply(staged3["change_id"], call3)
+    assert applied3["status"] == "applied", applied3
 
-    # In request 1, both s1 and s2 are usable_in_this_request=True.
+    # In request 1, s1 and s2 are usable by TeamArchitect, while s3 is delegated only to CodeWritingAgent.
     listed_req1 = json.loads(tools.list_execution_ssh_sessions._tool_func())
     by_id_req1 = {entry["session_id"]: entry for entry in listed_req1["sessions"]}
     assert by_id_req1[s1_id]["usable_in_this_request"] is True
     assert by_id_req1[s1_id]["typing_approved"] is True
     assert by_id_req1[s2_id]["usable_in_this_request"] is True
     assert by_id_req1[s2_id]["typing_approved"] is True
+    assert by_id_req1[s3_id]["delegation_active"] is True
+    assert by_id_req1[s3_id]["usable_in_this_request"] is False
+    assert by_id_req1[s3_id]["typing_approved"] is False
+    assert "CodeWritingAgent" in by_id_req1[s3_id]["unusable_reason"]
 
     # Simulate the same person sending a second chat message (new gateway-signed context -> new work_id).
     lead.task_manager = SignedTaskManager(
@@ -1891,8 +1907,8 @@ async def test_ssh_delegation_second_request_behavior_for_default_and_single_req
     # Session 2 (this_request_only=True) is refused cleanly, reported in listing, and re-staging guides the agent.
     refused_write = await _type(s2_id, "two\n")
     assert refused_write["error_code"] == "execution_access_refused"
-    assert "This approval was for one request, which has ended" in refused_write["error"]
-    assert "this_request_only=false" in refused_write["error"]
+    assert "This approval is for another request. Create a new session" in refused_write["error"]
+    assert "stage it with this_request_only=false" in refused_write["error"]
 
     listed_req2 = json.loads(tools.list_execution_ssh_sessions._tool_func())
     by_id_req2 = {entry["session_id"]: entry for entry in listed_req2["sessions"]}
@@ -1902,6 +1918,7 @@ async def test_ssh_delegation_second_request_behavior_for_default_and_single_req
     assert by_id_req2[s2_id]["delegation_active"] is True
     assert by_id_req2[s2_id]["usable_in_this_request"] is False
     assert by_id_req2[s2_id]["typing_approved"] is False
+    assert "This approval is for another request" in by_id_req2[s2_id]["unusable_reason"]
 
     replan_s2 = json.loads(
         tools.plan_execution_ssh_interaction._tool_func(
@@ -1912,8 +1929,8 @@ async def test_ssh_delegation_second_request_behavior_for_default_and_single_req
         )
     )
     assert replan_s2["error_code"] == "execution_access_refused"
-    assert "This approval was for one request, which has ended" in replan_s2["error"]
-    assert "this_request_only=false" in replan_s2["error"]
+    assert "This approval is for another request. Create a new session" in replan_s2["error"]
+    assert "stage it with this_request_only=false" in replan_s2["error"]
 
     await tools.close_execution_ssh_session._tool_func(session_id=s1_id)
     await tools.close_execution_ssh_session._tool_func(session_id=s2_id)

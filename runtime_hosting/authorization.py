@@ -70,8 +70,8 @@ class ExecutionAuthorizationDenied(PermissionError):
 
 
 SSH_SINGLE_REQUEST_ENDED_MESSAGE = (
-    "This approval was for one request, which has ended. "
-    "Create a new session, or stage with this_request_only=false to keep the approval until it expires."
+    "This approval is for another request. Create a new session; "
+    "to keep its approval across messages, stage it with this_request_only=false."
 )
 
 
