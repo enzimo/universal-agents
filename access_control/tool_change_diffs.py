@@ -34,11 +34,13 @@ from custom_messages.contracts.access_v2 import (
     AccountLinkStatus,
     AccountLinkV1,
     AccountMode,
+    AccountSharing,
     CredentialInjectionV1,
     HttpRouteV1,
     InjectionPlacement,
     LinkOwnerKind,
     LinkPurpose,
+    OwnerScope,
     ReviewItemV1,
     ToolDefinitionV1,
     injections_match,
@@ -47,6 +49,31 @@ from custom_messages.contracts.tool_setup_spec_v1 import ExternalSetupStepV1
 from secure_tools.chat_commands import link_command
 
 _ROW_TEXT_LIMIT = 1600
+_DESCRIBED_TOOL_FIELDS = frozenset(
+    {
+        "schema_version",
+        "tool_id",
+        "kind",
+        "display_name",
+        "description",
+        "hosts",
+        "routes",
+        "operations",
+        "account",
+        "credential_injections",
+        "gate_injections",
+        "setup",
+        "link_owners",
+        "default_sharing",
+        "owner_scope",
+    }
+)
+_OWNER_SCOPE_WORDS = {
+    OwnerScope.TEAM: "team",
+    OwnerScope.PERSON: "each person's own",
+    OwnerScope.ADMINISTRATORS: "administrators only",
+    OwnerScope.PLATFORM: "platform",
+}
 
 
 def _bounded(text: str) -> str:
@@ -164,6 +191,19 @@ class ToolChangeDiff:
     removed_prerequisites: tuple[str, ...] = ()
     display_name_changed: bool = False
     description_changed: bool = False
+    link_owners_changed: bool = False
+    default_sharing_changed: bool = False
+    owner_scope_changed: bool = False
+    other_changed_fields: tuple[str, ...] = ()
+
+    @property
+    def policy_changed(self) -> bool:
+        return bool(
+            self.link_owners_changed
+            or self.default_sharing_changed
+            or self.owner_scope_changed
+            or self.other_changed_fields
+        )
 
     @property
     def routes_changed(self) -> bool:
@@ -192,6 +232,7 @@ class ToolChangeDiff:
                 self.setup_changed,
                 self.display_name_changed,
                 self.description_changed,
+                self.policy_changed,
             )
         )
 
@@ -239,6 +280,15 @@ def _diff_setup(
     return added_or_changed, removed_ids, reordered, added_prereqs, removed_prereqs
 
 
+def _other_changed_fields(current: ToolDefinitionV1, proposed: ToolDefinitionV1) -> tuple[str, ...]:
+    """Any ``ToolDefinitionV1`` fields outside the explicitly described aspects whose values differ."""
+
+    old_dump = current.model_dump(mode="json")
+    new_dump = proposed.model_dump(mode="json")
+    keys = (set(old_dump) | set(new_dump)) - _DESCRIBED_TOOL_FIELDS
+    return tuple(sorted(key for key in keys if old_dump.get(key) != new_dump.get(key)))
+
+
 def diff_tool_definition(current: ToolDefinitionV1, proposed: ToolDefinitionV1) -> ToolChangeDiff:
     """Compare ``current`` and ``proposed`` web API tool definitions."""
 
@@ -277,6 +327,10 @@ def diff_tool_definition(current: ToolDefinitionV1, proposed: ToolDefinitionV1) 
         removed_prerequisites=removed_prerequisites,
         display_name_changed=current.display_name != proposed.display_name,
         description_changed=current.description != proposed.description,
+        link_owners_changed=current.link_owners != proposed.link_owners,
+        default_sharing_changed=current.default_sharing != proposed.default_sharing,
+        owner_scope_changed=current.owner_scope is not proposed.owner_scope,
+        other_changed_fields=_other_changed_fields(current, proposed),
     )
 
 
@@ -309,6 +363,8 @@ def _overview_row(index: int, diff: ToolChangeDiff) -> ReviewItemV1:
         aspects.append("setup")
     if diff.display_name_changed or diff.description_changed:
         aspects.append("details")
+    if diff.policy_changed:
+        aspects.append("account and ownership settings")
     return ReviewItemV1(
         item_id=f"change-{index}",
         section="tool",
@@ -535,6 +591,51 @@ def _details_row(
     ]
 
 
+def _link_owners_words(owners: tuple[str, ...]) -> str:
+    if len(owners) == 1:
+        return f"{owners[0]} only"
+    return " then ".join(owners)
+
+
+def _sharing_words(sharing: AccountSharing | None) -> str:
+    return sharing.value if sharing is not None else "team default"
+
+
+def _policy_row(
+    index: int, current: ToolDefinitionV1, proposed: ToolDefinitionV1, diff: ToolChangeDiff
+) -> list[ReviewItemV1]:
+    if not diff.policy_changed:
+        return []
+    parts: list[str] = []
+    if diff.link_owners_changed:
+        parts.append(
+            f"whose account is used: {_link_owners_words(current.link_owners)} -> "
+            f"{_link_owners_words(proposed.link_owners)}"
+        )
+    if diff.default_sharing_changed:
+        parts.append(
+            f"default account sharing: {_sharing_words(current.default_sharing)} -> "
+            f"{_sharing_words(proposed.default_sharing)}"
+        )
+    if diff.owner_scope_changed:
+        parts.append(
+            f"owner scope: {_OWNER_SCOPE_WORDS[current.owner_scope]} -> "
+            f"{_OWNER_SCOPE_WORDS[proposed.owner_scope]}"
+        )
+    if diff.other_changed_fields:
+        parts.append(f"other settings: {', '.join(diff.other_changed_fields)}")
+    return [
+        ReviewItemV1(
+            item_id=f"change-{index}-settings",
+            section="tool",
+            text=_bounded(
+                f"Account and ownership settings changed for {diff.proposed_name} ({diff.tool_id}): "
+                f"{'; '.join(parts)}."
+            ),
+        )
+    ]
+
+
 def tool_change_rows(
     index: int,
     *,
@@ -556,6 +657,7 @@ def tool_change_rows(
         *_relink_row(index, diff, impact),
         *_setup_rows(index, proposed, diff),
         *_details_row(index, current, proposed, diff),
+        *_policy_row(index, current, proposed, diff),
     ]
     return diff, rows
 

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from access_catalog.catalog import load_catalog
-from access_catalog.instance_tools import proposed_tool_path, write_instance_tool
+from access_catalog.catalog import CatalogError, load_catalog
+from access_catalog.instance_tools import proposed_tool_path, read_proposed_tool_file, tool_definition, write_instance_tool
 from access_control.account_sharing import TeamAccountSharing
 from access_control.proposals import (
     ProposalCompiler,
@@ -16,6 +16,7 @@ from access_control.proposals import (
     proposal_summary,
     with_tool_change_baselines,
 )
+from access_control.tool_change_diffs import tool_change_rows
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccessProposalV1,
@@ -27,6 +28,7 @@ from custom_messages.contracts.access_v2 import (
     InjectionPlacement,
     LinkOwnerKind,
     LinkPurpose,
+    OwnerScope,
     ProposedAccountLinkV1,
     ProposedGrantV1,
     ProposedHttpToolChangeV1,
@@ -587,3 +589,101 @@ def test_assess_link_impact_marks_unused_when_account_or_gate_removed(tmp_path: 
     assert "Team gate credential removed" in rows["change-0-gate-credentials"].text
     assert "1 existing account link will no longer be used" in rows["change-0-relink"].text
     assert "existing team gate link will no longer be used" in rows["change-0-relink"].text
+
+
+@pytest.mark.parametrize(
+    ("extra_yaml", "expected_field"),
+    [
+        ("    link_owners: [team]\n", "link_owners"),
+        ("    default_sharing: private\n", "default_sharing"),
+        ("    owner_scope: administrators\n", "owner_scope"),
+    ],
+)
+def test_tool_change_refuses_file_with_operator_only_settings(
+    tmp_path: Path, caplog, extra_yaml: str, expected_field: str
+) -> None:
+    """C20: a proposed-*.yaml file edited by an operator with settings ProposedHttpToolV1 cannot express is refused."""
+
+    instance = tmp_path / "instance"
+    path = proposed_tool_path(instance, "http:gitea")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "tools:\n"
+        "  - tool_id: http:gitea\n"
+        "    display_name: Gitea\n"
+        "    hosts: [gitea.example.com]\n"
+        "    account: linked_credential\n"
+        "    credential_injections:\n"
+        "      - placement: header\n"
+        "        name: Authorization\n"
+        "        field: token\n"
+        "        template: 'token {value}'\n"
+        + extra_yaml,
+        encoding="utf-8",
+    )
+    compiler, _ = _compiler(tmp_path, instance)
+    proposal = AccessProposalV1(
+        title="Add gate",
+        reason="Add Cloudflare gate",
+        tool_changes=(
+            _gitea_change(
+                gate_injections=(
+                    CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="gate"),
+                )
+            ),
+        ),
+    )
+    caplog.set_level("WARNING")
+    with pytest.raises(ProposalRefused, match=f"settings a tool change cannot keep.*{expected_field}"):
+        with_tool_change_baselines(proposal, instance_root=instance, catalog=compiler.catalog)
+    assert f"reason=unsupported_file_settings tool_id=http:gitea fields={expected_field}" in caplog.text
+
+
+def test_diff_tool_definition_describes_link_owners_default_sharing_and_owner_scope() -> None:
+    """C20 belt-and-suspenders: diff_tool_definition never silently drops policy fields."""
+
+    base = tool_definition(_gitea_tool())
+    custom = base.model_copy(
+        update={
+            "link_owners": ("team",),
+            "owner_scope": OwnerScope.ADMINISTRATORS,
+        }
+    )
+    diff, rows = tool_change_rows(0, current=custom, proposed=base)
+    assert diff.has_changes and diff.policy_changed
+    by_id = {row.item_id: row for row in rows}
+    assert "account and ownership settings" in by_id["change-0"].text
+    assert "whose account is used: team only -> person then team" in by_id["change-0-settings"].text
+    assert "owner scope: administrators only -> team" in by_id["change-0-settings"].text
+
+    private_default = base.model_copy(update={"default_sharing": AccountSharing.PRIVATE})
+    diff2, rows2 = tool_change_rows(0, current=private_default, proposed=base)
+    assert diff2.has_changes and diff2.default_sharing_changed
+    by_id2 = {row.item_id: row for row in rows2}
+    assert "default account sharing: private -> team default" in by_id2["change-0-settings"].text
+
+
+def test_read_proposed_tool_file_refuses_tool_sets_and_reached_through(tmp_path: Path) -> None:
+    instance = tmp_path / "instance"
+    path = proposed_tool_path(instance, "http:bad")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "tools:\n"
+        "  - tool_id: http:bad\n"
+        "    display_name: Bad\n"
+        "    hosts: [bad.example.com]\n"
+        "    tool_sets: [standard]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CatalogError, match="cannot join tool sets"):
+        read_proposed_tool_file(instance, "http:bad")
+    path.write_text(
+        "tools:\n"
+        "  - tool_id: http:bad\n"
+        "    display_name: Bad\n"
+        "    hosts: [bad.example.com]\n"
+        "    reached_through: fn:web\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(CatalogError, match="cannot name a function tool"):
+        read_proposed_tool_file(instance, "http:bad")

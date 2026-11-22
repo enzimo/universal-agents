@@ -36,6 +36,9 @@ from custom_messages.contracts.access_v2 import (
     GrantLifetime,
     InjectionPlacement,
     LinkOwnerKind,
+    LinkPurpose,
+    REASON_ACCOUNT_LINK_OUTDATED,
+    REASON_GATE_LINK_MISSING,
     SubjectKind,
     SubjectRefV1,
 )
@@ -344,3 +347,282 @@ def test_proposals_are_decided_by_administrators_and_checked_before_review(world
         )
     )
     assert worker_row["status"] == "refused" and "Workers keep no lasting access" in worker_row["reason"]
+
+
+def _propose_tool_change(context: Context, changed_tool: dict, **extra) -> dict:
+    return json.loads(
+        asyncio.run(
+            propose_access_change(
+                title="Update Portainer hosts and add gate credential",
+                reason="Portainer moved behind a Cloudflare gate and gained a mirror host.",
+                tool_context=context,
+                tool_changes=[changed_tool],
+                **extra,
+            )
+        )
+    )
+
+
+def test_tool_change_proposal_end_to_end_replaces_file_enforces_gate_and_outdated_link(world) -> None:
+    """A2 + A3 + A4 end-to-end: propose tool_changes -> review rows -> approve -> atomic replace -> gate & outdated link."""
+
+    lead, requests, gate, instance, service = world
+    set_agent_ref(lead)
+
+    # 1. Create the initial Portainer tool via proposal and link its team account.
+    c1 = Context("tooluse-initial-portainer")
+    with pytest.raises(InterruptException):
+        propose(c1)
+    r1 = requests().decide(
+        c1.raised[0]["access_request_id"], OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",)
+    )
+    assert r1.applied_at_utc is not None
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_portainer_v1",
+            team_id=TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            credential_key="team_portainer",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-API-Key", field="api_token"),),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=service.clock(),
+        )
+    )
+    assert boa(gate, "post", RESTART).allowed
+
+    # 2. Propose a tool change adding a new host, changing account injections, and adding a gate credential.
+    updated_portainer = {
+        **PORTAINER,
+        "hosts": ["portainer.example.test", "portainer-mirror.example.test"],
+        "credential_injections": [
+            {"placement": "header", "name": "Authorization", "field": "api_token", "template": "Bearer {value}"}
+        ],
+        "gate_injections": [
+            {"placement": "header", "name": "X-CF-Gate", "field": "cf_secret"}
+        ],
+    }
+    c2 = Context("tooluse-change-portainer")
+    with pytest.raises(InterruptException):
+        _propose_tool_change(
+            c2,
+            updated_portainer,
+            account_links=[
+                {
+                    "tool_id": "http:portainer",
+                    "owner": "team",
+                    "purpose": "Pass the Cloudflare gate.",
+                    "link_purpose": "gate",
+                }
+            ],
+        )
+    req2 = service.store.get_request(c2.raised[0]["access_request_id"])
+    rows = {row.item_id: row for row in req2.change.items}
+    assert "change-0" in rows and "change-0-hosts-added" in rows
+    assert "new_host" in rows["change-0-hosts-added"].flags
+    assert "change-0-account-credentials" in rows and "change-0-gate-credentials" in rows
+    assert "/link http:portainer team" in rows["change-0-relink"].text
+    assert "gate credential" in rows["account-0"].text
+
+    # Only an administrator may approve tool_changes (installs=True).
+    member = type(OWNER)("member-1", TEAM, ("member",))
+    assert not requests().may_decide(member, req2)
+
+    # 3. Approve: file is replaced atomically and catalog reloads.
+    decided = requests().decide(req2.request_id, OWNER, AccessReviewChoice.APPROVE)
+    assert decided.applied_at_utc is not None
+    c2.responses[access_tools.ACCESS_REQUEST_INTERRUPT_NAME] = access_request_runtime.decision_response(
+        service.store.get_request(req2.request_id)
+    )
+    resumed = _propose_tool_change(
+        c2,
+        updated_portainer,
+        account_links=[
+            {
+                "tool_id": "http:portainer",
+                "owner": "team",
+                "purpose": "Pass the Cloudflare gate.",
+                "link_purpose": "gate",
+            }
+        ],
+    )
+    assert resumed["status"] == "applied"
+    assert resumed["account_links"] == [
+        {"tool_id": "http:portainer", "owner": "team", "linked": False, "link_purpose": "gate"}
+    ]
+    assert "/link <tool_id> gate" in resumed["message"]
+
+    # 4. Broker sees the new host immediately and refuses for missing gate link first, then outdated account link.
+    mirror_url = "https://portainer-mirror.example.test/api/stacks/1/restart"
+    assert boa(gate, "post", mirror_url).reason_code == REASON_GATE_LINK_MISSING
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_portainer_gate",
+            team_id=TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="team_portainer_gate",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-CF-Gate", field="cf_secret"),),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=service.clock(),
+        )
+    )
+    # Gate link now matches, so broker reaches the old account link and refuses it as outdated!
+    assert boa(gate, "post", mirror_url).reason_code == REASON_ACCOUNT_LINK_OUTDATED
+
+
+def test_tool_change_rollback_on_same_open_repository_and_conflict_after_review(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2 + C18: failed decision restores previous file on the same open repository (no reopen), and edited files are refused."""
+
+    lead, requests, _gate, instance, service = world
+    set_agent_ref(lead)
+
+    c1 = Context("tooluse-seed-portainer")
+    with pytest.raises(InterruptException):
+        propose(c1)
+    requests().decide(c1.raised[0]["access_request_id"], OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
+
+    tool_file = instance / "control" / "access" / "tools" / "proposed-http-portainer.yaml"
+    original_bytes = tool_file.read_bytes()
+
+    updated = {**PORTAINER, "hosts": ["portainer.example.test", "portainer-v2.example.test"]}
+    c2 = Context("tooluse-change-rollback")
+    with pytest.raises(InterruptException):
+        _propose_tool_change(c2, updated)
+    req_id = c2.raised[0]["access_request_id"]
+
+    # Simulate apply_together failure on the SAME open AccessRepository (C18: no reopen before reconcile).
+    def broken(*_args, **_kwargs):
+        raise ValueError("disk full during store commit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service.store, "apply_together", broken)
+        with pytest.raises(HandDownRefused, match="nothing changed"):
+            requests().decide(req_id, OWNER, AccessReviewChoice.APPROVE)
+
+    assert tool_file.read_bytes() == original_bytes
+    assert service.store.decision_recoveries(TEAM) == []
+    assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING
+    assert "portainer-v2.example.test" not in service.catalog.http_hosts
+
+    # Now edit the file on disk after review -> approval is refused and external edit stays intact.
+    external = original_bytes + b"# operator comment\n"
+    tool_file.write_bytes(external)
+    with pytest.raises(HandDownRefused, match="changed after the proposal was prepared"):
+        requests().decide(req_id, OWNER, AccessReviewChoice.APPROVE)
+    assert tool_file.read_bytes() == external
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_unconfirmed_tool_change_is_reconciled_after_reopening_the_store(world, monkeypatch, committed: bool) -> None:
+    from datetime import timedelta
+
+    from access_control.requests import DecisionOutcomeUnknown
+
+    lead, requests, _gate, instance, service = world
+    set_agent_ref(lead)
+    c1 = Context("tooluse-seed-reopen")
+    with pytest.raises(InterruptException):
+        propose(c1)
+    requests().decide(c1.raised[0]["access_request_id"], OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",))
+    tool_file = instance / "control" / "access" / "tools" / "proposed-http-portainer.yaml"
+    original_bytes = tool_file.read_bytes()
+
+    updated = {**PORTAINER, "hosts": ["portainer.example.test", "portainer-reopen.example.test"]}
+    c2 = Context("tooluse-change-reopen")
+    with pytest.raises(InterruptException):
+        _propose_tool_change(c2, updated)
+    req_id = c2.raised[0]["access_request_id"]
+
+    with uncertain_store(monkeypatch, service.store, "apply_together", committed=committed):
+        with pytest.raises(DecisionOutcomeUnknown, match="could not yet confirm"):
+            requests().decide(req_id, OWNER, AccessReviewChoice.APPROVE)
+
+    assert tool_file.read_bytes() != original_bytes
+    service.store = AccessRepository(service.store.settings)
+    later = service.clock() + timedelta(minutes=11)
+    monkeypatch.setattr(service, "clock", lambda: later)
+    requests().recover_decisions()
+    assert service.store.decision_recoveries(TEAM, now=later) == []
+    if committed:
+        assert b"portainer-reopen.example.test" in tool_file.read_bytes()
+        assert service.store.get_request(req_id).status is AccessRequestStatus.GRANTED
+    else:
+        assert tool_file.read_bytes() == original_bytes
+        assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING
+
+
+def test_tool_change_with_authorization_off_applies_with_confirmed_and_rolls_back_on_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A7: with authorization.enabled false, tool_changes shows diffs before confirmation, applies on confirmed=true, and rolls back on failure."""
+
+    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    access_runtime._runtime_access.cache_clear()
+    instance = tmp_path / "instance"
+    (instance / "control").mkdir(parents=True)
+    lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
+    lead.instance_root = str(instance)
+    lead.authorization_config = {"enabled": False}
+    set_agent_ref(lead)
+
+    try:
+        # 1. Create tool with authorization off.
+        created = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Add Portainer",
+                    reason="Manage stacks",
+                    tool_context=Context("tooluse-auth-off-1"),
+                    tools=[PORTAINER],
+                    confirmed=True,
+                )
+            )
+        )
+        assert created["status"] == "applied"
+        tool_file = instance / "control" / "access" / "tools" / "proposed-http-portainer.yaml"
+        original_bytes = tool_file.read_bytes()
+
+        # 2. Propose a tool change with confirmed=False -> agreement_needed with trusted diff rows, file untouched.
+        updated = {
+            **PORTAINER,
+            "hosts": ["portainer.example.test", "portainer-extra.example.test"],
+            "gate_injections": [{"placement": "header", "name": "X-Gate", "field": "gate"}],
+        }
+        preview = _propose_tool_change(Context("tooluse-auth-off-2"), updated, confirmed=False)
+        assert preview["status"] == "agreement_needed"
+        assert any("portainer-extra.example.test" in line for line in preview["changes"])
+        assert any("Team gate credential added" in line for line in preview["changes"])
+        assert tool_file.read_bytes() == original_bytes
+
+        # 3. Built-in tool is still refused with authorization off.
+        refused = _propose_tool_change(
+            Context("tooluse-auth-off-builtin"),
+            {**PORTAINER, "tool_id": "http:github", "hosts": ["api.github.com"]},
+            confirmed=True,
+        )
+        assert refused["status"] == "refused" and "built-in tool" in refused["reason"]
+
+        # 4. A failure after replacing the file (e.g. protected data folder) restores the original file!
+        failed = _propose_tool_change(
+            Context("tooluse-auth-off-rollback"),
+            updated,
+            data_folders=[{"name": "bad_folder", "path": str(instance), "writable": False}],
+            confirmed=True,
+        )
+        assert failed["status"] == "refused"
+        assert tool_file.read_bytes() == original_bytes
+
+        # 5. confirmed=True applies the replacement cleanly.
+        applied = _propose_tool_change(Context("tooluse-auth-off-3"), updated, confirmed=True)
+        assert applied["status"] == "applied"
+        assert b"portainer-extra.example.test" in tool_file.read_bytes()
+        assert b"X-Gate" in tool_file.read_bytes()
+    finally:
+        access_runtime._runtime_access.cache_clear()
+        set_agent_ref(None)

@@ -629,8 +629,10 @@ def test_an_approved_proposals_credential_forms_carry_their_card_view(harness: H
             )
 
     harness.inbox.tool_setups = Setups()
+    from custom_messages.contracts.access_v2 import ProposedAccountLinkV1
+
     harness.inbox.proposals.account_links[request.request_id] = [
-        SimpleNamespace(tool_id="http:portainer", owner="team", purpose="Read the stacks")
+        ProposedAccountLinkV1(tool_id="http:portainer", owner="team", purpose="Read the stacks")
     ]
 
     links, forms = asyncio.run(harness.inbox._open_account_links("owner-1", request))
@@ -641,3 +643,44 @@ def test_an_approved_proposals_credential_forms_carry_their_card_view(harness: H
     assert links[0]["frame_url"] == "http://127.0.0.1:18600/account-link/v1.s1.sig?view=card"
     assert links[0]["expires_at_utc"] == "2026-11-20T10:15:00Z"
     assert links[0]["label"].startswith("Choose the credential for ")
+
+
+def test_an_approved_proposals_gate_link_opens_with_gate_purpose_and_distinct_request_id(harness: Harness) -> None:
+    from assistant_gateway.application.account_links import AccountLinkForm
+    from custom_messages.contracts.access_v2 import LinkPurpose, ProposedAccountLinkV1
+
+    request = ask(harness)
+    opened: list[dict[str, Any]] = []
+
+    class Setups:
+        async def open_proposal_link(self, **fields: Any) -> AccountLinkForm:
+            opened.append(fields)
+            return AccountLinkForm(
+                session_id=f"s-{fields['purpose']}",
+                form_url=f"http://127.0.0.1:18600/account-link/v1.{fields['purpose']}.sig",
+                status_url=f"http://127.0.0.1:18600/account-link/v1.{fields['purpose']}.sig/status",
+                expires_at_utc="2026-11-20T10:15:00Z",
+                tool_display_name="Gitea",
+            )
+
+    harness.inbox.tool_setups = Setups()
+    harness.inbox.proposals.account_links[request.request_id] = [
+        ProposedAccountLinkV1(tool_id="http:gitea", owner="team", purpose="Use team account"),
+        ProposedAccountLinkV1(
+            tool_id="http:gitea",
+            owner="team",
+            purpose="Pass the Cloudflare gate",
+            link_purpose=LinkPurpose.GATE,
+        ),
+    ]
+
+    links, forms = asyncio.run(harness.inbox._open_account_links("owner-1", request))
+
+    assert [f["request_id"] for f in opened] == [
+        f"{request.request_id}:http:gitea:account",
+        f"{request.request_id}:http:gitea:gate",
+    ]
+    assert [f["purpose"] for f in opened] == ["account", "gate"]
+    assert links[0]["label"].startswith("Choose the credential for ")
+    assert links[1]["label"].startswith("Choose the team gate credential for ")
+    assert [entry[3] for entry in forms] == ["account", "gate"]

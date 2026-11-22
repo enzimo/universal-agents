@@ -66,13 +66,15 @@ from access_catalog.instance_tools import (
     private_hosts,
     read_proposed_tool_file,
     remove_instance_tool,
+    replace_instance_tool,
+    restore_instance_tool,
     tool_definition,
     with_proposed_tools,
     write_instance_tool,
 )
 from access_control.cli_binaries import Downloader, fetch_https, workspaces_root
 from access_control.data_folders import DataFolderRegistry, registration_problem
-from access_control.decision_effects import EffectJournal, OwnedFile
+from access_control.decision_effects import EffectJournal, OwnedFile, ReplacedFile
 from access_control.proposal_clis import cli_rows, install_programs
 from access_control.tool_change_diffs import describe_injections, tool_change_rows
 from access_control.decisions import HandDownRefused
@@ -98,6 +100,7 @@ from custom_messages.contracts.access_v2 import (
     GrantV1,
     LinkOwnerKind,
     LinkPurpose,
+    OwnerScope,
     ProposedAccountLinkV1,
     ProposedGrantV1,
     ReviewItemV1,
@@ -105,6 +108,7 @@ from custom_messages.contracts.access_v2 import (
     SubjectRefV1,
     TargetKind,
     TargetRefV1,
+    ToolDefinitionV1,
     ToolKind,
     contract_digest,
     summary_line,
@@ -210,14 +214,32 @@ def _mcp_server_flags(record: MCPConnectionRecordV1) -> tuple[str, ...]:
     return tuple(flags)
 
 
+def _unsupported_tool_change_fields(definition: ToolDefinitionV1) -> tuple[str, ...]:
+    """Fields on an existing ``proposed-*.yaml`` file that ``ProposedHttpToolV1`` cannot express."""
+
+    unsupported: list[str] = []
+    if definition.owner_scope is not OwnerScope.TEAM:
+        unsupported.append("owner_scope")
+    if definition.link_owners != ("person", "team"):
+        unsupported.append("link_owners")
+    if definition.default_sharing is not None:
+        unsupported.append("default_sharing")
+    if definition.tool_sets:
+        unsupported.append("tool_sets")
+    if definition.installed_cli is not None:
+        unsupported.append("installed_cli")
+    return tuple(unsupported)
+
+
 def load_changeable_tool_file(
     instance_root: Path, catalog: ToolCatalog, tool_id: str
 ) -> ProposedToolFile:
     """Read and verify the single-tool ``proposed-*.yaml`` file that a ``tool_changes`` item may replace.
 
-    Built-in tools (``ua_definitions``), unknown tools, non-HTTP tools, and
-    operator hand-written catalog files are refused with a plain reason and
-    a structured warning log.
+    Built-in tools (``ua_definitions``), unknown tools, non-HTTP tools,
+    operator hand-written catalog files, and proposal files carrying
+    operator-only settings that a tool change cannot express are refused with
+    a plain reason and a structured warning log.
     """
 
     if tool_id in builtin_tool_ids():
@@ -244,7 +266,7 @@ def load_changeable_tool_file(
         )
         raise ProposalRefused(f"Only web API tools (http:*) can be changed through tool_changes, not {tool_id}.")
     try:
-        return read_proposed_tool_file(instance_root, tool_id)
+        tool_file = read_proposed_tool_file(instance_root, tool_id)
     except FileNotFoundError as exc:
         logger.warning(
             "Refused a proposed tool change for an operator-managed catalog file. event=proposal_tool_change_refused "
@@ -263,6 +285,19 @@ def load_changeable_tool_file(
             exc,
         )
         raise ProposalRefused(f"{tool_id} cannot be changed: {exc}") from exc
+    unsupported = _unsupported_tool_change_fields(tool_file.definition)
+    if unsupported:
+        logger.warning(
+            "Refused a proposed tool change because the file sets operator-only fields. "
+            "event=proposal_tool_change_refused reason=unsupported_file_settings tool_id=%s fields=%s",
+            tool_id,
+            ",".join(unsupported),
+        )
+        raise ProposalRefused(
+            f"{tool_id} has settings a tool change cannot keep ({', '.join(unsupported)}); "
+            "an operator must edit its catalog file."
+        )
+    return tool_file
 
 
 def with_tool_change_baselines(
@@ -799,11 +834,12 @@ class ProposalApplier:
         if proposal.account_links:
             self.account_links[request.request_id] = list(proposal.account_links)
         logger.warning(
-            "An access proposal was applied. event=proposal_applied request_id=%s by=%s tools=%s mcp_servers=%s "
-            "grants=%s folders=%s revoked=%s",
+            "An access proposal was applied. event=proposal_applied request_id=%s by=%s tools=%s tool_changes=%s "
+            "mcp_servers=%s grants=%s folders=%s revoked=%s",
             request.request_id,
             reviewer.person_id,
             ",".join(tool.tool_id for tool in (*proposal.tools, *proposal.clis)),
+            ",".join(changed.tool_id for changed in proposal.tool_changes),
             ",".join(item.connection_id for item in proposal.mcp_servers),
             ",".join(applied.grant_ids),
             ",".join(folder.name for folder in proposal.data_folders),
@@ -820,15 +856,15 @@ class ProposalApplier:
         compiled: CompiledProposal,
         claim: DecisionClaim,
     ) -> AccessRequestV1:
-        """Write tool files and install MCP servers, then store the rest together; undo all on any failure.
+        """Write tool files, replace changed tools, and install MCP servers, then store the rest together; undo all on any failure.
 
         Each download runs between two renewals of the decision's claim
         (``AccessRequests.renew_claim``): the download gets the claim's whole
         time limit, and a decision that lost the request meanwhile stops
         before it writes anything. Any failure (also a busy or lost database)
-        undoes the files, programs and servers this approval wrote, unless the
-        outcome was stored after all; refusals are reported as such and other
-        errors are raised again as they were.
+        undoes the files, replacements, programs and servers this approval
+        wrote, unless the outcome was stored after all; refusals are reported
+        as such and other errors are raised again as they were.
         """
 
         recovery = requests.recovery_record(
@@ -845,6 +881,23 @@ class ProposalApplier:
                 "tool_files", path.parent, (path.name,), descriptor, body, staging_parts=(temporary.name,)
             )
 
+        def prepare_replacement(
+            path: Path, descriptor: int, body: bytes, temporary: Path, previous_bytes: bytes
+        ) -> None:
+            journal.prepare_replacement(
+                "replaced_tool_files",
+                path.parent,
+                (path.name,),
+                descriptor,
+                body,
+                previous_bytes,
+                staging_parts=(temporary.name,),
+            )
+
+        def publish_replacement(commit: Callable[[], None]) -> None:
+            with requests.service.store.decision_effect_transaction(claim):
+                commit()
+
         def prepare_server(record: MCPConnectionRecordV1) -> None:
             recovery.effects["servers"].append(record.model_dump(mode="json"))
             requests.service.store.save_decision_recovery(recovery)
@@ -859,6 +912,15 @@ class ProposalApplier:
             install_programs(self.instance_root, compiled.proposal.clis, download, before_write=prepare_program)
             for tool in (*compiled.proposal.tools, *compiled.proposal.clis):
                 write_instance_tool(self.instance_root, tool, before_write=prepare_tool)
+            for changed in compiled.proposal.tool_changes:
+                assert changed.previous_definition_digest is not None
+                replace_instance_tool(
+                    self.instance_root,
+                    changed,
+                    expected_previous_sha256=changed.previous_definition_digest,
+                    before_replace=prepare_replacement,
+                    publish=publish_replacement,
+                )
             self._install_servers(
                 compiled.proposal, request, reviewer, prepare_server, claim, now=requests.service.clock()
             )
@@ -901,6 +963,7 @@ class ProposalApplier:
 
         directory = InstanceLayout.at(self.instance_root).instance_tools_dir
         written = [OwnedFile.model_validate(record) for record in effects["tool_files"]]
+        replaced = [ReplacedFile.model_validate(record) for record in effects["replaced_tool_files"]]
         programs = [OwnedFile.model_validate(record) for record in effects["programs"]]
         installed = [MCPConnectionRecordV1.model_validate(record) for record in effects["servers"]]
         if current is not None and (
@@ -911,12 +974,12 @@ class ProposalApplier:
             # when renewal failed with a database error rather than ClaimLost.
             programs = []
             if current.status is AccessRequestStatus.GRANTED:
-                written, installed = [], []
+                written, replaced, installed = [], [], []
             logger.warning(
                 "Another decision may use this proposal's programs; they are kept. "
                 "event=proposal_programs_kept request_id=%s", recovery.claim.request_id,
             )
-        self._undo_items(requests, directory, recovery.claim.request_id, written, programs, installed)
+        self._undo_items(requests, directory, recovery.claim.request_id, written, replaced, programs, installed)
         return None
 
     def _undo_items(
@@ -925,16 +988,24 @@ class ProposalApplier:
         directory: Path,
         request_id: str,
         written: list[OwnedFile],
+        replaced: list[ReplacedFile],
         programs: list[OwnedFile],
         installed: list[MCPConnectionRecordV1],
     ) -> None:
-        """Take back the files, programs and servers a failed approval wrote (each step logged on failure)."""
+        """Take back the files, replacements, programs and servers a failed approval wrote (each step logged on failure)."""
 
         steps: list[tuple[str, Callable[[], None]]] = [
             *((
                 f"tool file {'/'.join(owned.parts)}",
                 lambda owned=owned: owned.remove(directory, lambda: remove_instance_tool(directory.joinpath(*owned.parts))),
             ) for owned in written),
+            *((
+                f"replaced tool file {'/'.join(item.parts)}",
+                lambda item=item: item.restore(
+                    directory,
+                    lambda previous, target=directory.joinpath(*item.parts): restore_instance_tool(target, previous),
+                ),
+            ) for item in reversed(replaced)),
             *((f"program {'/'.join(owned.parts)}", lambda owned=owned: owned.remove(workspaces_root(self.instance_root))) for owned in programs),
             ("MCP servers", lambda: self._restore_servers(installed, request_id=request_id)),
             ("catalog", lambda: setattr(requests.service, "catalog", self.catalogs.current())),

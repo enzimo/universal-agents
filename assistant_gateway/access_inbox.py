@@ -83,6 +83,12 @@ from assistant_gateway.application.access_reviews import (
     WEB_PROPOSAL_CHOICE_LABELS,
     WEB_REVIEW_CHOICE_LABELS,
 )
+from assistant_gateway.application.account_links import (
+    ACCOUNT_LINK_PURPOSE_ACCOUNT,
+    ACCOUNT_LINK_PURPOSE_GATE,
+    AccountLinkPurpose,
+    account_link_restart_command,
+)
 from assistant_gateway.application.access_inbox_ports import NoticeQuery
 from assistant_gateway.application.gateway_application import GatewayDeliveryEvent
 from assistant_gateway.domain.message_types import ACCESS_REVIEW_MESSAGE_TYPE
@@ -94,6 +100,7 @@ from custom_messages.contracts.access_v2 import (
     AccessRequestStatus,
     AccessRequestV1,
     AccessReviewChoice,
+    LinkPurpose,
     SubjectKind,
     ToolKind,
 )
@@ -822,38 +829,51 @@ class GatewayAccessInbox:
         for item in pending:
             tool = self.requests().service.catalog.tools.get(item.tool_id)
             name = tool.display_name if tool else item.tool_id
+            purpose: AccountLinkPurpose = (
+                ACCOUNT_LINK_PURPOSE_GATE
+                if item.link_purpose is LinkPurpose.GATE
+                else ACCOUNT_LINK_PURPOSE_ACCOUNT
+            )
             try:
                 if self.tool_setups is None or person is None:
                     raise RuntimeError("account link forms are not available in this gateway")
                 form = await self.tool_setups.open_proposal_link(
-                    request_id=f"{request.request_id}:{item.tool_id}",
+                    request_id=f"{request.request_id}:{item.tool_id}:{purpose}",
                     person_id=person_id,
                     person_roles=tuple(person.roles),
                     tool_id=item.tool_id,
                     owner=item.owner,
                     reason=item.purpose,
+                    purpose=purpose,
                 )
             except Exception as exc:  # noqa: BLE001 - the proposal stands; the form can be opened with /link
                 self._logger.warning(
                     "Could not open a credential form after a proposal. event=proposal_account_link_failed "
-                    "request_id=%s tool_id=%s error=%s",
+                    "request_id=%s tool_id=%s purpose=%s error=%s",
                     request.request_id,
                     item.tool_id,
+                    purpose,
                     exc,
                 )
-                lines.append(f"{name}: the form could not open ({exc}); use /link {item.tool_id}.")
+                retry_command = account_link_restart_command(item.tool_id, item.owner, purpose=purpose)
+                lines.append(f"{name}: the form could not open ({exc}); use {retry_command}.")
                 continue
             # Web Chat shows the form as a broker card (frame_url, its sandboxed card view);
             # url stays the full page for "Open in its own tab" and the other pages.
+            label = (
+                f"Choose the team gate credential for {name}"
+                if purpose == ACCOUNT_LINK_PURPOSE_GATE
+                else f"Choose the credential for {name}"
+            )
             links.append(
                 {
-                    "label": f"Choose the credential for {name}",
+                    "label": label,
                     "url": form.form_url,
                     "frame_url": card_view_url(form.form_url),
                     "expires_at_utc": form.expires_at_utc,
                 }
             )
-            forms.append((form, item.tool_id, item.owner))
+            forms.append((form, item.tool_id, item.owner, purpose))
             lines.append(f"{name}: {form.form_url}")
         await asyncio.to_thread(
             self.requests().inbox.send_notice,

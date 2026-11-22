@@ -106,6 +106,10 @@ def read_proposed_tool_file(instance_root: str | Path, tool_id: str) -> Proposed
         raise CatalogError(f"The catalog file {filename} does not match tool {tool_id}.")
     if "installed_cli" in entry:
         raise CatalogError(f"Tool {tool_id} is an installed CLI, not a web API tool.")
+    if entry.get("reached_through"):
+        raise CatalogError(f"The catalog file {filename}: {tool_id} cannot name a function tool from an instance definition.")
+    if entry.get("tool_sets"):
+        raise CatalogError(f"The catalog file {filename}: {tool_id} cannot join tool sets from an instance definition.")
     try:
         definition = ToolDefinitionV1(**_tool_fields(entry, _http_operations(entry)))
     except Exception as exc:
