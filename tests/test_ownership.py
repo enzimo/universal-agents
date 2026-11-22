@@ -92,7 +92,7 @@ def test_team_memory_is_read_by_members_and_managed_by_administrators() -> None:
     assert (outsider.allowed, outsider.reason) == (False, "same_team_member_required")
 
 
-def test_members_browse_their_own_folder_and_administrators_also_the_shared_ones() -> None:
+def test_members_browse_their_own_folder_and_team_while_administrators_also_see_agents() -> None:
     def browse(path: str, roles: tuple[str, ...], person: str = "usr_x"):
         return private_access(
             person_id=person,
@@ -106,14 +106,24 @@ def test_members_browse_their_own_folder_and_administrators_also_the_shared_ones
 
     assert browse("users/usr_x/notes.md", ("member",)).reason == "own_workspace_folder"
     assert browse("users", ("member",)).allowed and browse(".", ("member",)).allowed
+    assert (browse("team", ("member",)).allowed, browse("team", ("member",)).reason) == (
+        True,
+        "team_workspace_folder",
+    )
     assert (browse("team/plan.md", ("member",)).allowed, browse("team/plan.md", ("member",)).reason) == (
+        True,
+        "team_workspace_folder",
+    )
+    assert (browse("agents/run.log", ("member",)).allowed, browse("agents/run.log", ("member",)).reason) == (
         False,
         "own_folder_only",
     )
     assert not browse("users/usr_y/diary.md", ("member",)).allowed
-    assert browse("team/plan.md", ("admin",)).reason == "team_admin_workspace_read"
+    assert browse("team/plan.md", ("admin",)).reason == "team_workspace_folder"
+    assert browse("agents/run.log", ("admin",)).reason == "team_admin_workspace_read"
     assert not browse("users/usr_y/diary.md", ("admin",)).allowed, "administrators cannot open other people's folders"
     assert browse("users/usr_x/notes.md", ()).reason == "team_member_required"
+    assert browse("team/plan.md", ()).reason == "team_member_required"
 
 
 def test_unknown_actions_are_refused() -> None:

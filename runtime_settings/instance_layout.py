@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -169,6 +170,26 @@ EXECUTION_RUST_BUILDS_DIRNAME = "rust-builds"
 
 # The one legacy location: every file used to sit in <root>/workspace.
 LEGACY_WORKSPACE_DIRNAME = "workspace"
+
+# Version-control and dependency folders excluded from workspace browsing and
+# download links. They are not secrets, so they stay separate from credential
+# names in ``access_control.sensitive_paths``.
+WORKSPACE_HIDDEN_DIRNAMES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+)
+
+
+def is_hidden_workspace_tooling_path(parts: Sequence[str]) -> bool:
+    """Whether any component in ``parts`` names a hidden VCS or dependency folder."""
+
+    return any(part.casefold() in WORKSPACE_HIDDEN_DIRNAMES for part in parts)
 
 _SAFE_PERSON_FOLDER = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _SLUG_UNSAFE = re.compile(r"[^a-z0-9]+")

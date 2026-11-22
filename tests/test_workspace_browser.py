@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import pytest
 
 from assistant_gateway.application.workspace_browser import (
+    WORKSPACE_PREVIEW_MAX_BYTES,
     GatewayWorkspaceAccess,
     WebsiteWorkspaceBrowser,
+    WorkspacePathNotFoundError,
     WorkspacePathRejectedError,
+    WorkspacePathTypeError,
     WorkspacePreviewUnavailableError,
 )
 from assistant_gateway.runtime_ports import OwnershipPrivateResourceAuthorizer
@@ -106,9 +110,9 @@ def test_workspace_browser_rejects_traversal_secrets_symlinks_and_shared_files_f
     browser = _browser(workspace)
     member = GatewayWorkspaceAccess("usr_member", ("member",))
 
-    # Members may open the top level, but it lists only users/ (absent here).
+    # Members may open the top level, which lists only users/ and team/ (both absent here).
     assert browser.list_directory(access=member, path="").entries == ()
-    with pytest.raises(PermissionError, match="only your own folder"):
+    with pytest.raises(PermissionError, match="own folder and team/"):
         browser.inspect_file(access=member, path="notes.txt")
     with pytest.raises(WorkspacePathRejectedError, match="traversal"):
         browser.inspect_file(access=ADMIN_ACCESS, path="../outside.txt")
@@ -182,10 +186,10 @@ def test_workspace_browser_does_not_return_unsupported_binary_content(
         browser.read_file_content(access=ADMIN_ACCESS, path="archive.bin")
 
 
-def test_workspace_browser_shows_each_person_only_their_own_folder(
+def test_workspace_browser_shows_each_person_their_own_folder_and_team(
     tmp_path: Path,
 ) -> None:
-    """Administrators browse team/, agents/ and their own folder; members only their own."""
+    """Members browse users/<me>/ and team/; administrators also see agents/."""
 
     from runtime_settings.instance_layout import InstanceLayout
 
@@ -195,6 +199,7 @@ def test_workspace_browser_shows_each_person_only_their_own_folder(
         layout.person_dir(person).mkdir(parents=True)
         (layout.person_dir(person) / "notes.md").write_text(person, encoding="utf-8")
     (layout.team_dir / "shared.md").write_text("shared", encoding="utf-8")
+    (layout.agents_dir / "maintenance.log").write_text("agent log", encoding="utf-8")
     browser = _browser(layout.workspaces_dir)
 
     top = browser.list_directory(access=ADMIN_ACCESS, path="")
@@ -204,22 +209,139 @@ def test_workspace_browser_shows_each_person_only_their_own_folder(
     assert [entry.name for entry in users.entries] == ["usr_admin"]
     assert browser.inspect_file(access=ADMIN_ACCESS, path="users/usr_admin/notes.md")
     assert browser.inspect_file(access=ADMIN_ACCESS, path="team/shared.md")
+    assert browser.inspect_file(access=ADMIN_ACCESS, path="agents/maintenance.log")
     with pytest.raises(WorkspacePathRejectedError, match="private"):
         browser.list_directory(access=ADMIN_ACCESS, path="users/usr_other")
     with pytest.raises(WorkspacePathRejectedError, match="private"):
         browser.read_file_content(access=ADMIN_ACCESS, path="users/usr_other/notes.md")
+    with pytest.raises(WorkspacePathRejectedError, match="private"):
+        browser.open_file_download(access=ADMIN_ACCESS, path="users/usr_other/notes.md")
 
     member = GatewayWorkspaceAccess("usr_other", ("member",))
     member_top = browser.list_directory(access=member, path="")
     member_users = browser.list_directory(access=member, path="users")
+    member_team = browser.list_directory(access=member, path="team")
 
-    assert [entry.name for entry in member_top.entries] == ["users"]
+    assert {entry.name for entry in member_top.entries} == {"users", "team"}
     assert [entry.name for entry in member_users.entries] == ["usr_other"]
+    assert "shared.md" in {entry.name for entry in member_team.entries}
     own_notes = browser.inspect_file(access=member, path="users/usr_other/notes.md")
     assert own_notes.content == "usr_other"
-    with pytest.raises(PermissionError, match="only your own folder"):
-        browser.list_directory(access=member, path="team")
-    with pytest.raises(PermissionError, match="only your own folder"):
-        browser.inspect_file(access=member, path="team/shared.md")
+    team_notes = browser.inspect_file(access=member, path="team/shared.md")
+    assert team_notes.content == "shared"
+    with browser.open_file_download(access=member, path="team/shared.md") as download:
+        assert download.read_at(0, 64) == b"shared"
+        assert download.content_type == "text/markdown"
+    with pytest.raises(PermissionError, match="agents/ is for administrators"):
+        browser.list_directory(access=member, path="agents")
+    with pytest.raises(PermissionError, match="agents/ is for administrators"):
+        browser.inspect_file(access=member, path="agents/maintenance.log")
+    with pytest.raises(PermissionError, match="agents/ is for administrators"):
+        browser.open_file_download(access=member, path="agents/maintenance.log")
     with pytest.raises(WorkspacePathRejectedError, match="private"):
         browser.inspect_file(access=member, path="users/usr_admin/notes.md")
+    with pytest.raises(WorkspacePathRejectedError, match="private"):
+        browser.open_file_download(access=member, path="users/usr_admin/notes.md")
+
+
+def test_workspace_browser_open_file_download_streams_large_binary_and_closes_safely(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    large_size = WORKSPACE_PREVIEW_MAX_BYTES + 2048
+    large_path = workspace / "recording.mp3"
+    with open(large_path, "wb") as handle:
+        handle.write(b"ID3" + b"\x00" * (large_size - 6) + b"END")
+    unknown_bin = workspace / "payload.unknownext"
+    unknown_bin.write_bytes(b"\x01\x02\x03\x04")
+    browser = _browser(workspace)
+
+    with browser.open_file_download(access=ADMIN_ACCESS, path="recording.mp3") as download:
+        assert download.path == "recording.mp3"
+        assert download.name == "recording.mp3"
+        assert download.size_bytes == large_size
+        assert download.content_type == "audio/mpeg"
+        assert download.read_at(0, 3) == b"ID3"
+        assert download.read_at(large_size - 3, 10) == b"END"
+        assert download.read_at(large_size, 10) == b""
+        assert download.read_at(0, 0) == b""
+    assert download.closed is True
+    download.close()  # idempotent
+    with pytest.raises(ValueError, match="already closed"):
+        download.read_at(0, 1)
+
+    with browser.open_file_download(access=ADMIN_ACCESS, path="payload.unknownext") as binary:
+        assert binary.content_type == "application/octet-stream"
+        assert binary.read_at(1, 2) == b"\x02\x03"
+
+
+def test_workspace_browser_open_file_download_serializes_concurrent_read_and_close(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "data.bin").write_bytes(b"abcdefgh" * 1024)
+    browser = _browser(workspace)
+
+    download = browser.open_file_download(access=ADMIN_ACCESS, path="data.bin")
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(2)
+
+    def reader() -> None:
+        barrier.wait()
+        for _ in range(50):
+            try:
+                chunk = download.read_at(0, 16)
+                assert chunk == b"abcdefghabcdefgh"
+            except ValueError:
+                return
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+                return
+
+    def closer() -> None:
+        barrier.wait()
+        download.close()
+        download.close()
+
+    t1 = threading.Thread(target=reader)
+    t2 = threading.Thread(target=closer)
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not errors
+    assert download.closed is True
+
+
+def test_workspace_browser_open_file_download_refuses_unsafe_targets(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "folder").mkdir()
+    (workspace / ".git").mkdir()
+    (workspace / ".git" / "config").write_text("git", encoding="utf-8")
+    (workspace / ".env").write_text("SECRET=1", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    os.symlink(outside, workspace / "link.txt")
+    os.link(outside, workspace / "hardlink.txt")
+    browser = _browser(workspace)
+
+    with pytest.raises(WorkspacePathTypeError, match="regular file"):
+        browser.open_file_download(access=ADMIN_ACCESS, path="folder")
+    with pytest.raises(WorkspacePathNotFoundError):
+        browser.open_file_download(access=ADMIN_ACCESS, path="missing.bin")
+    with pytest.raises(WorkspacePathRejectedError, match="traversal"):
+        browser.open_file_download(access=ADMIN_ACCESS, path="../outside.txt")
+    with pytest.raises(WorkspacePathRejectedError, match="not available"):
+        browser.open_file_download(access=ADMIN_ACCESS, path=".env")
+    with pytest.raises(WorkspacePathRejectedError, match="not available"):
+        browser.open_file_download(access=ADMIN_ACCESS, path=".git/config")
+    with pytest.raises(WorkspacePathRejectedError, match="opened safely"):
+        browser.open_file_download(access=ADMIN_ACCESS, path="link.txt")
+    with pytest.raises(WorkspacePathRejectedError, match="Multi-linked"):
+        browser.open_file_download(access=ADMIN_ACCESS, path="hardlink.txt")

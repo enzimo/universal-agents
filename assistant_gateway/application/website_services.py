@@ -61,6 +61,7 @@ from assistant_gateway.application.website_application import (
     GatewayGeneratedSiteSession,
     GatewaySessionAliasConflict,
     GatewayWorkspaceFileContent,
+    GatewayWorkspaceFileDownload,
     GatewayWebChatIdentity,
     IssuedWebEnrollmentTokenV1,
     WebHostedMCPServerListV1,
@@ -1005,6 +1006,21 @@ class WebsiteOperationsApplication:
         path: str,
     ) -> GatewayWorkspaceFileContent:
         return self._workspace_browser.read_file_content(
+            access=GatewayWorkspaceAccess(
+                canonical_user_id=canonical_user_id,
+                roles=roles,
+            ),
+            path=path,
+        )
+
+    def open_web_chat_workspace_download(
+        self,
+        *,
+        canonical_user_id: str,
+        roles: tuple[str, ...],
+        path: str,
+    ) -> GatewayWorkspaceFileDownload:
+        return self._workspace_browser.open_file_download(
             access=GatewayWorkspaceAccess(
                 canonical_user_id=canonical_user_id,
                 roles=roles,

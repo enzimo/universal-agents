@@ -1,10 +1,9 @@
 """Read-only view of the agents' workspaces area for signed-in team members.
 
 The root is ``<instance_root>/workspaces``. Every member sees their own folder
-under users/ (the owner asked for "their user folder and nothing else, for
-now"); administrators also see the shared team/ and agents/ folders. Other
-people's folders stay private even to administrators
-(runtime_settings.instance_layout).
+under ``users/`` and the shared ``team/`` folder; administrators also see
+``agents/``. Other people's folders stay private even to administrators
+(``runtime_settings.instance_layout``).
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ from typing import Iterator, Literal
 from assistant_gateway.application.ports import GatewayPrivateResourceAuthorizer
 from assistant_gateway.application.website_application import (
     GatewayWorkspaceFileContent,
+    GatewayWorkspaceFileDownload,
     WebWorkspaceDirectoryV1,
     WebWorkspaceEntryV1,
     WebWorkspaceFileV1,
@@ -34,7 +34,12 @@ from access_control.people import is_administrator
 from access_control.ownership import RESOURCE_FILE_PATH, WORKSPACE_FILE_READ
 from access_control.safe_open import UnsafePath
 from access_control.sensitive_paths import is_sensitive_path
-from runtime_settings.instance_layout import USERS_DIRNAME, person_folder_name
+from runtime_settings.instance_layout import (
+    TEAM_DIRNAME,
+    USERS_DIRNAME,
+    is_hidden_workspace_tooling_path,
+    person_folder_name,
+)
 
 
 WORKSPACE_PREVIEW_MAX_BYTES = 5 * 1024 * 1024
@@ -51,19 +56,6 @@ _IMAGE_CONTENT_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
-# Version-control and dependency folders the browser leaves out. They are not
-# secrets, so they are kept apart from credential names, which come from the
-# list every file check shares (access_control.sensitive_paths).
-_VCS_AND_DEPENDENCY_FOLDER_NAMES = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        ".venv",
-        "__pycache__",
-        "node_modules",
-    }
-)
 
 WorkspacePreviewKind = Literal[
     "markdown",
@@ -134,8 +126,12 @@ class WebsiteWorkspaceBrowser:
             own = person_folder_name(access.canonical_user_id)
             entries = [entry for entry in entries if entry.name == own]
         elif parts == () and not is_administrator(access.roles):
-            # Members see only their own folder, reached through users/.
-            entries = [entry for entry in entries if entry.name == USERS_DIRNAME]
+            # Members see their own folder (under users/) and the shared team/ folder.
+            entries = [
+                entry
+                for entry in entries
+                if entry.name in {USERS_DIRNAME, TEAM_DIRNAME}
+            ]
         truncated = len(entries) > WORKSPACE_DIRECTORY_ENTRY_LIMIT
         visible_entries = entries[:WORKSPACE_DIRECTORY_ENTRY_LIMIT]
         return WebWorkspaceDirectoryV1(
@@ -224,6 +220,38 @@ class WebsiteWorkspaceBrowser:
             content=content,
         )
 
+    def open_file_download(
+        self,
+        *,
+        access: GatewayWorkspaceAccess,
+        path: str,
+    ) -> GatewayWorkspaceFileDownload:
+        """Open a safe regular workspace file for streaming download with no size cap."""
+
+        parts = self._path_parts(path, allow_root=False)
+        self._require_own_person_folder(access, parts)
+        relative_path = self._relative_path(parts)
+        self._authorize(access=access, relative_path=relative_path)
+        stack = ExitStack()
+        try:
+            with self._safely():
+                file_fd, file_stat = stack.enter_context(
+                    safe_open.opened_file(self._workspace_root, parts)
+                )
+            content_type = self._download_content_type(parts[-1])
+            closer = stack.pop_all().close
+        except BaseException:
+            stack.close()
+            raise
+        return GatewayWorkspaceFileDownload(
+            path=relative_path,
+            name=parts[-1],
+            size_bytes=file_stat.st_size,
+            content_type=content_type,
+            file_descriptor=file_fd,
+            close_callback=closer,
+        )
+
     def _authorize(
         self,
         *,
@@ -241,7 +269,7 @@ class WebsiteWorkspaceBrowser:
         )
         if not allowed:
             raise PermissionError(
-                "You can browse only your own folder here; the team's shared folders are for administrators."
+                "You can browse only your own folder and team/ here; agents/ is for administrators."
             )
 
     @staticmethod
@@ -285,7 +313,7 @@ class WebsiteWorkspaceBrowser:
         that agent tools and attachments refuse.
         """
 
-        if any(part.casefold() in _VCS_AND_DEPENDENCY_FOLDER_NAMES for part in parts):
+        if is_hidden_workspace_tooling_path(parts):
             return True
         return is_sensitive_path(PurePosixPath(*parts))
 
@@ -323,7 +351,7 @@ class WebsiteWorkspaceBrowser:
                 raise WorkspacePathTypeError(
                     "Workspace path is not a directory."
                     if exc.reason == safe_open.REASON_NOT_DIRECTORY
-                    else "Workspace preview requires a regular file."
+                    else "Workspace file access requires a regular file."
                 ) from exc
             if exc.reason == safe_open.REASON_SEVERAL_LINKS:
                 raise WorkspacePathRejectedError("Multi-linked workspace files are not available.") from exc
@@ -415,6 +443,21 @@ class WebsiteWorkspaceBrowser:
             None,
             f"Preview is not available for {shown_type} files.",
         )
+
+    @staticmethod
+    def _download_content_type(name: str) -> str:
+        lowered_name = name.casefold()
+        suffix = Path(lowered_name).suffix
+        if suffix in _MARKDOWN_SUFFIXES:
+            return "text/markdown"
+        if suffix in _HTML_SUFFIXES:
+            return "text/html"
+        if suffix in _IMAGE_CONTENT_TYPES:
+            return _IMAGE_CONTENT_TYPES[suffix]
+        if suffix in _PDF_SUFFIXES:
+            return "application/pdf"
+        guessed_type, _encoding = mimetypes.guess_type(lowered_name)
+        return guessed_type or "application/octet-stream"
 
     @staticmethod
     def _read_bytes(file_fd: int, expected_size: int) -> bytes:

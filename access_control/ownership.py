@@ -6,9 +6,9 @@ sessions, workflows) belong to one person, and only that person may read or
 change them. Three exceptions: every team member may read team memory and
 administrators manage it; every team member may read and edit team knowledge
 pages; and in the gateway's workspace
-browser every member may read their own folder (``users/<their folder>``),
-while administrators also see ``team/`` and ``agents/``. Nobody browses
-another person's folder there. Agents reach files through folder decisions
+browser every member may read their own folder (``users/<their folder>``) and
+the shared ``team/`` folder, while administrators also see ``agents/``. Nobody
+browses another person's folder there. Agents reach files through folder decisions
 instead (``access_control.folders``, ``AccessService.decide_folder``).
 
 After-action report reviews (lessons from one person's work) follow the
@@ -488,13 +488,13 @@ def system_work_schedule_access(
 def _workspace_read(
     person_id: str | None, team_id: str | None, role_set: frozenset[str], administrator: bool, resource_id: str
 ) -> OwnershipDecision:
-    """The workspace browser: a member's own folder; administrators also the shared folders.
+    """The workspace browser: every member sees their own folder and ``team/``; administrators also ``agents/``.
 
     ``resource_id`` is ``workspace/<path below workspaces/>``. The browser
     also refuses other people's folders by path; this is the rule it asks.
     """
 
-    from runtime_settings.instance_layout import USERS_DIRNAME, person_folder_name
+    from runtime_settings.instance_layout import TEAM_DIRNAME, USERS_DIRNAME, person_folder_name
 
     if not (person_id and team_id and role_set):
         return _denied("team_member_required", person_id, RESOURCE_FILE_PATH, resource_id, WORKSPACE_FILE_READ)
@@ -502,6 +502,8 @@ def _workspace_read(
     own = [USERS_DIRNAME, person_folder_name(person_id)]
     if parts[:2] == own or parts in ([], [USERS_DIRNAME]):
         return OwnershipDecision(True, "own_workspace_folder")
+    if parts[:1] == [TEAM_DIRNAME]:
+        return OwnershipDecision(True, "team_workspace_folder")
     if administrator and parts[:1] != [USERS_DIRNAME]:
         return OwnershipDecision(True, "team_admin_workspace_read")
     return _denied("own_folder_only", person_id, RESOURCE_FILE_PATH, resource_id, WORKSPACE_FILE_READ)
