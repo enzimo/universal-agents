@@ -857,6 +857,7 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
                 "authorization_keys": tuple(sorted(authorization)),
                 "mcp_config": authorization["mcp_config"],
                 "access_gate": authorization["access_gate"],
+                "execution_ssh_config": authorization["execution_ssh_config"],
                 "web_chat_origin": authorization["web_chat_origin"],
             }
         )
@@ -893,11 +894,21 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
     assert access_gate.team_id == "team_test"
     assert access_gate.access is not None
     assert access_gate.links is not None, "account links are read in both modes"
+    execution_ssh_config = observed.pop("execution_ssh_config")
+    assert execution_ssh_config is not None
+    assert execution_ssh_config.instance_name == "test_instance"
+    assert execution_ssh_config.ssh.enabled is False
     assert observed == {
         "host": "0.0.0.0",
         "port": 8767,
         "token": "test-token",
-        "authorization_keys": ("access_gate", "mcp_config", "tool_setup_recheck_days", "web_chat_origin"),
+        "authorization_keys": (
+            "access_gate",
+            "execution_ssh_config",
+            "mcp_config",
+            "tool_setup_recheck_days",
+            "web_chat_origin",
+        ),
     }
 
 

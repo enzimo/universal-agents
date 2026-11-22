@@ -57,9 +57,10 @@ const SAMPLE_SESSION = {
   status: "open",
   is_active: true,
   can_revoke: true,
+  owner_agent_type: "TeamArchitect",
   delegated_agent_type: "InfraSpecialist",
   delegated_task_id: "task_bootstrap_9",
-  capabilities: ["broker_sudo", "workspace_transfer"],
+  capabilities: ["commands", "broker_sudo", "workspace_transfer"],
   expires_at_utc: "2026-11-22T20:00:00Z",
   revoked_at_utc: null,
   revoked_by: null,
@@ -89,6 +90,7 @@ test("helpers format status labels, badge classes, and capability labels cleanly
   assert.equal(statusBadgeClass("revoked"), "execution-ssh-badge is-revoked");
   assert.equal(statusBadgeClass("expired"), "execution-ssh-badge is-expired");
   assert.equal(statusBadgeClass("closed"), "execution-ssh-badge is-inactive");
+  assert.equal(capabilityLabel("commands"), "Commands");
   assert.equal(capabilityLabel("broker_sudo"), "Broker sudo");
   assert.equal(capabilityLabel("workspace_transfer"), "Workspace transfer");
   assert.equal(capabilityLabel("password_bootstrap"), "Password bootstrap");
@@ -131,9 +133,72 @@ test("administrators see enrolled hosts, delegated sessions, and disabled notice
   assert.match(container.textContent, /Key: prod-ssh-key/);
   assert.match(container.textContent, /Bootstrap: prod-bootstrap \(completed\)/);
   assert.match(container.textContent, /Agent: InfraSpecialist · Task: task_bootstrap_9/);
+  assert.match(container.textContent, /Commands/);
   assert.match(container.textContent, /Broker sudo/);
   assert.match(container.textContent, /Workspace transfer/);
   assert.deepEqual(buttonLabels(container), ["Refresh", "Revoke", "Terminate"]);
+
+  // Narrow-screen .team-table layout requires matching data-label attributes and a single value child per td.
+  const tables = byTag(container, "table");
+  assert.equal(tables.length, 2);
+  const targetCells = byTag(tables[0], "td");
+  assert.deepEqual(
+    targetCells.map(cell => cell.getAttribute("data-label")),
+    ["Host", "Host Key", "Credentials & Lifecycle", "Status", "Action"],
+  );
+  assert.ok(targetCells.every(cell => cell.children.length === 1));
+
+  const sessionCells = byTag(tables[1], "td");
+  assert.deepEqual(
+    sessionCells.map(cell => cell.getAttribute("data-label")),
+    ["Session", "Delegation & Capabilities", "Expires", "Status", "Action"],
+  );
+  assert.ok(sessionCells.every(cell => cell.children.length === 1));
+});
+
+test("connect-only and non-delegated sessions render owning agent type and Connect only", async () => {
+  const { requests, container, controls } = setup();
+  controls.load();
+  await answer(requests, EXECUTION_SSH_API, jsonResponse({
+    status: "ok",
+    can_manage: true,
+    ssh_enabled: true,
+    targets: [],
+    sessions: [
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_connect",
+        owner_agent_type: "TeamArchitect",
+        delegated_agent_type: null,
+        delegated_task_id: null,
+        capabilities: [],
+      },
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_legacy",
+        owner_agent_type: "CustomLead",
+        delegated_agent_type: null,
+        delegated_task_id: null,
+        capabilities: ["typing"],
+      },
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_unknown",
+        owner_agent_type: null,
+        delegated_agent_type: null,
+        delegated_task_id: null,
+        capabilities: [],
+      },
+    ],
+  }));
+
+  assert.match(container.textContent, /Agent: TeamArchitect/);
+  assert.match(container.textContent, /Connect only/);
+  assert.doesNotMatch(container.textContent, /Commands only/);
+  assert.doesNotMatch(container.textContent, /Agent: TeamLead/);
+  assert.match(container.textContent, /Agent: CustomLead/);
+  assert.match(container.textContent, /Typing/);
+  assert.match(container.textContent, /Agent: Unknown/);
 });
 
 test("one-click Revoke on a host sends CSRF POST, disables while busy, and refreshes in place", async () => {
@@ -283,4 +348,85 @@ test("in-flight revoke ignores stale earlier load response and prevents duplicat
   }));
   assert.equal(byClass(container, "execution-ssh-revoke-target").length, 0);
   assert.equal(statusLine(container).textContent, "Revoked.");
+  // Refresh button must not be left permanently disabled by overlapping load()+revoke().
+  const refreshBtn = byClass(container, "execution-ssh-refresh")[0];
+  assert.equal(refreshBtn.disabled, false);
+  refreshBtn.click();
+  await settle();
+  assert.equal(openRequests(requests).filter(r => r.method === "GET").length, 1);
+});
+
+test("stale post-sign-out revoke does not clear a new session's actionInFlight guard or lock Refresh", async () => {
+  const { requests, container, controls } = setup();
+  const refreshBtn = byClass(container, "execution-ssh-refresh")[0];
+
+  // Session 1 loads and starts a revoke POST.
+  controls.load();
+  await answer(requests, EXECUTION_SSH_API, jsonResponse({
+    status: "ok",
+    can_manage: true,
+    ssh_enabled: true,
+    targets: [SAMPLE_TARGET],
+    sessions: [],
+  }));
+  byClass(container, "execution-ssh-revoke-target")[0].click();
+  await settle();
+  const stalePost = openRequests(requests)[0];
+  assert.equal(stalePost.method, "POST");
+  assert.equal(refreshBtn.disabled, false);
+
+  // Admin 1 signs out mid-revoke; Admin 2 signs in and loads fresh rows.
+  controls.clear();
+  assert.equal(refreshBtn.disabled, false);
+  controls.load();
+  await settle();
+  const secondLoad = openRequests(requests).find(r => r.method === "GET" && r.path === EXECUTION_SSH_API);
+  assert.ok(secondLoad);
+  secondLoad.answered = true;
+  secondLoad.respond(jsonResponse({
+    status: "ok",
+    can_manage: true,
+    ssh_enabled: true,
+    targets: [{ ...SAMPLE_TARGET, target_id: "ssh_tgt_beta" }],
+    sessions: [],
+  }));
+  await settle();
+
+  // Admin 2 starts a revoke POST.
+  const secondRevokeBtn = byClass(container, "execution-ssh-revoke-target")[0];
+  secondRevokeBtn.click();
+  await settle();
+  const activePost = openRequests(requests).find(r => r.path.includes("ssh_tgt_beta"));
+  assert.ok(activePost);
+
+  // Session 1's stale POST settles now: must NOT clear Session 2's actionInFlight guard.
+  stalePost.answered = true;
+  stalePost.respond(errorResponse(500, "Stale session failure"));
+  await settle();
+  assert.equal(statusLine(container).hidden, true);
+  assert.equal(refreshBtn.disabled, false);
+
+  // Clicking Refresh while Session 2's POST is still in flight must remain guarded.
+  refreshBtn.click();
+  await settle();
+  assert.equal(openRequests(requests).filter(r => r.method === "GET").length, 0);
+
+  // Session 2's POST settles cleanly.
+  activePost.answered = true;
+  activePost.respond(jsonResponse({
+    status: "ok",
+    kind: "target",
+    resource_id: "ssh_tgt_beta",
+    revoked: true,
+    broker_notified: true,
+    terminated_live: false,
+    message: "Revoked beta.",
+    can_manage: true,
+    ssh_enabled: true,
+    targets: [{ ...SAMPLE_TARGET, target_id: "ssh_tgt_beta", status: "revoked", can_revoke: false }],
+    sessions: [],
+  }));
+  await settle();
+  assert.equal(statusLine(container).textContent, "Revoked beta.");
+  assert.equal(refreshBtn.disabled, false);
 });

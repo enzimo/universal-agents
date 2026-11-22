@@ -1135,11 +1135,35 @@ on the controller so it refers to the same bytes as the profile's artifact PVC.
 Set `execution_control.kubernetes.network_policy_enforced: true` only after the
 namespace enforces the `universal-agents.io/network` labels.
 
-SSH is disabled by default. Each `execution_control.ssh.targets` item pins the
-host, port, username, host-key algorithm and fingerprint, the id of its key
-material (`credential_binding_id`), identity file, and known-hosts file. Keep key files outside `workspaces/`.
-An optional `remote_persistent_session_name` uses remote `tmux` for explicit
-reattachment after a local broker restart.
+Brokered SSH is disabled by default (`execution_control.ssh.enabled: false`)
+and also requires `execution_control.enabled: true`. Operators control where
+the broker may connect and what administrators may delegate:
+
+- **Network guardrails:** `execution_control.ssh.denied_cidrs` blocks loopback,
+  unspecified, link-local, cloud metadata (`169.254.0.0/16`, `fe80::/10`,
+  `fd00:ec2::254/128`), and their IPv4-mapped IPv6 forms by default (in
+  containers, add the host gateway IP here as well). Setting any entry in
+  `allowed_cidrs` or `allowed_domains` switches SSH to allowlist-only mode;
+  resolved addresses are checked before `ssh-keyscan` or `ssh` runs.
+- **Delegation and bootstrap limits:** `max_delegation_ttl_seconds` (default
+  `7200`) caps how long an administrator-approved session delegation can stay
+  active. `allow_password_bootstrap` (default `false`) gates one-time
+  administrator-approved password login (`enroll_execution_ssh_key`) used to
+  install a Sealbox SSH public key on a fresh host before permanently latching
+  off password bootstrap for that host.
+- **Operator-pinned disk-key targets:** Each `execution_control.ssh.targets`
+  item pins the host, port, username, host-key algorithm and fingerprint, the
+  id of its key material (`credential_binding_id`), identity file, and
+  known-hosts file. Keep key files outside `workspaces/`. An optional
+  `remote_persistent_session_name` uses remote `tmux` for explicit reattachment
+  after a local broker restart.
+- **Administrator-enrolled Sealbox targets:** Administrators can also enroll
+  hosts dynamically through TeamLead's staged approval workflow using
+  Sealbox-backed `ssh_private_key` and `ssh_host_bootstrap` credentials. The
+  broker pins the host's Ed25519 fingerprint, keeps all keys and ephemeral
+  `ssh-agent` sockets inside the broker process, scrubs touched secrets from
+  all outputs and transcripts, and lets administrators review and revoke hosts
+  or terminate live sessions immediately in **Settings → Tasks → Brokered SSH**.
 
 Execution revisions accept non-secret environment entries only. Names beginning
 with `UA_` are reserved. A revision that names credentials

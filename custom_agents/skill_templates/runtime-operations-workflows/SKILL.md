@@ -1162,10 +1162,14 @@ Who decides what:
   checks the access again before every run, so a revoked grant stops the next run
   (`authorization_expired`). Do not imply that a completed creation workflow
   guarantees a later run.
-- Managed services and typing into an SSH session are exact changes a person approves
-  in the Inbox (an administrator). Your task waits in `apply_change` until they
-  decide. If the service, revision, profile, or session changes first, the plan is
-  refused; stage it again.
+- Managed services, enrolling a Sealbox-backed SSH host
+  (`execution_ssh_target_enroll`), and delegating SSH session capabilities
+  (`execution_ssh_interaction`) are exact changes an administrator approves in
+  the Inbox. Your task waits in `apply_change` until they decide. If the
+  service, revision, profile, target, or session changes first, the plan is
+  refused; stage it again. Administrators can review enrolled SSH hosts and
+  active delegated sessions and revoke or terminate them immediately in
+  **Settings → Tasks → Brokered SSH**.
 - With authorization off, explain the exact revision, schedule, service, or session,
   get the person's agreement, and pass `confirmed=true` (to `create_execution_job`
   with `activate=true`, `set_execution_job_enabled`, `create_execution_ssh_session`,

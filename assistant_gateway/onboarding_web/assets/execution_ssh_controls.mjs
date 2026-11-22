@@ -22,8 +22,9 @@ export const EXECUTION_SSH_TITLE = "Brokered SSH Access";
 export const EXECUTION_SSH_INTRO = "Enrolled SSH hosts and delegated agent sessions for this team. "
   + "Revoking a host or terminating a session stops active remote commands and closes live connections immediately.";
 export const EXECUTION_SSH_DISABLED_NOTE = "Brokered SSH is currently turned off in instance configuration "
-  + "(execution_control.ssh.enabled: false). Existing records can still be reviewed and revoked.";
+  + "(execution_control.enabled or execution_control.ssh.enabled is false). Existing records can still be reviewed and revoked.";
 export const CAPABILITY_LABELS = Object.freeze({
+  commands: "Commands",
   typing: "Typing",
   password_bootstrap: "Password bootstrap",
   broker_sudo: "Broker sudo",
@@ -70,6 +71,20 @@ function tableHead(document, headers) {
   headers.forEach(label => row.append(element(document, "th", "", label)));
   thead.append(row);
   return thead;
+}
+
+// Narrow-screen .team-table layout uses a 2-column grid (::before data-label + 1 value child).
+function tableCell(document, label, ...children) {
+  const cell = element(document, "td");
+  cell.setAttribute("data-label", label);
+  if (children.length === 1) {
+    cell.append(children[0]);
+  } else if (children.length > 1) {
+    const content = element(document, "div", "execution-ssh-cell-content");
+    content.append(...children);
+    cell.append(content);
+  }
+  return cell;
 }
 
 /**
@@ -123,53 +138,55 @@ export function createExecutionSSHControls({ container, client, browser = global
       const row = element(document, "tr");
       row.setAttribute("data-target-id", text(target.target_id));
 
-      const hostCell = element(document, "td");
-      hostCell.append(
+      const hostLines = [
         element(document, "div", "execution-ssh-primary", `${text(target.username)}@${text(target.host)}:${Number(target.port)}`),
         element(document, "div", "execution-ssh-meta", `${text(target.platform)} · ${text(target.target_id)}`),
-      );
+      ];
       if (text(target.reason)) {
-        hostCell.append(element(document, "div", "execution-ssh-meta", text(target.reason)));
+        hostLines.push(element(document, "div", "execution-ssh-meta", text(target.reason)));
       }
+      const hostCell = tableCell(document, "Host", ...hostLines);
 
-      const keyCell = element(document, "td");
-      keyCell.append(
+      const keyCell = tableCell(
+        document,
+        "Host Key",
         element(document, "div", "execution-ssh-mono", text(target.host_key_fingerprint)),
         element(document, "div", "execution-ssh-meta", text(target.host_key_algorithm)),
       );
 
-      const credCell = element(document, "td");
       const lifecycleText = text(target.lifecycle) === "temporary" && text(target.expires_at_utc)
         ? `Temporary · expires ${formatTime(target.expires_at_utc)}`
         : statusLabel(target.lifecycle);
-      credCell.append(
+      const credLines = [
         element(document, "div", "execution-ssh-primary", `Key: ${text(target.credential_key)}`),
         element(document, "div", "execution-ssh-meta", lifecycleText),
-      );
+      ];
       if (text(target.bootstrap_credential_key)) {
         const bootstrapNote = text(target.password_bootstrap_completed_at_utc)
           ? `Bootstrap: ${text(target.bootstrap_credential_key)} (completed)`
           : `Bootstrap: ${text(target.bootstrap_credential_key)}`;
-        credCell.append(element(document, "div", "execution-ssh-meta", bootstrapNote));
+        credLines.push(element(document, "div", "execution-ssh-meta", bootstrapNote));
       }
+      const credCell = tableCell(document, "Credentials & Lifecycle", ...credLines);
 
-      const statusCell = element(document, "td");
-      statusCell.append(element(document, "span", statusBadgeClass(target.status), statusLabel(target.status)));
+      const statusLines = [element(document, "span", statusBadgeClass(target.status), statusLabel(target.status))];
       if (text(target.revoked_at_utc)) {
         const who = text(target.revoked_by) ? ` by ${text(target.revoked_by)}` : "";
-        statusCell.append(element(document, "div", "execution-ssh-meta", `Revoked ${formatTime(target.revoked_at_utc)}${who}`));
+        statusLines.push(element(document, "div", "execution-ssh-meta", `Revoked ${formatTime(target.revoked_at_utc)}${who}`));
       }
+      const statusCell = tableCell(document, "Status", ...statusLines);
 
-      const actionCell = element(document, "td");
+      let actionContent;
       if (target.can_revoke === true) {
         const button = element(document, "button", "button danger mcp-connection-action execution-ssh-revoke-target", "Revoke");
         button.type = "button";
         button.setAttribute("aria-label", `Revoke enrolled host ${text(target.username)}@${text(target.host)}:${Number(target.port)}`);
         button.addEventListener("click", () => { revokeTarget(target, button); });
-        actionCell.append(button);
+        actionContent = button;
       } else {
-        actionCell.append(element(document, "span", "execution-ssh-meta", "—"));
+        actionContent = element(document, "span", "execution-ssh-meta", "—");
       }
+      const actionCell = tableCell(document, "Action", actionContent);
 
       row.append(hostCell, keyCell, credCell, statusCell, actionCell);
       tbody.append(row);
@@ -195,40 +212,44 @@ export function createExecutionSSHControls({ container, client, browser = global
       const row = element(document, "tr");
       row.setAttribute("data-session-id", text(session.session_id));
 
-      const sessionCell = element(document, "td");
-      sessionCell.append(
+      const sessionCell = tableCell(
+        document,
+        "Session",
         element(document, "div", "execution-ssh-primary", text(session.target_label) || `${text(session.username)}@${text(session.host)}:${Number(session.port)}`),
         element(document, "div", "execution-ssh-meta", `${text(session.session_id)} · ${text(session.platform)}`),
       );
 
-      const delegationCell = element(document, "td");
-      const agentText = text(session.delegated_agent_type)
-        ? `Agent: ${text(session.delegated_agent_type)}`
-        : "Agent: TeamLead";
+      const agentName = text(session.delegated_agent_type) || text(session.owner_agent_type);
+      const agentText = agentName ? `Agent: ${agentName}` : "Agent: Unknown";
       const taskText = text(session.delegated_task_id) ? ` · Task: ${text(session.delegated_task_id)}` : "";
-      delegationCell.append(element(document, "div", "execution-ssh-primary", `${agentText}${taskText}`));
       const caps = Array.isArray(session.capabilities) ? session.capabilities : [];
       const capRow = element(document, "div", "execution-ssh-capabilities");
       if (caps.length) {
         caps.forEach(cap => capRow.append(element(document, "span", "execution-ssh-cap", capabilityLabel(cap))));
       } else {
-        capRow.append(element(document, "span", "execution-ssh-meta", "Commands only"));
+        capRow.append(element(document, "span", "execution-ssh-meta", "Connect only"));
       }
-      delegationCell.append(capRow);
+      const delegationCell = tableCell(
+        document,
+        "Delegation & Capabilities",
+        element(document, "div", "execution-ssh-primary", `${agentText}${taskText}`),
+        capRow,
+      );
 
-      const expiresCell = element(document, "td");
-      expiresCell.append(
+      const expiresCell = tableCell(
+        document,
+        "Expires",
         element(document, "div", "execution-ssh-meta", text(session.expires_at_utc) ? formatTime(session.expires_at_utc) : "No expiry"),
       );
 
-      const statusCell = element(document, "td");
-      statusCell.append(element(document, "span", statusBadgeClass(session.status), statusLabel(session.status)));
+      const statusLines = [element(document, "span", statusBadgeClass(session.status), statusLabel(session.status))];
       if (text(session.revoked_at_utc)) {
         const who = text(session.revoked_by) ? ` by ${text(session.revoked_by)}` : "";
-        statusCell.append(element(document, "div", "execution-ssh-meta", `Revoked ${formatTime(session.revoked_at_utc)}${who}`));
+        statusLines.push(element(document, "div", "execution-ssh-meta", `Revoked ${formatTime(session.revoked_at_utc)}${who}`));
       }
+      const statusCell = tableCell(document, "Status", ...statusLines);
 
-      const actionCell = element(document, "td");
+      let actionContent;
       if (session.can_revoke === true) {
         const liveStatus = text(session.status).toLowerCase();
         const isLiveConnection = liveStatus === "open" || liveStatus === "connecting";
@@ -237,10 +258,11 @@ export function createExecutionSSHControls({ container, client, browser = global
         button.type = "button";
         button.setAttribute("aria-label", `${label} SSH session ${text(session.session_id)}`);
         button.addEventListener("click", () => { revokeSession(session, button, isLiveConnection); });
-        actionCell.append(button);
+        actionContent = button;
       } else {
-        actionCell.append(element(document, "span", "execution-ssh-meta", "—"));
+        actionContent = element(document, "span", "execution-ssh-meta", "—");
       }
+      const actionCell = tableCell(document, "Action", actionContent);
 
       row.append(sessionCell, delegationCell, expiresCell, statusCell, actionCell);
       tbody.append(row);
@@ -273,20 +295,22 @@ export function createExecutionSSHControls({ container, client, browser = global
     state.actionInFlight = true;
     state.version += 1;
     const epoch = state.epoch;
-    const finish = client.beginAction(button, busyLabel, container);
+    // Scope busy disabling to `body` so `refreshButton` in `header` is never snapshotted
+    // while disabled by an overlapping load() refresh; load() already guards on actionInFlight.
+    const finish = client.beginAction(button, busyLabel, body);
     setStatus("", false);
     return Promise.resolve()
       .then(() => client.post(path, {}, fallbackMessage))
       .then(payload => {
+        if (epoch !== state.epoch) return;
         finish();
         state.actionInFlight = false;
-        if (epoch !== state.epoch) return;
         render(payload);
         setStatus(text(payload && payload.message) || defaultSuccess, false);
       }, error => {
+        if (epoch !== state.epoch) return;
         finish();
         state.actionInFlight = false;
-        if (epoch !== state.epoch) return;
         setStatus(failureMessage(error, fallbackMessage), true);
       });
   }

@@ -1450,29 +1450,38 @@ PVC can preserve files at `UA_DATA_DIR=/ua/data`. A managed MCP service becomes
 a pending MCP server that an administrator installs (in Settings or through an
 access proposal); each call is still checked against access to its `mcp:` tool.
 
-Brokered SSH sessions use only operator-registered hosts with pinned host keys.
-The agent can open, read, write, resize, and close a PTY by session id, but it
-cannot receive the identity key or substitute a host. A remote `tmux` name can
-preserve work on the server when the local broker restarts.
+Brokered SSH sessions use either operator-pinned targets from configuration or
+hosts that an administrator enrolled through the Inbox with a pinned Ed25519
+host key and Sealbox-backed credentials (`ssh_private_key` or
+`ssh_host_bootstrap`). Every key, passphrase, admin password, and auth key
+stays inside the secure tool broker and is scrubbed from outputs and
+transcripts; agents can never read the secret material or substitute a host.
+A remote `tmux` name can preserve work on the server when the local broker
+restarts.
 
 Who decides, with authorization on:
 
 - **Jobs and SSH sessions.** TeamLead needs write access to "Deterministic
   execution and SSH" (`fn:execution_control`), checked on every call. The
-  execution controller checks that access again before every run and every SSH
-  use, so revoking the grant stops the next run. Because a job runs later,
-  outside the chat that created it, TeamLead needs access that lasts (not
-  "for this task only") to turn a job on.
+  execution controller and secure tool broker check that access again before
+  every run and every SSH operation, so revoking the grant stops the next
+  action. Because a job runs later, outside the chat that created it, TeamLead
+  needs access that lasts (not "for this task only") to turn a job on.
 - **Jobs that run on the host.** A job whose profile runs code on the
   controller host (`backend: local`) runs outside any sandbox. It also needs
   lasting full access to **Unconfined host execution** (`code:unconfined`) for
   the agent type that turned it on and the person it works for, checked when
   the job is turned on and before every run.
-- **Managed services and typing into SSH.** TeamLead stages the exact change
-  and you (an administrator) approve it in the Inbox: creating a service,
-  starting, stopping or removing it, or letting TeamLead type into one SSH
-  session. Commands typed into a session run on that host, so each session
-  needs its own approval.
+- **Managed services, SSH host enrollment, and bounded SSH delegation.**
+  TeamLead stages the exact change and you (an administrator) approve it in
+  the Inbox: creating, starting, stopping, or removing a service; enrolling a
+  Sealbox-backed SSH host with its verified fingerprint; or delegating a
+  time-bounded SSH session (optionally to one specialist type for one task)
+  with explicit capability flags (commands, interactive typing, one-time
+  password key bootstrap, broker `sudo` / secret recipes, or filtered
+  workspace bundle upload). Administrators can inspect enrolled hosts and
+  active delegated sessions and revoke or terminate them immediately in
+  **Settings → Tasks → Brokered SSH**.
 
 With authorization off, TeamLead asks for your agreement in the chat instead.
 

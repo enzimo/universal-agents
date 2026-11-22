@@ -785,7 +785,7 @@ assistant:
 # Immutable deterministic execution keeps source/build artifacts, exact activations,
 # schedule attempts, and managed-service desired state outside the agent process.
 execution_control:
-  enabled: true                                 # Master switch for immutable execution jobs and managed services.
+  enabled: true                                 # Master switch for immutable execution jobs, managed services, and brokered SSH.
   runner:
     enabled: true                               # Start the fenced execution controller in headless launch.
     tick_interval_seconds: 2                    # Schedule materialization and finite-run polling interval.

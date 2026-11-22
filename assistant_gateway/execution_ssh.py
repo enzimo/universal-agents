@@ -23,7 +23,7 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from assistant_gateway.application.execution_ssh_page import (
     ADMINISTRATORS_ONLY_TEXT,
@@ -46,7 +46,6 @@ from runtime_hosting.execution_contracts import (
     EnrolledSSHTargetV1,
     InteractiveSessionStatus,
     InteractiveSessionV1,
-    SSHDelegationBoundsV1,
     SSHInteractionRecordV1,
     SSHRevocationStateV1,
     SSHTargetStatus,
@@ -71,6 +70,7 @@ _ACTIVE_SESSION_STATUSES = frozenset(
 )
 
 
+@runtime_checkable
 class ExecutionSSHRevokeBroker(Protocol):
     """Minimal broker client port used by ``GatewayExecutionSSH`` for live termination."""
 
@@ -90,18 +90,30 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _iso_or_none(value: datetime | None) -> str | None:
     if value is None:
         return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat()
+    return _as_utc(value).isoformat()
 
 
-def _capabilities_from_bounds(bounds: SSHDelegationBoundsV1 | None) -> tuple[str, ...]:
-    if bounds is None:
+def _capabilities_from_interaction(
+    interaction: SSHInteractionRecordV1 | None,
+) -> tuple[str, ...]:
+    if interaction is None:
         return ()
+    bounds = interaction.bounds
+    if bounds is None:
+        # Legacy 0.9 approvals without delegation bounds authorize interactive typing only.
+        return ("typing",)
     enabled: list[str] = []
+    if bounds.allow_commands:
+        enabled.append("commands")
     if bounds.allow_typing:
         enabled.append("typing")
     if bounds.allow_password_bootstrap:
@@ -150,6 +162,7 @@ def _summarize_session(
     revocation: SSHRevocationStateV1 | None,
     now: datetime,
 ) -> DelegatedSSHSessionSummary:
+    now_utc = _as_utc(now)
     revoked_at = (
         revocation.revoked_at_utc
         if revocation is not None
@@ -160,14 +173,21 @@ def _summarize_session(
         if revocation is not None
         else (interaction.revoked_by if interaction is not None else None)
     )
-    expires_at = (
-        interaction.activation.expires_at_utc if interaction is not None else None
-    )
+    connect_activation = session.connect_activation
+    expiry_candidates = [
+        _as_utc(candidate)
+        for candidate in (
+            connect_activation.expires_at_utc if connect_activation is not None else None,
+            interaction.activation.expires_at_utc if interaction is not None else None,
+        )
+        if candidate is not None
+    ]
+    expires_at = min(expiry_candidates) if expiry_candidates else None
     is_revoked = revoked_at is not None
     is_expired = (
         not is_revoked
         and expires_at is not None
-        and expires_at <= now
+        and expires_at <= now_utc
         and session.status in _ACTIVE_SESSION_STATUSES
     )
     if is_revoked:
@@ -184,10 +204,23 @@ def _summarize_session(
     interaction_unrevoked = (
         interaction is not None
         and interaction.revoked_at_utc is None
-        and (expires_at is None or expires_at > now)
+        and (expires_at is None or expires_at > now_utc)
     )
     can_revoke = not is_revoked and (is_active or interaction_unrevoked)
     bounds = interaction.bounds if interaction is not None else None
+    owner_agent_type = (
+        (
+            (connect_activation.holder.agent_type or "").strip()
+            if connect_activation is not None
+            else ""
+        )
+        or (
+            (interaction.activation.holder.agent_type or "").strip()
+            if interaction is not None
+            else ""
+        )
+        or None
+    )
     target = session.target
     return DelegatedSSHSessionSummary(
         session_id=session.session_id,
@@ -200,9 +233,10 @@ def _summarize_session(
         status=effective_status,
         is_active=is_active,
         can_revoke=can_revoke,
+        owner_agent_type=owner_agent_type,
         delegated_agent_type=bounds.delegated_agent_type if bounds is not None else None,
         delegated_task_id=bounds.delegated_task_id if bounds is not None else None,
-        capabilities=_capabilities_from_bounds(bounds),
+        capabilities=_capabilities_from_interaction(interaction),
         expires_at_utc=_iso_or_none(expires_at),
         revoked_at_utc=_iso_or_none(revoked_at),
         revoked_by=revoked_by,
@@ -283,7 +317,9 @@ class GatewayExecutionSSH:
             ),
             person_changes=person_changes,
             broker=broker,
-            default_ssh_enabled=bool(config.execution_control.ssh.enabled),
+            default_ssh_enabled=bool(
+                config.execution_control.enabled and config.execution_control.ssh.enabled
+            ),
         )
 
     def _can_manage(self, person_id: str) -> bool:
@@ -295,7 +331,9 @@ class GatewayExecutionSSH:
     def _read_ssh_enabled(self) -> bool:
         try:
             saved = GatewayInstanceConfig.load_saved(self._config_path)
-            return bool(saved.execution_control.ssh.enabled)
+            return bool(
+                saved.execution_control.enabled and saved.execution_control.ssh.enabled
+            )
         except Exception:  # noqa: BLE001 - fall back to startup setting if config unreadable
             return self._default_ssh_enabled
 

@@ -66,6 +66,7 @@ class DelegatedSSHSessionSummary:
     status: str
     is_active: bool
     can_revoke: bool
+    owner_agent_type: str | None
     delegated_agent_type: str | None
     delegated_task_id: str | None
     capabilities: tuple[str, ...]

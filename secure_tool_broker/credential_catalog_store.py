@@ -338,6 +338,7 @@ def load_scope_readonly(
         raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
     try:
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
         conn.execute(f"PRAGMA busy_timeout={_LOCK_WAIT_MS}")
         try:
             rows = conn.execute(

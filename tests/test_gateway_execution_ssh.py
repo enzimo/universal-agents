@@ -81,6 +81,7 @@ def _make_config(
     tmp_path: Path,
     *,
     authorization_enabled: bool = True,
+    execution_enabled: bool = True,
     ssh_enabled: bool = True,
 ) -> GatewayInstanceConfig:
     config = GatewayInstanceConfig.create(
@@ -95,7 +96,7 @@ def _make_config(
     if authorization_enabled:
         assert CEDAR_BINARY.exists(), f"Cedar binary required at {CEDAR_BINARY}"
         config.authorization.cedar_binary_path = str(CEDAR_BINARY)
-    config.execution_control.enabled = True
+    config.execution_control.enabled = execution_enabled
     config.execution_control.ssh.enabled = ssh_enabled
     config.save(config.layout.instance_config_path)
     return config
@@ -133,11 +134,16 @@ def _seed_target_and_session(
     now: datetime,
     target_id: str = "ssh_tgt_01",
     session_id: str = "ssh_sess_01",
+    owner_agent_type: str = "TeamArchitect",
     target_expires_at: datetime | None = None,
     session_status: InteractiveSessionStatus = InteractiveSessionStatus.OPEN,
+    connect_expires_at: datetime | None = None,
     session_expires_at: datetime | None = None,
+    with_interaction: bool = True,
+    legacy_bounds: bool = False,
     delegated_agent_type: str | None = "InfraWorker",
     delegated_task_id: str | None = "task_123",
+    allow_commands: bool = False,
     allow_broker_sudo: bool = True,
     allow_workspace_transfer: bool = True,
 ) -> tuple[EnrolledSSHTargetV1, InteractiveSessionV1]:
@@ -149,7 +155,7 @@ def _seed_target_and_session(
         owner_id=team_id,
     )
     holder = AccessHolderV1(
-        agent_type="TeamArchitect",
+        agent_type=owner_agent_type,
         agent_id="agent_lead_1",
         person_id="usr_admin",
     )
@@ -236,6 +242,7 @@ def _seed_target_and_session(
             approved_at_utc=now - timedelta(minutes=5),
         ),
         activated_at_utc=now - timedelta(minutes=5),
+        expires_at_utc=connect_expires_at,
     )
     session = InteractiveSessionV1(
         session_id=session_id,
@@ -249,33 +256,39 @@ def _seed_target_and_session(
     )
     repo.create_interactive_session(session)
 
-    bounds = SSHDelegationBoundsV1(
-        delegated_agent_type=delegated_agent_type,
-        delegated_task_id=delegated_task_id,
-        allow_typing=False,
-        allow_password_bootstrap=False,
-        allow_broker_sudo=allow_broker_sudo,
-        allow_workspace_transfer=allow_workspace_transfer,
-    )
-    interaction_activation = ActivationRecordV2.build(
-        activation_id=f"act_{session_id}",
-        kind=ExecutionActivationKind.SSH_INTERACT,
-        resource_id=session_id,
-        resource_digest=conn_target.calculate_digest(),
-        generation=1,
-        owner=owner,
-        operation="fn:execution_control#change:execution_ssh_interaction",
-        holder=holder,
-        approval=ChangeApprovalRecordV1(
-            mode=ChangeApprovalMode.PERSON_APPROVAL,
-            access_request_id=f"req_{session_id}",
-            approved_by="usr_admin",
-            approved_at_utc=now - timedelta(minutes=4),
-        ),
-        activated_at_utc=now - timedelta(minutes=4),
-        expires_at_utc=session_expires_at or (now + timedelta(hours=1)),
-    )
-    repo.put_ssh_interaction(interaction_activation, bounds=bounds)
+    if with_interaction:
+        bounds = (
+            None
+            if legacy_bounds
+            else SSHDelegationBoundsV1(
+                delegated_agent_type=delegated_agent_type,
+                delegated_task_id=delegated_task_id,
+                allow_commands=allow_commands,
+                allow_typing=False,
+                allow_password_bootstrap=False,
+                allow_broker_sudo=allow_broker_sudo,
+                allow_workspace_transfer=allow_workspace_transfer,
+            )
+        )
+        interaction_activation = ActivationRecordV2.build(
+            activation_id=f"act_{session_id}",
+            kind=ExecutionActivationKind.SSH_INTERACT,
+            resource_id=session_id,
+            resource_digest=conn_target.calculate_digest(),
+            generation=1,
+            owner=owner,
+            operation="fn:execution_control#change:execution_ssh_interaction",
+            holder=holder,
+            approval=ChangeApprovalRecordV1(
+                mode=ChangeApprovalMode.PERSON_APPROVAL,
+                access_request_id=f"req_{session_id}",
+                approved_by="usr_admin",
+                approved_at_utc=now - timedelta(minutes=4),
+            ),
+            activated_at_utc=now - timedelta(minutes=4),
+            expires_at_utc=session_expires_at or (now + timedelta(hours=1)),
+        )
+        repo.put_ssh_interaction(interaction_activation, bounds=bounds)
     return target, session
 
 
@@ -363,6 +376,7 @@ async def test_gateway_execution_ssh_real_cedar_admin_vs_member_and_revocation_a
         assert admin_page.targets[0].can_revoke is True
         assert len(admin_page.sessions) == 1
         assert admin_page.sessions[0].session_id == "ssh_sess_01"
+        assert admin_page.sessions[0].owner_agent_type == "TeamArchitect"
         assert admin_page.sessions[0].delegated_agent_type == "InfraWorker"
         assert admin_page.sessions[0].delegated_task_id == "task_123"
         assert admin_page.sessions[0].capabilities == ("broker_sudo", "workspace_transfer")
@@ -653,3 +667,126 @@ def test_gateway_execution_ssh_checks_both_change_kinds_and_bounds_inactive_rows
     assert len(page.sessions) == 52
     assert all(s.is_active for s in page.sessions[:2])
     assert all(not s.is_active for s in page.sessions[2:])
+
+
+def test_gateway_execution_ssh_reports_disabled_when_execution_control_disabled(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 11, 22, 19, 0, 0, tzinfo=timezone.utc)
+    config = _make_config(
+        tmp_path,
+        authorization_enabled=False,
+        execution_enabled=False,
+        ssh_enabled=True,
+    )
+    _, person_changes = _make_person_changes(config, roles_by_person={"usr_admin": ("admin",)})
+    try:
+        service = GatewayExecutionSSH.from_gateway_config(
+            config,
+            person_changes=person_changes,
+        )
+        service._clock = lambda: now
+        page = service.page(person_id="usr_admin")
+        assert page.can_manage is True
+        assert page.ssh_enabled is False
+    finally:
+        person_changes.close()
+
+
+def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 11, 22, 19, 0, 0, tzinfo=timezone.utc)
+    config = _make_config(tmp_path, authorization_enabled=False, ssh_enabled=True)
+    _, person_changes = _make_person_changes(config, roles_by_person={"usr_admin": ("admin",)})
+    repo = create_execution_control_repository(config.manager_storage_settings)
+
+    # 1) Connect-only session whose connect_activation already expired.
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_connect_exp",
+        session_id="ssh_sess_connect_exp",
+        owner_agent_type="TeamArchitect",
+        connect_expires_at=now - timedelta(minutes=1),
+        with_interaction=False,
+    )
+    # 2) Legacy 0.9 interaction (bounds=None) -> typing only, custom owning agent type.
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_legacy",
+        session_id="ssh_sess_legacy",
+        owner_agent_type="CustomLead",
+        with_interaction=True,
+        legacy_bounds=True,
+        session_expires_at=now + timedelta(minutes=30),
+    )
+    # 3) Bounded delegation with allow_commands=True and connect expiry earlier than interaction expiry.
+    earlier_connect = now + timedelta(minutes=10)
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_cmd",
+        session_id="ssh_sess_cmd",
+        owner_agent_type="TeamArchitect",
+        connect_expires_at=earlier_connect,
+        session_expires_at=now + timedelta(hours=1),
+        with_interaction=True,
+        delegated_agent_type="InfraWorker",
+        allow_commands=True,
+        allow_broker_sudo=True,
+        allow_workspace_transfer=False,
+    )
+    # 4) Bounded delegation with all capability flags disabled.
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_empty",
+        session_id="ssh_sess_empty",
+        owner_agent_type="TeamArchitect",
+        with_interaction=True,
+        delegated_agent_type=None,
+        allow_commands=False,
+        allow_broker_sudo=False,
+        allow_workspace_transfer=False,
+    )
+    try:
+        service = GatewayExecutionSSH(
+            team_id=config.manager.team_id,
+            config_path=config.config_path,
+            repository=repo,
+            person_changes=person_changes,
+            default_ssh_enabled=True,
+            clock=lambda: now,
+        )
+        page = service.page(person_id="usr_admin")
+        by_id = {item.session_id: item for item in page.sessions}
+
+        connect_exp = by_id["ssh_sess_connect_exp"]
+        assert connect_exp.capabilities == ()
+        assert connect_exp.owner_agent_type == "TeamArchitect"
+        assert connect_exp.status == "expired"
+        assert connect_exp.is_active is False
+        assert connect_exp.can_revoke is False
+        assert connect_exp.expires_at_utc == (now - timedelta(minutes=1)).isoformat()
+
+        legacy = by_id["ssh_sess_legacy"]
+        assert legacy.capabilities == ("typing",)
+        assert legacy.owner_agent_type == "CustomLead"
+        assert legacy.delegated_agent_type is None
+        assert legacy.is_active is True
+
+        cmd = by_id["ssh_sess_cmd"]
+        assert cmd.capabilities == ("commands", "broker_sudo")
+        assert cmd.expires_at_utc == earlier_connect.isoformat()
+
+        empty = by_id["ssh_sess_empty"]
+        assert empty.capabilities == ()
+        assert empty.owner_agent_type == "TeamArchitect"
+    finally:
+        person_changes.close()

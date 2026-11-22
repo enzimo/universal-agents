@@ -82,6 +82,10 @@ NOT_SECRET_VALUES: dict[str, str] = {
     "POSTGRES_MIGRATION_PASSWORD": "migration script resolves its own _FILE form",
     "POSTGRES_SUPERUSER_DSN": "migration script resolves its own _FILE form",
     "POSTGRES_SUPERUSER_PASSWORD": "migration script resolves its own _FILE form",
+    # Brokered SSH ephemeral ssh-agent socket path and remote script status markers, never secrets.
+    "SSH_AUTH_SOCK": "Unix socket path of the broker's ephemeral ssh-agent, not a secret value",
+    "UA_KEY_AUTH_OK": "non-secret stdout sentinel emitted by key-login verification probe",
+    "UA_SUDO_AUTH_FAILED": "non-secret stderr sentinel emitted when broker sudo authentication fails",
 }
 
 # Listed names that only a program the broker runs reads, so no project file

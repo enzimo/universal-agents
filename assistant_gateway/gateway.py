@@ -574,14 +574,15 @@ def _execution_ssh(
     config: GatewayInstanceConfig,
     *,
     person_changes: PersonChangeCheck,
-    broker: ExecutionSSHRevokeBroker,
+    broker: GatewaySecureBroker | ExecutionSSHRevokeBroker | None,
 ) -> GatewayExecutionSSH:
     """Settings > Tasks > Brokered SSH: admin inspection and live revocation."""
 
+    revoke_broker = broker if isinstance(broker, ExecutionSSHRevokeBroker) else None
     return GatewayExecutionSSH.from_gateway_config(
         config,
         person_changes=person_changes,
-        broker=broker,
+        broker=revoke_broker,
     )
 
 
