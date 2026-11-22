@@ -26,6 +26,11 @@ from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from custom_messages.contracts.access_v2 import (
+    REASON_ACCOUNT_LINK_MISSING,
+    REASON_ACCOUNT_LINK_OUTDATED,
+    REASON_GATE_LINK_MISSING,
+)
 from id_generation import new_id
 
 logger = logging.getLogger(__name__)
@@ -42,7 +47,6 @@ REASON_NO_TASK_CONTEXT = "web_request_task_context_missing"
 REASON_BROKER_ERROR = "web_request_broker_error"
 REASON_REQUEST_FAILED = "web_request_failed"
 # Reasons the broker gives (secure_tool_broker.access_gate), kept as they are.
-REASON_ACCOUNT_LINK_MISSING = "account_link_missing"
 REASON_ACCESS_DENIED = "access_denied"
 
 
@@ -212,7 +216,7 @@ def _response(payload: Mapping[str, Any]) -> BrokerWebResponse:
 
 
 def is_missing_key(error: BrokerWebRequestError) -> bool:
-    return error.reason_code == REASON_ACCOUNT_LINK_MISSING
+    return error.reason_code in {REASON_ACCOUNT_LINK_MISSING, REASON_ACCOUNT_LINK_OUTDATED}
 
 
 __all__ = [
@@ -221,6 +225,8 @@ __all__ = [
     "BrokerWebResponse",
     "REASON_ACCESS_DENIED",
     "REASON_ACCOUNT_LINK_MISSING",
+    "REASON_ACCOUNT_LINK_OUTDATED",
+    "REASON_GATE_LINK_MISSING",
     "is_missing_key",
     "send_web_request",
 ]

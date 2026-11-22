@@ -47,6 +47,8 @@ from access_control.identity import ContextVerifier, IdentityRejected
 from access_control.task_identity import ScheduleRunLookup, job_schedule_id, resolve_task_identity
 from custom_messages.contracts.access_v2 import (
     REASON_ACCOUNT_LINK_MISSING,
+    REASON_ACCOUNT_LINK_OUTDATED,
+    REASON_GATE_LINK_MISSING,
     AccountLinkV1,
     AccountMode,
     AccountSharing,
@@ -54,9 +56,10 @@ from custom_messages.contracts.access_v2 import (
     LinkPurpose,
     OperationResolutionV1,
     ToolDefinitionV1,
+    injections_match,
 )
 from secure_tool_broker.account_links import ACCESS_STORE_MISSING_NEXT_STEP, ACCESS_STORE_MISSING_TEXT
-from secure_tool_broker.tool_setup_tracking import note_link_missing
+from secure_tool_broker.tool_setup_tracking import note_gate_link_missing, note_link_missing
 from secure_tools.auth_methods import tool_sign_in
 from secure_tools.chat_commands import link_command
 from storage.access_repository import AccessRepository
@@ -78,6 +81,7 @@ class GateResult:
     resolution: OperationResolutionV1 | None = None
     person_id: str | None = None
     account_link: AccountLinkV1 | None = None
+    gate_link: AccountLinkV1 | None = None
 
     def as_error(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"error": self.message, "reason_code": self.reason_code}
@@ -277,19 +281,93 @@ class BrokerAccessGate:
             self.team_id, tool_id, LinkOwnerKind.TEAM, self.team_id, purpose=LinkPurpose.ACCOUNT
         )
 
+    def gate_link_for(self, tool_id: str) -> AccountLinkV1 | None:
+        """The team's active gate credential link for a web API tool, regardless of account sharing."""
+
+        if self.links is None:
+            return None
+        tool = self.catalog.tools.get(tool_id)
+        if tool is None or not tool.gate_injections:
+            return None
+        return self.links.active_link(
+            self.team_id, tool_id, LinkOwnerKind.TEAM, self.team_id, purpose=LinkPurpose.GATE
+        )
+
+    def _check_gate_link(
+        self,
+        tool: ToolDefinitionV1,
+        resolution: OperationResolutionV1,
+        person_id: str | None,
+        context: Mapping[str, Any],
+    ) -> tuple[AccountLinkV1 | None, GateResult | None]:
+        if not tool.gate_injections:
+            return None, None
+        if self.links is None:
+            logger.error(
+                "A tool call needs a team gate credential but the broker has no access store. "
+                "event=broker_access_store_missing tool_id=%s person_id=%s",
+                tool.tool_id,
+                person_id,
+            )
+            return None, self._refuse(
+                REASON_GATE_LINK_MISSING,
+                ACCESS_STORE_MISSING_TEXT,
+                context,
+                next_step=ACCESS_STORE_MISSING_NEXT_STEP,
+                resolution=resolution,
+            )
+        gate_link = self.gate_link_for(tool.tool_id)
+        if gate_link is None:
+            note_gate_link_missing(self.links, self.team_id, person_id, tool.tool_id)
+            return None, self._refuse(
+                REASON_GATE_LINK_MISSING,
+                f"{tool.display_name} requires a team gate credential before requests can be sent, and none is linked.",
+                context,
+                next_step=gate_link_next_step(tool),
+                resolution=resolution,
+            )
+        if not injections_match(gate_link.injections, tool.gate_injections):
+            note_gate_link_missing(self.links, self.team_id, person_id, tool.tool_id)
+            return None, self._refuse(
+                REASON_ACCOUNT_LINK_OUTDATED,
+                f"The team gate credential link for {tool.display_name} was made for an earlier tool definition, "
+                "so the broker did not send the request.",
+                context,
+                next_step=outdated_link_next_step(tool, gate_link),
+                resolution=resolution,
+            )
+        return gate_link, None
+
     def _with_account(
         self, resolution: OperationResolutionV1, person_id: str | None, context: Mapping[str, Any]
     ) -> GateResult:
         tool = self.catalog.tools.get(resolution.tool_id)
-        if tool is None or tool.account is not AccountMode.LINKED_CREDENTIAL:
+        if tool is None:
             return GateResult(True, resolution=resolution, person_id=person_id)
+        gate_link, refusal = self._check_gate_link(tool, resolution, person_id, context)
+        if refusal is not None:
+            return refusal
+        if tool.account is not AccountMode.LINKED_CREDENTIAL:
+            return GateResult(True, resolution=resolution, person_id=person_id, gate_link=gate_link)
         if tool_sign_in(tool.tool_id) is not None:
             # A sign-in tool with a team fallback (X): the executor uses the
             # person's own sign-in first, and this team link (only while the
             # team shares the service) without one; it tells the person how to
             # sign in when neither exists.
             team_link = self.account_link_for(tool.tool_id, None)
-            return GateResult(True, resolution=resolution, person_id=person_id, account_link=team_link)
+            if team_link is not None and not injections_match(team_link.injections, tool.credential_injections):
+                note_link_missing(self.links, self.team_id, person_id, tool.tool_id)
+                return self._refuse(
+                    REASON_ACCOUNT_LINK_OUTDATED,
+                    f"The linked account for {tool.display_name} was made for an earlier tool definition, "
+                    "so the broker did not send the request.",
+                    context,
+                    next_step=outdated_link_next_step(tool, team_link),
+                    resolution=resolution,
+                )
+            return GateResult(
+                True, resolution=resolution, person_id=person_id, account_link=team_link, gate_link=gate_link
+            )
         if self.links is None:
             logger.error(
                 "A tool call needs an account but the broker has no access store. "
@@ -315,7 +393,37 @@ class BrokerAccessGate:
                 next_step=account_link_next_step(tool, team_used=team_used),
                 resolution=resolution,
             )
-        return GateResult(True, resolution=resolution, person_id=person_id, account_link=link)
+        if not injections_match(link.injections, tool.credential_injections):
+            note_link_missing(self.links, self.team_id, person_id, tool.tool_id)
+            return self._refuse(
+                REASON_ACCOUNT_LINK_OUTDATED,
+                f"The linked account for {tool.display_name} was made for an earlier tool definition, "
+                "so the broker did not send the request.",
+                context,
+                next_step=outdated_link_next_step(tool, link),
+                resolution=resolution,
+            )
+        return GateResult(True, resolution=resolution, person_id=person_id, account_link=link, gate_link=gate_link)
+
+
+def gate_link_next_step(tool: ToolDefinitionV1, *, outdated: bool = False) -> str:
+    """What an administrator does when a web API tool's team gate credential is missing or outdated."""
+
+    command = link_command(tool.tool_id, purpose=LinkPurpose.GATE)
+    if outdated:
+        return f"A team administrator links the team's gate credential for {tool.display_name} again with {command}."
+    return f"A team administrator links the team's gate credential for {tool.display_name} with {command}."
+
+
+def outdated_link_next_step(tool: ToolDefinitionV1, link: AccountLinkV1) -> str:
+    """What to do when an active link's stored injections no longer match the tool's current definition."""
+
+    if link.purpose is LinkPurpose.GATE:
+        return gate_link_next_step(tool, outdated=True)
+    command = link_command(tool.tool_id, link.owner_kind)
+    if link.owner_kind is LinkOwnerKind.TEAM:
+        return f"A team administrator links the team's account for {tool.display_name} again with {command}."
+    return f"Link your account for {tool.display_name} again with {command}."
 
 
 def account_link_next_step(tool: ToolDefinitionV1, *, team_used: bool) -> str:
@@ -399,10 +507,14 @@ def build_broker_access_gate(
 
 __all__ = [
     "REASON_ACCOUNT_LINK_MISSING",
+    "REASON_ACCOUNT_LINK_OUTDATED",
+    "REASON_GATE_LINK_MISSING",
     "account_link_next_step",
     "BrokerAccessGate",
     "build_broker_access_gate",
+    "gate_link_next_step",
     "GateResult",
+    "outdated_link_next_step",
     "REASON_ACCESS_DENIED",
     "REASON_IDENTITY_REJECTED",
     "REASON_UNLISTED_HOST",

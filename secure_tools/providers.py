@@ -35,6 +35,7 @@ class ToolContext:
     invocation_id: str | None = None
     # Chosen by the broker's access gate, never by the request.
     account_link: AccountLinkV1 | None = None
+    gate_link: AccountLinkV1 | None = None
     # Configured by the operator (security_layer.api_request_user_agent); never by the request.
     api_request_user_agent: str | None = None
 

@@ -1038,6 +1038,7 @@ class SecureToolBrokerService:
             context,
             team_id=self._access_gate.team_id,
             account_link=gate.account_link,
+            gate_link=gate.gate_link,
             api_request_user_agent=self._api_request_user_agent,
         )
 

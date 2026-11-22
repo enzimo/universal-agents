@@ -57,6 +57,8 @@ from custom_messages.contracts.access_v2 import (
     AccessRequestStatus,
     AccessReviewChoice,
     AccountLinkV1,
+    CredentialInjectionV1,
+    InjectionPlacement,
     LinkOwnerKind,
     ProposedCliToolV1,
     SubjectKind,
@@ -66,7 +68,7 @@ from custom_tools import code_sandbox
 from custom_tools.providers.access_proposals import propose_access_change
 from tests.task_work_support import set_agent_ref
 from secure_tool_broker import installed_clis as broker_clis
-from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_MISSING
+from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_MISSING, REASON_ACCOUNT_LINK_OUTDATED
 from secure_tool_broker.cli_passthrough import CommandRefused, check_installed_command_line
 from secure_tools.installed_clis import installed_cli_provider
 from secure_tools.providers import ToolContext
@@ -182,14 +184,26 @@ def program_path(instance: Path) -> Path:
     return workspaces_root(instance) / "team" / "tools" / "tea" / "tea"
 
 
-def person_link(service, person_id: str = OWNER.person_id, key: str = "gitea_me") -> AccountLinkV1:
+def person_link(
+    service,
+    person_id: str = OWNER.person_id,
+    key: str = "gitea_me",
+    *,
+    injections: tuple[CredentialInjectionV1, ...] | None = None,
+) -> AccountLinkV1:
+    resolved = (
+        tuple(CredentialInjectionV1(**item) for item in tea()["credential_injections"])
+        if injections is None
+        else injections
+    )
     return service.store.create_link(AccountLinkV1(
-        link_id=f"account_link_tea_{person_id}",
+        link_id=f"account_link_tea_{person_id}_{key}",
         team_id=TEAM,
         tool_id="cli:tea",
         owner_kind=LinkOwnerKind.PERSON,
         owner_id=person_id,
         credential_key=key,
+        injections=resolved,
         created_by=SubjectRefV1(kind=SubjectKind.USER, id=person_id),
         created_at_utc=datetime.now(timezone.utc),
     ))
@@ -793,6 +807,27 @@ def test_set_up_tools_plans_the_clis_setup_step_and_account_link(world, served) 
 
     assert [(piece.kind, piece.step_id) for piece in plan.pieces] == [("external_step", "create_token"), ("account_link", None)]
     assert plan.pieces[1].depends_on == (plan.pieces[0].piece_id,)
+
+
+def test_installed_cli_link_matches_reordered_injections_and_refuses_outdated_link(world, served) -> None:  # noqa: F811
+    _lead, _requests, gate, _instance, service = world
+    _request, decide = approve(world, tea(), served)
+    decide()
+    reordered = (
+        CredentialInjectionV1(placement=InjectionPlacement.FILE, name=".config/tea/token", field="token", template="{value}"),
+        CredentialInjectionV1(placement=InjectionPlacement.ENV, name="TEA_TOKEN", field="token", template="{value}"),
+    )
+    person_link(service, key="reordered_key", injections=reordered)
+    allowed = worker_call(gate, ["repo", "list"])
+    assert allowed.allowed and allowed.account_link is not None
+
+    outdated = (
+        CredentialInjectionV1(placement=InjectionPlacement.ENV, name="OLD_TEA_TOKEN", field="token"),
+    )
+    person_link(service, key="outdated_key", injections=outdated)
+    refused = worker_call(gate, ["repo", "list"])
+    assert not refused.allowed and refused.reason_code == REASON_ACCOUNT_LINK_OUTDATED
+    assert "/link cli:tea" in refused.next_step
 
 
 def _no_sharing_choices():

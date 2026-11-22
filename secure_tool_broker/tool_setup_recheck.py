@@ -35,6 +35,7 @@ from typing import Any, Final
 from access_control.tool_setup_states import (
     SOURCE_PERIODIC_CHECK,
     STEP_ACCOUNT_LINK,
+    STEP_GATE_LINK,
     STEP_SIGN_IN,
     STEP_TEAM_SIGN_IN_APP,
     ToolSetupStates,
@@ -42,12 +43,14 @@ from access_control.tool_setup_states import (
 from custom_messages.contracts.access_v2 import (
     AccessNoticeKind,
     AccessNoticeV1,
+    LinkPurpose,
     PersonStanding,
     ToolSetupState,
     ToolSetupStateV1,
 )
 from secure_tool_broker.tool_setup_status import record_status, tool_status_entry
 from secure_tools.auth_methods import tool_sign_in
+from secure_tools.chat_commands import link_command
 
 LOGGER = logging.getLogger(__name__)
 
@@ -116,6 +119,13 @@ def notice_text(gate: Any, state: ToolSetupStateV1) -> tuple[str, str]:
             f"{name} needs the team's sign-in app",
             f"{name} stopped working for you because the team's {name} sign-in app is not set up. "
             f"A team administrator or owner can set it up with {command}.",
+        )
+    if state.missing_step == STEP_GATE_LINK:
+        command = link_command(state.tool_id, purpose=LinkPurpose.GATE)
+        return (
+            f"{name} needs the team's gate credential",
+            f"{name} stopped working because the team's gate credential is missing or no longer matches the tool. "
+            f"A team administrator or owner can link it with {command}.",
         )
     if state.missing_step == STEP_ACCOUNT_LINK:
         return (

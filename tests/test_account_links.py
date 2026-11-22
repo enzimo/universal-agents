@@ -160,7 +160,22 @@ def save_credentials(scope: CredentialOwnerScope, **credentials: CatalogCredenti
     save_catalog(CredentialCatalog(credentials=credentials), scope=scope)
 
 
-def link(store: AccessRepository, owner_kind: LinkOwnerKind, owner_id: str, key: str, tool_id: str = "http:portainer"):
+def link(
+    store: AccessRepository,
+    owner_kind: LinkOwnerKind,
+    owner_id: str,
+    key: str,
+    tool_id: str = "http:portainer",
+    *,
+    injections: tuple[CredentialInjectionV1, ...] | None = None,
+):
+    resolved_injections = injections
+    if resolved_injections is None:
+        resolved_injections = (
+            (CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-API-Key", field="api_token"),)
+            if tool_id == "http:portainer"
+            else ()
+        )
     return store.create_link(
         AccountLinkV1(
             link_id=f"account_link_{owner_kind.value}_{key}",
@@ -169,7 +184,7 @@ def link(store: AccessRepository, owner_kind: LinkOwnerKind, owner_id: str, key:
             owner_kind=owner_kind,
             owner_id=owner_id,
             credential_key=key,
-            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-API-Key", field="api_token"),),
+            injections=resolved_injections,
             created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
             created_at_utc=NOW,
         )

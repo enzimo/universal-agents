@@ -620,7 +620,7 @@ def _link_owner_key(document: dict[str, Any]) -> tuple[str, str, str, str, str]:
         text("tool_id"),
         text("owner_kind"),
         text("owner_id"),
-        text("purpose") or LinkPurpose.ACCOUNT.value,
+        text("purpose"),
     )
 
 

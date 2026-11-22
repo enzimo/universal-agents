@@ -467,6 +467,76 @@ def test_an_older_store_gives_its_people_references_on_postgres(settings) -> Non
         ).fetchone()
 
 
+def test_an_older_store_gets_the_purpose_column_and_index_on_postgres(settings) -> None:
+    """In-place upgrade for ``access_account_links.purpose`` and the purpose-scoped active-link index on PostgreSQL."""
+
+    import json
+
+    from custom_messages.contracts.access_v2 import CredentialInjectionV1, InjectionPlacement, LinkPurpose
+    from storage.access_repository import ONE_ACTIVE_LINK_INDEX, _LEGACY_ONE_ACTIVE_LINK_INDEX
+    from storage.postgres_connection import connect_postgres
+
+    store = AccessRepository(settings)
+    original = store.create_link(
+        AccountLinkV1(
+            link_id="link_pre_purpose",
+            team_id=TEAM,
+            tool_id="http:gitea",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            credential_key="gitea_team",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="token"),),
+            created_by=OWNER,
+            created_at_utc=NOW,
+        )
+    )
+    with connect_postgres(settings.postgres_dsn) as conn:
+        for row in conn.execute("SELECT link_id, payload_json FROM access_account_links").fetchall():
+            payload = json.loads(row[1])
+            payload.pop("purpose", None)
+            conn.execute("UPDATE access_account_links SET payload_json=%s WHERE link_id=%s", (json.dumps(payload), row[0]))
+        conn.execute(f"DROP INDEX {ONE_ACTIVE_LINK_INDEX}")
+        conn.execute("ALTER TABLE access_account_links DROP COLUMN purpose")
+        conn.execute(
+            f"CREATE UNIQUE INDEX {_LEGACY_ONE_ACTIVE_LINK_INDEX} "
+            "ON access_account_links(team_id, tool_id, owner_kind, owner_id) WHERE status = 'active'"
+        )
+        conn.commit()
+
+    upgraded = AccessRepository(settings)
+
+    active = upgraded.active_link(TEAM, "http:gitea", LinkOwnerKind.TEAM, TEAM, purpose=LinkPurpose.ACCOUNT)
+    assert active is not None and active.link_id == original.link_id and active.purpose is LinkPurpose.ACCOUNT
+    gate = upgraded.create_link(
+        AccountLinkV1(
+            link_id="link_gate_pg",
+            team_id=TEAM,
+            tool_id="http:gitea",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="gitea_gate",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="secret"),),
+            created_by=OWNER,
+            created_at_utc=NOW,
+        )
+    )
+    assert upgraded.active_link(TEAM, "http:gitea", LinkOwnerKind.TEAM, TEAM, purpose=LinkPurpose.GATE) == gate
+    assert upgraded.active_link(TEAM, "http:gitea", LinkOwnerKind.TEAM, TEAM, purpose=LinkPurpose.ACCOUNT) == active
+    with connect_postgres(settings.postgres_dsn) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = %s",
+            (ONE_ACTIVE_LINK_INDEX,),
+        ).fetchone()
+        assert (
+            conn.execute(
+                "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = %s",
+                (_LEGACY_ONE_ACTIVE_LINK_INDEX,),
+            ).fetchone()
+            is None
+        )
+
+
 def test_a_copy_written_from_an_earlier_read_keeps_the_stored_reference_on_postgres(settings) -> None:
     store = AccessRepository(settings)
     first = store.record_person(TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=PERSON,

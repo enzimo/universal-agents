@@ -459,3 +459,218 @@ def test_the_broker_treats_built_in_maintenance_agents_as_system_agents(tmp_path
         assert gate.access.agent_role_of("GeneralAssistant") == AGENT_ROLE_WORKER
     finally:
         gate.access.cedar.close()
+
+
+# -- outdated links and team gate credentials -------------------------------------
+
+
+GATED_TOOLS_YAML = """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - {placement: header, name: Authorization, field: api_token, template: "token {value}"}
+      - {placement: query, name: tenant, field: tenant_id}
+    gate_injections:
+      - {placement: header, name: CF-Access-Client-Id, field: client_id}
+      - {placement: header, name: CF-Access-Client-Secret, field: client_secret}
+  - tool_id: http:public-gated
+    display_name: Public Gated Docs
+    account: none
+    hosts: [docs.example.com]
+    gate_injections:
+      - {placement: header, name: X-Gate-Secret, field: gate_secret}
+"""
+
+
+@pytest.fixture
+def gated_world(tmp_path: Path):
+    tools = tmp_path / "instance" / "control" / "access" / "tools"
+    tools.mkdir(parents=True)
+    (tools / "gated.yaml").write_text(GATED_TOOLS_YAML, encoding="utf-8")
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    gate = BrokerAccessGate(
+        catalogs=CatalogSource(tmp_path / "instance"),
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    return gate, store
+
+
+def _make_link(
+    store: AccessRepository,
+    *,
+    link_id: str,
+    tool_id: str,
+    owner_kind: str,
+    owner_id: str,
+    purpose: str = "account",
+    injections: tuple,
+):
+    from custom_messages.contracts.access_v2 import AccountLinkV1, LinkOwnerKind, LinkPurpose
+
+    return store.create_link(
+        AccountLinkV1(
+            link_id=link_id,
+            team_id=TEST_TEAM,
+            tool_id=tool_id,
+            owner_kind=LinkOwnerKind(owner_kind),
+            owner_id=owner_id,
+            purpose=LinkPurpose(purpose),
+            credential_key=f"key_{link_id}",
+            injections=injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+            created_at_utc=datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc),
+        )
+    )
+
+
+def test_gate_link_missing_and_outdated_are_refused_with_gate_command(gated_world) -> None:
+    from access_control.tool_setup_states import FIXED_BY_ADMINISTRATOR, STEP_GATE_LINK, ToolSetupStates
+    from custom_messages.contracts.access_v2 import CredentialInjectionV1, InjectionPlacement, ToolSetupState
+    from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_OUTDATED, REASON_GATE_LINK_MISSING
+
+    gate, store = gated_world
+
+    def call_public():
+        return gate.check_broker_action(
+            MANAGER, "secure_requests", "get", {"url": "https://docs.example.com/index"}, agent_context()
+        )
+
+    missing = call_public()
+    assert not missing.allowed and missing.reason_code == REASON_GATE_LINK_MISSING
+    assert "/link http:public-gated gate" in missing.next_step
+    state = ToolSetupStates(store).get(TEST_TEAM, "user-1", "http:public-gated")
+    assert state is not None and (state.state, state.missing_step, state.fixed_by) == (
+        ToolSetupState.NEEDS_SETUP,
+        STEP_GATE_LINK,
+        FIXED_BY_ADMINISTRATOR,
+    )
+
+    _make_link(
+        store,
+        link_id="gate_old",
+        tool_id="http:public-gated",
+        owner_kind="team",
+        owner_id=TEST_TEAM,
+        purpose="gate",
+        injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Old-Gate", field="gate_secret"),),
+    )
+    outdated = call_public()
+    assert not outdated.allowed and outdated.reason_code == REASON_ACCOUNT_LINK_OUTDATED
+    assert "/link http:public-gated gate" in outdated.next_step
+
+    valid = _make_link(
+        store,
+        link_id="gate_ok",
+        tool_id="http:public-gated",
+        owner_kind="team",
+        owner_id=TEST_TEAM,
+        purpose="gate",
+        injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER, name="x-gate-secret", field="gate_secret", template="{value}"
+            ),
+        ),
+    )
+    allowed = call_public()
+    assert allowed.allowed and allowed.account_link is None and allowed.gate_link == valid
+
+
+def test_outdated_account_links_refuse_without_falling_back_and_gate_ignores_account_sharing(gated_world) -> None:
+    from access_control.account_sharing import TeamAccountSharing
+    from access_control.tool_setup_states import STEP_ACCOUNT_LINK, ToolSetupStates
+    from custom_messages.contracts.access_v2 import AccountSharing, CredentialInjectionV1, InjectionPlacement, ToolSetupState
+    from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_OUTDATED
+
+    gate, store = gated_world
+    tool = gate.catalog.tools["http:gitea"]
+    gate_link = _make_link(
+        store,
+        link_id="gitea_gate",
+        tool_id="http:gitea",
+        owner_kind="team",
+        owner_id=TEST_TEAM,
+        purpose="gate",
+        injections=(
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="cf-access-client-secret", field="client_secret"),
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="cf-access-client-id", field="client_id"),
+        ),
+    )
+    matching_account = (
+        CredentialInjectionV1(placement=InjectionPlacement.QUERY, name="tenant", field="tenant_id", template="{value}"),
+        CredentialInjectionV1(
+            placement=InjectionPlacement.HEADER, name="authorization", field="api_token", template="token {value}"
+        ),
+    )
+    outdated_account = (
+        CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Old-Token", field="api_token"),
+    )
+
+    def call_gitea(person_id: str = "user-1"):
+        return gate.check_broker_action(
+            MANAGER,
+            "secure_requests",
+            "get",
+            {"url": "https://gitea.example.com/api/v1/repos"},
+            agent_context(person_id),
+        )
+
+    # Team account link is outdated -> refused with team /link command.
+    _make_link(
+        store,
+        link_id="gitea_team_old",
+        tool_id="http:gitea",
+        owner_kind="team",
+        owner_id=TEST_TEAM,
+        injections=outdated_account,
+    )
+    team_refused = call_gitea()
+    assert not team_refused.allowed and team_refused.reason_code == REASON_ACCOUNT_LINK_OUTDATED
+    assert "/link http:gitea team" in team_refused.next_step
+    assert ToolSetupStates(store).get(TEST_TEAM, "user-1", "http:gitea").missing_step == STEP_ACCOUNT_LINK
+
+    # Valid team link works, even with reordered / lowercase-header / explicit-default injections.
+    team_valid = _make_link(
+        store,
+        link_id="gitea_team_ok",
+        tool_id="http:gitea",
+        owner_kind="team",
+        owner_id=TEST_TEAM,
+        injections=matching_account,
+    )
+    team_ok = call_gitea()
+    assert team_ok.allowed and team_ok.account_link == team_valid and team_ok.gate_link == gate_link
+
+    # Outdated personal link is refused with person /link command and never falls back to the valid team link.
+    _make_link(
+        store,
+        link_id="gitea_person_old",
+        tool_id="http:gitea",
+        owner_kind="person",
+        owner_id="user-1",
+        injections=outdated_account,
+    )
+    person_refused = call_gitea()
+    assert not person_refused.allowed and person_refused.reason_code == REASON_ACCOUNT_LINK_OUTDATED
+    assert "/link http:gitea." in person_refused.next_step and "/link http:gitea team" not in person_refused.next_step
+    assert ToolSetupStates(store).get(TEST_TEAM, "user-1", "http:gitea").state is ToolSetupState.NEEDS_SETUP
+
+    # Making the service private still uses the team gate link alongside the person's matching account link.
+    TeamAccountSharing(store, TEST_TEAM).choose_tool(tool, AccountSharing.PRIVATE, by="user-1")
+    person_valid = _make_link(
+        store,
+        link_id="gitea_person_ok",
+        tool_id="http:gitea",
+        owner_kind="person",
+        owner_id="user-1",
+        injections=matching_account,
+    )
+    private_ok = call_gitea()
+    assert private_ok.allowed and private_ok.account_link == person_valid and private_ok.gate_link == gate_link
