@@ -62,15 +62,33 @@ from custom_messages.solution_variation import (
     SolutionEvaluationOutcome,
     SolutionVariationRun,
 )
+from runtime_hosting.execution_contracts import (
+    InteractiveSessionStatus,
+    SSHDelegationBoundsV1,
+    SSHSecretRecipe,
+    SSHTargetStatus,
+)
 from storage.config import StorageSettings
 from storage.adapter_host_repository import create_adapter_host_repository
 from storage.after_action_report_repository import create_after_action_report_repository
+from storage.execution_control_repository import (
+    ImmutableRecordConflict,
+    StaleExecutionFence,
+    create_execution_control_repository,
+)
 from storage.memory_graph_repository import create_memory_graph_repository
 from storage.multi_user_owner_migration import migrate_legacy_null_owner_rows
 from storage.postgres_connection import connect_postgres, redact_postgres_dsn
 from storage.solution_variation_repository import create_solution_variation_repository
 from live_storage_utils import resolve_live_storage_settings
 from tests.after_action_report_repository_support import assert_report_person_scoping
+from tests.execution_ssh_repository_support import (
+    build_enrolled_ssh_target,
+    build_pending_enrolled_session,
+    build_ssh_interaction_activation,
+    create_live_enrolled_session,
+    team_owner_scope,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1188,6 +1206,173 @@ def exercise_old_access_table_drop(settings: StorageSettings, report: dict[str, 
     record_check(report, "old_access_table_drop", {"dropped": dropped, "observation_only": True})
 
 
+def exercise_execution_control_repository_ssh(
+    settings: StorageSettings, report: dict[str, Any]
+) -> None:
+    """Validate PostgresExecutionControlRepository SSH tables, fencing, bootstrap latch, and concurrent revocation."""
+
+    team_id = "team_live_pg"
+    owner = team_owner_scope(team_id)
+    repository = create_execution_control_repository(settings, logger=logger)
+
+    # 1. Enrolled SSH target persistence, idempotency, conflict detection, and concurrent claim fencing.
+    target_1 = build_enrolled_ssh_target(owner, target_id="ssh_tgt_live_pg_1", host="live-pg-1.internal")
+    assert repository.put_ssh_target(target_1) == target_1
+    assert repository.put_ssh_target(target_1) == target_1
+    try:
+        repository.put_ssh_target(
+            build_enrolled_ssh_target(owner, target_id=target_1.target_id, host="conflict.internal")
+        )
+    except ImmutableRecordConflict:
+        pass
+    else:
+        raise AssertionError("Postgres accepted conflicting enrolled SSH target content")
+
+    pending = build_pending_enrolled_session(target_1, session_id="ssh_sess_live_pg_claim")
+    repository.create_interactive_session(pending)
+    claim_barrier = threading.Barrier(2)
+
+    def race_claim(index: int) -> Any:
+        worker_repo = create_execution_control_repository(settings, logger=logger)
+        claim_barrier.wait(10)
+        try:
+            return worker_repo.claim_interactive_session(
+                team_id=team_id,
+                session_id=pending.session_id,
+                broker_id=f"live-broker-{index}",
+                lease_token=f"live-tok-{index}",
+                lease_ttl_seconds=120,
+            )
+        except StaleExecutionFence as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claim_outcomes = list(pool.map(race_claim, range(2)))
+    winners = [item for item in claim_outcomes if not isinstance(item, Exception)]
+    fenced = [item for item in claim_outcomes if isinstance(item, StaleExecutionFence)]
+    assert len(winners) == 1 and len(fenced) == 1 and winners[0].fence == 1
+
+    opened = repository.update_claimed_interactive_session(
+        winners[0].model_copy(update={"status": InteractiveSessionStatus.OPEN}),
+        broker_id=winners[0].lease_owner or "",
+        lease_token=winners[0].lease_token or "",
+        fence=winners[0].fence,
+    )
+    bounds = SSHDelegationBoundsV1(
+        delegated_agent_type="HostBootstrapper",
+        delegated_task_id="task_live_pg_ssh",
+        allow_commands=True,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+    )
+    interaction = repository.put_ssh_interaction(
+        build_ssh_interaction_activation(opened, bounds=bounds),
+        bounds=bounds,
+    )
+    assert interaction.bounds == bounds and interaction.activation.binds_session(opened, bounds=bounds)
+
+    # 2. Password bootstrap single-claim exclusivity, release, and permanent latch.
+    peer = create_live_enrolled_session(
+        repository, target_1, session_id="ssh_sess_live_pg_peer", broker_id="live-peer", lease_token="tok-peer"
+    )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id=team_id, target_id=target_1.target_id, session_id=opened.session_id
+    ) is True
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id=team_id, target_id=target_1.target_id, session_id=peer.session_id
+    ) is False
+    assert repository.release_ssh_target_password_bootstrap_claim(
+        team_id=team_id, target_id=target_1.target_id, session_id=opened.session_id
+    ) is True
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id=team_id, target_id=target_1.target_id, session_id=peer.session_id
+    ) is True
+    latched = repository.mark_ssh_target_password_bootstrap_completed(
+        team_id=team_id, target_id=target_1.target_id
+    )
+    assert latched is not None and latched.password_bootstrap_completed_at_utc is not None
+    assert latched.enrollment_digest() == target_1.enrollment_digest()
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id=team_id, target_id=target_1.target_id, session_id=opened.session_id
+    ) is False
+
+    # 3. Concurrent target revocation vs session revoke / release / close under canonical lock order.
+    target_2 = build_enrolled_ssh_target(owner, target_id="ssh_tgt_live_pg_2", host="live-pg-2.internal")
+    repository.put_ssh_target(target_2)
+    s1 = create_live_enrolled_session(
+        repository, target_2, session_id="ssh_sess_live_pg_r1", broker_id="b-r1", lease_token="t-r1"
+    )
+    s2 = create_live_enrolled_session(
+        repository, target_2, session_id="ssh_sess_live_pg_r2", broker_id="b-r2", lease_token="t-r2"
+    )
+    s3 = build_pending_enrolled_session(target_2, session_id="ssh_sess_live_pg_r3")
+    repository.create_interactive_session(s3)
+    repository.put_ssh_interaction(build_ssh_interaction_activation(s1))
+    repository.put_ssh_interaction(build_ssh_interaction_activation(s2))
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id=team_id, target_id=target_2.target_id, session_id=s1.session_id
+    ) is True
+
+    race_barrier = threading.Barrier(4)
+
+    def run_target_revoke() -> None:
+        r = create_execution_control_repository(settings, logger=logger)
+        race_barrier.wait(10)
+        r.revoke_ssh_target(team_id=team_id, target_id=target_2.target_id, revoked_by="live_admin_target")
+
+    def run_session_revoke() -> None:
+        r = create_execution_control_repository(settings, logger=logger)
+        race_barrier.wait(10)
+        r.revoke_interactive_session(team_id=team_id, session_id=s1.session_id, revoked_by="live_admin_session")
+
+    def run_session_release() -> None:
+        r = create_execution_control_repository(settings, logger=logger)
+        race_barrier.wait(10)
+        r.update_claimed_interactive_session(
+            s2.model_copy(update={"status": InteractiveSessionStatus.CLOSED}),
+            broker_id="b-r2",
+            lease_token="t-r2",
+            fence=s2.fence,
+            release=True,
+        )
+
+    def run_unleased_close() -> None:
+        r = create_execution_control_repository(settings, logger=logger)
+        race_barrier.wait(10)
+        r.close_unleased_interactive_session(team_id=team_id, session_id=s3.session_id)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [
+            pool.submit(run_target_revoke),
+            pool.submit(run_session_revoke),
+            pool.submit(run_session_release),
+            pool.submit(run_unleased_close),
+        ]
+        for future in futures:
+            future.result(timeout=20)
+
+    revoked_target = repository.get_ssh_target(team_id=team_id, target_id=target_2.target_id)
+    assert revoked_target is not None and revoked_target.status == SSHTargetStatus.REVOKED
+    for sess_id in (s1.session_id, s2.session_id, s3.session_id):
+        assert repository.get_interactive_session_revocation(team_id=team_id, session_id=sess_id) is not None
+    with connect_postgres(settings.postgres_dsn or "") as conn:
+        claim_row = conn.execute(
+            "SELECT password_bootstrap_claimed_by_session_id FROM execution_ssh_targets WHERE target_id = %s",
+            (target_2.target_id,),
+        ).fetchone()
+    assert claim_row is not None and claim_row["password_bootstrap_claimed_by_session_id"] is None
+
+    record_check(
+        report,
+        "execution_control_repository_ssh",
+        {
+            "latched_target_id": target_1.target_id,
+            "revoked_target_id": target_2.target_id,
+            "concurrent_claim_fenced": True,
+            "concurrent_revocation_deadlock_free": True,
+        },
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run live storage validation against the configured Postgres instance."
@@ -1241,6 +1426,7 @@ def main() -> None:
         exercise_gateway_state_store(settings, report)
         exercise_gateway_owner_assignment(settings, report)
         exercise_adapter_host_repository(settings, report)
+        exercise_execution_control_repository_ssh(settings, report)
         exercise_old_access_table_drop(settings, report)
 
         report["status"] = "passed"
