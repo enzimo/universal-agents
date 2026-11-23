@@ -400,6 +400,16 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
                     ),
                     (
                         "GET",
+                        "/api/web-chat/workspace/download",
+                        self.workspace._handle_web_chat_workspace_download,
+                    ),
+                    (
+                        "HEAD",
+                        "/api/web-chat/workspace/download",
+                        self.workspace._handle_web_chat_workspace_download,
+                    ),
+                    (
+                        "GET",
                         "/api/web-chat/objectives",
                         self.controls._handle_web_chat_objectives,
                     ),
@@ -662,6 +672,7 @@ class InternalWebsiteInteractiveApp(BaseInteractiveApp):
         app.middlewares.append(
             check_signed_in_person(self.access._session_person, self.application.identity.is_web_chat_user_active)
         )
+        app.on_cleanup.append(self.workspace.close)
         return app
 
     def _signed_in_person(self, request: web.Request) -> str | None:

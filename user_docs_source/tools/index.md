@@ -20,7 +20,7 @@ with broker-owned credentials.
 With authorization on, every agent has the web research tools (such as
 `exa_search`, `exa_get_contents` and `brave_web_search_artifact`) as part of
 [internet access](../permissions.md#internet-access), and `file_read`,
-`file_write` and `file_move` among its standard tools; with authorization off,
+`file_write`, `file_move` and `workspace_file_link` among its standard tools; with authorization off,
 an agent has the tools its definition lists. File operations stay within the
 task's folders, what was shared with the task's person, and any folders the
 agent was given (see

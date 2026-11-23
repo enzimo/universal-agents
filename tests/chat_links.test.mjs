@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readChatPageLink } from "../assistant_gateway/onboarding_web/assets/chat_links.mjs";
+import {
+  readChatPageLink,
+  readWorkspaceFileLink,
+  stripWorkspaceDownloadParam,
+} from "../assistant_gateway/onboarding_web/assets/chat_links.mjs";
 
 const at = (search, hash = "") => ({ pathname: "/webchat", search, hash });
 
@@ -23,4 +27,37 @@ test("separate pages and plain chat keep their address", () => {
       view, accessRequestId: "", accessAgentType: "", cleanUrl: "",
     });
   }
+});
+
+test("workspace file deep-links read path and download flag and strip download cleanly", () => {
+  assert.deepEqual(
+    readWorkspaceFileLink(at("?view=files&path=team%2Fguides%2Freport%201.pdf&download=1")),
+    { path: "team/guides/report 1.pdf", download: true },
+  );
+  assert.deepEqual(
+    readWorkspaceFileLink(at("?view=files&path=team%2Freport.pdf&download=true")),
+    { path: "team/report.pdf", download: true },
+  );
+  assert.deepEqual(
+    readWorkspaceFileLink(at("?view=files&path=team%2Freport.pdf")),
+    { path: "team/report.pdf", download: false },
+  );
+  assert.deepEqual(
+    readWorkspaceFileLink(at("?view=files&download=1")),
+    { path: "", download: false },
+  );
+  assert.deepEqual(
+    readWorkspaceFileLink(at("?view=objectives&path=team%2Freport.pdf&download=1")),
+    { path: "", download: false },
+  );
+
+  assert.equal(
+    stripWorkspaceDownloadParam(at("?view=files&path=team%2Freport.pdf&download=1")),
+    "/webchat?view=files&path=team%2Freport.pdf",
+  );
+  assert.equal(
+    stripWorkspaceDownloadParam(at("?view=files&path=team%2Freport.pdf&download=1&extra=ok", "#top")),
+    "/webchat?view=files&path=team%2Freport.pdf&extra=ok#top",
+  );
+  assert.equal(stripWorkspaceDownloadParam(at("?view=files&path=team%2Freport.pdf")), "");
 });
