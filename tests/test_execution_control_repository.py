@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import base64
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
+import re
 import sqlite3
-import struct
+from typing import Any
 
 import pytest
 
@@ -21,7 +22,6 @@ from runtime_hosting.execution_contracts import (
     AutomationScheduleV1,
     BuildAttestationV1,
     CodeArtifactV1,
-    EnrolledSSHTargetV1,
     ExecutionActivationKind,
     InteractiveSessionStatus,
     InteractiveSessionV1,
@@ -31,8 +31,6 @@ from runtime_hosting.execution_contracts import (
     SSHDelegationBoundsV1,
     SSHInteractionRecordV1,
     SSHSecretRecipe,
-    SSHTargetLifecycle,
-    SSHTargetPlatform,
     SSHTargetStatus,
     ExecutionLanguage,
     ExecutionRevisionV1,
@@ -41,16 +39,22 @@ from runtime_hosting.execution_contracts import (
     RunAttemptStatus,
     RunAttemptV1,
     ssh_interaction_resource_digest,
-    ssh_public_key_sha256_fingerprint,
 )
 from scripts.upgrade_schema_fixture import is_vector_table
 from storage.execution_control_repository import (
     ImmutableRecordConflict,
     OldExecutionRecordFormat,
+    PostgresExecutionControlRepository,
     SqliteExecutionControlRepository,
     StaleExecutionFence,
 )
 from tests.execution_access_support import activation as build_activation
+from tests.execution_ssh_repository_support import (
+    build_enrolled_ssh_target,
+    build_pending_enrolled_session,
+    build_ssh_interaction_activation,
+    create_live_enrolled_session,
+)
 from tests.upgrade_schemas import read_schema_statements
 
 
@@ -449,108 +453,8 @@ def test_ssh_typing_approvals_are_recorded_once_per_session(tmp_path: Path) -> N
     assert repository.get_ssh_interaction(team_id="team_beta", session_id=session.session_id) is None
 
 
-def _enrolled_target(
-    owner: OwnerScopeV1 | None = None,
-    *,
-    target_id: str = "ssh_tgt_prod_mac",
-    host: str = "build-mac.internal",
-    lifecycle: SSHTargetLifecycle = SSHTargetLifecycle.TEMPORARY,
-    expires_at_utc: datetime | None = None,
-) -> EnrolledSSHTargetV1:
-    owner_scope = owner or _owner()
-    wire_type = b"ssh-ed25519"
-    key_blob = struct.pack(">I", len(wire_type)) + wire_type + struct.pack(">I", 32) + (b"\x05" * 32)
-    key_b64 = base64.b64encode(key_blob).decode("ascii")
-    pub_line = f"ssh-ed25519 {key_b64}"
-    algo, fp = ssh_public_key_sha256_fingerprint(pub_line)
-    effective_expiry = (
-        expires_at_utc
-        if expires_at_utc is not None
-        else (
-            datetime.now(timezone.utc) + timedelta(hours=2)
-            if lifecycle == SSHTargetLifecycle.TEMPORARY
-            else None
-        )
-    )
-    seed_fields = {
-        "target_id": target_id,
-        "owner": owner_scope,
-        "host": host,
-        "port": 2222,
-        "username": "admin",
-        "platform": SSHTargetPlatform.MACOS,
-        "host_key_algorithm": algo,
-        "host_key_fingerprint": fp,
-        "host_key_public_key": pub_line,
-        "credential_key": "build_mac_ssh_key",
-        "credential_owner_scope": owner_scope,
-        "credential_public_key_fingerprint": fp,
-        "bootstrap_credential_key": "build_mac_ssh_bootstrap",
-        "bootstrap_credential_owner_scope": owner_scope,
-        "lifecycle": lifecycle,
-        "expires_at_utc": effective_expiry,
-        "reason": "Bootstrap headless build host",
-    }
-    placeholder_activation = build_activation(
-        ExecutionActivationKind.SSH_TARGET_ENROLL,
-        resource_id=target_id,
-        resource_digest=_SHA_A,
-        owner_scope=owner_scope,
-        mode=ChangeApprovalMode.PERSON_APPROVAL,
-        function="change:execution_ssh_target_enroll",
-    )
-    digest = EnrolledSSHTargetV1.model_construct(
-        activation=placeholder_activation,
-        **seed_fields,
-    ).enrollment_digest()
-    real_activation = build_activation(
-        ExecutionActivationKind.SSH_TARGET_ENROLL,
-        resource_id=target_id,
-        resource_digest=digest,
-        owner_scope=owner_scope,
-        mode=ChangeApprovalMode.PERSON_APPROVAL,
-        function="change:execution_ssh_target_enroll",
-    )
-    return EnrolledSSHTargetV1(activation=real_activation, **seed_fields)
-
-
-def _create_live_enrolled_session(
-    repository: SqliteExecutionControlRepository,
-    target: EnrolledSSHTargetV1,
-    *,
-    session_id: str,
-    broker_id: str = "broker-a",
-    lease_token: str = "lease-a",
-) -> InteractiveSessionV1:
-    conn_target = target.to_connection_target()
-    target_digest = conn_target.calculate_digest()
-    session = InteractiveSessionV1(
-        session_id=session_id,
-        owner=target.owner,
-        target=conn_target,
-        target_digest=target_digest,
-        connect_activation=build_activation(
-            ExecutionActivationKind.SSH_CONNECT,
-            resource_id=session_id,
-            resource_digest=target_digest,
-            owner_scope=target.owner,
-            mode=ChangeApprovalMode.HELD_ACCESS,
-        ),
-    )
-    repository.create_interactive_session(session)
-    claimed = repository.claim_interactive_session(
-        team_id=target.owner.team_id,
-        session_id=session_id,
-        broker_id=broker_id,
-        lease_token=lease_token,
-        lease_ttl_seconds=120,
-    )
-    return repository.update_claimed_interactive_session(
-        claimed.model_copy(update={"status": InteractiveSessionStatus.OPEN}),
-        broker_id=broker_id,
-        lease_token=lease_token,
-        fence=claimed.fence,
-    )
+_enrolled_target = build_enrolled_ssh_target
+_create_live_enrolled_session = create_live_enrolled_session
 
 
 def test_enrolled_ssh_targets_bootstrap_latch_and_cascade_revocation(tmp_path: Path) -> None:
@@ -1146,13 +1050,11 @@ def test_f6_claim_rejects_terminal_sessions_close_unleased_persists_closed_and_p
 ) -> None:
     """F6: Terminal sessions cannot be re-claimed, unleased PENDING closes atomically, and PG uses FOR UPDATE + fence CAS."""
 
-    from typing import Any
     from runtime_hosting.execution_contracts import (
         ArtifactKind,
         ArtifactReferenceV1,
         ArtifactStorageBackend,
     )
-    from storage.execution_control_repository import PostgresExecutionControlRepository
 
     repository = _repository(tmp_path)
     owner = _owner()
@@ -1291,3 +1193,698 @@ def test_f6_claim_rejects_terminal_sessions_close_unleased_persists_closed_and_p
     assert "desired_or_status = %s" in select_sql
     assert "desired_or_status = %s" in update_sql
     assert "AND generation = %s" in update_sql
+
+
+_SSH_TABLE_LOCK_RANK = {
+    "execution_ssh_targets": 1,
+    "execution_interactive_sessions": 2,
+    "execution_ssh_interactions": 3,
+}
+_LOCK_TABLE_PATTERN = re.compile(
+    r"\b(?:UPDATE|FROM|INTO)\s+(execution_ssh_targets|execution_interactive_sessions|execution_ssh_interactions)\b",
+    re.IGNORECASE,
+)
+
+
+class _RecordingCursor:
+    def __init__(
+        self,
+        *,
+        rows: list[dict[str, Any]] | None = None,
+        rowcount: int = 1,
+    ) -> None:
+        self._rows = list(rows or [])
+        self.rowcount = rowcount
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return list(self._rows)
+
+
+class _RecordingPostgresConnection:
+    """Fake PostgreSQL connection that records every SQL statement, params, commit, and rollback."""
+
+    def __init__(
+        self,
+        handler: Callable[[str, tuple[Any, ...]], _RecordingCursor],
+    ) -> None:
+        self._handler = handler
+        self.statements: list[tuple[str, tuple[Any, ...]]] = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def __enter__(self) -> "_RecordingPostgresConnection":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> _RecordingCursor:
+        self.statements.append((sql, params))
+        return self._handler(sql, params)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def _make_recording_pg_repo(
+    handler: Callable[[str, tuple[Any, ...]], _RecordingCursor],
+) -> tuple[PostgresExecutionControlRepository, _RecordingPostgresConnection]:
+    conn = _RecordingPostgresConnection(handler)
+    repo = object.__new__(PostgresExecutionControlRepository)
+    setattr(repo, "_connect", lambda: conn)
+    return repo, conn
+
+
+def _extract_ssh_lock_events(
+    statements: list[tuple[str, tuple[Any, ...]]],
+) -> list[tuple[str, str, str, tuple[Any, ...]]]:
+    events: list[tuple[str, str, str, tuple[Any, ...]]] = []
+    for sql, params in statements:
+        normalized = " ".join(sql.split())
+        upper = normalized.upper()
+        match = _LOCK_TABLE_PATTERN.search(normalized)
+        if match is None:
+            continue
+        table = match.group(1)
+        if upper.startswith("SELECT"):
+            if "FOR UPDATE" in upper:
+                events.append(("FOR UPDATE", table, normalized, params))
+            elif "FOR SHARE" in upper:
+                events.append(("FOR SHARE", table, normalized, params))
+            continue
+        for verb in ("UPDATE", "DELETE", "INSERT"):
+            if upper.startswith(verb):
+                events.append((verb, table, normalized, params))
+                break
+    return events
+
+
+def _assert_canonical_ssh_lock_order(
+    statements: list[tuple[str, tuple[Any, ...]]],
+    *,
+    allow_already_locked_target_update: str | None = None,
+) -> list[tuple[str, str, str, tuple[Any, ...]]]:
+    events = _extract_ssh_lock_events(statements)
+    assert events, "Expected at least one SSH row-locking statement."
+    locked_targets: set[str] = set()
+    max_rank = 0
+    for lock_kind, table, normalized, params in events:
+        if table == "execution_ssh_targets" and lock_kind == "FOR UPDATE" and params:
+            locked_targets.add(str(params[0]))
+        rank = _SSH_TABLE_LOCK_RANK[table]
+        if rank < max_rank:
+            is_allowed_reupdate = (
+                allow_already_locked_target_update is not None
+                and table == "execution_ssh_targets"
+                and lock_kind == "UPDATE"
+                and allow_already_locked_target_update in locked_targets
+                and allow_already_locked_target_update in params
+            )
+            assert is_allowed_reupdate, (
+                f"Non-canonical lock order: {lock_kind} on {table} after rank {max_rank}: {normalized}"
+            )
+        else:
+            max_rank = rank
+    return events
+
+
+def test_postgres_revoke_ssh_target_locks_tables_canonically_in_sql_order() -> None:
+    """#188 / A5 / C03: revoke_ssh_target locks targets, then all sessions in SQL order, then all interactions."""
+
+    now = datetime.now(timezone.utc)
+    target = build_enrolled_ssh_target(target_id="ssh_tgt_order_1")
+    other_target = build_enrolled_ssh_target(target_id="ssh_tgt_order_2", host="other.internal")
+    # Return matching rows in non-ASCII order to verify iteration preserves SQL ORDER BY without Python re-sorting.
+    sess_b = build_pending_enrolled_session(target, session_id="ssh_sess_b")
+    sess_a = build_pending_enrolled_session(target, session_id="ssh_sess_a")
+    sess_other = build_pending_enrolled_session(other_target, session_id="ssh_sess_other")
+    legacy_v1_json = json.dumps({"schema_version": 1, "session_id": "ssh_sess_v1"})
+
+    def handler(sql: str, params: tuple[Any, ...]) -> _RecordingCursor:
+        del params
+        if "CURRENT_TIMESTAMP" in sql:
+            return _RecordingCursor(rows=[{"database_now": now.isoformat()}])
+        if "FROM execution_ssh_targets" in sql:
+            return _RecordingCursor(rows=[{"record_json": target.model_dump_json()}])
+        if "FROM execution_interactive_sessions" in sql:
+            return _RecordingCursor(
+                rows=[
+                    {"session_id": sess_b.session_id, "record_json": sess_b.model_dump_json()},
+                    {"session_id": "ssh_sess_v1", "record_json": legacy_v1_json},
+                    {"session_id": sess_other.session_id, "record_json": sess_other.model_dump_json()},
+                    {"session_id": sess_a.session_id, "record_json": sess_a.model_dump_json()},
+                ]
+            )
+        return _RecordingCursor(rowcount=1)
+
+    pg_repo, conn = _make_recording_pg_repo(handler)
+    revoked = pg_repo.revoke_ssh_target(
+        team_id="team_alpha",
+        target_id=target.target_id,
+        revoked_by="person_admin",
+    )
+
+    assert revoked is not None and revoked.status == SSHTargetStatus.REVOKED
+    assert conn.commits == 1 and conn.rollbacks == 0
+    events = _assert_canonical_ssh_lock_order(conn.statements)
+    assert [(kind, table) for kind, table, _, _ in events] == [
+        ("FOR UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_interactive_sessions"),
+        ("UPDATE", "execution_interactive_sessions"),
+        ("UPDATE", "execution_ssh_interactions"),
+        ("UPDATE", "execution_ssh_interactions"),
+    ]
+    scan_sql = next(
+        " ".join(sql.split())
+        for sql, _ in conn.statements
+        if "FROM execution_interactive_sessions" in sql
+    )
+    assert "ORDER BY session_id" in scan_sql
+    session_update_ids = [params[2] for kind, table, _, params in events if table == "execution_interactive_sessions"]
+    interaction_update_ids = [params[2] for kind, table, _, params in events if table == "execution_ssh_interactions"]
+    assert session_update_ids == ["ssh_sess_b", "ssh_sess_a"]
+    assert interaction_update_ids == ["ssh_sess_b", "ssh_sess_a"]
+
+
+def test_postgres_revoke_interactive_session_locks_targets_before_sessions_and_interactions() -> None:
+    """#188 / A5 / C01: revoke_interactive_session locks unlatched targets first, then sessions, then interactions."""
+
+    now = datetime.now(timezone.utc)
+    target = build_enrolled_ssh_target(target_id="ssh_tgt_rev_sess")
+    session = build_pending_enrolled_session(target, session_id="ssh_sess_rev_1")
+
+    def handler(sql: str, params: tuple[Any, ...]) -> _RecordingCursor:
+        del params
+        if "CURRENT_TIMESTAMP" in sql:
+            return _RecordingCursor(rows=[{"database_now": now.isoformat()}])
+        if "SELECT record_json FROM execution_interactive_sessions" in sql:
+            return _RecordingCursor(rows=[{"record_json": session.model_dump_json()}])
+        if "FROM execution_ssh_targets" in sql:
+            return _RecordingCursor(
+                rows=[
+                    {
+                        "target_id": target.target_id,
+                        "password_bootstrap_claimed_by_session_id": session.session_id,
+                    }
+                ]
+            )
+        if "SELECT revoked_at_utc, revoked_by" in sql:
+            return _RecordingCursor(
+                rows=[{"revoked_at_utc": now.isoformat(), "revoked_by": "person_admin"}]
+            )
+        return _RecordingCursor(rowcount=1)
+
+    pg_repo, conn = _make_recording_pg_repo(handler)
+    revocation = pg_repo.revoke_interactive_session(
+        team_id="team_alpha",
+        session_id=session.session_id,
+        revoked_by="person_admin",
+    )
+
+    assert revocation is not None and revocation.revoked_by == "person_admin"
+    assert conn.commits == 1 and conn.rollbacks == 0
+    events = _assert_canonical_ssh_lock_order(conn.statements)
+    assert [(kind, table) for kind, table, _, _ in events] == [
+        ("FOR UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_interactive_sessions"),
+        ("UPDATE", "execution_ssh_interactions"),
+    ]
+    target_lock_sql = events[0][2]
+    assert "AND password_bootstrap_completed_at_utc IS NULL AND (target_id IN" in target_lock_sql
+    assert "ORDER BY target_id FOR UPDATE" in target_lock_sql
+
+
+def test_postgres_update_claimed_interactive_session_lock_order_and_rollback() -> None:
+    """#188 / A5: release=True locks targets first and rolls back on stale fence; release=False skips targets."""
+
+    target = build_enrolled_ssh_target(target_id="ssh_tgt_upd_rel")
+    session = build_pending_enrolled_session(target, session_id="ssh_sess_upd_rel").model_copy(
+        update={
+            "status": InteractiveSessionStatus.CLOSED,
+            "fence": 1,
+            "lease_owner": "broker-1",
+            "lease_token": "tok-1",
+            "lease_expires_at_utc": datetime.now(timezone.utc) + timedelta(minutes=5),
+        }
+    )
+
+    def _release_handler(session_rowcount: int) -> Callable[[str, tuple[Any, ...]], _RecordingCursor]:
+        def handler(sql: str, params: tuple[Any, ...]) -> _RecordingCursor:
+            del params
+            if "FROM execution_ssh_targets" in sql:
+                return _RecordingCursor(
+                    rows=[
+                        {
+                            "target_id": target.target_id,
+                            "password_bootstrap_claimed_by_session_id": session.session_id,
+                        }
+                    ]
+                )
+            if "UPDATE execution_interactive_sessions" in sql:
+                return _RecordingCursor(rowcount=session_rowcount)
+            return _RecordingCursor(rowcount=1)
+
+        return handler
+
+    # Valid release=True locks/clears targets before updating session and commits.
+    pg_repo, conn = _make_recording_pg_repo(_release_handler(1))
+    released = pg_repo.update_claimed_interactive_session(
+        session,
+        broker_id="broker-1",
+        lease_token="tok-1",
+        fence=1,
+        release=True,
+    )
+    assert released.lease_owner is None
+    assert conn.commits == 1 and conn.rollbacks == 0
+    events = _assert_canonical_ssh_lock_order(conn.statements)
+    assert [(kind, table) for kind, table, _, _ in events] == [
+        ("FOR UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_interactive_sessions"),
+    ]
+    assert "AND password_bootstrap_completed_at_utc IS NULL AND (target_id IN" in events[0][2]
+    assert "ORDER BY target_id FOR UPDATE" in events[0][2]
+
+    # Stale release=True rolls back any tentative target update instead of committing.
+    stale_repo, stale_conn = _make_recording_pg_repo(_release_handler(0))
+    with pytest.raises(StaleExecutionFence):
+        stale_repo.update_claimed_interactive_session(
+            session,
+            broker_id="broker-1",
+            lease_token="wrong-tok",
+            fence=1,
+            release=True,
+        )
+    assert stale_conn.commits == 0 and stale_conn.rollbacks == 1
+    _assert_canonical_ssh_lock_order(stale_conn.statements)
+
+    # release=False stays on the single-table fast path and never touches execution_ssh_targets.
+    renew_repo, renew_conn = _make_recording_pg_repo(_release_handler(1))
+    renew_repo.update_claimed_interactive_session(
+        session.model_copy(update={"status": InteractiveSessionStatus.OPEN}),
+        broker_id="broker-1",
+        lease_token="tok-1",
+        fence=1,
+        release=False,
+    )
+    assert renew_conn.commits == 1 and renew_conn.rollbacks == 0
+    assert not any("execution_ssh_targets" in sql for sql, _ in renew_conn.statements)
+    assert any("AND revoked_at_utc IS NULL" in sql for sql, _ in renew_conn.statements)
+
+
+def test_postgres_close_unleased_interactive_session_lock_order_and_race_rollback() -> None:
+    """#188 / A5: close_unleased locks targets before session FOR UPDATE and rolls back if newly leased."""
+
+    now = datetime.now(timezone.utc)
+    target = build_enrolled_ssh_target(target_id="ssh_tgt_close_unleased")
+    unleased = build_pending_enrolled_session(target, session_id="ssh_sess_close_unleased")
+    newly_leased = unleased.model_copy(
+        update={
+            "fence": 1,
+            "lease_owner": "broker-racer",
+            "lease_token": "tok-racer",
+            "lease_expires_at_utc": now + timedelta(minutes=5),
+        }
+    )
+
+    def _close_handler(*, leased_on_lock: bool) -> Callable[[str, tuple[Any, ...]], _RecordingCursor]:
+        def handler(sql: str, params: tuple[Any, ...]) -> _RecordingCursor:
+            del params
+            if "CURRENT_TIMESTAMP" in sql:
+                return _RecordingCursor(rows=[{"database_now": now.isoformat()}])
+            if "FROM execution_ssh_targets" in sql:
+                return _RecordingCursor(
+                    rows=[
+                        {
+                            "target_id": target.target_id,
+                            "password_bootstrap_claimed_by_session_id": unleased.session_id,
+                        }
+                    ]
+                )
+            if "FROM execution_interactive_sessions" in sql:
+                if "FOR UPDATE" in sql and leased_on_lock:
+                    return _RecordingCursor(rows=[{"record_json": newly_leased.model_dump_json()}])
+                return _RecordingCursor(rows=[{"record_json": unleased.model_dump_json()}])
+            return _RecordingCursor(rowcount=1)
+
+        return handler
+
+    pg_repo, conn = _make_recording_pg_repo(_close_handler(leased_on_lock=False))
+    closed = pg_repo.close_unleased_interactive_session(
+        team_id="team_alpha",
+        session_id=unleased.session_id,
+    )
+    assert closed is not None and closed.status == InteractiveSessionStatus.CLOSED
+    assert conn.commits == 1 and conn.rollbacks == 0
+    events = _assert_canonical_ssh_lock_order(conn.statements)
+    assert [(kind, table) for kind, table, _, _ in events] == [
+        ("FOR UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_ssh_targets"),
+        ("FOR UPDATE", "execution_interactive_sessions"),
+        ("UPDATE", "execution_interactive_sessions"),
+    ]
+    assert "ORDER BY target_id FOR UPDATE" in events[0][2]
+
+    # If a concurrent broker leased the session between peek and FOR UPDATE, roll back target update.
+    race_repo, race_conn = _make_recording_pg_repo(_close_handler(leased_on_lock=True))
+    with pytest.raises(StaleExecutionFence, match="leased"):
+        race_repo.close_unleased_interactive_session(
+            team_id="team_alpha",
+            session_id=unleased.session_id,
+        )
+    assert race_conn.commits == 0 and race_conn.rollbacks == 1
+    _assert_canonical_ssh_lock_order(race_conn.statements)
+
+
+def test_postgres_mark_interactive_sessions_lost_locks_multi_target_and_session_in_sql_order() -> None:
+    """#188 / A5 / C03: mark_interactive_sessions_lost locks multiple targets then sessions in SQL ORDER BY order."""
+
+    now = datetime.now(timezone.utc)
+    tgt_b = build_enrolled_ssh_target(target_id="ssh_tgt_b", host="b.internal")
+    tgt_a = build_enrolled_ssh_target(target_id="ssh_tgt_a", host="a.internal")
+    open_sess = build_pending_enrolled_session(tgt_b, session_id="ssh_sess_2").model_copy(
+        update={
+            "status": InteractiveSessionStatus.OPEN,
+            "fence": 1,
+            "lease_owner": "broker-1",
+            "lease_token": "tok-1",
+            "lease_expires_at_utc": now + timedelta(minutes=5),
+        }
+    )
+    pending_leased = build_pending_enrolled_session(tgt_a, session_id="ssh_sess_1").model_copy(
+        update={
+            "status": InteractiveSessionStatus.PENDING,
+            "fence": 1,
+            "lease_owner": "broker-2",
+            "lease_token": "tok-2",
+            "lease_expires_at_utc": now + timedelta(minutes=5),
+        }
+    )
+
+    def handler(sql: str, params: tuple[Any, ...]) -> _RecordingCursor:
+        del params
+        if "FROM execution_ssh_targets" in sql:
+            # Non-ASCII order returned by SQL ORDER BY target_id to verify no Python re-sorting.
+            return _RecordingCursor(
+                rows=[
+                    {
+                        "target_id": tgt_b.target_id,
+                        "password_bootstrap_claimed_by_session_id": open_sess.session_id,
+                    },
+                    {
+                        "target_id": tgt_a.target_id,
+                        "password_bootstrap_claimed_by_session_id": pending_leased.session_id,
+                    },
+                ]
+            )
+        if "FROM execution_interactive_sessions" in sql:
+            # Non-ASCII order returned by SQL ORDER BY session_id to verify no Python re-sorting.
+            return _RecordingCursor(
+                rows=[
+                    {"session_id": open_sess.session_id, "record_json": open_sess.model_dump_json()},
+                    {"session_id": pending_leased.session_id, "record_json": pending_leased.model_dump_json()},
+                ]
+            )
+        return _RecordingCursor(rowcount=1)
+
+    pg_repo, conn = _make_recording_pg_repo(handler)
+    recovered = pg_repo.mark_interactive_sessions_lost(
+        team_id="team_alpha",
+        updated_at_utc=now,
+    )
+
+    assert [item.session_id for item in recovered] == ["ssh_sess_2"]
+    assert conn.commits == 1 and conn.rollbacks == 0
+    events = _assert_canonical_ssh_lock_order(conn.statements)
+    assert [(kind, table) for kind, table, _, _ in events] == [
+        ("FOR UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_ssh_targets"),
+        ("UPDATE", "execution_ssh_targets"),
+        ("FOR UPDATE", "execution_interactive_sessions"),
+        ("UPDATE", "execution_interactive_sessions"),
+        ("UPDATE", "execution_interactive_sessions"),
+    ]
+    peek_sql = " ".join(conn.statements[0][0].split())
+    assert "FROM execution_interactive_sessions" in peek_sql and "ORDER BY session_id" in peek_sql
+    assert "FOR UPDATE" not in peek_sql
+    assert "ORDER BY target_id FOR UPDATE" in events[0][2]
+    assert "ORDER BY session_id FOR UPDATE" in events[3][2]
+    target_update_ids = [params[0] for kind, table, _, params in events if kind == "UPDATE" and table == "execution_ssh_targets"]
+    session_update_ids = [params[-2] for kind, table, _, params in events if kind == "UPDATE" and table == "execution_interactive_sessions"]
+    assert target_update_ids == ["ssh_tgt_b", "ssh_tgt_a"]
+    assert session_update_ids == ["ssh_sess_2", "ssh_sess_1"]
+
+
+def test_postgres_claim_password_bootstrap_locks_target_before_sessions_on_takeover() -> None:
+    """#188 / A5 / C03: claim_ssh_target_password_bootstrap locks target FOR UPDATE, checks claimer+holder FOR SHARE, then updates same target."""
+
+    now = datetime.now(timezone.utc)
+    target = build_enrolled_ssh_target(target_id="ssh_tgt_boot_takeover")
+    claimer = build_pending_enrolled_session(target, session_id="ssh_sess_claimer").model_copy(
+        update={
+            "status": InteractiveSessionStatus.OPEN,
+            "fence": 1,
+            "lease_owner": "broker-new",
+            "lease_token": "tok-new",
+            "lease_expires_at_utc": now + timedelta(minutes=5),
+        }
+    )
+    expired_holder = build_pending_enrolled_session(target, session_id="ssh_sess_holder").model_copy(
+        update={
+            "status": InteractiveSessionStatus.OPEN,
+            "fence": 1,
+            "lease_owner": "broker-old",
+            "lease_token": "tok-old",
+            "lease_expires_at_utc": now - timedelta(seconds=10),
+        }
+    )
+
+    def handler(sql: str, params: tuple[Any, ...]) -> _RecordingCursor:
+        del params
+        if "CURRENT_TIMESTAMP" in sql:
+            return _RecordingCursor(rows=[{"database_now": now.isoformat()}])
+        if "FROM execution_ssh_targets" in sql:
+            return _RecordingCursor(
+                rows=[
+                    {
+                        "status": SSHTargetStatus.ACTIVE.value,
+                        "expires_at_utc": (now + timedelta(hours=1)).isoformat(),
+                        "revoked_at_utc": None,
+                        "password_bootstrap_claimed_by_session_id": expired_holder.session_id,
+                        "password_bootstrap_completed_at_utc": None,
+                    }
+                ]
+            )
+        if "FROM execution_interactive_sessions" in sql:
+            return _RecordingCursor(
+                rows=[
+                    {
+                        "session_id": claimer.session_id,
+                        "desired_or_status": claimer.status.value,
+                        "lease_owner": claimer.lease_owner,
+                        "lease_expires_at_utc": claimer.lease_expires_at_utc.isoformat()
+                        if claimer.lease_expires_at_utc
+                        else None,
+                        "revoked_at_utc": None,
+                        "record_json": claimer.model_dump_json(),
+                    },
+                    {
+                        "session_id": expired_holder.session_id,
+                        "desired_or_status": expired_holder.status.value,
+                        "lease_owner": expired_holder.lease_owner,
+                        "lease_expires_at_utc": expired_holder.lease_expires_at_utc.isoformat()
+                        if expired_holder.lease_expires_at_utc
+                        else None,
+                        "revoked_at_utc": None,
+                        "record_json": expired_holder.model_dump_json(),
+                    },
+                ]
+            )
+        return _RecordingCursor(rowcount=1)
+
+    pg_repo, conn = _make_recording_pg_repo(handler)
+    claimed = pg_repo.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha",
+        target_id=target.target_id,
+        session_id=claimer.session_id,
+    )
+
+    assert claimed is True
+    assert conn.commits == 1 and conn.rollbacks == 0
+    events = _assert_canonical_ssh_lock_order(
+        conn.statements,
+        allow_already_locked_target_update=target.target_id,
+    )
+    assert [(kind, table) for kind, table, _, _ in events] == [
+        ("FOR UPDATE", "execution_ssh_targets"),
+        ("FOR SHARE", "execution_interactive_sessions"),
+        ("UPDATE", "execution_ssh_targets"),
+    ]
+    session_lock_sql = events[1][2]
+    assert "ORDER BY session_id FOR SHARE" in session_lock_sql
+    assert set(events[1][3][1:]) == {claimer.session_id, expired_holder.session_id}
+    assert events[2][3][1] == target.target_id
+
+
+def test_sqlite_multi_session_target_revocation_isolation_and_coalesce(tmp_path: Path) -> None:
+    """A2 / A5: SQLite target revocation cascades across multiple sessions, isolates other targets, and preserves COALESCE."""
+
+    repository = _repository(tmp_path)
+    target_a = build_enrolled_ssh_target(target_id="ssh_tgt_multi_a", host="a.internal")
+    target_b = build_enrolled_ssh_target(target_id="ssh_tgt_multi_b", host="b.internal")
+    repository.put_ssh_target(target_a)
+    repository.put_ssh_target(target_b)
+
+    sess_a1 = create_live_enrolled_session(repository, target_a, session_id="ssh_sess_a1", broker_id="b1", lease_token="t1")
+    sess_a2 = create_live_enrolled_session(repository, target_a, session_id="ssh_sess_a2", broker_id="b2", lease_token="t2")
+    sess_b1 = create_live_enrolled_session(repository, target_b, session_id="ssh_sess_b1", broker_id="b3", lease_token="t3")
+    old_sess = _session(_owner(), session_id="ssh_sess_old_skip")
+    repository.create_interactive_session(old_sess)
+    _save_as_old_format(
+        repository,
+        "execution_interactive_sessions",
+        "session_id",
+        old_sess.session_id,
+        connect_activation=_old_activation(old_sess.session_id),
+    )
+
+    for sess in (sess_a1, sess_a2, sess_b1):
+        repository.put_ssh_interaction(build_ssh_interaction_activation(sess))
+
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target_a.target_id, session_id=sess_a1.session_id
+    ) is True
+
+    first_time = datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc)
+    second_time = first_time + timedelta(minutes=15)
+    revoked_first = repository.revoke_ssh_target(
+        team_id="team_alpha",
+        target_id=target_a.target_id,
+        revoked_by="person_admin_first",
+        revoked_at_utc=first_time,
+    )
+    assert revoked_first is not None
+    assert revoked_first.revoked_by == "person_admin_first"
+    assert revoked_first.revoked_at_utc == first_time
+
+    # Re-revoking with a different actor/time preserves the original revocation metadata via COALESCE.
+    revoked_second = repository.revoke_ssh_target(
+        team_id="team_alpha",
+        target_id=target_a.target_id,
+        revoked_by="person_admin_second",
+        revoked_at_utc=second_time,
+    )
+    assert revoked_second is not None
+    assert revoked_second.revoked_by == "person_admin_first"
+    assert revoked_second.revoked_at_utc == first_time
+
+    for sess_id in (sess_a1.session_id, sess_a2.session_id):
+        rev = repository.get_interactive_session_revocation(team_id="team_alpha", session_id=sess_id)
+        assert rev is not None
+        assert rev.revoked_by == "person_admin_first"
+        assert rev.revoked_at_utc == first_time
+        inter = repository.get_ssh_interaction(team_id="team_alpha", session_id=sess_id)
+        assert inter is not None
+        assert inter.revoked_by == "person_admin_first"
+        assert inter.revoked_at_utc == first_time
+
+    # Sessions and interactions for target_b remain unrevoked.
+    assert repository.get_interactive_session_revocation(team_id="team_alpha", session_id=sess_b1.session_id) is None
+    inter_b = repository.get_ssh_interaction(team_id="team_alpha", session_id=sess_b1.session_id)
+    assert inter_b is not None and inter_b.revoked_at_utc is None
+
+
+def test_sqlite_rollback_preserves_bootstrap_claims_and_expiry_allows_takeover(tmp_path: Path) -> None:
+    """A2 / A5: Failed fenced release/close keeps bootstrap claims intact; valid release/expired close/takeover clear or transfer them."""
+
+    repository = _repository(tmp_path)
+    target = build_enrolled_ssh_target(target_id="ssh_tgt_rollback_boot")
+    repository.put_ssh_target(target)
+
+    sess_1 = create_live_enrolled_session(repository, target, session_id="ssh_sess_rb_1", broker_id="b1", lease_token="tok-1")
+    sess_2 = create_live_enrolled_session(repository, target, session_id="ssh_sess_rb_2", broker_id="b2", lease_token="tok-2")
+
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_1.session_id
+    ) is True
+    # Idempotent re-claim by the same live session succeeds.
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_1.session_id
+    ) is True
+
+    # Stale-fence release=True must roll back and NOT clear sess_1's bootstrap claim.
+    with pytest.raises(StaleExecutionFence):
+        repository.update_claimed_interactive_session(
+            sess_1.model_copy(update={"status": InteractiveSessionStatus.CLOSED}),
+            broker_id="b1",
+            lease_token="wrong-token",
+            fence=sess_1.fence,
+            release=True,
+        )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_2.session_id
+    ) is False
+
+    # close_unleased on actively leased sess_1 must fail and NOT clear its bootstrap claim.
+    with pytest.raises(StaleExecutionFence, match="leased"):
+        repository.close_unleased_interactive_session(team_id="team_alpha", session_id=sess_1.session_id)
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_2.session_id
+    ) is False
+
+    # Valid release=True releases the lease AND clears the bootstrap claim so sess_2 can claim.
+    repository.update_claimed_interactive_session(
+        sess_1.model_copy(update={"status": InteractiveSessionStatus.CLOSED}),
+        broker_id="b1",
+        lease_token="tok-1",
+        fence=sess_1.fence,
+        release=True,
+    )
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_2.session_id
+    ) is True
+
+    # Expire sess_2's lease directly in SQLite -> sess_3 can take over, or close_unleased clears claim.
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    with repository._connect() as connection:
+        expired_model = sess_2.model_copy(update={"lease_expires_at_utc": datetime.fromisoformat(expired_at)})
+        connection.execute(
+            "UPDATE execution_interactive_sessions SET lease_expires_at_utc = ?, record_json = ? WHERE session_id = ?",
+            (expired_at, expired_model.model_dump_json(), sess_2.session_id),
+        )
+        connection.commit()
+
+    closed_expired = repository.close_unleased_interactive_session(
+        team_id="team_alpha",
+        session_id=sess_2.session_id,
+        disconnected=True,
+    )
+    assert closed_expired is not None and closed_expired.status == InteractiveSessionStatus.DISCONNECTED
+
+    sess_3 = create_live_enrolled_session(repository, target, session_id="ssh_sess_rb_3", broker_id="b3", lease_token="tok-3")
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_3.session_id
+    ) is True
+
+    # Expire sess_3's lease without closing it -> live sess_4 takes over directly.
+    with repository._connect() as connection:
+        expired_3 = sess_3.model_copy(update={"lease_expires_at_utc": datetime.fromisoformat(expired_at)})
+        connection.execute(
+            "UPDATE execution_interactive_sessions SET lease_expires_at_utc = ?, record_json = ? WHERE session_id = ?",
+            (expired_at, expired_3.model_dump_json(), sess_3.session_id),
+        )
+        connection.commit()
+
+    sess_4 = create_live_enrolled_session(repository, target, session_id="ssh_sess_rb_4", broker_id="b4", lease_token="tok-4")
+    assert repository.claim_ssh_target_password_bootstrap(
+        team_id="team_alpha", target_id=target.target_id, session_id=sess_4.session_id
+    ) is True
