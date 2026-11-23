@@ -71,6 +71,7 @@ from runtime_hosting.execution_contracts import (
     ServiceRestartPolicy,
     TERMINAL_INTERACTIVE_SESSION_STATUSES,
     enrolled_ssh_target_digest,
+    parse_ssh_secret_recipe,
     ssh_interaction_resource_digest,
     ssh_public_key_sha256_fingerprint,
     utc_now,
@@ -109,8 +110,10 @@ _STALE = "If this changes before approval, the change is refused and must be sta
 _REMOTE_HOST_SECRET_BOUNDARY_NOTE = (
     "Security note: The broker never places secrets in prompts, tool arguments, logs, command lines, "
     "transcripts, or agent-written commands. Any secret sent to the remote host can still be captured "
-    "by whoever controls that host; enroll SSH keys before running arbitrary commands, prefer single-use "
-    "ephemeral Tailscale auth keys, and rotate bootstrap passwords afterward."
+    "by whoever controls that host, and shell, typing, or file-upload access on the same remote account "
+    "can compromise later broker sudo or secret-recipe runs on that account; enroll SSH keys and run "
+    "recipe-only bootstrap before granting shell/upload access, prefer single-use ephemeral Tailscale "
+    "auth keys, and rotate bootstrap passwords afterward."
 )
 
 
@@ -1425,7 +1428,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
                     "Cannot restrict SSH delegation to this request without a verified signed task context."
                 )
             delegated_work_id = work_id
-        parsed_recipes = tuple(SSHSecretRecipe(recipe) for recipe in allowed_secret_recipes)
+        parsed_recipes = tuple(parse_ssh_secret_recipe(recipe) for recipe in allowed_secret_recipes)
         bounds = SSHDelegationBoundsV1(
             delegated_agent_type=normalized_agent_type,
             delegated_task_id=delegated_work_id,

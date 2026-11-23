@@ -1479,11 +1479,14 @@ Who decides, with authorization on:
   time-bounded SSH session (optionally to one specialist type for one task)
   with explicit capability flags (commands, interactive typing, one-time
   password key bootstrap, unrestricted broker `sudo`, named broker secret
-  recipes such as `tailscale_up`—approvable without unrestricted root `sudo`—or
-  filtered workspace bundle upload). Administrators can inspect enrolled hosts
-  and active delegated sessions (with separate badges for unrestricted broker
-  `sudo` and named secret recipes) and revoke or terminate them immediately in
-  **Settings → Tasks → Brokered SSH**.
+  recipes such as `tailscale_up`—approvable without unrestricted root `sudo` on
+  sessions without shell, typing, or upload access—or filtered workspace bundle
+  upload). Because shell or file writes on the same remote account can
+  compromise later broker `sudo` runs, complete recipe-only bootstrap before
+  granting shell or upload access and rotate bootstrap passwords afterward.
+  Administrators can inspect enrolled hosts and active delegated sessions (with
+  separate badges for unrestricted broker `sudo` and named secret recipes) and
+  revoke or terminate them immediately in **Settings → Tasks → Brokered SSH**.
 
 With authorization off, TeamLead asks for your agreement in the chat instead.
 

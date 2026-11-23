@@ -24,7 +24,8 @@ export const EXECUTION_SSH_INTRO = "Enrolled SSH hosts and delegated agent sessi
 export const EXECUTION_SSH_DISABLED_NOTE = "Brokered SSH is currently turned off in instance configuration "
   + "(execution_control.enabled or execution_control.ssh.enabled is false). Existing records can still be reviewed and revoked.";
 export const EXECUTION_SSH_SECRET_BOUNDARY_NOTE = "Broker secret recipes run broker-owned scripts and do not grant unrestricted root commands "
-  + "unless Broker sudo (unrestricted root) is also shown. Any secret sent to a remote host can still be observed by whoever controls that host.";
+  + "unless Broker sudo (unrestricted root) is also shown. Any secret sent to a remote host can still be observed by whoever controls that host, "
+  + "and shell, typing, or file-upload access on the same remote account can compromise later broker sudo or secret-recipe runs; rotate bootstrap passwords afterward.";
 export const CAPABILITY_LABELS = Object.freeze({
   commands: "Commands",
   typing: "Typing",
@@ -65,16 +66,26 @@ export function statusBadgeClass(value) {
 
 export function capabilityLabel(name) {
   const key = text(name);
-  return CAPABILITY_LABELS[key] || key.replaceAll("_", " ");
+  return Object.hasOwn(CAPABILITY_LABELS, key)
+    ? CAPABILITY_LABELS[key]
+    : key.replaceAll("_", " ");
+}
+
+function normalizedCapabilities(session) {
+  return Array.isArray(session && session.capabilities)
+    ? session.capabilities.map(text).filter(Boolean)
+    : [];
+}
+
+function normalizedSecretRecipes(session) {
+  if (!Array.isArray(session && session.allowed_secret_recipes)) return [];
+  return [...new Set(session.allowed_secret_recipes.map(text).filter(Boolean))];
 }
 
 export function sessionCapabilityLabels(session) {
-  const caps = Array.isArray(session && session.capabilities) ? session.capabilities : [];
-  const recipes = Array.isArray(session && session.allowed_secret_recipes)
-    ? session.allowed_secret_recipes.map(text).filter(Boolean)
-    : [];
+  const caps = normalizedCapabilities(session);
+  const recipes = normalizedSecretRecipes(session);
   const hasBrokerSudo = caps.includes("broker_sudo");
-  const hasRecipeCap = caps.includes("secret_recipes");
   const labels = [];
   let recipeLabelAdded = false;
   const formatRecipesBadge = () => {
@@ -86,7 +97,7 @@ export function sessionCapabilityLabels(session) {
     return hasBrokerSudo ? "Secret recipes" : CAPABILITY_LABELS.secret_recipes;
   };
   caps.forEach(cap => {
-    if (text(cap) === "secret_recipes") {
+    if (cap === "secret_recipes") {
       if (!recipeLabelAdded) {
         labels.push(formatRecipesBadge());
         recipeLabelAdded = true;
@@ -95,17 +106,15 @@ export function sessionCapabilityLabels(session) {
     }
     labels.push(capabilityLabel(cap));
   });
-  if (!recipeLabelAdded && (recipes.length > 0 || hasRecipeCap)) {
+  if (!recipeLabelAdded && recipes.length > 0) {
     labels.push(formatRecipesBadge());
   }
   return labels;
 }
 
 function sessionUsesRemoteHostSecrets(session) {
-  const caps = Array.isArray(session && session.capabilities) ? session.capabilities : [];
-  const recipes = Array.isArray(session && session.allowed_secret_recipes)
-    ? session.allowed_secret_recipes.map(text).filter(Boolean)
-    : [];
+  const caps = normalizedCapabilities(session);
+  const recipes = normalizedSecretRecipes(session);
   return (
     recipes.length > 0
     || caps.includes("secret_recipes")

@@ -1153,7 +1153,13 @@ the broker may connect and what administrators may delegate:
   off password bootstrap for that host. Administrators can also approve named
   broker-owned secret recipes (such as `tailscale_up`) independently of
   unrestricted broker `sudo` (`allow_broker_sudo`), so a recipe-only delegation
-  can run approved recipes while refusing free-form root commands.
+  can run approved recipes while refusing free-form root commands. To prevent
+  remote-account shell or file writes from intercepting broker `sudo`
+  authentication, recipe-only delegations (`allow_broker_sudo: false`) cannot be
+  combined with `allow_commands`, `allow_typing`, or `allow_workspace_transfer`
+  on the same session; run key bootstrap and recipe-only setup before granting
+  shell or upload access on that remote account and rotate bootstrap passwords
+  afterward.
 - **Operator-pinned disk-key targets:** Each `execution_control.ssh.targets`
   item pins the host, port, username, host-key algorithm and fingerprint, the
   id of its key material (`credential_binding_id`), identity file, and

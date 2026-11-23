@@ -1013,7 +1013,12 @@ class BrokerExecutionSSHRuntime:
 
         if action == "run_execution_ssh_sudo":
             raw_recipe_params = params.get("recipe_params")
-            recipe_params = dict(raw_recipe_params) if isinstance(raw_recipe_params, Mapping) else None
+            if raw_recipe_params is None:
+                recipe_params = None
+            elif isinstance(raw_recipe_params, Mapping):
+                recipe_params = dict(raw_recipe_params)
+            else:
+                raise ValueError("recipe_params must be a JSON object.")
             sudo_timeout = float(params.get("timeout_seconds", 120.0))
             wait_seconds = max(0.0, min(float(params.get("wait_seconds", 5.0)), 60.0))
             sudo_result = await broker.run_sudo(

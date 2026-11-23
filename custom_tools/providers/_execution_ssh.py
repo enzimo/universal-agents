@@ -636,10 +636,11 @@ def create_execution_ssh_session(
 ) -> str:
     """Create a session for one installed or enrolled SSH target that you can open, read and resize.
 
-    Remote commands, typing, password bootstrap, broker sudo, and workspace
-    bundle upload each need an administrator's bounded approval for the session:
-    call plan_execution_ssh_interaction, then apply_change. With authorization
-    off, get the person's agreement first and pass confirmed=true.
+    Remote commands, typing, password bootstrap, broker sudo, named broker
+    secret recipes, and workspace bundle upload each need an administrator's
+    bounded approval for the session: call plan_execution_ssh_interaction, then
+    apply_change. With authorization off, get the person's agreement first and
+    pass confirmed=true.
     """
     try:
         service, error = _manager_service("create_execution_ssh_session")
@@ -680,7 +681,11 @@ def plan_execution_ssh_interaction(
     named broker secret recipe in allowed_secret_recipes_json (for example
     '["tailscale_up"]'). Named secret recipes can be approved with
     allow_broker_sudo=false so the session runs only those broker-owned recipes
-    without unrestricted root sudo. When this_request_only is omitted, it
+    without unrestricted root sudo (optionally paired with
+    allow_password_bootstrap=true, but never combined with allow_commands,
+    allow_typing, or allow_workspace_transfer on the same session unless
+    allow_broker_sudo=true is explicitly approved). When this_request_only is
+    omitted, it
     defaults to true when delegated_agent_type is set (single-request worker
     delegation) and false otherwise (usable across follow-up messages from the
     same person on this session until it expires or is revoked). Pass
@@ -1041,6 +1046,12 @@ async def run_execution_ssh_sudo(
             return json.dumps({"error": error})
         recipe_params = _json_dict(recipe_params_json, field_name="recipe_params_json")
         bounded_wait = max(0.0, min(float(wait_seconds), 60.0))
+        cleaned_recipe = str(secret_recipe or "").strip()
+        audit_reason = (
+            f"Run SSH secret recipe {cleaned_recipe} on session {session_id}"
+            if cleaned_recipe
+            else f"Run broker sudo on SSH session {session_id}"
+        )
         result = await call_execution_ssh_broker(
             "run_execution_ssh_sudo",
             {
@@ -1052,7 +1063,7 @@ async def run_execution_ssh_sudo(
                 "timeout_seconds": timeout_seconds,
                 "wait_seconds": bounded_wait,
             },
-            reason=f"Run broker sudo on SSH session {session_id}",
+            reason=audit_reason,
             timeout_seconds=bounded_wait + 30.0,
         )
         return json.dumps(result)

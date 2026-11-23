@@ -47,6 +47,7 @@ from runtime_hosting.execution_contracts import (
     SSHSecretRecipe,
     SSHTargetPlatform,
     TERMINAL_INTERACTIVE_SESSION_STATUSES,
+    parse_ssh_secret_recipe,
     ssh_public_key_sha256_fingerprint,
 )
 from runtime_hosting.ssh_credentials import (
@@ -92,6 +93,7 @@ from runtime_hosting.ssh_operations import (
     build_tar_gz_bundle,
     probe_ssh_host_key,
     validate_remote_destination,
+    validate_sudo_secret_recipe_params,
     validate_trusted_bin_paths,
 )
 from storage.execution_control_repository import (
@@ -1769,12 +1771,11 @@ class SSHSessionBroker:
         self._require_not_shutting_down()
         normalized_cmd = str(command or "").strip() or None
         normalized_extra = str(extra_secret_field or "").strip() or None
-        raw_recipe = (
-            secret_recipe.value
-            if isinstance(secret_recipe, SSHSecretRecipe)
-            else str(secret_recipe or "").strip()
-        )
-        parsed_recipe = SSHSecretRecipe(raw_recipe) if raw_recipe else None
+        if isinstance(secret_recipe, SSHSecretRecipe):
+            parsed_recipe: SSHSecretRecipe | None = secret_recipe
+        else:
+            raw_recipe = str(secret_recipe or "").strip()
+            parsed_recipe = parse_ssh_secret_recipe(raw_recipe) if raw_recipe else None
 
         if normalized_extra is not None:
             if normalized_extra in FORBIDDEN_EXTRA_SECRET_FIELDS:
@@ -1797,9 +1798,10 @@ class SSHSessionBroker:
                 raise ValueError(
                     "Do not pass free command text together with a broker secret_recipe."
                 )
+            validate_sudo_secret_recipe_params(parsed_recipe, recipe_params)
         elif normalized_cmd is None:
             raise ValueError("run_sudo requires either a command or an approved secret_recipe.")
-        elif recipe_params:
+        elif recipe_params is not None:
             raise ValueError(
                 "recipe_params can only be used with an approved broker secret_recipe."
             )

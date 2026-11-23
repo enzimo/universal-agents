@@ -1571,6 +1571,66 @@ def test_ssh_delegation_rejects_unknown_agent_types_invalid_targets_expired_sess
             allow_broker_sudo=True,
             allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
         )
+    # F1, F4, F5: Recipe-only staging (allow_broker_sudo=False) enforces the exact same target guardrails,
+    # plain-language recipe parsing errors, and forbids combining with allow_commands/allow_typing/allow_workspace_transfer.
+    with pytest.raises(ValueError, match="dynamically enrolled SSH target"):
+        interact.stage(
+            session_id=sess_static.session_id,
+            reason="Recipe-only on static target",
+            ttl_seconds=300,
+            allow_broker_sudo=False,
+            allowed_secret_recipes=("tailscale_up",),
+        )
+    with pytest.raises(ValueError, match="bootstrap_credential_key"):
+        interact.stage(
+            session_id=sess_no_boot.session_id,
+            reason="Recipe-only without bootstrap cred",
+            ttl_seconds=300,
+            allow_broker_sudo=False,
+            allowed_secret_recipes=("tailscale_up",),
+        )
+    with pytest.raises(ValueError, match="not supported on Windows"):
+        interact.stage(
+            session_id=sess_win.session_id,
+            reason="Recipe-only on Windows",
+            ttl_seconds=300,
+            allow_broker_sudo=False,
+            allowed_secret_recipes=("tailscale_up",),
+        )
+    with pytest.raises(ValueError, match="tailscale_auth_key"):
+        interact.stage(
+            session_id=sess_no_ts.session_id,
+            reason="Recipe-only without tailscale key",
+            ttl_seconds=300,
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(" tailscale_up ",),
+        )
+    with pytest.raises(ValueError, match=r"must not be empty.*tailscale_up"):
+        interact.stage(
+            session_id=sess_no_ts.session_id,
+            reason="Blank recipe name",
+            ttl_seconds=300,
+            allow_broker_sudo=False,
+            allowed_secret_recipes=("   ",),
+        )
+    with pytest.raises(ValueError, match=r"Unknown SSH secret recipe 'bad_recipe'.*tailscale_up"):
+        interact.stage(
+            session_id=sess_no_ts.session_id,
+            reason="Unknown recipe name",
+            ttl_seconds=300,
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(" bad_recipe ",),
+        )
+    for forbidden_combo in ("allow_commands", "allow_typing", "allow_workspace_transfer"):
+        with pytest.raises(ValueError, match="cannot be combined with"):
+            interact.stage(
+                session_id=sess_no_ts.session_id,
+                reason=f"Recipe-only mixed with {forbidden_combo}",
+                ttl_seconds=300,
+                allow_broker_sudo=False,
+                allowed_secret_recipes=("tailscale_up",),
+                **{forbidden_combo: True},
+            )
 
     # C44(b): After an approval expires, staging and applying both tell the agent to create a new session.
     t0 = datetime(2026, 11, 22, 14, 0, 0, tzinfo=timezone.utc)
@@ -2324,6 +2384,9 @@ def _write_fake_tool_sudo(directory: Path, *, expected_password: str) -> Path:
         f"stamp = pathlib.Path({str(stamp_dir)!r}) / f'ppid_{{os.getppid()}}'\n"
         f"expected = {expected_password!r}\n"
         "args = sys.argv[1:]\n"
+        "if args == ['-k']:\n"
+        "    stamp.unlink(missing_ok=True)\n"
+        "    sys.exit(0)\n"
         "if '-S' in args and '-v' in args:\n"
         "    pw = sys.stdin.readline().rstrip('\\r\\n')\n"
         "    if pw != expected:\n"
@@ -7545,7 +7608,7 @@ async def test_ssh_recipe_only_delegation_end_to_end_real_cedar(
         assert combined_refused["error_code"] == "invalid_argument", combined_refused
         assert "Do not pass free command text together with a broker secret_recipe" in combined_refused["error"]
 
-        # 7. A5: Combined Session B (allow_broker_sudo=True + tailscale_up) continues running both free-form sudo and recipe.
+        # 7. A5 & F5: Combined Session B (allow_broker_sudo=True + tailscale_up) continues running both free-form sudo and recipe.
         sudo_free_ok = await _invoke_with_access_hook(
             worker,
             tools.run_execution_ssh_sudo,
@@ -7556,6 +7619,73 @@ async def test_ssh_recipe_only_delegation_end_to_end_real_cedar(
         )
         assert sudo_free_ok["status"] == "completed", sudo_free_ok
         assert "sudo-combined-ok" in sudo_free_ok["stdout"]
+
+        ts_record.unlink(missing_ok=True)
+        sudo_recipe_ok = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
+            session_id=session_b_id,
+            secret_recipe="tailscale_up",
+            extra_secret_field="tailscale_auth_key",
+            recipe_params_json=json.dumps({"hostname": "combined-e2e"}),
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+        assert sudo_recipe_ok["status"] == "completed", sudo_recipe_ok
+        assert ts_key not in sudo_recipe_ok["stdout"]
+        combined_ts_data = json.loads(ts_record.read_text(encoding="utf-8"))
+        assert combined_ts_data["auth_key"] == ts_key
+        assert "--hostname" in combined_ts_data["args"] and "combined-e2e" in combined_ts_data["args"]
+
+        # F2: BrokerExecutionSSHRuntime refuses non-object recipe_params instead of coercing to None.
+        from custom_tools.broker_execution_ssh import ExecutionSSHBrokerError
+        from custom_tools.providers import _execution_ssh as ssh_tool_mod
+
+        set_agent_ref(worker)
+        with pytest.raises(ExecutionSSHBrokerError, match="recipe_params must be a JSON object") as bad_rp_exc:
+            await ssh_tool_mod.call_execution_ssh_broker(
+                "run_execution_ssh_sudo",
+                {
+                    "session_id": session_b_id,
+                    "secret_recipe": "tailscale_up",
+                    "recipe_params": ["not-an-object"],
+                },
+                reason="Test non-object recipe_params refusal",
+            )
+        assert bad_rp_exc.value.error_code == "invalid_argument"
+
+        # F6: create_execution_ssh_session docstring names secret recipes, and run_execution_ssh_sudo
+        # uses distinct audit reasons for secret-recipe vs free-form sudo broker calls.
+        assert "named broker" in (tools.create_execution_ssh_session._tool_func.__doc__ or "")
+
+        captured_reasons: list[str] = []
+        orig_broker_call = ssh_tool_mod.call_execution_ssh_broker
+
+        async def _capture_reason(action: str, payload: dict[str, Any], *, reason: str, **kw: Any) -> dict[str, Any]:
+            captured_reasons.append(reason)
+            return await orig_broker_call(action, payload, reason=reason, **kw)
+
+        monkeypatch.setattr(ssh_tool_mod, "call_execution_ssh_broker", _capture_reason)
+        await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
+            session_id=session_b_id,
+            secret_recipe=" tailscale_up ",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+        await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
+            session_id=session_b_id,
+            command="echo reason-check",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+        assert captured_reasons == [
+            f"Run SSH secret recipe tailscale_up on session {session_b_id}",
+            f"Run broker sudo on SSH session {session_b_id}",
+        ]
 
         await _invoke_with_access_hook(worker, tools.close_execution_ssh_session, session_id=session_a_id)
         await _invoke_with_access_hook(worker, tools.close_execution_ssh_session, session_id=session_b_id)

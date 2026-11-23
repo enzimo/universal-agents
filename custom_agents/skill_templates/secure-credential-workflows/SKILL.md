@@ -646,7 +646,10 @@ brokered SSH (see `runtime-operations-workflows`):
   `admin_password` secret, optional `ssh_public_key` / `ssh_private_key` /
   `ssh_passphrase`, optional `tailscale_auth_key` secret) for initial host
   bootstrapping, unrestricted broker `sudo`, or named broker secret recipes
-  (which can be approved without unrestricted root `sudo`).
+  (which can be approved without unrestricted root `sudo` on sessions without
+  shell, typing, or upload access; run recipe-only bootstrap before granting
+  shell/upload access on that remote account and rotate bootstrap passwords
+  afterward).
 - Collect missing SSH credentials through the broker's secure form
   (`secure_credential_collection_request`), never in chat, prompts, workspace
   files, or shell commands.

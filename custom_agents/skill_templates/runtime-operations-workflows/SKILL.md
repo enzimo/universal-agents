@@ -1203,9 +1203,15 @@ For SSH:
    `allow_broker_sudo`, `allow_workspace_transfer`, `allowed_secret_recipes_json`),
    then `apply_change` for administrator approval. Named secret recipes (such as
    `allowed_secret_recipes_json='["tailscale_up"]'`) can be approved on their own
-   with `allow_broker_sudo=false` so least-privilege sessions can run approved
-   recipes via `run_execution_ssh_sudo(secret_recipe=...)` while refusing
-   free-form `run_execution_ssh_sudo(command=...)`.
+   with `allow_broker_sudo=false` (and optionally `allow_password_bootstrap=true`)
+   so least-privilege sessions can run approved recipes via
+   `run_execution_ssh_sudo(secret_recipe=...)` while refusing free-form
+   `run_execution_ssh_sudo(command=...)`. Recipe-only delegations cannot be
+   combined with `allow_commands`, `allow_typing`, or `allow_workspace_transfer`
+   on the same session because shell or file writes on the remote account could
+   intercept broker `sudo` authentication; run key bootstrap and recipe-only
+   steps before granting shell/upload access on a separate session, and rotate
+   bootstrap passwords afterward.
 4. Delegating a session to a worker type (`delegated_agent_type`): workers hold no
    lasting access of their own. TeamLead must hold delegable `fn:execution_control`
    access for the person's work (via `request_access` with `hand_on=True` if not
