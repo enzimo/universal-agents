@@ -1769,7 +1769,12 @@ class SSHSessionBroker:
         self._require_not_shutting_down()
         normalized_cmd = str(command or "").strip() or None
         normalized_extra = str(extra_secret_field or "").strip() or None
-        parsed_recipe = SSHSecretRecipe(secret_recipe) if secret_recipe is not None else None
+        raw_recipe = (
+            secret_recipe.value
+            if isinstance(secret_recipe, SSHSecretRecipe)
+            else str(secret_recipe or "").strip()
+        )
+        parsed_recipe = SSHSecretRecipe(raw_recipe) if raw_recipe else None
 
         if normalized_extra is not None:
             if normalized_extra in FORBIDDEN_EXTRA_SECRET_FIELDS:
@@ -1794,6 +1799,10 @@ class SSHSessionBroker:
                 )
         elif normalized_cmd is None:
             raise ValueError("run_sudo requires either a command or an approved secret_recipe.")
+        elif recipe_params:
+            raise ValueError(
+                "recipe_params can only be used with an approved broker secret_recipe."
+            )
 
         session = self._session_for_operation(session_id)
         enrolled_target, interaction = self._authorize_session(

@@ -47,6 +47,7 @@ from runtime_hosting.execution_contracts import (
     OwnerScopeKind,
     OwnerScopeV1,
     SSHDelegationBoundsV1,
+    SSHSecretRecipe,
     SSHTargetLifecycle,
     SSHTargetPlatform,
     SSHTargetStatus,
@@ -147,6 +148,7 @@ def _seed_target_and_session(
     allow_commands: bool = False,
     allow_broker_sudo: bool = True,
     allow_workspace_transfer: bool = True,
+    allowed_secret_recipes: tuple[SSHSecretRecipe, ...] = (),
     person_roles: tuple[str, ...] = (),
 ) -> tuple[EnrolledSSHTargetV1, InteractiveSessionV1]:
     alg, fingerprint, pubkey = _sample_ed25519_key(target_id)
@@ -271,6 +273,7 @@ def _seed_target_and_session(
                 allow_password_bootstrap=False,
                 allow_broker_sudo=allow_broker_sudo,
                 allow_workspace_transfer=allow_workspace_transfer,
+                allowed_secret_recipes=allowed_secret_recipes,
             )
         )
         interaction_activation = ActivationRecordV2.build(
@@ -750,7 +753,7 @@ def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
         allow_broker_sudo=True,
         allow_workspace_transfer=False,
     )
-    # 4) Bounded delegation with all capability flags disabled.
+    # 4) Connect-only active session without an interaction record (no capabilities).
     _seed_target_and_session(
         repo,
         team_id=config.manager.team_id,
@@ -758,11 +761,7 @@ def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
         target_id="ssh_tgt_empty",
         session_id="ssh_sess_empty",
         owner_agent_type="TeamArchitect",
-        with_interaction=True,
-        delegated_agent_type=None,
-        allow_commands=False,
-        allow_broker_sudo=False,
-        allow_workspace_transfer=False,
+        with_interaction=False,
     )
     try:
         service = GatewayExecutionSSH(

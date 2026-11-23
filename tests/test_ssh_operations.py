@@ -954,6 +954,129 @@ async def test_run_sudo_separated_handshake_and_tailscale_recipe_enforces_c03_ru
             caller=_LEAD_CALLER,
         )
 
+    # (i) #186 (A2): Recipe-only delegation (allow_broker_sudo=False) runs approved tailscale_up
+    #     while refusing free-form sudo commands, C03 combinations, recipe_params on free commands,
+    #     and Windows recipe-only targets.
+    ts_record_recipe_only = tmp_path / "ts_record_recipe_only.json"
+    fake_ts_recipe_only = _write_fake_tailscale(tmp_path / "ts_bin_recipe_only", ts_record_recipe_only)
+    broker_recipe_only = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_public_key"): client_pub,
+            ("ops_boot", "admin_password"): admin_pw,
+            ("ops_boot", "tailscale_auth_key"): ts_key,
+        },
+        ssh_executable=fake_ssh,
+        sudo_search_paths=(str(fake_sudo_pw),),
+        tailscale_search_paths=(str(fake_ts_recipe_only),),
+    )
+    recipe_only_session = _create_session_and_delegation(
+        repository,
+        target,
+        SSHDelegationBoundsV1(
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        ),
+        session_id="ssh_sess_recipe_only",
+    )
+    # Free-form sudo command is refused with a clear message explaining unrestricted broker sudo was not approved.
+    with pytest.raises(
+        ExecutionAuthorizationDenied,
+        match=r"Unrestricted broker-assisted sudo \(allow_broker_sudo\) was not approved",
+    ):
+        await broker_recipe_only.run_sudo(
+            session_id=recipe_only_session.session_id,
+            command="id",
+            caller=_LEAD_CALLER,
+        )
+    # Combining free-form command with secret_recipe / extra_secret_field stays strictly refused (C03).
+    with pytest.raises(ValueError, match="Do not pass free command text together with a broker secret_recipe"):
+        await broker_recipe_only.run_sudo(
+            session_id=recipe_only_session.session_id,
+            command="id",
+            secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+            extra_secret_field="tailscale_auth_key",
+            caller=_LEAD_CALLER,
+        )
+    with pytest.raises(PermissionError, match="never piped to arbitrary agent-written commands"):
+        await broker_recipe_only.run_sudo(
+            session_id=recipe_only_session.session_id,
+            command="id",
+            extra_secret_field="tailscale_auth_key",
+            caller=_LEAD_CALLER,
+        )
+    with pytest.raises(ValueError, match="recipe_params can only be used with an approved broker secret_recipe"):
+        await broker_recipe_only.run_sudo(
+            session_id=session.session_id,
+            command="id",
+            recipe_params={"hostname": "bad"},
+            caller=_LEAD_CALLER,
+        )
+    # Approved tailscale_up recipe succeeds on the recipe-only delegation (with explicit extra_secret_field).
+    recipe_only_res = await broker_recipe_only.run_sudo(
+        session_id=recipe_only_session.session_id,
+        secret_recipe="tailscale_up",
+        extra_secret_field="tailscale_auth_key",
+        recipe_params={"hostname": "recipe-only-node", "ssh": True},
+        caller=_LEAD_CALLER,
+    )
+    assert recipe_only_res.status == SSHCommandStatus.COMPLETED, recipe_only_res
+    assert ts_key not in recipe_only_res.stdout
+    assert "[REDACTED]" in recipe_only_res.stdout
+    ro_recorded = json.loads(ts_record_recipe_only.read_text(encoding="utf-8"))
+    assert ro_recorded["key_value"] == ts_key
+    assert ro_recorded["key_mode"] == "0o600"
+    assert "--hostname" in ro_recorded["args"] and "recipe-only-node" in ro_recorded["args"]
+    assert not Path(ro_recorded["key_path"]).exists()
+
+    # Windows target still refuses recipe-only delegations.
+    win_recipe_session = _create_session_and_delegation(
+        repository,
+        win_target,
+        SSHDelegationBoundsV1(
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        ),
+        session_id="ssh_sess_win_recipe_only",
+    )
+    with pytest.raises(ExecutionAuthorizationDenied, match="not supported on Windows"):
+        await broker_recipe_only.run_sudo(
+            session_id=win_recipe_session.session_id,
+            secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+            caller=_LEAD_CALLER,
+        )
+
+    # Target without bootstrap credential still refuses recipe-only delegations.
+    no_boot_target = _make_enrolled_target(
+        target_id="linux_no_boot_recipe",
+        host="198.51.100.72",
+        port=22,
+        username="ops",
+        platform=SSHTargetPlatform.LINUX,
+        host_pub=host_pub,
+        credential_key="ops_key",
+        credential_pub=client_pub,
+        bootstrap_credential_key=None,
+    )
+    repository.put_ssh_target(no_boot_target)
+    no_boot_session = _create_session_and_delegation(
+        repository,
+        no_boot_target,
+        SSHDelegationBoundsV1(
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        ),
+        session_id="ssh_sess_noboot_recipe_only",
+    )
+    with pytest.raises(ExecutionAuthorizationDenied, match="bootstrap credential"):
+        await broker_recipe_only.run_sudo(
+            session_id=no_boot_session.session_id,
+            secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+            caller=_LEAD_CALLER,
+        )
+
 
 # -- 5. Workspace bundle transfer & sensitive path filtering -------------------
 

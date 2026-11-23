@@ -1162,8 +1162,19 @@ class SSHDelegationBoundsV1(BaseModel):
 
     @model_validator(mode="after")
     def _validate_bounds(self) -> Self:
-        if self.allowed_secret_recipes and not self.allow_broker_sudo:
-            raise ValueError("allowed_secret_recipes requires allow_broker_sudo=True.")
+        if not (
+            self.allow_commands
+            or self.allow_typing
+            or self.allow_password_bootstrap
+            or self.allow_broker_sudo
+            or self.allow_workspace_transfer
+            or self.allowed_secret_recipes
+        ):
+            raise ValueError(
+                "Enable at least one SSH capability flag (allow_commands, allow_typing, "
+                "allow_password_bootstrap, allow_broker_sudo, or allow_workspace_transfer) "
+                "or at least one entry in allowed_secret_recipes."
+            )
         return self
 
 

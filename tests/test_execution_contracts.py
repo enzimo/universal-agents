@@ -516,3 +516,66 @@ def test_bounded_ssh_interaction_record_requires_activation_expiry() -> None:
             activation=no_expiry,
             bounds=SSHDelegationBoundsV1(allow_typing=True),
         )
+
+
+def test_ssh_delegation_bounds_allows_recipe_only_and_rejects_empty_bounds() -> None:
+    """#186 (A1, A5): Recipe-only bounds work without allow_broker_sudo; empty bounds fail; stored sudo+recipe digests stay stable."""
+
+    from runtime_hosting.execution_contracts import (
+        SSHSecretRecipe,
+        ssh_interaction_resource_digest,
+    )
+
+    with pytest.raises(ValidationError, match="Enable at least one"):
+        SSHDelegationBoundsV1()
+
+    with pytest.raises(ValidationError, match="Enable at least one"):
+        SSHDelegationBoundsV1(
+            delegated_agent_type="CodeWritingAgent",
+            allow_commands=False,
+            allow_typing=False,
+            allow_password_bootstrap=False,
+            allow_broker_sudo=False,
+            allow_workspace_transfer=False,
+            allowed_secret_recipes=(),
+        )
+
+    recipe_only = SSHDelegationBoundsV1(
+        allow_broker_sudo=False,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP, SSHSecretRecipe.TAILSCALE_UP),
+    )
+    assert recipe_only.allow_broker_sudo is False
+    assert recipe_only.allowed_secret_recipes == (SSHSecretRecipe.TAILSCALE_UP,)
+
+    # Existing stored 0.10 JSON with allow_broker_sudo=True and allowed_secret_recipes continues loading unchanged.
+    stored_json = (
+        '{"delegated_agent_type":"HostBootstrapper","delegated_task_id":"work_1",'
+        '"allow_commands":true,"allow_typing":false,"allow_password_bootstrap":false,'
+        '"allow_broker_sudo":true,"allow_workspace_transfer":false,'
+        '"allowed_secret_recipes":["tailscale_up"],"reason":"Join Tailscale"}'
+    )
+    loaded = SSHDelegationBoundsV1.model_validate_json(stored_json)
+    assert loaded.allow_broker_sudo is True
+    assert loaded.allowed_secret_recipes == (SSHSecretRecipe.TAILSCALE_UP,)
+    assert ssh_interaction_resource_digest(
+        target_digest=_SHA_A, bounds=loaded
+    ) == ssh_interaction_resource_digest(
+        target_digest=_SHA_A,
+        bounds=SSHDelegationBoundsV1(
+            delegated_agent_type="HostBootstrapper",
+            delegated_task_id="work_1",
+            allow_commands=True,
+            allow_broker_sudo=True,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+            reason="Join Tailscale",
+        ),
+    )
+    assert ssh_interaction_resource_digest(
+        target_digest=_SHA_A, bounds=recipe_only
+    ) != ssh_interaction_resource_digest(
+        target_digest=_SHA_A,
+        bounds=SSHDelegationBoundsV1(
+            allow_broker_sudo=True,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        ),
+    )
