@@ -1233,10 +1233,9 @@ def exercise_execution_control_repository_ssh(
     claim_barrier = threading.Barrier(2)
 
     def race_claim(index: int) -> Any:
-        worker_repo = create_execution_control_repository(settings, logger=logger)
         claim_barrier.wait(10)
         try:
-            return worker_repo.claim_interactive_session(
+            return repository.claim_interactive_session(
                 team_id=team_id,
                 session_id=pending.session_id,
                 broker_id=f"live-broker-{index}",
@@ -1315,19 +1314,16 @@ def exercise_execution_control_repository_ssh(
     race_barrier = threading.Barrier(4)
 
     def run_target_revoke() -> None:
-        r = create_execution_control_repository(settings, logger=logger)
         race_barrier.wait(10)
-        r.revoke_ssh_target(team_id=team_id, target_id=target_2.target_id, revoked_by="live_admin_target")
+        repository.revoke_ssh_target(team_id=team_id, target_id=target_2.target_id, revoked_by="live_admin_target")
 
     def run_session_revoke() -> None:
-        r = create_execution_control_repository(settings, logger=logger)
         race_barrier.wait(10)
-        r.revoke_interactive_session(team_id=team_id, session_id=s1.session_id, revoked_by="live_admin_session")
+        repository.revoke_interactive_session(team_id=team_id, session_id=s1.session_id, revoked_by="live_admin_session")
 
     def run_session_release() -> None:
-        r = create_execution_control_repository(settings, logger=logger)
         race_barrier.wait(10)
-        r.update_claimed_interactive_session(
+        repository.update_claimed_interactive_session(
             s2.model_copy(update={"status": InteractiveSessionStatus.CLOSED}),
             broker_id="b-r2",
             lease_token="t-r2",
@@ -1336,9 +1332,8 @@ def exercise_execution_control_repository_ssh(
         )
 
     def run_unleased_close() -> None:
-        r = create_execution_control_repository(settings, logger=logger)
         race_barrier.wait(10)
-        r.close_unleased_interactive_session(team_id=team_id, session_id=s3.session_id)
+        repository.close_unleased_interactive_session(team_id=team_id, session_id=s3.session_id)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [

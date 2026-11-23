@@ -291,7 +291,7 @@ def test_ssh_target_interaction_bootstrap_lifecycle_and_latch(pg_dsn: str) -> No
     expired_target = build_enrolled_ssh_target(
         owner,
         target_id="ssh_tgt_pg_expired",
-        expires_at_utc=datetime.now(timezone.utc) - timedelta(minutes=5),
+        expires_at_utc=repo.current_time_utc() - timedelta(minutes=5),
     )
     repo.put_ssh_target(expired_target)
     assert {item.target_id for item in repo.list_ssh_targets(team_id=TEAM, include_inactive=False)} == {
@@ -321,10 +321,11 @@ def test_ssh_target_interaction_bootstrap_lifecycle_and_latch(pg_dsn: str) -> No
     assert repo.release_ssh_target_password_bootstrap_claim(team_id=TEAM, target_id=target.target_id, session_id=sess_a.session_id) is True
     assert repo.claim_ssh_target_password_bootstrap(team_id=TEAM, target_id=target.target_id, session_id=sess_b.session_id) is True
 
-    # Takeover after holder lease expiry.
-    expired_iso = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    # Takeover after holder lease expiry (anchored to database clock).
+    expired_at = repo.current_time_utc() - timedelta(seconds=30)
+    expired_iso = expired_at.isoformat()
     with connect_postgres(pg_dsn) as conn:
-        expired_b = sess_b.model_copy(update={"lease_expires_at_utc": datetime.fromisoformat(expired_iso)})
+        expired_b = sess_b.model_copy(update={"lease_expires_at_utc": expired_at})
         conn.execute(
             "UPDATE execution_interactive_sessions SET lease_expires_at_utc = %s, record_json = %s WHERE session_id = %s",
             (expired_iso, expired_b.model_dump_json(), sess_b.session_id),
@@ -441,10 +442,9 @@ def test_claim_interactive_session_for_update_fence_cas_concurrency(pg_dsn: str)
     barrier = threading.Barrier(contenders)
 
     def attempt(index: int) -> Any:
-        worker_repo = PostgresExecutionControlRepository(pg_dsn)
         barrier.wait(10)
         try:
-            return worker_repo.claim_interactive_session(
+            return repo.claim_interactive_session(
                 team_id=TEAM,
                 session_id=pending.session_id,
                 broker_id=f"broker-{index}",
@@ -522,9 +522,10 @@ def test_close_unleased_interactive_session_and_mark_interactive_sessions_lost(p
     with pytest.raises(StaleExecutionFence, match="leased"):
         repo.close_unleased_interactive_session(team_id=TEAM, session_id=leased_exp.session_id)
 
-    expired_iso = (datetime.now(timezone.utc) - timedelta(seconds=20)).isoformat()
+    expired_at = repo.current_time_utc() - timedelta(seconds=20)
+    expired_iso = expired_at.isoformat()
     with connect_postgres(pg_dsn) as conn:
-        expired_copy = leased_exp.model_copy(update={"lease_expires_at_utc": datetime.fromisoformat(expired_iso)})
+        expired_copy = leased_exp.model_copy(update={"lease_expires_at_utc": expired_at})
         conn.execute(
             "UPDATE execution_interactive_sessions SET lease_expires_at_utc = %s, record_json = %s WHERE session_id = %s",
             (expired_iso, expired_copy.model_dump_json(), leased_exp.session_id),
@@ -555,10 +556,15 @@ def test_close_unleased_interactive_session_and_mark_interactive_sessions_lost(p
 
 @pytest.mark.parametrize(
     "concurrent_op",
-    ["revoke_interactive_session", "update_claimed_release", "mark_interactive_sessions_lost"],
+    [
+        "revoke_interactive_session",
+        "update_claimed_release",
+        "close_unleased_interactive_session",
+        "mark_interactive_sessions_lost",
+    ],
 )
 def test_deterministic_paused_lock_overlap_has_zero_deadlocks(pg_dsn: str, concurrent_op: str) -> None:
-    """C02: Pause revoke_ssh_target right after locking execution_ssh_targets while session mutations run concurrently."""
+    """C02 / F2: Pause revoke_ssh_target right after locking execution_ssh_targets while session mutations run concurrently."""
 
     from storage.postgres_connection import connect_postgres
 
@@ -577,9 +583,19 @@ def test_deterministic_paused_lock_overlap_has_zero_deadlocks(pg_dsn: str, concu
     assert setup_repo.claim_ssh_target_password_bootstrap(
         team_id=TEAM, target_id=target.target_id, session_id=session.session_id
     ) is True
+    if concurrent_op == "close_unleased_interactive_session":
+        # Expire the lease using the database clock so close_unleased_interactive_session
+        # proceeds to clear the uncompleted bootstrap claim and close the session.
+        expired_at = setup_repo.current_time_utc() - timedelta(seconds=30)
+        with connect_postgres(pg_dsn) as conn:
+            expired_copy = session.model_copy(update={"lease_expires_at_utc": expired_at})
+            conn.execute(
+                "UPDATE execution_interactive_sessions SET lease_expires_at_utc = %s, record_json = %s WHERE session_id = %s",
+                (expired_at.isoformat(), expired_copy.model_dump_json(), session.session_id),
+            )
+            conn.commit()
 
     revoker = PostgresExecutionControlRepository(pg_dsn)
-    racer = PostgresExecutionControlRepository(pg_dsn)
     locked_target = threading.Event()
     original_connect = revoker._connect
     setattr(
@@ -595,29 +611,38 @@ def test_deterministic_paused_lock_overlap_has_zero_deadlocks(pg_dsn: str, concu
             revoker.revoke_ssh_target(team_id=TEAM, target_id=target.target_id, revoked_by="admin_pause")
         except BaseException as exc:  # noqa: BLE001 - inspected explicitly below
             errors.append(exc)
+        finally:
+            locked_target.set()
 
     def run_racer() -> None:
         try:
             if concurrent_op == "revoke_interactive_session":
-                racer.revoke_interactive_session(team_id=TEAM, session_id=session.session_id, revoked_by="admin_sess")
+                setup_repo.revoke_interactive_session(team_id=TEAM, session_id=session.session_id, revoked_by="admin_sess")
             elif concurrent_op == "update_claimed_release":
-                racer.update_claimed_interactive_session(
+                setup_repo.update_claimed_interactive_session(
                     session.model_copy(update={"status": InteractiveSessionStatus.CLOSED}),
                     broker_id="broker-pause",
                     lease_token="tok-pause",
                     fence=session.fence,
                     release=True,
                 )
+            elif concurrent_op == "close_unleased_interactive_session":
+                setup_repo.close_unleased_interactive_session(team_id=TEAM, session_id=session.session_id)
             else:
-                racer.mark_interactive_sessions_lost(team_id=TEAM, updated_at_utc=datetime.now(timezone.utc))
+                setup_repo.mark_interactive_sessions_lost(team_id=TEAM, updated_at_utc=setup_repo.current_time_utc())
         except BaseException as exc:  # noqa: BLE001 - inspected explicitly below
             errors.append(exc)
 
     thread = threading.Thread(target=run_revoker)
     thread.start()
-    assert locked_target.wait(10), "revoke_ssh_target never reached its execution_ssh_targets FOR UPDATE lock"
-    run_racer()
-    thread.join(timeout=20)
+    try:
+        assert locked_target.wait(10), (
+            f"revoke_ssh_target never reached its execution_ssh_targets FOR UPDATE lock; errors={errors!r}"
+        )
+        assert errors == [], f"revoke_ssh_target failed before lock pause: {errors!r}"
+        run_racer()
+    finally:
+        thread.join(timeout=20)
     assert not thread.is_alive(), "revoke_ssh_target hung during lock overlap"
 
     _assert_no_deadlock_errors(errors)
@@ -637,39 +662,57 @@ def test_deterministic_paused_lock_overlap_has_zero_deadlocks(pg_dsn: str, concu
 
 
 def test_multithreaded_target_revocation_vs_session_mutations_no_deadlocks(pg_dsn: str) -> None:
-    """A3 / C02: Stress-test concurrent revoke_ssh_target vs session revoke/release/close/lost/bootstrap with zero deadlocks."""
+    """A3 / C02 / F1 / F2: Stress-test concurrent two-target revocations vs session mutations with zero deadlocks."""
 
     from storage.postgres_connection import connect_postgres
 
-    setup_repo = PostgresExecutionControlRepository(pg_dsn)
+    repo = PostgresExecutionControlRepository(pg_dsn)
     owner = team_owner_scope(TEAM)
     rounds = 15
 
     for round_idx in range(rounds):
-        target = build_enrolled_ssh_target(owner, target_id=f"ssh_tgt_stress_{round_idx}")
-        setup_repo.put_ssh_target(target)
-        s1 = create_live_enrolled_session(setup_repo, target, session_id=f"ssh_sess_st_{round_idx}_1", broker_id="b1", lease_token="t1")
-        s2 = create_live_enrolled_session(setup_repo, target, session_id=f"ssh_sess_st_{round_idx}_2", broker_id="b2", lease_token="t2")
-        s3 = build_pending_enrolled_session(target, session_id=f"ssh_sess_st_{round_idx}_3")
-        setup_repo.create_interactive_session(s3)
-        setup_repo.put_ssh_interaction(build_ssh_interaction_activation(s1))
-        setup_repo.put_ssh_interaction(build_ssh_interaction_activation(s2))
-        assert setup_repo.claim_ssh_target_password_bootstrap(
-            team_id=TEAM, target_id=target.target_id, session_id=s1.session_id
+        target_a = build_enrolled_ssh_target(
+            owner, target_id=f"ssh_tgt_stress_{round_idx}_a", host=f"stress-{round_idx}-a.internal"
+        )
+        target_b = build_enrolled_ssh_target(
+            owner, target_id=f"ssh_tgt_stress_{round_idx}_b", host=f"stress-{round_idx}-b.internal"
+        )
+        repo.put_ssh_target(target_a)
+        repo.put_ssh_target(target_b)
+
+        s1 = create_live_enrolled_session(repo, target_a, session_id=f"ssh_sess_st_{round_idx}_a1", broker_id="b1", lease_token="t1")
+        s2 = create_live_enrolled_session(repo, target_a, session_id=f"ssh_sess_st_{round_idx}_a2", broker_id="b2", lease_token="t2")
+        s3 = build_pending_enrolled_session(target_a, session_id=f"ssh_sess_st_{round_idx}_a3")
+        repo.create_interactive_session(s3)
+        sb1 = create_live_enrolled_session(repo, target_b, session_id=f"ssh_sess_st_{round_idx}_b1", broker_id="b3", lease_token="t3")
+        sb2 = create_live_enrolled_session(repo, target_b, session_id=f"ssh_sess_st_{round_idx}_b2", broker_id="b4", lease_token="t4")
+
+        for sess in (s1, s2, sb1):
+            repo.put_ssh_interaction(build_ssh_interaction_activation(sess))
+        assert repo.claim_ssh_target_password_bootstrap(
+            team_id=TEAM, target_id=target_a.target_id, session_id=s1.session_id
+        ) is True
+        assert repo.claim_ssh_target_password_bootstrap(
+            team_id=TEAM, target_id=target_b.target_id, session_id=sb1.session_id
         ) is True
 
-        def do_revoke_target(repo: PostgresExecutionControlRepository) -> Any:
-            return repo.revoke_ssh_target(
-                team_id=TEAM, target_id=target.target_id, revoked_by="admin_stress_target"
+        def do_revoke_target_a(store: PostgresExecutionControlRepository) -> Any:
+            return store.revoke_ssh_target(
+                team_id=TEAM, target_id=target_a.target_id, revoked_by="admin_stress_target_a"
             )
 
-        def do_revoke_session(repo: PostgresExecutionControlRepository) -> Any:
-            return repo.revoke_interactive_session(
-                team_id=TEAM, session_id=s1.session_id, revoked_by="admin_stress_session"
+        def do_revoke_target_b(store: PostgresExecutionControlRepository) -> Any:
+            return store.revoke_ssh_target(
+                team_id=TEAM, target_id=target_b.target_id, revoked_by="admin_stress_target_b"
             )
 
-        def do_release_session(repo: PostgresExecutionControlRepository) -> Any:
-            return repo.update_claimed_interactive_session(
+        def do_revoke_session_a1(store: PostgresExecutionControlRepository) -> Any:
+            return store.revoke_interactive_session(
+                team_id=TEAM, session_id=s1.session_id, revoked_by="admin_stress_session_a1"
+            )
+
+        def do_release_session_a2(store: PostgresExecutionControlRepository) -> Any:
+            return store.update_claimed_interactive_session(
                 s2.model_copy(update={"status": InteractiveSessionStatus.CLOSED}),
                 broker_id="b2",
                 lease_token="t2",
@@ -677,39 +720,55 @@ def test_multithreaded_target_revocation_vs_session_mutations_no_deadlocks(pg_ds
                 release=True,
             )
 
-        def do_close_unleased(repo: PostgresExecutionControlRepository) -> Any:
-            return repo.close_unleased_interactive_session(
+        def do_close_unleased_a3(store: PostgresExecutionControlRepository) -> Any:
+            return store.close_unleased_interactive_session(
                 team_id=TEAM, session_id=s3.session_id
             )
 
-        def do_mark_lost(repo: PostgresExecutionControlRepository) -> Any:
-            return repo.mark_interactive_sessions_lost(
-                team_id=TEAM, updated_at_utc=datetime.now(timezone.utc)
+        def do_revoke_session_b1(store: PostgresExecutionControlRepository) -> Any:
+            return store.revoke_interactive_session(
+                team_id=TEAM, session_id=sb1.session_id, revoked_by="admin_stress_session_b1"
             )
 
-        def do_claim_bootstrap(repo: PostgresExecutionControlRepository) -> Any:
-            return repo.claim_ssh_target_password_bootstrap(
-                team_id=TEAM, target_id=target.target_id, session_id=s2.session_id
+        def do_release_session_b2(store: PostgresExecutionControlRepository) -> Any:
+            return store.update_claimed_interactive_session(
+                sb2.model_copy(update={"status": InteractiveSessionStatus.CLOSED}),
+                broker_id="b4",
+                lease_token="t4",
+                fence=sb2.fence,
+                release=True,
+            )
+
+        def do_mark_lost(store: PostgresExecutionControlRepository) -> Any:
+            return store.mark_interactive_sessions_lost(
+                team_id=TEAM, updated_at_utc=store.current_time_utc()
+            )
+
+        def do_claim_bootstrap_a(store: PostgresExecutionControlRepository) -> Any:
+            return store.claim_ssh_target_password_bootstrap(
+                team_id=TEAM, target_id=target_a.target_id, session_id=s2.session_id
             )
 
         workers: list[Callable[[PostgresExecutionControlRepository], Any]] = [
-            do_revoke_target,
-            do_revoke_session,
-            do_release_session,
-            do_close_unleased,
+            do_revoke_target_a,
+            do_revoke_target_b,
+            do_revoke_session_a1,
+            do_release_session_a2,
+            do_close_unleased_a3,
+            do_revoke_session_b1,
+            do_release_session_b2,
             do_mark_lost,
-            do_claim_bootstrap,
+            do_claim_bootstrap_a,
         ]
         barrier = threading.Barrier(len(workers))
         unexpected: list[BaseException] = []
 
         def run_worker(fn: Callable[[PostgresExecutionControlRepository], Any]) -> None:
-            worker_repo = PostgresExecutionControlRepository(pg_dsn)
             barrier.wait(10)
             try:
-                fn(worker_repo)
+                fn(repo)
             except StaleExecutionFence:
-                # Expected when mark_interactive_sessions_lost clears s2's lease before release=True runs.
+                # Expected when mark_interactive_sessions_lost clears a lease before release=True runs.
                 return
             except BaseException as exc:  # noqa: BLE001 - asserted below
                 unexpected.append(exc)
@@ -720,16 +779,17 @@ def test_multithreaded_target_revocation_vs_session_mutations_no_deadlocks(pg_ds
         _assert_no_deadlock_errors(unexpected)
         assert unexpected == [], f"Round {round_idx} raised unexpected errors: {unexpected!r}"
 
-        stored_target = setup_repo.get_ssh_target(team_id=TEAM, target_id=target.target_id)
-        assert stored_target is not None and stored_target.status == SSHTargetStatus.REVOKED
-        for sess_id in (s1.session_id, s2.session_id, s3.session_id):
-            assert setup_repo.get_interactive_session_revocation(team_id=TEAM, session_id=sess_id) is not None
-        for sess_id in (s1.session_id, s2.session_id):
-            inter = setup_repo.get_ssh_interaction(team_id=TEAM, session_id=sess_id)
+        for target in (target_a, target_b):
+            stored_target = repo.get_ssh_target(team_id=TEAM, target_id=target.target_id)
+            assert stored_target is not None and stored_target.status == SSHTargetStatus.REVOKED
+            with connect_postgres(pg_dsn) as conn:
+                row = conn.execute(
+                    "SELECT password_bootstrap_claimed_by_session_id FROM execution_ssh_targets WHERE target_id = %s",
+                    (target.target_id,),
+                ).fetchone()
+            assert row is not None and row["password_bootstrap_claimed_by_session_id"] is None
+        for sess_id in (s1.session_id, s2.session_id, s3.session_id, sb1.session_id, sb2.session_id):
+            assert repo.get_interactive_session_revocation(team_id=TEAM, session_id=sess_id) is not None
+        for sess_id in (s1.session_id, s2.session_id, sb1.session_id):
+            inter = repo.get_ssh_interaction(team_id=TEAM, session_id=sess_id)
             assert inter is not None and inter.revoked_at_utc is not None
-        with connect_postgres(pg_dsn) as conn:
-            row = conn.execute(
-                "SELECT password_bootstrap_claimed_by_session_id FROM execution_ssh_targets WHERE target_id = %s",
-                (target.target_id,),
-            ).fetchone()
-        assert row is not None and row["password_bootstrap_claimed_by_session_id"] is None

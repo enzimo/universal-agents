@@ -1138,8 +1138,7 @@ class _RelationalExecutionControlRepository:
             row = connection.execute(
                 f"""
                 SELECT record_json FROM execution_ssh_targets
-                 WHERE target_id = {self._dialect.bind} AND team_id = {self._dialect.bind}
-                {self._row_lock_suffix()}
+                 WHERE target_id = {self._dialect.bind} AND team_id = {self._dialect.bind}{self._lock_clause()}
                 """,
                 (target_id, team_id),
             ).fetchone()
@@ -1198,7 +1197,7 @@ class _RelationalExecutionControlRepository:
             now = self._database_now(connection)
             for table, id_column in _AUTHORITY_TABLES:
                 rows = connection.execute(
-                    f"SELECT {id_column} AS record_id, record_json FROM {table} WHERE team_id = {self._dialect.bind}",
+                    f"SELECT {id_column} AS record_id, record_json FROM {table} WHERE team_id = {self._dialect.bind} ORDER BY {id_column}",
                     (team_id,),
                 ).fetchall()
                 for row in rows:
@@ -1981,8 +1980,7 @@ class _RelationalExecutionControlRepository:
         lease_ttl_seconds: int,
     ) -> InteractiveSessionV1:
         pending_status = InteractiveSessionStatus.PENDING.value
-        row_lock = self._row_lock_suffix()
-        lock_clause = f" {row_lock}" if row_lock else ""
+        lock_clause = self._lock_clause()
         with self._connect() as connection:
             self._begin_claim(connection)
             database_now = self._database_now(connection)
