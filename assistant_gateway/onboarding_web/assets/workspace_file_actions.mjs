@@ -7,9 +7,11 @@
  * - the person's own folder: the gateway lists only that folder under
  *   `users/`, so its name is learned from that listing (a folder name can be
  *   a hashed slug the browser cannot work out from the person's id);
- * - the page title: "Your files" when the top level lists only `users/`
- *   (members), "Workspace" when it also lists `team/` or `agents/`
+ * - the page title: "Your files" when the top level lists only `users/` and/or
+ *   `team/` (members), "Workspace" when it also lists `agents/`
  *   (administrators). The title is display only; the gateway decides access;
+ * - Download (every readable file, including `team/` files and files without a
+ *   browser preview): fetches `/api/web-chat/workspace/download?path=...`;
  * - Share (files and folders in the person's own folder): POST
  *   /api/web-chat/files/share `{path, person, level, hours}`. It gives that
  *   person, and agents working for them, access to the item. Sharing is
@@ -48,6 +50,7 @@ export const PAGE_NAME = "Workspace Files";
 export const MEMBER_VIEW_TITLE = "Your files";
 export const ADMIN_VIEW_TITLE = "Workspace";
 
+export const DOWNLOAD_ACTION_LABEL = "Download";
 export const SHARE_ACTION_LABEL = "Share…";
 export const SEND_ACTION_LABEL = "Send…";
 export const SHARED_CHIP_LABEL = "Shared";
@@ -97,20 +100,24 @@ export function pathParts(path) {
   return text(path).split("/").filter(Boolean);
 }
 
-/** "Your files" for members (only users/ at the top), "Workspace" for administrators. */
+const MEMBER_ROOT_FOLDERS = new Set([USERS_FOLDER, TEAM_FOLDER]);
+
+/** "Your files" for members (users/ and team/ at the top), "Workspace" for administrators (includes agents/). */
 export function workspaceViewTitle(rootEntries) {
   const names = (Array.isArray(rootEntries) ? rootEntries : []).map(entry => text(entry && entry.name));
-  return names.some(name => name && name !== USERS_FOLDER) ? ADMIN_VIEW_TITLE : MEMBER_VIEW_TITLE;
+  return names.some(name => name && !MEMBER_ROOT_FOLDERS.has(name)) ? ADMIN_VIEW_TITLE : MEMBER_VIEW_TITLE;
 }
 
 /**
- * Which actions a tree row offers: Share on files and folders inside the
- * person's own folder, Send on files there. The folder itself gets neither.
+ * Which actions a tree row offers: Download on every readable file, Share on
+ * files and folders inside the person's own folder, and Send on files there.
+ * Folders never get Download; the person's own root folder gets neither Share nor Send.
  */
 export function rowActions(entry, ownFolders) {
   const parts = pathParts(entry && entry.path);
+  const isFile = text(entry && entry.kind) === "file";
   const own = parts.length >= 3 && parts[0] === USERS_FOLDER && ownFolders.has(parts[1]);
-  return { share: own, send: own && text(entry.kind) === "file" };
+  return { download: isFile, share: own, send: own && isFile };
 }
 
 /** `team`, `team/reports` from what the person typed ("reports", "/team/reports/"). */
@@ -566,8 +573,8 @@ export function createWorkspaceFileActions({ browser = globalThis, onUnauthorize
 
   return {
     labels: Object.freeze({
-      share: SHARE_ACTION_LABEL, send: SEND_ACTION_LABEL, shared: SHARED_CHIP_LABEL, pageName: PAGE_NAME,
-      memberTitle: MEMBER_VIEW_TITLE,
+      download: DOWNLOAD_ACTION_LABEL, share: SHARE_ACTION_LABEL, send: SEND_ACTION_LABEL,
+      shared: SHARED_CHIP_LABEL, pageName: PAGE_NAME, memberTitle: MEMBER_VIEW_TITLE,
     }),
     /** Records a folder listing; the users/ listing names the person's own folder. */
     noteListing(path, entries) {

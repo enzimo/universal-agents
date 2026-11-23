@@ -98,6 +98,7 @@ tools:
       file_read: read
       file_write: {level: write, record_kind: file}
       file_move: {level: write, record_kind: file}
+      workspace_file_link: read
     # A person sends a file into another person's folder (decision D15): the
     # recipient or an administrator approves, and the gateway applies it.
     changes:

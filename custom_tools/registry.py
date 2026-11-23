@@ -13,7 +13,12 @@ from __future__ import annotations
 from custom_tools.calculator import calculator
 from custom_tools.exa_tools import exa_get_contents, exa_search
 from custom_tools.local_media_context_tool import load_local_media_for_model_context
-from custom_tools.non_interactive_file_tools import file_move, file_read, file_write
+from custom_tools.non_interactive_file_tools import (
+    file_move,
+    file_read,
+    file_write,
+    workspace_file_link,
+)
 from custom_tools.non_interactive_shell import shell
 from custom_tools.provider_contract import ToolProvider, dedupe_tools, tool_name
 from custom_tools.providers.access import PROVIDER as ACCESS_PROVIDER
@@ -57,7 +62,7 @@ from custom_tools.web_research_artifact_tools import (
 )
 from custom_tools.web_service_tools import capture_web_screenshot, searxng
 
-FILES_PROVIDER = ToolProvider("files", (file_read, file_write, file_move))
+FILES_PROVIDER = ToolProvider("files", (file_read, file_write, file_move, workspace_file_link))
 CALCULATOR_PROVIDER = ToolProvider("calculator", (calculator,))
 LOCAL_CONTEXT_PROVIDER = ToolProvider(
     "local_context",
