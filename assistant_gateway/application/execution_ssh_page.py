@@ -77,6 +77,7 @@ class DelegatedSSHSessionSummary:
     owner_id: str
     created_at_utc: str
     updated_at_utc: str
+    allowed_secret_recipes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

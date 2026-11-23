@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
@@ -76,6 +77,7 @@ from runtime_hosting.authorization import (
 )
 from runtime_hosting.execution_contracts import (
     InteractiveSessionV1,
+    SSHSecretRecipe,
     TERMINAL_INTERACTIVE_SESSION_STATUSES,
 )
 from runtime_hosting.ssh import MAX_PTY_WRITE_BYTES, SSHSessionUnavailable
@@ -271,23 +273,36 @@ def _ssh_caller(service: ExecutionControlService) -> SSHCallerContext:
     )
 
 
-def _enabled_delegation_capabilities(interaction: Any) -> tuple[SSHCapability, ...]:
+@dataclass(frozen=True)
+class _SessionCapabilityView:
+    usable_in_this_request: bool
+    typing_approved: bool
+    broker_sudo_approved: bool
+    approved_secret_recipes: tuple[str, ...]
+    unusable_reason: str | None
+
+
+def _enabled_delegation_capabilities(
+    interaction: Any,
+) -> tuple[tuple[SSHCapability, SSHSecretRecipe | None], ...]:
     if interaction is None:
         return ()
     bounds = interaction.bounds
     if bounds is None:
-        return (SSHCapability.TYPING,)
-    capabilities: list[SSHCapability] = []
+        return ((SSHCapability.TYPING, None),)
+    capabilities: list[tuple[SSHCapability, SSHSecretRecipe | None]] = []
     if bounds.allow_commands:
-        capabilities.append(SSHCapability.COMMAND)
+        capabilities.append((SSHCapability.COMMAND, None))
     if bounds.allow_typing:
-        capabilities.append(SSHCapability.TYPING)
+        capabilities.append((SSHCapability.TYPING, None))
     if bounds.allow_password_bootstrap:
-        capabilities.append(SSHCapability.PASSWORD_BOOTSTRAP)
+        capabilities.append((SSHCapability.PASSWORD_BOOTSTRAP, None))
     if bounds.allow_broker_sudo:
-        capabilities.append(SSHCapability.BROKER_SUDO)
+        capabilities.append((SSHCapability.BROKER_SUDO, None))
+    for recipe in bounds.allowed_secret_recipes:
+        capabilities.append((SSHCapability.BROKER_SUDO, recipe))
     if bounds.allow_workspace_transfer:
-        capabilities.append(SSHCapability.WORKSPACE_TRANSFER)
+        capabilities.append((SSHCapability.WORKSPACE_TRANSFER, None))
     return tuple(capabilities)
 
 
@@ -297,14 +312,16 @@ def _session_capability_view(
     interaction: Any,
     revocation: Any,
     caller: SSHCallerContext,
-) -> tuple[bool, bool, str | None]:
-    """Derive ``usable_in_this_request`` and ``typing_approved`` directly from ``ExecutionAccessGuard``."""
+) -> _SessionCapabilityView:
+    """Derive ``usable_in_this_request`` and approved capabilities directly from ``ExecutionAccessGuard``."""
 
     if session.status in TERMINAL_INTERACTIVE_SESSION_STATUSES:
-        return (
-            False,
-            False,
-            f"SSH session is {session.status.value} and cannot be used; create a new session.",
+        return _SessionCapabilityView(
+            usable_in_this_request=False,
+            typing_approved=False,
+            broker_sudo_approved=False,
+            approved_secret_recipes=(),
+            unusable_reason=f"SSH session is {session.status.value} and cannot be used; create a new session.",
         )
     guard = service.access_guard()
     enrolled_target = (
@@ -319,7 +336,9 @@ def _session_capability_view(
     usable = False
     first_refusal: str | None = None
     typing_approved = False
-    for capability in enabled:
+    broker_sudo_approved = False
+    approved_recipes: list[str] = []
+    for capability, recipe in enabled:
         try:
             guard.require_ssh_capability(
                 session,
@@ -329,6 +348,7 @@ def _session_capability_view(
                 enrolled_target=enrolled_target,
                 session_revocation=revocation,
                 allow_password_bootstrap_setting=allow_pw,
+                secret_recipe=recipe,
             )
         except ExecutionAuthorizationDenied as exc:
             if first_refusal is None:
@@ -337,7 +357,18 @@ def _session_capability_view(
             usable = True
             if capability is SSHCapability.TYPING:
                 typing_approved = True
-    return usable, typing_approved, (None if usable else first_refusal)
+            elif capability is SSHCapability.BROKER_SUDO:
+                if recipe is None:
+                    broker_sudo_approved = True
+                else:
+                    approved_recipes.append(recipe.value)
+    return _SessionCapabilityView(
+        usable_in_this_request=usable,
+        typing_approved=typing_approved,
+        broker_sudo_approved=broker_sudo_approved,
+        approved_secret_recipes=tuple(approved_recipes),
+        unusable_reason=None if usable else first_refusal,
+    )
 
 
 def _require_local_capability(
@@ -645,13 +676,16 @@ def plan_execution_ssh_interaction(
 
     Requires ttl_seconds (duration from administrator approval, capped by
     execution_control.ssh.max_delegation_ttl_seconds) and/or expires_at_utc
-    (ISO 8601 UTC hard deadline), plus at least one explicit capability flag.
-    When this_request_only is omitted, it defaults to true when
-    delegated_agent_type is set (single-request worker delegation) and false
-    otherwise (usable across follow-up messages from the same person on this
-    session until it expires or is revoked). Pass this_request_only=true or
-    this_request_only=false to override that default. An administrator approves
-    the exact bounds in the Inbox.
+    (ISO 8601 UTC hard deadline), plus at least one explicit capability flag or
+    named broker secret recipe in allowed_secret_recipes_json (for example
+    '["tailscale_up"]'). Named secret recipes can be approved with
+    allow_broker_sudo=false so the session runs only those broker-owned recipes
+    without unrestricted root sudo. When this_request_only is omitted, it
+    defaults to true when delegated_agent_type is set (single-request worker
+    delegation) and false otherwise (usable across follow-up messages from the
+    same person on this session until it expires or is revoked). Pass
+    this_request_only=true or this_request_only=false to override that default.
+    An administrator approves the exact bounds in the Inbox.
     """
     try:
         service, error = _manager_service("plan_execution_ssh_interaction")
@@ -724,23 +758,29 @@ def list_execution_ssh_sessions() -> str:
                 and interaction is not None
                 and interaction.is_active()
             )
-            usable_in_this_request, typing_approved, unusable_reason = _session_capability_view(
+            view = _session_capability_view(
                 service, item, interaction, revocation, caller
             )
             entry: dict[str, Any] = {
                 **item.model_dump(mode="json"),
                 "revoked": revocation is not None,
                 "delegation_active": delegation_active,
-                "usable_in_this_request": usable_in_this_request,
-                "typing_approved": typing_approved,
+                "usable_in_this_request": view.usable_in_this_request,
+                "typing_approved": view.typing_approved,
+                "broker_sudo_approved": view.broker_sudo_approved,
+                "approved_secret_recipes": list(view.approved_secret_recipes),
                 "delegation": (
                     interaction.bounds.model_dump(mode="json")
                     if interaction is not None and interaction.bounds is not None
                     else None
                 ),
             }
-            if (delegation_active or is_terminal) and not usable_in_this_request and unusable_reason:
-                entry["unusable_reason"] = unusable_reason
+            if (
+                (delegation_active or is_terminal)
+                and not view.usable_in_this_request
+                and view.unusable_reason
+            ):
+                entry["unusable_reason"] = view.unusable_reason
             payloads.append(entry)
         return json.dumps({"returned": len(payloads), "sessions": payloads})
     except Exception as exc:
@@ -976,12 +1016,14 @@ async def run_execution_ssh_sudo(
     timeout_seconds: float = 120.0,
     wait_seconds: float = 5.0,
 ) -> str:
-    """Run a root command or admin-approved broker secret recipe over SSH (requires allow_broker_sudo).
+    """Run a root command (requires allow_broker_sudo) or an admin-approved broker secret recipe over SSH.
 
-    Pass either free ``command`` text (runs under sudo with stdin /dev/null and
-    Sealbox admin_password handled only by the broker) OR an admin-approved
-    ``secret_recipe`` (for example 'tailscale_up' with optional JSON flags in
-    ``recipe_params_json``). Sealbox secrets are never piped to arbitrary
+    Pass either free ``command`` text (requires allow_broker_sudo=true; runs
+    under sudo with stdin /dev/null and Sealbox admin_password handled only by
+    the broker) OR an admin-approved ``secret_recipe`` (for example
+    'tailscale_up' with optional JSON flags in ``recipe_params_json``, allowed
+    whenever that recipe is in allowed_secret_recipes even when
+    allow_broker_sudo=false). Sealbox secrets are never piped to arbitrary
     agent-written commands. Supports async polling via ``get_execution_ssh_command``.
 
     Process lifecycle notes: on Linux/macOS, stopping (timeout, revoke, or
