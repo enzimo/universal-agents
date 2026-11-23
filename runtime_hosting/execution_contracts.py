@@ -203,6 +203,25 @@ SUPPORTED_SSH_SECRET_RECIPES: frozenset[SSHSecretRecipe] = frozenset(
 )
 
 
+def parse_ssh_secret_recipe(value: SSHSecretRecipe | str) -> SSHSecretRecipe:
+    """Parse one SSH secret recipe name (stripping whitespace) with a plain-language error."""
+
+    if isinstance(value, SSHSecretRecipe):
+        return value
+    cleaned = str(value or "").strip()
+    supported = ", ".join(sorted(recipe.value for recipe in SUPPORTED_SSH_SECRET_RECIPES))
+    if not cleaned:
+        raise ValueError(
+            f"SSH secret recipe name must not be empty. Supported secret recipes: {supported}."
+        )
+    try:
+        return SSHSecretRecipe(cleaned)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unknown SSH secret recipe {cleaned!r}. Supported secret recipes: {supported}."
+        ) from exc
+
+
 def validate_ssh_host_syntax(value: str) -> str:
     """Reject leading dashes, control chars, whitespace, and option-like syntax in SSH hosts."""
 
@@ -1162,8 +1181,31 @@ class SSHDelegationBoundsV1(BaseModel):
 
     @model_validator(mode="after")
     def _validate_bounds(self) -> Self:
-        if self.allowed_secret_recipes and not self.allow_broker_sudo:
-            raise ValueError("allowed_secret_recipes requires allow_broker_sudo=True.")
+        if not (
+            self.allow_commands
+            or self.allow_typing
+            or self.allow_password_bootstrap
+            or self.allow_broker_sudo
+            or self.allow_workspace_transfer
+            or self.allowed_secret_recipes
+        ):
+            raise ValueError(
+                "Enable at least one SSH capability flag (allow_commands, allow_typing, "
+                "allow_password_bootstrap, allow_broker_sudo, or allow_workspace_transfer) "
+                "or at least one entry in allowed_secret_recipes."
+            )
+        if (
+            self.allowed_secret_recipes
+            and not self.allow_broker_sudo
+            and (self.allow_commands or self.allow_typing or self.allow_workspace_transfer)
+        ):
+            raise ValueError(
+                "Recipe-only SSH delegation (allowed_secret_recipes with allow_broker_sudo=False) "
+                "cannot be combined with allow_commands, allow_typing, or allow_workspace_transfer, "
+                "because shell or file writes on the remote account could intercept the broker's sudo "
+                "authentication. Use a separate session for commands/typing/uploads, or explicitly "
+                "approve allow_broker_sudo=True if unrestricted root sudo is intended."
+            )
         return self
 
 
@@ -1499,6 +1541,7 @@ __all__ = [
     "TERMINAL_INTERACTIVE_SESSION_STATUSES",
     "TERMINAL_RUN_ATTEMPT_STATUSES",
     "enrolled_ssh_target_digest",
+    "parse_ssh_secret_recipe",
     "ssh_interaction_resource_digest",
     "ssh_public_key_sha256_fingerprint",
     "utc_now",

@@ -484,21 +484,22 @@ class ExecutionAccessGuard:
                     "Password bootstrap has already completed and is permanently latched off for this target."
                 )
         elif capability is SSHCapability.BROKER_SUDO:
-            if not bounds.allow_broker_sudo:
+            if secret_recipe is None:
+                if not bounds.allow_broker_sudo:
+                    raise ExecutionAuthorizationDenied(
+                        "Unrestricted broker-assisted sudo (allow_broker_sudo) was not approved on this SSH delegation."
+                    )
+            elif secret_recipe not in bounds.allowed_secret_recipes:
                 raise ExecutionAuthorizationDenied(
-                    "Broker-assisted sudo (allow_broker_sudo) was not approved on this SSH delegation."
+                    f"Secret recipe {secret_recipe.value!r} was not approved on this SSH delegation."
                 )
             if enrolled_target is None or enrolled_target.bootstrap_credential_key is None:
                 raise ExecutionAuthorizationDenied(
-                    "Broker-assisted sudo requires an enrolled SSH target with a bootstrap credential."
+                    "Broker-assisted sudo and secret recipes require an enrolled SSH target with a bootstrap credential."
                 )
             if enrolled_target.platform == SSHTargetPlatform.WINDOWS:
                 raise ExecutionAuthorizationDenied(
-                    "Broker-assisted sudo is not supported on Windows targets."
-                )
-            if secret_recipe is not None and secret_recipe not in bounds.allowed_secret_recipes:
-                raise ExecutionAuthorizationDenied(
-                    f"Secret recipe {secret_recipe.value!r} was not approved on this SSH delegation."
+                    "Broker-assisted sudo and secret recipes are not supported on Windows targets."
                 )
         elif capability is SSHCapability.WORKSPACE_TRANSFER:
             if not bounds.allow_workspace_transfer:

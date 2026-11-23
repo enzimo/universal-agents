@@ -516,3 +516,83 @@ def test_bounded_ssh_interaction_record_requires_activation_expiry() -> None:
             activation=no_expiry,
             bounds=SSHDelegationBoundsV1(allow_typing=True),
         )
+
+
+def test_ssh_delegation_bounds_allows_recipe_only_and_rejects_empty_bounds() -> None:
+    """#186 (A1, A5, F1, F4, F5): Recipe-only bounds work without allow_broker_sudo, forbid shell/typing/upload mixing, reject empty bounds, parse recipes cleanly, and preserve pinned 0.10 digests."""
+
+    from runtime_hosting.execution_contracts import (
+        SSHSecretRecipe,
+        parse_ssh_secret_recipe,
+        ssh_interaction_resource_digest,
+    )
+
+    with pytest.raises(ValidationError, match="Enable at least one"):
+        SSHDelegationBoundsV1()
+
+    with pytest.raises(ValidationError, match="Enable at least one"):
+        SSHDelegationBoundsV1(
+            delegated_agent_type="CodeWritingAgent",
+            allow_commands=False,
+            allow_typing=False,
+            allow_password_bootstrap=False,
+            allow_broker_sudo=False,
+            allow_workspace_transfer=False,
+            allowed_secret_recipes=(),
+        )
+
+    recipe_only = SSHDelegationBoundsV1(
+        allow_broker_sudo=False,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP, SSHSecretRecipe.TAILSCALE_UP),
+    )
+    assert recipe_only.allow_broker_sudo is False
+    assert recipe_only.allowed_secret_recipes == (SSHSecretRecipe.TAILSCALE_UP,)
+
+    # F1: allow_password_bootstrap=True may pair with recipe-only delegation (fixed broker script),
+    # while combining recipe-only with allow_commands/allow_typing/allow_workspace_transfer is refused.
+    recipe_plus_bootstrap = SSHDelegationBoundsV1(
+        allow_password_bootstrap=True,
+        allow_broker_sudo=False,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+    )
+    assert recipe_plus_bootstrap.allow_password_bootstrap is True
+    assert recipe_plus_bootstrap.allow_broker_sudo is False
+
+    for disallowed_flag in ("allow_commands", "allow_typing", "allow_workspace_transfer"):
+        with pytest.raises(ValidationError, match="cannot be combined with"):
+            SSHDelegationBoundsV1(
+                **{disallowed_flag: True},
+                allow_broker_sudo=False,
+                allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+            )
+
+    # F4: shared secret-recipe parser strips whitespace and emits plain-language errors.
+    assert parse_ssh_secret_recipe("  tailscale_up \n") is SSHSecretRecipe.TAILSCALE_UP
+    assert parse_ssh_secret_recipe(SSHSecretRecipe.TAILSCALE_UP) is SSHSecretRecipe.TAILSCALE_UP
+    with pytest.raises(ValueError, match=r"must not be empty.*tailscale_up"):
+        parse_ssh_secret_recipe("   ")
+    with pytest.raises(ValueError, match=r"Unknown SSH secret recipe 'bogus'.*tailscale_up"):
+        parse_ssh_secret_recipe(" bogus ")
+
+    # F5 / A5: Existing stored 0.10 JSON with allow_broker_sudo=True and allowed_secret_recipes
+    # continues loading unchanged and matches the exact pinned pre-change SHA-256 hex digest.
+    pinned_010_digest = "216b2b12c2c8ad8234c3c2fb808785a4d33fe546c1b38b204e247533498caf75"
+    stored_json = (
+        '{"delegated_agent_type":"HostBootstrapper","delegated_task_id":"work_1",'
+        '"allow_commands":true,"allow_typing":false,"allow_password_bootstrap":false,'
+        '"allow_broker_sudo":true,"allow_workspace_transfer":false,'
+        '"allowed_secret_recipes":["tailscale_up"],"reason":"Join Tailscale"}'
+    )
+    loaded = SSHDelegationBoundsV1.model_validate_json(stored_json)
+    assert loaded.allow_broker_sudo is True
+    assert loaded.allowed_secret_recipes == (SSHSecretRecipe.TAILSCALE_UP,)
+    assert ssh_interaction_resource_digest(target_digest=_SHA_A, bounds=loaded) == pinned_010_digest
+    assert ssh_interaction_resource_digest(
+        target_digest=_SHA_A, bounds=recipe_only
+    ) != ssh_interaction_resource_digest(
+        target_digest=_SHA_A,
+        bounds=SSHDelegationBoundsV1(
+            allow_broker_sudo=True,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        ),
+    )

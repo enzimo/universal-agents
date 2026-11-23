@@ -47,6 +47,7 @@ from runtime_hosting.execution_contracts import (
     OwnerScopeKind,
     OwnerScopeV1,
     SSHDelegationBoundsV1,
+    SSHSecretRecipe,
     SSHTargetLifecycle,
     SSHTargetPlatform,
     SSHTargetStatus,
@@ -147,6 +148,7 @@ def _seed_target_and_session(
     allow_commands: bool = False,
     allow_broker_sudo: bool = True,
     allow_workspace_transfer: bool = True,
+    allowed_secret_recipes: tuple[SSHSecretRecipe, ...] = (),
     person_roles: tuple[str, ...] = (),
 ) -> tuple[EnrolledSSHTargetV1, InteractiveSessionV1]:
     alg, fingerprint, pubkey = _sample_ed25519_key(target_id)
@@ -271,6 +273,7 @@ def _seed_target_and_session(
                 allow_password_bootstrap=False,
                 allow_broker_sudo=allow_broker_sudo,
                 allow_workspace_transfer=allow_workspace_transfer,
+                allowed_secret_recipes=allowed_secret_recipes,
             )
         )
         interaction_activation = ActivationRecordV2.build(
@@ -750,7 +753,7 @@ def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
         allow_broker_sudo=True,
         allow_workspace_transfer=False,
     )
-    # 4) Bounded delegation with all capability flags disabled.
+    # 4) Connect-only active session without an interaction record (no capabilities).
     _seed_target_and_session(
         repo,
         team_id=config.manager.team_id,
@@ -758,13 +761,43 @@ def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
         target_id="ssh_tgt_empty",
         session_id="ssh_sess_empty",
         owner_agent_type="TeamArchitect",
+        with_interaction=False,
+    )
+    # 5) #186 (A4): Recipe-only delegation (allow_broker_sudo=False, allowed_secret_recipes=('tailscale_up',)).
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_recipe_only",
+        session_id="ssh_sess_recipe_only",
+        owner_agent_type="TeamArchitect",
         with_interaction=True,
-        delegated_agent_type=None,
+        delegated_agent_type="InfraWorker",
         allow_commands=False,
         allow_broker_sudo=False,
         allow_workspace_transfer=False,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+    )
+    # 6) #186 (A4, A5): Combined unrestricted broker sudo + secret recipes.
+    _seed_target_and_session(
+        repo,
+        team_id=config.manager.team_id,
+        now=now,
+        target_id="ssh_tgt_sudo_and_recipe",
+        session_id="ssh_sess_sudo_and_recipe",
+        owner_agent_type="TeamArchitect",
+        with_interaction=True,
+        delegated_agent_type="InfraWorker",
+        allow_commands=True,
+        allow_broker_sudo=True,
+        allow_workspace_transfer=False,
+        allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
     )
     try:
+        from assistant_gateway.interactive_apps.website_handlers.execution_ssh import (
+            execution_ssh_payload,
+        )
+
         service = GatewayExecutionSSH(
             team_id=config.manager.team_id,
             config_path=config.config_path,
@@ -778,6 +811,7 @@ def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
 
         connect_exp = by_id["ssh_sess_connect_exp"]
         assert connect_exp.capabilities == ()
+        assert connect_exp.allowed_secret_recipes == ()
         assert connect_exp.owner_agent_type == "TeamArchitect"
         assert connect_exp.status == "expired"
         assert connect_exp.is_active is False
@@ -786,17 +820,41 @@ def test_gateway_execution_ssh_summarizes_capabilities_owner_and_connect_expiry(
 
         legacy = by_id["ssh_sess_legacy"]
         assert legacy.capabilities == ("typing",)
+        assert legacy.allowed_secret_recipes == ()
         assert legacy.owner_agent_type == "CustomLead"
         assert legacy.delegated_agent_type is None
         assert legacy.is_active is True
 
         cmd = by_id["ssh_sess_cmd"]
         assert cmd.capabilities == ("commands", "broker_sudo")
+        assert cmd.allowed_secret_recipes == ()
         assert cmd.expires_at_utc == earlier_connect.isoformat()
 
         empty = by_id["ssh_sess_empty"]
         assert empty.capabilities == ()
+        assert empty.allowed_secret_recipes == ()
         assert empty.owner_agent_type == "TeamArchitect"
+
+        recipe_only = by_id["ssh_sess_recipe_only"]
+        assert recipe_only.capabilities == ("secret_recipes",)
+        assert recipe_only.allowed_secret_recipes == ("tailscale_up",)
+
+        sudo_and_recipe = by_id["ssh_sess_sudo_and_recipe"]
+        assert sudo_and_recipe.capabilities == ("commands", "broker_sudo", "secret_recipes")
+        assert sudo_and_recipe.allowed_secret_recipes == ("tailscale_up",)
+
+        payload = execution_ssh_payload(page)
+        payload_by_id = {item["session_id"]: item for item in payload["sessions"]}
+        assert payload_by_id["ssh_sess_recipe_only"]["capabilities"] == ["secret_recipes"]
+        assert payload_by_id["ssh_sess_recipe_only"]["allowed_secret_recipes"] == ["tailscale_up"]
+        assert payload_by_id["ssh_sess_sudo_and_recipe"]["capabilities"] == [
+            "commands",
+            "broker_sudo",
+            "secret_recipes",
+        ]
+        assert payload_by_id["ssh_sess_sudo_and_recipe"]["allowed_secret_recipes"] == [
+            "tailscale_up"
+        ]
     finally:
         person_changes.close()
 

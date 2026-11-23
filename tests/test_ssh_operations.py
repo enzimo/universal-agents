@@ -292,6 +292,9 @@ def _write_fake_sudo(
         "if calls_log is not None:\n"
         "    with calls_log.open('a', encoding='utf-8') as fh:\n"
         "        fh.write(json.dumps(args) + '\\n')\n"
+        "if args == ['-k']:\n"
+        "    stamp.unlink(missing_ok=True)\n"
+        "    sys.exit(0)\n"
         "if '-v' in args and '-S' in args:\n"
         "    pw = sys.stdin.readline().rstrip('\\r\\n')\n"
         "    if pw != expected:\n"
@@ -951,6 +954,204 @@ async def test_run_sudo_separated_handshake_and_tailscale_recipe_enforces_c03_ru
         await broker_pw.run_sudo(
             session_id=win_session.session_id,
             command="whoami",
+            caller=_LEAD_CALLER,
+        )
+
+    # (i) #186 (A2): Recipe-only delegation (allow_broker_sudo=False) runs approved tailscale_up
+    #     while refusing free-form sudo commands, C03 combinations, recipe_params on free commands,
+    #     and Windows recipe-only targets.
+    ts_record_recipe_only = tmp_path / "ts_record_recipe_only.json"
+    fake_ts_recipe_only = _write_fake_tailscale(tmp_path / "ts_bin_recipe_only", ts_record_recipe_only)
+    broker_recipe_only = _catalog_broker(
+        tmp_path,
+        repository,
+        secrets_map={
+            ("ops_key", "ssh_private_key"): client_priv,
+            ("ops_key", "ssh_public_key"): client_pub,
+            ("ops_boot", "admin_password"): admin_pw,
+            ("ops_boot", "tailscale_auth_key"): ts_key,
+        },
+        ssh_executable=fake_ssh,
+        sudo_search_paths=(str(fake_sudo_pw),),
+        tailscale_search_paths=(str(fake_ts_recipe_only),),
+    )
+    recipe_only_session = _create_session_and_delegation(
+        repository,
+        target,
+        SSHDelegationBoundsV1(
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        ),
+        session_id="ssh_sess_recipe_only",
+    )
+    # Free-form sudo command is refused with a clear message explaining unrestricted broker sudo was not approved.
+    with pytest.raises(
+        ExecutionAuthorizationDenied,
+        match=r"Unrestricted broker-assisted sudo \(allow_broker_sudo\) was not approved",
+    ):
+        await broker_recipe_only.run_sudo(
+            session_id=recipe_only_session.session_id,
+            command="id",
+            caller=_LEAD_CALLER,
+        )
+    # Combining free-form command with secret_recipe / extra_secret_field stays strictly refused (C03).
+    with pytest.raises(ValueError, match="Do not pass free command text together with a broker secret_recipe"):
+        await broker_recipe_only.run_sudo(
+            session_id=recipe_only_session.session_id,
+            command="id",
+            secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+            extra_secret_field="tailscale_auth_key",
+            caller=_LEAD_CALLER,
+        )
+    with pytest.raises(PermissionError, match="never piped to arbitrary agent-written commands"):
+        await broker_recipe_only.run_sudo(
+            session_id=recipe_only_session.session_id,
+            command="id",
+            extra_secret_field="tailscale_auth_key",
+            caller=_LEAD_CALLER,
+        )
+    with pytest.raises(ValueError, match="recipe_params can only be used with an approved broker secret_recipe"):
+        await broker_recipe_only.run_sudo(
+            session_id=session.session_id,
+            command="id",
+            recipe_params={"hostname": "bad"},
+            caller=_LEAD_CALLER,
+        )
+    # F2: Empty mapping recipe_params={} is also refused on free-form sudo commands.
+    with pytest.raises(ValueError, match="recipe_params can only be used with an approved broker secret_recipe"):
+        await broker_recipe_only.run_sudo(
+            session_id=session.session_id,
+            command="id",
+            recipe_params={},
+            caller=_LEAD_CALLER,
+        )
+    # F2: Malformed recipe_params fails eagerly BEFORE any SSH probe or Sealbox secret lookup.
+    eager_secret_calls: list[tuple[str, str]] = []
+    eager_ssh_log = tmp_path / "eager_ssh_spawns.log"
+    eager_fake_ssh = tmp_path / "eager_fake_ssh"
+    eager_fake_ssh.write_text(
+        f"#!/bin/sh\necho SPAWN >> {str(eager_ssh_log)!r}\nexit 0\n",
+        encoding="utf-8",
+    )
+    eager_fake_ssh.chmod(0o755)
+    eager_broker = SSHSessionBroker(
+        repository=repository,
+        authorization_guard=_AGREEMENT_GUARD,
+        material_provider=CompositeSSHCredentialMaterialProvider(
+            ConfiguredSSHCredentialMaterialProvider({}),
+            CatalogSSHCredentialMaterialProvider(
+                ephemeral_base_dir=tmp_path / "ssh-ephemeral-eager",
+                secret_resolver=lambda key, field, _owner: (
+                    eager_secret_calls.append((key, field)) or "unused"
+                ),
+            ),
+        ),
+        artifact_store=FilesystemArtifactStore(tmp_path / "artifacts-eager"),
+        team_id="team_alpha",
+        broker_id="broker-eager",
+        ssh_executable=str(eager_fake_ssh),
+        network_policy=SSHNetworkPolicy.default(),
+        resolver=lambda host, _port: (host,),
+        local_address_checker=lambda _ip: False,
+        sudo_search_paths=(str(fake_sudo_pw),),
+        tailscale_search_paths=(str(fake_ts_recipe_only),),
+    )
+    with pytest.raises(ValueError, match="Unsupported tailscale_up recipe parameters"):
+        await eager_broker.run_sudo(
+            session_id=recipe_only_session.session_id,
+            secret_recipe="tailscale_up",
+            recipe_params={"bad_flag": True},
+            caller=_LEAD_CALLER,
+        )
+    assert eager_secret_calls == []
+    assert not eager_ssh_log.exists()
+
+    # F4: Unknown secret_recipe raises plain-language error naming supported recipes.
+    with pytest.raises(ValueError, match=r"Unknown SSH secret recipe 'bogus'.*tailscale_up"):
+        await broker_recipe_only.run_sudo(
+            session_id=recipe_only_session.session_id,
+            secret_recipe=" bogus ",
+            caller=_LEAD_CALLER,
+        )
+
+    # F1: build_sudo_secret_recipe_command embeds sudo -k cleanup in the exit trap when needs_password=True.
+    from runtime_hosting.ssh_operations import build_sudo_secret_recipe_command
+
+    built_pw_argv = build_sudo_secret_recipe_command(
+        recipe=SSHSecretRecipe.TAILSCALE_UP,
+        sudo_path=str(fake_sudo_pw),
+        needs_password=True,
+        tailscale_search_paths=(str(fake_ts_recipe_only),),
+    )
+    assert "-k >/dev/null 2>&1 || true" in " ".join(built_pw_argv)
+
+    # Clear any earlier free-sudo stamp files so only this recipe run could leave a stamp behind.
+    pw_stamp_dir = tmp_path / "sudo_pw" / "sudo_stamps_password"
+    for old_stamp in pw_stamp_dir.glob("ppid_*"):
+        old_stamp.unlink()
+
+    # Approved tailscale_up recipe succeeds on the recipe-only delegation (whitespace-padded recipe + explicit extra_secret_field).
+    recipe_only_res = await broker_recipe_only.run_sudo(
+        session_id=recipe_only_session.session_id,
+        secret_recipe="  tailscale_up  ",
+        extra_secret_field="tailscale_auth_key",
+        recipe_params={"hostname": "recipe-only-node", "ssh": True},
+        caller=_LEAD_CALLER,
+    )
+    assert recipe_only_res.status == SSHCommandStatus.COMPLETED, recipe_only_res
+    assert ts_key not in recipe_only_res.stdout
+    assert "[REDACTED]" in recipe_only_res.stdout
+    ro_recorded = json.loads(ts_record_recipe_only.read_text(encoding="utf-8"))
+    assert ro_recorded["key_value"] == ts_key
+    assert ro_recorded["key_mode"] == "0o600"
+    assert "--hostname" in ro_recorded["args"] and "recipe-only-node" in ro_recorded["args"]
+    assert not Path(ro_recorded["key_path"]).exists()
+    # F1: sudo -k exit trap cleared any cached fake-sudo timestamp file after completion.
+    assert list(pw_stamp_dir.glob("ppid_*")) == []
+
+    # Windows target still refuses recipe-only delegations.
+    win_recipe_session = _create_session_and_delegation(
+        repository,
+        win_target,
+        SSHDelegationBoundsV1(
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        ),
+        session_id="ssh_sess_win_recipe_only",
+    )
+    with pytest.raises(ExecutionAuthorizationDenied, match="not supported on Windows"):
+        await broker_recipe_only.run_sudo(
+            session_id=win_recipe_session.session_id,
+            secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+            caller=_LEAD_CALLER,
+        )
+
+    # Target without bootstrap credential still refuses recipe-only delegations.
+    no_boot_target = _make_enrolled_target(
+        target_id="linux_no_boot_recipe",
+        host="198.51.100.72",
+        port=22,
+        username="ops",
+        platform=SSHTargetPlatform.LINUX,
+        host_pub=host_pub,
+        credential_key="ops_key",
+        credential_pub=client_pub,
+        bootstrap_credential_key=None,
+    )
+    repository.put_ssh_target(no_boot_target)
+    no_boot_session = _create_session_and_delegation(
+        repository,
+        no_boot_target,
+        SSHDelegationBoundsV1(
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        ),
+        session_id="ssh_sess_noboot_recipe_only",
+    )
+    with pytest.raises(ExecutionAuthorizationDenied, match="bootstrap credential"):
+        await broker_recipe_only.run_sudo(
+            session_id=no_boot_session.session_id,
+            secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
             caller=_LEAD_CALLER,
         )
 
@@ -1927,7 +2128,60 @@ async def test_c61_expired_sudo_ticket_and_isolated_session_stops_on_revoke_and_
         with pytest.raises(ProcessLookupError):
             os.kill(ts_pid, 0)
         assert not keyfile_path.exists()
-        assert len(calls_log.read_text(encoding="utf-8").splitlines()) == ts_calls_before
+        # Stopping ran inside the root shell; the only post-revoke sudo invocation is exit-trap `-k` cleanup.
+        post_revoke_calls = [
+            json.loads(line)
+            for line in calls_log.read_text(encoding="utf-8").splitlines()[ts_calls_before:]
+        ]
+        assert all(call == ["-k"] for call in post_revoke_calls)
+
+        # (c) F5: Async _monitor_tick() live revocation on a recipe-only (allow_broker_sudo=False)
+        #     in-flight tailscale_up command kills the child, wipes the keyfile, and marks REVOKED.
+        ts_pid_file.unlink(missing_ok=True)
+        ts_keypath_file.unlink(missing_ok=True)
+        recipe_only_bounds = SSHDelegationBoundsV1(
+            allow_broker_sudo=False,
+            allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
+        )
+        session_ro = _create_session_and_delegation(
+            repository, target, recipe_only_bounds, session_id="ssh_sess_c61_recipe_only"
+        )
+        ro_cmd = await broker.run_sudo(
+            session_id=session_ro.session_id,
+            secret_recipe=SSHSecretRecipe.TAILSCALE_UP,
+            recipe_params={"hostname": "c61-ro-node"},
+            caller=_LEAD_CALLER,
+            timeout_seconds=60.0,
+            wait_seconds=0.4,
+        )
+        assert ro_cmd.status == SSHCommandStatus.RUNNING
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not (ts_pid_file.is_file() and ts_keypath_file.is_file()):
+            await asyncio.sleep(0.05)
+        assert ts_pid_file.is_file() and ts_keypath_file.is_file()
+        ro_pid = int(ts_pid_file.read_text(encoding="utf-8").strip())
+        ro_keyfile = Path(ts_keypath_file.read_text(encoding="utf-8").strip())
+        os.kill(ro_pid, 0)
+
+        # Persist revocation directly in storage (simulating gateway/admin revocation) and drive _monitor_tick().
+        repository.revoke_interactive_session(
+            team_id="team_alpha", session_id=session_ro.session_id, revoked_by="admin_monitor"
+        )
+        await broker._monitor_tick()
+        live_ro = broker._commands[ro_cmd.command_id]
+        assert live_ro.revoked_event.is_set()
+        await asyncio.wait_for(live_ro.done_event.wait(), timeout=5.0)
+        ro_after = await broker.get_command(
+            session_id=session_ro.session_id,
+            command_id=ro_cmd.command_id,
+            caller=_LEAD_CALLER,
+            wait_seconds=0.0,
+        )
+        assert ro_after.status == SSHCommandStatus.REVOKED
+        await asyncio.sleep(0.2)
+        with pytest.raises(ProcessLookupError):
+            os.kill(ro_pid, 0)
+        assert not ro_keyfile.exists()
     finally:
         await broker.shutdown()
 

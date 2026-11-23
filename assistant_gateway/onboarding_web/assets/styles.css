@@ -4540,7 +4540,7 @@ body.is-theme-customizing {
   display: inline-block;
   padding: 2px 7px;
   border: 1px solid rgba(7, 89, 133, 0.24);
-  border-radius: 999px;
+  border-radius: 7px;
   background: rgba(7, 89, 133, 0.08);
   color: var(--ocean);
   font-size: 0.72rem;

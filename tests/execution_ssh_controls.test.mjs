@@ -5,8 +5,10 @@ import test from "node:test";
 import {
   EXECUTION_SSH_API,
   EXECUTION_SSH_DISABLED_NOTE,
+  EXECUTION_SSH_SECRET_BOUNDARY_NOTE,
   capabilityLabel,
   createExecutionSSHControls,
+  sessionCapabilityLabels,
   statusBadgeClass,
   statusLabel,
 } from "../assistant_gateway/onboarding_web/assets/execution_ssh_controls.mjs";
@@ -91,10 +93,53 @@ test("helpers format status labels, badge classes, and capability labels cleanly
   assert.equal(statusBadgeClass("expired"), "execution-ssh-badge is-expired");
   assert.equal(statusBadgeClass("closed"), "execution-ssh-badge is-inactive");
   assert.equal(capabilityLabel("commands"), "Commands");
-  assert.equal(capabilityLabel("broker_sudo"), "Broker sudo");
+  assert.equal(capabilityLabel("broker_sudo"), "Broker sudo (unrestricted root)");
+  assert.equal(capabilityLabel("secret_recipes"), "Secret recipes (no unrestricted root sudo)");
   assert.equal(capabilityLabel("workspace_transfer"), "Workspace transfer");
   assert.equal(capabilityLabel("password_bootstrap"), "Password bootstrap");
   assert.equal(capabilityLabel("typing"), "Typing");
+
+  // C02 & A4: distinct, non-contradictory capability badge labels across all combinations.
+  assert.deepEqual(
+    sessionCapabilityLabels({
+      capabilities: ["secret_recipes"],
+      allowed_secret_recipes: ["tailscale_up"],
+    }),
+    ["Secret recipes: tailscale_up (no unrestricted root sudo)"],
+  );
+  assert.deepEqual(
+    sessionCapabilityLabels({
+      capabilities: ["commands", "broker_sudo", "secret_recipes"],
+      allowed_secret_recipes: ["tailscale_up"],
+    }),
+    ["Commands", "Broker sudo (unrestricted root)", "Secret recipes: tailscale_up"],
+  );
+  // Fallback when allowed_secret_recipes is omitted alongside broker_sudo must not say "no unrestricted root sudo".
+  assert.deepEqual(
+    sessionCapabilityLabels({
+      capabilities: ["broker_sudo", "secret_recipes"],
+    }),
+    ["Broker sudo (unrestricted root)", "Secret recipes"],
+  );
+  // Payload carrying allowed_secret_recipes without "secret_recipes" in capabilities still renders the recipe badge.
+  assert.deepEqual(
+    sessionCapabilityLabels({
+      capabilities: [],
+      allowed_secret_recipes: ["tailscale_up"],
+    }),
+    ["Secret recipes: tailscale_up (no unrestricted root sudo)"],
+  );
+  // F3: whitespace-padded / blank / duplicate capabilities & recipes normalize cleanly, and prototype keys stay safe.
+  assert.deepEqual(
+    sessionCapabilityLabels({
+      capabilities: [" broker_sudo ", "   ", " secret_recipes ", "secret_recipes"],
+      allowed_secret_recipes: [" tailscale_up ", "tailscale_up", "  "],
+    }),
+    ["Broker sudo (unrestricted root)", "Secret recipes: tailscale_up"],
+  );
+  assert.equal(capabilityLabel("toString"), "toString");
+  assert.equal(capabilityLabel("constructor"), "constructor");
+  assert.equal(capabilityLabel("__proto__"), "  proto  ");
 });
 
 test("non-administrators do not see the Brokered SSH section", async () => {
@@ -134,8 +179,12 @@ test("administrators see enrolled hosts, delegated sessions, and disabled notice
   assert.match(container.textContent, /Bootstrap: prod-bootstrap \(completed\)/);
   assert.match(container.textContent, /Agent: InfraSpecialist · Task: task_bootstrap_9/);
   assert.match(container.textContent, /Commands/);
-  assert.match(container.textContent, /Broker sudo/);
+  assert.match(container.textContent, /Broker sudo \(unrestricted root\)/);
   assert.match(container.textContent, /Workspace transfer/);
+  assert.match(
+    container.textContent,
+    new RegExp(EXECUTION_SSH_SECRET_BOUNDARY_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
   assert.deepEqual(buttonLabels(container), ["Refresh", "Revoke", "Terminate"]);
 
   // Narrow-screen .team-table layout requires matching data-label attributes and a single value child per td.
@@ -199,6 +248,127 @@ test("connect-only and non-delegated sessions render owning agent type and Conne
   assert.match(container.textContent, /Agent: CustomLead/);
   assert.match(container.textContent, /Typing/);
   assert.match(container.textContent, /Agent: Unknown/);
+  assert.doesNotMatch(
+    container.textContent,
+    new RegExp(EXECUTION_SSH_SECRET_BOUNDARY_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+});
+
+test("recipe-only sessions distinguish secret recipes from unrestricted root sudo and show trust-boundary note", async () => {
+  const { requests, container, controls } = setup();
+  controls.load();
+  await answer(requests, EXECUTION_SSH_API, jsonResponse({
+    status: "ok",
+    can_manage: true,
+    ssh_enabled: true,
+    targets: [],
+    sessions: [
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_recipe_only",
+        capabilities: ["secret_recipes"],
+        allowed_secret_recipes: ["tailscale_up"],
+      },
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_sudo_plus_recipe",
+        capabilities: ["commands", "broker_sudo", "secret_recipes"],
+        allowed_secret_recipes: ["tailscale_up"],
+      },
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_recipe_xss",
+        capabilities: [],
+        allowed_secret_recipes: ["<img src=x onerror=alert(1)>"],
+      },
+    ],
+  }));
+
+  const rows = byTag(container, "tbody")[0].children;
+  assert.equal(rows.length, 3);
+  assert.match(rows[0].textContent, /Secret recipes: tailscale_up \(no unrestricted root sudo\)/);
+  assert.doesNotMatch(rows[0].textContent, /Broker sudo \(unrestricted root\)/);
+  assert.doesNotMatch(rows[0].textContent, /Connect only/);
+
+  assert.match(rows[1].textContent, /Broker sudo \(unrestricted root\)/);
+  assert.match(rows[1].textContent, /Secret recipes: tailscale_up/);
+  assert.doesNotMatch(rows[1].textContent, /no unrestricted root sudo/);
+
+  assert.equal(byTag(container, "img").length, 0);
+  assert.match(rows[2].textContent, /Secret recipes: <img src=x onerror=alert\(1\)> \(no unrestricted root sudo\)/);
+  assert.doesNotMatch(rows[2].textContent, /Connect only/);
+
+  assert.match(
+    container.textContent,
+    new RegExp(EXECUTION_SSH_SECRET_BOUNDARY_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+
+  // F5: Isolated recipe-only session (without any broker_sudo session present) still shows the trust-boundary note.
+  controls.load();
+  await answer(requests, EXECUTION_SSH_API, jsonResponse({
+    status: "ok",
+    can_manage: true,
+    ssh_enabled: true,
+    targets: [],
+    sessions: [
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_recipe_isolated",
+        capabilities: [" secret_recipes "],
+        allowed_secret_recipes: [" tailscale_up ", "tailscale_up"],
+      },
+    ],
+  }));
+  assert.match(container.textContent, /Secret recipes: tailscale_up \(no unrestricted root sudo\)/);
+  assert.doesNotMatch(container.textContent, /Connect only/);
+  assert.match(
+    container.textContent,
+    new RegExp(EXECUTION_SSH_SECRET_BOUNDARY_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+
+  // F5: Isolated session with capabilities: [] and non-empty allowed_secret_recipes shows recipe badge + trust-boundary note.
+  controls.load();
+  await answer(requests, EXECUTION_SSH_API, jsonResponse({
+    status: "ok",
+    can_manage: true,
+    ssh_enabled: true,
+    targets: [],
+    sessions: [
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_recipes_only_field",
+        capabilities: [],
+        allowed_secret_recipes: ["tailscale_up"],
+      },
+    ],
+  }));
+  assert.match(container.textContent, /Secret recipes: tailscale_up \(no unrestricted root sudo\)/);
+  assert.doesNotMatch(container.textContent, /Connect only/);
+  assert.match(
+    container.textContent,
+    new RegExp(EXECUTION_SSH_SECRET_BOUNDARY_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+
+  // Password bootstrap also triggers the remote-host secret boundary note for parity with Admin Inbox.
+  controls.load();
+  await answer(requests, EXECUTION_SSH_API, jsonResponse({
+    status: "ok",
+    can_manage: true,
+    ssh_enabled: true,
+    targets: [],
+    sessions: [
+      {
+        ...SAMPLE_SESSION,
+        session_id: "ssh_sess_pw_boot",
+        capabilities: [" password_bootstrap "],
+        allowed_secret_recipes: [],
+      },
+    ],
+  }));
+  assert.match(
+    container.textContent,
+    new RegExp(EXECUTION_SSH_SECRET_BOUNDARY_NOTE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
 });
 
 test("one-click Revoke on a host sends CSRF POST, disables while busy, and refreshes in place", async () => {

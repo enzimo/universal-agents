@@ -43,6 +43,7 @@ def execution_ssh_payload(page: ExecutionSSHPage) -> dict[str, Any]:
             {
                 **dataclasses.asdict(session),
                 "capabilities": list(session.capabilities),
+                "allowed_secret_recipes": list(session.allowed_secret_recipes),
             }
             for session in page.sessions
         ],

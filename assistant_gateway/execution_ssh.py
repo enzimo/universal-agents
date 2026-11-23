@@ -120,6 +120,8 @@ def _capabilities_from_interaction(
         enabled.append("password_bootstrap")
     if bounds.allow_broker_sudo:
         enabled.append("broker_sudo")
+    if bounds.allowed_secret_recipes:
+        enabled.append("secret_recipes")
     if bounds.allow_workspace_transfer:
         enabled.append("workspace_transfer")
     return tuple(enabled)
@@ -244,6 +246,11 @@ def _summarize_session(
         owner_id=session.owner.owner_id,
         created_at_utc=session.created_at_utc.astimezone(timezone.utc).isoformat(),
         updated_at_utc=session.updated_at_utc.astimezone(timezone.utc).isoformat(),
+        allowed_secret_recipes=(
+            tuple(recipe.value for recipe in bounds.allowed_secret_recipes)
+            if bounds is not None
+            else ()
+        ),
     )
 
 

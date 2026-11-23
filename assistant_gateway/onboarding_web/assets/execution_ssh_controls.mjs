@@ -23,11 +23,15 @@ export const EXECUTION_SSH_INTRO = "Enrolled SSH hosts and delegated agent sessi
   + "Revoking a host or terminating a session stops active remote commands and closes live connections immediately.";
 export const EXECUTION_SSH_DISABLED_NOTE = "Brokered SSH is currently turned off in instance configuration "
   + "(execution_control.enabled or execution_control.ssh.enabled is false). Existing records can still be reviewed and revoked.";
+export const EXECUTION_SSH_SECRET_BOUNDARY_NOTE = "Broker secret recipes run broker-owned scripts and do not grant unrestricted root commands "
+  + "unless Broker sudo (unrestricted root) is also shown. Any secret sent to a remote host can still be observed by whoever controls that host, "
+  + "and shell, typing, or file-upload access on the same remote account can compromise later broker sudo or secret-recipe runs; rotate bootstrap passwords afterward.";
 export const CAPABILITY_LABELS = Object.freeze({
   commands: "Commands",
   typing: "Typing",
   password_bootstrap: "Password bootstrap",
-  broker_sudo: "Broker sudo",
+  broker_sudo: "Broker sudo (unrestricted root)",
+  secret_recipes: "Secret recipes (no unrestricted root sudo)",
   workspace_transfer: "Workspace transfer",
 });
 
@@ -62,7 +66,61 @@ export function statusBadgeClass(value) {
 
 export function capabilityLabel(name) {
   const key = text(name);
-  return CAPABILITY_LABELS[key] || key.replaceAll("_", " ");
+  return Object.hasOwn(CAPABILITY_LABELS, key)
+    ? CAPABILITY_LABELS[key]
+    : key.replaceAll("_", " ");
+}
+
+function normalizedCapabilities(session) {
+  return Array.isArray(session && session.capabilities)
+    ? session.capabilities.map(text).filter(Boolean)
+    : [];
+}
+
+function normalizedSecretRecipes(session) {
+  if (!Array.isArray(session && session.allowed_secret_recipes)) return [];
+  return [...new Set(session.allowed_secret_recipes.map(text).filter(Boolean))];
+}
+
+export function sessionCapabilityLabels(session) {
+  const caps = normalizedCapabilities(session);
+  const recipes = normalizedSecretRecipes(session);
+  const hasBrokerSudo = caps.includes("broker_sudo");
+  const labels = [];
+  let recipeLabelAdded = false;
+  const formatRecipesBadge = () => {
+    if (recipes.length) {
+      return hasBrokerSudo
+        ? `Secret recipes: ${recipes.join(", ")}`
+        : `Secret recipes: ${recipes.join(", ")} (no unrestricted root sudo)`;
+    }
+    return hasBrokerSudo ? "Secret recipes" : CAPABILITY_LABELS.secret_recipes;
+  };
+  caps.forEach(cap => {
+    if (cap === "secret_recipes") {
+      if (!recipeLabelAdded) {
+        labels.push(formatRecipesBadge());
+        recipeLabelAdded = true;
+      }
+      return;
+    }
+    labels.push(capabilityLabel(cap));
+  });
+  if (!recipeLabelAdded && recipes.length > 0) {
+    labels.push(formatRecipesBadge());
+  }
+  return labels;
+}
+
+function sessionUsesRemoteHostSecrets(session) {
+  const caps = normalizedCapabilities(session);
+  const recipes = normalizedSecretRecipes(session);
+  return (
+    recipes.length > 0
+    || caps.includes("secret_recipes")
+    || caps.includes("broker_sudo")
+    || caps.includes("password_bootstrap")
+  );
 }
 
 function tableHead(document, headers) {
@@ -204,6 +262,9 @@ export function createExecutionSSHControls({ container, client, browser = global
       section.append(element(document, "p", "permission-empty-state", "No delegated SSH sessions."));
       return section;
     }
+    if (sessions.some(sessionUsesRemoteHostSecrets)) {
+      section.append(element(document, "p", "execution-ssh-note", EXECUTION_SSH_SECRET_BOUNDARY_NOTE));
+    }
     const wrap = element(document, "div", "team-table-wrap");
     const table = element(document, "table", "team-table execution-ssh-table");
     table.append(tableHead(document, ["Session", "Delegation & Capabilities", "Expires", "Status", "Action"]));
@@ -222,10 +283,10 @@ export function createExecutionSSHControls({ container, client, browser = global
       const agentName = text(session.delegated_agent_type) || text(session.owner_agent_type);
       const agentText = agentName ? `Agent: ${agentName}` : "Agent: Unknown";
       const taskText = text(session.delegated_task_id) ? ` · Task: ${text(session.delegated_task_id)}` : "";
-      const caps = Array.isArray(session.capabilities) ? session.capabilities : [];
+      const capLabels = sessionCapabilityLabels(session);
       const capRow = element(document, "div", "execution-ssh-capabilities");
-      if (caps.length) {
-        caps.forEach(cap => capRow.append(element(document, "span", "execution-ssh-cap", capabilityLabel(cap))));
+      if (capLabels.length) {
+        capLabels.forEach(label => capRow.append(element(document, "span", "execution-ssh-cap", label)));
       } else {
         capRow.append(element(document, "span", "execution-ssh-meta", "Connect only"));
       }

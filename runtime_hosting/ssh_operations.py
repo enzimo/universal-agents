@@ -544,6 +544,19 @@ def validate_tailscale_up_params(params: Mapping[str, Any] | None) -> tuple[str,
     return tuple(flags)
 
 
+def validate_sudo_secret_recipe_params(
+    recipe: SSHSecretRecipe,
+    params: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Validate non-secret parameters for an approved broker SSH secret recipe."""
+
+    if params is not None and not isinstance(params, Mapping):
+        raise ValueError("recipe_params must be a JSON object.")
+    if recipe != SSHSecretRecipe.TAILSCALE_UP:
+        raise ValueError(f"Unsupported SSH secret recipe: {recipe!r}.")
+    return validate_tailscale_up_params(params)
+
+
 def build_sudo_secret_recipe_command(
     *,
     recipe: SSHSecretRecipe,
@@ -555,29 +568,32 @@ def build_sudo_secret_recipe_command(
     """Build a broker-written remote command for an admin-approved secret recipe.
 
     Secrets flow exclusively over stdin (never argv) into an ephemeral ``0600``
-    temp file wiped by ``trap`` on exit.
+    temp file wiped by ``trap`` on exit. When ``needs_password`` is True, the
+    exit trap also runs ``sudo -k`` to drop the cached timestamp.
     """
 
     validate_trusted_bin_paths((sudo_path,), label="sudo")
-    if recipe != SSHSecretRecipe.TAILSCALE_UP:
-        raise ValueError(f"Unsupported SSH secret recipe: {recipe!r}.")
+    flags = validate_sudo_secret_recipe_params(recipe, recipe_params)
     ts_paths = validate_trusted_bin_paths(tailscale_search_paths, label="tailscale")
-    flags = validate_tailscale_up_params(recipe_params)
     quoted_sudo = shlex.quote(sudo_path)
     quoted_ts_paths = " ".join(shlex.quote(path) for path in ts_paths)
     quoted_flags = (" " + " ".join(shlex.quote(item) for item in flags)) if flags else ""
-    parts: list[str] = ["umask 077"]
+    parts: list[str] = ["umask 077", "_ua_keyfile=''"]
     if needs_password:
+        trap_body = f"rm -f -- \"$_ua_keyfile\"; {quoted_sudo} -k >/dev/null 2>&1 || true"
         parts.extend(
             [
                 "IFS= read -r _ua_pw || exit 71",
                 f"printf '%s\\n' \"$_ua_pw\" | {quoted_sudo} -S -p '' -v >/dev/null 2>&1",
                 "_ua_rc=$?; _ua_pw=''; unset _ua_pw",
                 f"if [ \"$_ua_rc\" -ne 0 ]; then printf '{SUDO_AUTH_FAILED_MARKER}\\n' >&2; exit 72; fi",
+                f"trap {shlex.quote(trap_body)} EXIT HUP INT TERM",
                 f"if ! {quoted_sudo} -n true </dev/null >/dev/null 2>&1; then "
                 f"printf '{SUDO_NO_TIMESTAMP_MARKER}\\n' >&2; exit 73; fi",
             ]
         )
+    else:
+        parts.append("trap 'rm -f -- \"$_ua_keyfile\"' EXIT HUP INT TERM")
     watched_tailscale = _wrap_posix_watched_command(
         f'"$1" up --auth-key="file:$2"{quoted_flags}',
         cleanup_path_var="_ua_kf",
@@ -595,7 +611,6 @@ def build_sudo_secret_recipe_command(
             f"if [ -z \"$_ua_ts\" ]; then _ua_tskey=''; unset _ua_tskey; "
             f"printf '{TAILSCALE_BIN_MISSING_MARKER}\\n' >&2; exit 75; fi",
             "_ua_keyfile=$(mktemp \"${TMPDIR:-/tmp}/ua-ts-XXXXXX\") || exit 76",
-            "trap 'rm -f -- \"$_ua_keyfile\"' EXIT HUP INT TERM",
             "chmod 600 \"$_ua_keyfile\" || exit 76",
             "printf '%s\\n' \"$_ua_tskey\" > \"$_ua_keyfile\"",
             "_ua_tskey=''; unset _ua_tskey",
@@ -781,6 +796,7 @@ __all__ = [
     "host_key_verification_commands",
     "probe_ssh_host_key",
     "validate_remote_destination",
+    "validate_sudo_secret_recipe_params",
     "validate_tailscale_up_params",
     "validate_trusted_bin_paths",
 ]

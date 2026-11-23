@@ -1150,7 +1150,16 @@ the broker may connect and what administrators may delegate:
   active. `allow_password_bootstrap` (default `false`) gates one-time
   administrator-approved password login (`enroll_execution_ssh_key`) used to
   install a Sealbox SSH public key on a fresh host before permanently latching
-  off password bootstrap for that host.
+  off password bootstrap for that host. Administrators can also approve named
+  broker-owned secret recipes (such as `tailscale_up`) independently of
+  unrestricted broker `sudo` (`allow_broker_sudo`), so a recipe-only delegation
+  can run approved recipes while refusing free-form root commands. To prevent
+  remote-account shell or file writes from intercepting broker `sudo`
+  authentication, recipe-only delegations (`allow_broker_sudo: false`) cannot be
+  combined with `allow_commands`, `allow_typing`, or `allow_workspace_transfer`
+  on the same session; run key bootstrap and recipe-only setup before granting
+  shell or upload access on that remote account and rotate bootstrap passwords
+  afterward.
 - **Operator-pinned disk-key targets:** Each `execution_control.ssh.targets`
   item pins the host, port, username, host-key algorithm and fingerprint, the
   id of its key material (`credential_binding_id`), identity file, and
@@ -1162,8 +1171,10 @@ the broker may connect and what administrators may delegate:
   Sealbox-backed `ssh_private_key` and `ssh_host_bootstrap` credentials. The
   broker pins the host's Ed25519 fingerprint, keeps all keys and ephemeral
   `ssh-agent` sockets inside the broker process, scrubs touched secrets from
-  all outputs and transcripts, and lets administrators review and revoke hosts
-  or terminate live sessions immediately in **Settings → Tasks → Brokered SSH**.
+  all outputs and transcripts, and lets administrators review capabilities
+  (distinguishing unrestricted broker `sudo` from named secret recipes), revoke
+  hosts, or terminate live sessions immediately in **Settings → Tasks → Brokered
+  SSH**.
 
 Execution revisions accept non-secret environment entries only. Names beginning
 with `UA_` are reserved. A revision that names credentials

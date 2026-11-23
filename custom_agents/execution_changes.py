@@ -71,6 +71,7 @@ from runtime_hosting.execution_contracts import (
     ServiceRestartPolicy,
     TERMINAL_INTERACTIVE_SESSION_STATUSES,
     enrolled_ssh_target_digest,
+    parse_ssh_secret_recipe,
     ssh_interaction_resource_digest,
     ssh_public_key_sha256_fingerprint,
     utc_now,
@@ -109,8 +110,10 @@ _STALE = "If this changes before approval, the change is refused and must be sta
 _REMOTE_HOST_SECRET_BOUNDARY_NOTE = (
     "Security note: The broker never places secrets in prompts, tool arguments, logs, command lines, "
     "transcripts, or agent-written commands. Any secret sent to the remote host can still be captured "
-    "by whoever controls that host; enroll SSH keys before running arbitrary commands, prefer single-use "
-    "ephemeral Tailscale auth keys, and rotate bootstrap passwords afterward."
+    "by whoever controls that host, and shell, typing, or file-upload access on the same remote account "
+    "can compromise later broker sudo or secret-recipe runs on that account; enroll SSH keys and run "
+    "recipe-only bootstrap before granting shell/upload access, prefer single-use ephemeral Tailscale "
+    "auth keys, and rotate bootstrap passwords afterward."
 )
 
 
@@ -1346,10 +1349,10 @@ class SSHInteractionChangeService(_ExecutionChanges):
                     "Broker-assisted sudo and secret recipes require a dynamically enrolled SSH target with a bootstrap credential."
                 )
             if enrolled_target.platform == SSHTargetPlatform.WINDOWS:
-                raise ValueError("Broker-assisted sudo is not supported on Windows targets.")
+                raise ValueError("Broker-assisted sudo and secret recipes are not supported on Windows targets.")
             if enrolled_target.bootstrap_credential_key is None or enrolled_target.bootstrap_credential_owner_scope is None:
                 raise ValueError(
-                    "Broker-assisted sudo requires an enrolled SSH target with a bootstrap_credential_key."
+                    "Broker-assisted sudo and secret recipes require an enrolled SSH target with a bootstrap_credential_key."
                 )
 
         needs_bootstrap_cred = bool(
@@ -1425,7 +1428,7 @@ class SSHInteractionChangeService(_ExecutionChanges):
                     "Cannot restrict SSH delegation to this request without a verified signed task context."
                 )
             delegated_work_id = work_id
-        parsed_recipes = tuple(SSHSecretRecipe(recipe) for recipe in allowed_secret_recipes)
+        parsed_recipes = tuple(parse_ssh_secret_recipe(recipe) for recipe in allowed_secret_recipes)
         bounds = SSHDelegationBoundsV1(
             delegated_agent_type=normalized_agent_type,
             delegated_task_id=delegated_work_id,
@@ -1437,19 +1440,6 @@ class SSHInteractionChangeService(_ExecutionChanges):
             allowed_secret_recipes=parsed_recipes,
             reason=binding["reason"],
         )
-        if not any(
-            (
-                bounds.allow_commands,
-                bounds.allow_typing,
-                bounds.allow_password_bootstrap,
-                bounds.allow_broker_sudo,
-                bounds.allow_workspace_transfer,
-            )
-        ):
-            raise ValueError(
-                "Enable at least one SSH capability flag (allow_commands, allow_typing, "
-                "allow_password_bootstrap, allow_broker_sudo, or allow_workspace_transfer)."
-            )
         session = self._session_that_can_open(session_id)
         self._check_existing_interaction(session.session_id, now=now)
         self._validate_target_capabilities(session, bounds)
@@ -1607,7 +1597,13 @@ class SSHInteractionChangeService(_ExecutionChanges):
         if bounds.allow_password_bootstrap:
             enabled_caps.append("one-time password key bootstrap")
         if bounds.allow_broker_sudo:
-            enabled_caps.append("broker-assisted sudo")
+            enabled_caps.append("broker sudo (unrestricted root)")
+        if bounds.allowed_secret_recipes:
+            recipes_list = ", ".join(recipe.value for recipe in bounds.allowed_secret_recipes)
+            if bounds.allow_broker_sudo:
+                enabled_caps.append(f"secret recipes: {recipes_list}")
+            else:
+                enabled_caps.append(f"secret recipes: {recipes_list} (no unrestricted root sudo)")
         if bounds.allow_workspace_transfer:
             enabled_caps.append("workspace bundle transfer")
         caps_summary = ", ".join(enabled_caps)
@@ -1639,17 +1635,27 @@ class SSHInteractionChangeService(_ExecutionChanges):
                 f"allow_commands={_flag(bounds.allow_commands)}, "
                 f"allow_typing={_flag(bounds.allow_typing)}, "
                 f"allow_password_bootstrap={_flag(bounds.allow_password_bootstrap)}, "
-                f"allow_broker_sudo={_flag(bounds.allow_broker_sudo)}, "
+                f"allow_broker_sudo={_flag(bounds.allow_broker_sudo)} "
+                f"({'unrestricted root commands' if bounds.allow_broker_sudo else 'no unrestricted root sudo'}), "
                 f"allow_workspace_transfer={_flag(bounds.allow_workspace_transfer)}."
             ),
         ]
-        if bounds.allow_broker_sudo:
+        if bounds.allow_broker_sudo or bounds.allowed_secret_recipes:
             recipes = (
                 ", ".join(recipe.value for recipe in bounds.allowed_secret_recipes)
                 if bounds.allowed_secret_recipes
                 else "none"
             )
-            effect.append(f"Approved broker secret recipes (allowed_secret_recipes): {recipes}.")
+            if bounds.allowed_secret_recipes and not bounds.allow_broker_sudo:
+                effect.append(
+                    f"Secret recipes: {recipes} (no unrestricted root sudo; "
+                    f"allowed_secret_recipes={recipes})."
+                )
+            else:
+                effect.append(
+                    f"Broker sudo (unrestricted root) with approved secret recipes "
+                    f"(allowed_secret_recipes): {recipes}."
+                )
         if (
             bounds.allow_password_bootstrap
             or bounds.allow_broker_sudo
@@ -1657,11 +1663,13 @@ class SSHInteractionChangeService(_ExecutionChanges):
         ):
             effect.append(_REMOTE_HOST_SECRET_BOUNDARY_NOTE)
         effect.extend([f"Reason: {plan.reason}", _STALE])
+        raw_title = f"Approve SSH delegation ({caps_summary}) for {acting_agent} on {target.username}@{target.host}"
+        bounded_title = raw_title if len(raw_title) <= 400 else raw_title[:399].rstrip() + "…"
         return ChangeProposalV1(
             kind=self.kind,
             change_id=plan.change_id,
             plan_digest=plan.plan_digest,
-            title=f"Approve SSH delegation ({caps_summary}) for {acting_agent} on {target.username}@{target.host}",
+            title=bounded_title,
             summary=summary_line(
                 f"Grant {acting_agent} {caps_summary} on {target.username}@{target.host} {window_phrase}."
             ),

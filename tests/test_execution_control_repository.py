@@ -809,18 +809,100 @@ def test_session_revocation_columns_cannot_be_overwritten_by_lease_renewals(tmp_
         )
 
 
-def test_ssh_delegation_bounds_validation() -> None:
-    bounds = SSHDelegationBoundsV1()
+def test_ssh_delegation_bounds_validation(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Enable at least one"):
+        SSHDelegationBoundsV1()
+
+    recipe_only = SSHDelegationBoundsV1(allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,))
     assert (
-        bounds.allow_commands,
-        bounds.allow_typing,
-        bounds.allow_password_bootstrap,
-        bounds.allow_broker_sudo,
-        bounds.allow_workspace_transfer,
-        bounds.allowed_secret_recipes,
-    ) == (False, False, False, False, False, ())
-    with pytest.raises(ValueError, match="allow_broker_sudo"):
-        SSHDelegationBoundsV1(allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,))
+        recipe_only.allow_commands,
+        recipe_only.allow_typing,
+        recipe_only.allow_password_bootstrap,
+        recipe_only.allow_broker_sudo,
+        recipe_only.allow_workspace_transfer,
+        recipe_only.allowed_secret_recipes,
+    ) == (False, False, False, False, False, (SSHSecretRecipe.TAILSCALE_UP,))
+
+    # Recipe-only delegation round-trips cleanly through SQLite storage and binds its session digest.
+    repository = SqliteExecutionControlRepository(str(tmp_path / "recipe-only.db"))
+    target = _enrolled_target(target_id="ssh_tgt_recipe_only")
+    repository.put_ssh_target(target)
+    session = _create_live_enrolled_session(
+        repository,
+        target,
+        session_id="ssh_sess_recipe_only",
+        broker_id="broker-recipe",
+        lease_token="tok-recipe",
+    )
+    interaction_digest = ssh_interaction_resource_digest(
+        target_digest=session.target_digest, bounds=recipe_only
+    )
+    interaction_act = build_activation(
+        ExecutionActivationKind.SSH_INTERACT,
+        resource_id=session.session_id,
+        resource_digest=interaction_digest,
+        owner_scope=target.owner,
+        mode=ChangeApprovalMode.PERSON_APPROVAL,
+        function="change:execution_ssh_interaction",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+    )
+    saved = repository.put_ssh_interaction(interaction_act, bounds=recipe_only)
+    loaded = repository.get_ssh_interaction(team_id=target.owner.team_id, session_id=session.session_id)
+    assert loaded == saved
+    assert loaded is not None and loaded.bounds == recipe_only
+    assert loaded.activation.binds_session(session, bounds=recipe_only)
+
+    # F5 / A5: Raw pre-change 0.10 SQLite row (allow_broker_sudo=true + allowed_secret_recipes=['tailscale_up'])
+    # loads unchanged from execution_ssh_interactions and verifies its session binding digest.
+    legacy_session = _create_live_enrolled_session(
+        repository,
+        target,
+        session_id="ssh_sess_prechange_010",
+        broker_id="broker-010",
+        lease_token="tok-010",
+    )
+    raw_010_bounds_json = (
+        '{"delegated_agent_type":"HostBootstrapper","delegated_task_id":"work_010",'
+        '"allow_commands":true,"allow_typing":false,"allow_password_bootstrap":false,'
+        '"allow_broker_sudo":true,"allow_workspace_transfer":false,'
+        '"allowed_secret_recipes":["tailscale_up"],"reason":"Pre-change 0.10 sudo + recipe"}'
+    )
+    expected_010_bounds = SSHDelegationBoundsV1.model_validate_json(raw_010_bounds_json)
+    raw_010_act = build_activation(
+        ExecutionActivationKind.SSH_INTERACT,
+        resource_id=legacy_session.session_id,
+        resource_digest=ssh_interaction_resource_digest(
+            target_digest=legacy_session.target_digest,
+            bounds=expected_010_bounds,
+        ),
+        owner_scope=target.owner,
+        mode=ChangeApprovalMode.PERSON_APPROVAL,
+        function="change:execution_ssh_interaction",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=30),
+    )
+    with sqlite3.connect(str(tmp_path / "recipe-only.db")) as raw_conn:
+        raw_conn.execute(
+            """
+            INSERT INTO execution_ssh_interactions (
+                session_id, team_id, owner_scope_kind, owner_id, record_json, delegation_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                legacy_session.session_id,
+                target.owner.team_id,
+                target.owner.scope_kind.value,
+                target.owner.owner_id,
+                raw_010_act.model_dump_json(),
+                raw_010_bounds_json,
+            ),
+        )
+    reloaded_010 = repository.get_ssh_interaction(
+        team_id=target.owner.team_id, session_id=legacy_session.session_id
+    )
+    assert reloaded_010 is not None
+    assert reloaded_010.bounds == expected_010_bounds
+    assert reloaded_010.activation.binds_session(legacy_session, bounds=reloaded_010.bounds)
 
 
 def test_upgrade_from_0_9_sqlite_fixture_preserves_job_service_session_and_interaction_digests(
