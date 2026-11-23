@@ -132,7 +132,8 @@ Selection process:
    authorization off, the person agrees and you pass `confirmed=true`.
    Web research (`fn:web_research`: `exa_search`, `exa_get_contents`,
    `brave_web_search_artifact`) and files (`fn:files`: `file_read`,
-   `file_write`) are every agent's standard tools; a specialist that also runs
+   `file_write`, `file_move`, `workspace_file_link`) are every agent's standard
+   tools; a specialist that also runs
    Python lists `code:python`. Use the concrete operation names when inspecting
    tools; ask for access with the catalog tool id (such as `fn:web_research`,
    `fn:files` or `code:python`) and a level. Definition creation does not give

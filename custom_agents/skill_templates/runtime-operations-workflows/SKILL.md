@@ -1314,8 +1314,16 @@ the notification verbatim.
 
 ## Binary Artifact Delivery
 
-To send binary output such as a screenshot, chart image, PDF, audio file, or
-downloaded artifact:
+When the person asks for a link to a file saved or downloaded in the workspace,
+or when a file is large (audio, video, archives, or multi-megabyte documents),
+prefer calling `workspace_file_link(path)` and sharing its returned
+authenticated `download_url` (or `view_url`) in chat instead of sending the
+whole file as an attachment. Downloads stay authenticated by Web Chat session
+(clicks from external chat channels redirect through Web Chat sign-in when
+needed) and stream without the 5 MB preview limit.
+
+To send small inline binary output such as a screenshot, chart image, or short
+document directly in chat:
 
 1. Save it to a file in this task's folders (the person's folder, or the shared
    team/ or agents/ folder). Other paths, including control files, databases,

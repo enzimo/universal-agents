@@ -8,7 +8,7 @@ import { createSignInGreeting } from "./chat_sign_in.mjs";
 import { createRuntimeViews } from "./chat_runtime_views.mjs";
 import { createLiveEvents } from "./chat_live_events.mjs";
 import { createChatAttention } from "./chat_attention.mjs";
-import { KNOWLEDGE_VIEW, readChatPageLink } from "./chat_links.mjs";
+import { KNOWLEDGE_VIEW, readChatPageLink, readWorkspaceFileLink } from "./chat_links.mjs";
 import { isAccessReviewMessage } from "./chat_access_review.mjs";
 import { createSettingsControls } from "./settings_controls.mjs";
 import { createWorkspaceFileActions } from "./workspace_file_actions.mjs";
@@ -31,6 +31,7 @@ const pageLink = readChatPageLink(window.location);
 if (pageLink.cleanUrl) {
   window.history.replaceState(null, document.title, pageLink.cleanUrl);
 }
+const workspaceFileLink = readWorkspaceFileLink(window.location);
 const appearanceState = {};
 const authenticationState = {};
 const diagnosticsState = {};
@@ -323,6 +324,10 @@ sharedState.clientId = "";
 authenticationState.pendingAccessRequestId = pageLink.accessRequestId;
 
 authenticationState.pendingAccessAgentType = pageLink.accessAgentType;
+
+authenticationState.pendingWorkspacePath = workspaceFileLink.path;
+
+authenticationState.pendingWorkspaceDownload = workspaceFileLink.download;
 
 // The command guide comes only from the server (/api/web-chat/settings,
 // assistant_gateway.application.command_help.WEB_CHAT_COMMAND_GUIDE), so the

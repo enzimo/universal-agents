@@ -119,6 +119,8 @@ def test_runtime_configuration_context_rereads_instance_config_on_explicit_call(
     assert first["config_file_snapshot"]["user_communication"]["preferred_thread_id"] == "42"
     assert first["config_file_snapshot"]["user_communication"]["notification_routing_mode"] == "default_target"
     assert first["config_file_snapshot"]["user_communication"]["tool"] == "notify_user"
+    assert "workspace_file_link(path)" in first["config_file_snapshot"]["user_communication"]["note"]
+    assert "small inline binary items like screenshots" in first["config_file_snapshot"]["user_communication"]["note"]
     # One view of scheduled-worker settings: the launcher's, read from the saved file.
     assert "schedule_workers" not in first["config_file_snapshot"]
     assert first["schedule_workers"]["source"] == str(config_path.resolve())

@@ -334,11 +334,15 @@ def notify_user(
     Use this when a task came from GitHub, a schedule, automation, or another
     non-chat source but you need to proactively tell the human something before
     the final task response. Do not use low-level `send_message` for user
-    communication. To send binary output such as a screenshot, first save the
-    file under the instance workspace or instance root, then pass an attachment
-    object with the local file path. Do not inline bytes or base64 data in this
-    tool call. The gateway owns final channel delivery, quiet hours, and
-    Telegram/Discord/WhatsApp mechanics.
+    communication. Prefer `workspace_file_link(path)` (and share its returned
+    authenticated download link in text) when the person asks for a link to a
+    file in their workspace or when a file is large (audio, video, archives, or
+    multi-megabyte documents) instead of sending the whole file as a chat
+    attachment. For small inline binary items such as a screenshot or chart,
+    first save the file under the instance workspace or instance root, then
+    pass an attachment object with the local file path. Do not inline bytes or
+    base64 data in this tool call. The gateway owns final channel delivery,
+    quiet hours, and Telegram/Discord/WhatsApp mechanics.
 
     Args:
         message: User-visible notification text.

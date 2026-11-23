@@ -272,6 +272,17 @@ def status(raw: str | Path, *, agent: Any = None) -> tuple[FileLocation, os.stat
         return location, safe_open.entry_status(location.root, location.parts)
 
 
+def inspect_regular_file(
+    raw: str | Path, *, agent: Any = None
+) -> tuple[FileLocation, os.stat_result]:
+    """Verify ``raw`` is an accessible regular single-link file and return its stat without reading bytes."""
+
+    location = locate(raw, agent=agent, is_file=True)
+    with _safely(location):
+        with safe_open.opened_file(location.root, location.parts) as (_fd, file_stat):
+            return location, file_stat
+
+
 def copy_to(
     raw: str | Path, destination: Path, *, max_bytes: int | None = None, agent: Any = None
 ) -> FileLocation:
@@ -329,6 +340,7 @@ __all__ = [
     "SEVERAL_HARD_LINKS",
     "UNSAFE_PATH",
     "copy_to",
+    "inspect_regular_file",
     "list_directory",
     "move_file",
     "locate",

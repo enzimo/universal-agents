@@ -1591,9 +1591,13 @@ person's folder plus `team/` and `agents/`, or only the shared folders for work
 with no person. File tools, `notify_user` attachments, research files, Python
 environments, and the code sandbox all use this one resolver. The gateway's
 workspace browser (`assistant_gateway/application/workspace_browser.py`) opens
-for every signed-in person, with roles from the real session: members see only
-their own folder, administrators also the shared folders, and nobody sees
-another person's folder. Folders outside the instance reach agents only as data
+for every signed-in person, with roles from the real session: members see their
+own folder and the shared `team/` folder, administrators also see `agents/`,
+and nobody sees another person's folder. Readable files can be streamed without
+the 5 MB preview cap through `/api/web-chat/workspace/download` (opened through
+`access_control.safe_open` off the event loop), and agents can return
+authenticated download and Workspace Files links with `workspace_file_link`
+(`fn:files`, level `read`). Folders outside the instance reach agents only as data
 folders, which administrators register in the access store
 (`access_control/data_folders.py`, decision D16: `/access folders`,
 `assistant_cli access folders`, the Access page, or an approved proposal).

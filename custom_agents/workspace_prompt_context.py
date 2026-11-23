@@ -20,7 +20,12 @@ def build_workspace_prompt_context(layout: InstanceLayout) -> str:
             "material such as cloned public repositories). Keep a person's results in "
             "their own folder; never copy personal data into team/ or agents/ unless the "
             f"person asks. {layout.team_shared_dir} is everyone's shared working folder: "
-            "use it when people, their agents and the team's agents work on the same files.",
+            "use it when people, their agents and the team's agents work on the same files. "
+            "When a person asks for a link to a file you saved or downloaded in the "
+            "workspace, or when sharing a large file (audio, video, archives, or "
+            "multi-megabyte documents), call workspace_file_link(path) and share its "
+            "returned authenticated download_url (or view_url) instead of attaching the "
+            "whole file in chat.",
             "Team control files (TeamLead's SOUL.md, model overrides, the startup roster, "
             "team templates, agent definitions, and team skills) live in "
             f"{layout.control_dir}. Agent file tools, shell, and Python cannot open them. "

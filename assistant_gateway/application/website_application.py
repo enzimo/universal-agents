@@ -7,12 +7,15 @@ from custom_messages.contracts.access_v2 import ChangeApprovalRecordV1
 from custom_messages.contracts.control_v1 import KnowledgeCommandPayload, KnowledgeCommandResultPayload
 from custom_messages.contracts.status_v1 import StatusReportV1
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 import hashlib
 import json
+import os
+import threading
+from types import TracebackType
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -220,6 +223,73 @@ class GatewayWorkspaceFileContent:
     preview_kind: Literal["html", "image", "pdf"]
     content_type: str
     content: bytes
+
+
+class GatewayWorkspaceFileDownload:
+    """An opened, link-safe workspace file ready for chunked streaming.
+
+    Holds the already-opened descriptor from ``access_control.safe_open.opened_file``
+    so chunk reads use ``os.pread`` directly against the validated inode without
+    buffering the whole file in memory. A lock serializes ``read_at`` and
+    ``close`` across worker threads so cancellation cannot race ``os.close``
+    with an in-flight ``os.pread`` and risk POSIX file-descriptor reuse.
+    """
+
+    def __init__(
+        self,
+        *,
+        path: str,
+        name: str,
+        size_bytes: int,
+        content_type: str,
+        file_descriptor: int,
+        close_callback: Callable[[], None],
+    ) -> None:
+        self.path = path
+        self.name = name
+        self.size_bytes = size_bytes
+        self.content_type = content_type
+        self._fd = file_descriptor
+        self._close_callback = close_callback
+        self._lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def read_at(self, offset: int, max_bytes: int) -> bytes:
+        """Read up to ``max_bytes`` starting at ``offset`` from the open descriptor."""
+
+        if offset < 0:
+            raise ValueError("Download read offset must be non-negative.")
+        if max_bytes <= 0:
+            return b""
+        with self._lock:
+            if self._closed:
+                raise ValueError("Workspace file download is already closed.")
+            return os.pread(self._fd, max_bytes, offset)
+
+    def close(self) -> None:
+        """Close the underlying descriptor once, waiting for any in-flight read."""
+
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._close_callback()
+
+    def __enter__(self) -> GatewayWorkspaceFileDownload:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
 
 class WebMemoryV1(WebsiteContractV1):
@@ -991,6 +1061,15 @@ class WebOperationsApplication(Protocol):
         path: str,
     ) -> GatewayWorkspaceFileContent:
         """Return validated inline HTML, image, or PDF content."""
+
+    def open_web_chat_workspace_download(
+        self,
+        *,
+        canonical_user_id: str,
+        roles: tuple[str, ...],
+        path: str,
+    ) -> GatewayWorkspaceFileDownload:
+        """Open a validated workspace file descriptor for chunked streaming download."""
 
     async def list_web_chat_memories(
         self,

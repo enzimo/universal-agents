@@ -73,7 +73,9 @@ reach can never be configured to overlap control or state files.
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -169,6 +171,72 @@ EXECUTION_RUST_BUILDS_DIRNAME = "rust-builds"
 
 # The one legacy location: every file used to sit in <root>/workspace.
 LEGACY_WORKSPACE_DIRNAME = "workspace"
+
+# Version-control and dependency folders excluded from workspace browsing and
+# download links. They are not secrets, so they stay separate from credential
+# names in ``access_control.sensitive_paths``.
+WORKSPACE_HIDDEN_DIRNAMES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+)
+
+
+def is_hidden_workspace_tooling_path(parts: Sequence[str]) -> bool:
+    """Whether any component in ``parts`` names a hidden VCS or dependency folder."""
+
+    return any(part.casefold() in WORKSPACE_HIDDEN_DIRNAMES for part in parts)
+
+
+WORKSPACE_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
+WORKSPACE_HTML_SUFFIXES = frozenset({".htm", ".html"})
+WORKSPACE_PDF_SUFFIXES = frozenset({".pdf"})
+WORKSPACE_IMAGE_CONTENT_TYPES = {
+    ".bmp": "image/bmp",
+    ".gif": "image/gif",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+_WORKSPACE_COMPRESSED_ENCODING_CONTENT_TYPES = {
+    "gzip": "application/gzip",
+    "bzip2": "application/x-bzip2",
+    "xz": "application/x-xz",
+    "compress": "application/x-compress",
+}
+
+
+def workspace_download_content_type(name: str) -> str:
+    """Return the download MIME type for a workspace filename.
+
+    Shared by the gateway workspace download endpoint and the agent
+    ``workspace_file_link`` tool so reported and served Content-Type values
+    stay aligned.
+    """
+
+    lowered_name = name.casefold()
+    suffix = Path(lowered_name).suffix
+    if suffix in WORKSPACE_MARKDOWN_SUFFIXES:
+        return "text/markdown"
+    if suffix in WORKSPACE_HTML_SUFFIXES:
+        return "text/html"
+    if suffix in WORKSPACE_IMAGE_CONTENT_TYPES:
+        return WORKSPACE_IMAGE_CONTENT_TYPES[suffix]
+    if suffix in WORKSPACE_PDF_SUFFIXES:
+        return "application/pdf"
+    guessed_type, encoding = mimetypes.guess_type(lowered_name)
+    if encoding is not None:
+        return _WORKSPACE_COMPRESSED_ENCODING_CONTENT_TYPES.get(
+            encoding.casefold(),
+            "application/octet-stream",
+        )
+    return guessed_type or "application/octet-stream"
 
 _SAFE_PERSON_FOLDER = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 _SLUG_UNSAFE = re.compile(r"[^a-z0-9]+")

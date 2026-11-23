@@ -549,6 +549,18 @@ class WebsiteApplicationDouble(CoreApplicationDouble):
             path=path,
         )
 
+    def open_web_chat_workspace_download(
+        self,
+        *,
+        canonical_user_id,
+        roles,
+        path,
+    ):
+        return self._workspace_browser.open_file_download(
+            access=GatewayWorkspaceAccess(canonical_user_id, roles),
+            path=path,
+        )
+
     async def list_web_chat_memories(self, request):
         result = await self._candidate.list_web_chat_memories(
             **_legacy_request_values("list_web_chat_memories", request)
