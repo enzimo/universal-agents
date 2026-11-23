@@ -1478,9 +1478,11 @@ Who decides, with authorization on:
   Sealbox-backed SSH host with its verified fingerprint; or delegating a
   time-bounded SSH session (optionally to one specialist type for one task)
   with explicit capability flags (commands, interactive typing, one-time
-  password key bootstrap, broker `sudo` / secret recipes, or filtered
-  workspace bundle upload). Administrators can inspect enrolled hosts and
-  active delegated sessions and revoke or terminate them immediately in
+  password key bootstrap, unrestricted broker `sudo`, named broker secret
+  recipes such as `tailscale_up`—approvable without unrestricted root `sudo`—or
+  filtered workspace bundle upload). Administrators can inspect enrolled hosts
+  and active delegated sessions (with separate badges for unrestricted broker
+  `sudo` and named secret recipes) and revoke or terminate them immediately in
   **Settings → Tasks → Brokered SSH**.
 
 With authorization off, TeamLead asks for your agreement in the chat instead.

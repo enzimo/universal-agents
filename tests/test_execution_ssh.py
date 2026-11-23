@@ -844,7 +844,14 @@ async def test_ssh_target_enrollment_and_bounded_delegation_end_to_end_with_real
         allow_broker_sudo=True,
         allowed_secret_recipes=(SSHSecretRecipe.TAILSCALE_UP,),
     )
+    del_proposal = interact_service.describe(staged_del["change_id"])
     del_effect = "\n".join(staged_del["effect"])
+    assert "broker sudo (unrestricted root)" in del_proposal.title
+    assert "secret recipes: tailscale_up" in del_proposal.title
+    assert "no unrestricted root sudo" not in del_proposal.title
+    assert "broker sudo (unrestricted root)" in del_proposal.summary
+    assert "secret recipes: tailscale_up" in del_proposal.summary
+    assert "no unrestricted root sudo" not in del_proposal.summary
     assert "CodeWritingAgent" in del_effect
     assert "this request only" in del_effect
     assert "for 15 minutes from approval" in del_effect
@@ -5187,25 +5194,26 @@ async def test_c87_inflight_recheck_run_sudo_enroll_key_and_unmonitored_open(
             ),
         )
         repo.create_interactive_session(session)
-        bounds = SSHDelegationBoundsV1(
-            allow_broker_sudo=allow_broker_sudo,
-            allow_password_bootstrap=allow_password_bootstrap,
-        )
-        repo.put_ssh_interaction(
-            build_activation(
-                ExecutionActivationKind.SSH_INTERACT,
-                resource_id=session_id,
-                resource_digest=ssh_interaction_resource_digest(
-                    target_digest=target_digest,
-                    bounds=bounds,
+        if allow_broker_sudo or allow_password_bootstrap:
+            bounds = SSHDelegationBoundsV1(
+                allow_broker_sudo=allow_broker_sudo,
+                allow_password_bootstrap=allow_password_bootstrap,
+            )
+            repo.put_ssh_interaction(
+                build_activation(
+                    ExecutionActivationKind.SSH_INTERACT,
+                    resource_id=session_id,
+                    resource_digest=ssh_interaction_resource_digest(
+                        target_digest=target_digest,
+                        bounds=bounds,
+                    ),
+                    owner_scope=active_scope,
+                    mode=ChangeApprovalMode.AGREEMENT,
+                    function="change:execution_ssh_interaction",
+                    expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
                 ),
-                owner_scope=active_scope,
-                mode=ChangeApprovalMode.AGREEMENT,
-                function="change:execution_ssh_interaction",
-                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
-            ),
-            bounds=bounds,
-        )
+                bounds=bounds,
+            )
         return enrolled, session
 
     # (a) run_sudo(): policy tightened (1) during _probe_remote_sudo prepare AND (2) during probe exit
@@ -7120,6 +7128,440 @@ async def test_c95_probe_remote_sudo_scrubs_prepare_errors(tmp_path: Path) -> No
         )
     assert secret_val not in str(caught_verify.value)
     assert "[REDACTED]" in str(caught_verify.value)
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_ssh_recipe_only_delegation_end_to_end_real_cedar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#186 (A3, A4, A5, C05): Real-Cedar E2E recipe-only delegation runs tailscale_up, refuses free-form sudo, distinguishes Inbox cards and list_execution_ssh_sessions, and bounds long titles."""
+
+    import subprocess
+    from custom_agents import access_runtime
+    from custom_agents.access_runtime import decide_call
+    from custom_agents.execution_changes import SSHInteractionChangeService
+    from custom_agents.execution_control_service import ExecutionControlService
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        DelegationMode,
+        GrantLifetime,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+    from custom_tools import agent_team_port
+    from runtime_hosting.execution_contracts import ssh_public_key_sha256_fingerprint
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        CredentialCatalog,
+    )
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from tests.change_approval_support import owner
+
+    use_signed_contexts(monkeypatch)
+    monkeypatch.setattr(
+        agent_team_port,
+        "_agent_type_source",
+        lambda: {
+            "TeamArchitect": {},
+            "CodeWritingAgent": {},
+            "WebResearchAgent": {},
+        },
+    )
+
+    keygen_dir = tmp_path / "keys"
+    keygen_dir.mkdir()
+    client_key = keygen_dir / "client_ed25519"
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(client_key)],
+        check=True,
+    )
+    client_priv = client_key.read_text(encoding="utf-8")
+    client_pub = client_key.with_suffix(".pub").read_text(encoding="utf-8").strip()
+    _, client_pub_fp = ssh_public_key_sha256_fingerprint(client_pub)
+
+    host_pub = _framed_ed25519_pub(b"\x66" * 32)
+    extract_root = tmp_path / "remote_extract"
+    remote_state = tmp_path / "remote_state"
+    fake_ssh_bin = _write_fake_tool_ssh(tmp_path / "tool_bin", extract_root=extract_root, state_dir=remote_state)
+    fake_keyscan_bin = _write_fake_keyscan(tmp_path / "tool_bin", public_key=host_pub)
+    admin_pw = "RecipeOnlyAdminPass!88"
+    ts_key = "tskey-auth-recipe-only-e2e-secret-88"
+    fake_sudo_bin = _write_fake_tool_sudo(tmp_path / "tool_sudo", expected_password=admin_pw)
+    ts_record = tmp_path / "ts_record.json"
+    fake_ts_bin = _write_fake_tool_tailscale(tmp_path / "tool_ts", ts_record)
+
+    instance = execution_instance(tmp_path, authorization_enabled=True)
+    instance.config.user.display_name = "Alice Smith"
+    instance.config.execution_control.ssh.ssh_executable = str(fake_ssh_bin)
+    instance.config.execution_control.ssh.allow_password_bootstrap = True
+    instance.config.execution_control.ssh.max_delegation_ttl_seconds = 1800
+    instance.config.save(instance.config_path)
+
+    lead = execution_lead(instance)
+    set_agent_ref(lead)
+
+    access_svc = access_runtime.runtime_access(lead).service
+    assert access_svc is not None
+    access_svc.grant_by_person(
+        owner(lead),
+        GrantV1(
+            grant_id="new",
+            team_id=lead.team_id,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{lead.team_id}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="fn:execution_control"),
+            level=AccessLevel.WRITE,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            delegation_depth=1,
+            delegation_mode=DelegationMode.AUTOMATIC,
+            for_person_id=owner(lead).person_id,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner(lead).person_id),
+            created_at_utc=datetime.now(timezone.utc),
+        ),
+    )
+
+    exec_service = ExecutionControlService(lead)
+    monkeypatch.setenv(
+        "SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH",
+        str(instance.config.credential_catalog_database_path),
+    )
+    monkeypatch.setenv("TEST_RECIPE_E2E_SSH_PRIV", client_priv)
+    monkeypatch.setenv("TEST_RECIPE_E2E_ADMIN_PW", admin_pw)
+    monkeypatch.setenv("TEST_RECIPE_E2E_TS_KEY", ts_key)
+    scope = CredentialOwnerScope.user(exec_service.owner.owner_id)
+    credential_catalog.save_catalog(
+        CredentialCatalog(
+            credentials={
+                "recipe_ssh_key": CatalogCredential(
+                    display_name="Recipe SSH Key",
+                    purpose="Deploy host with recipe-only delegation",
+                    fields={
+                        "ssh_public_key": CatalogCredentialField(
+                            kind="custom",
+                            visibility="metadata_visible",
+                            value_source="user_provided",
+                            value=client_pub,
+                        ),
+                        "ssh_private_key": CatalogCredentialField(
+                            kind="credential_file",
+                            visibility="secret",
+                            value_source="existing_source",
+                            resolution_order=[
+                                CatalogSourceRef(source="env", env_var="TEST_RECIPE_E2E_SSH_PRIV")
+                            ],
+                        ),
+                    },
+                ),
+                "recipe_boot": CatalogCredential(
+                    display_name="Recipe Host Bootstrap",
+                    purpose="Bootstrap admin and Tailscale key",
+                    fields={
+                        "username": CatalogCredentialField(
+                            kind="username",
+                            visibility="metadata_visible",
+                            value_source="user_provided",
+                            value="ops",
+                        ),
+                        "admin_password": CatalogCredentialField(
+                            kind="password",
+                            visibility="secret",
+                            value_source="existing_source",
+                            resolution_order=[
+                                CatalogSourceRef(source="env", env_var="TEST_RECIPE_E2E_ADMIN_PW")
+                            ],
+                        ),
+                        "tailscale_auth_key": CatalogCredentialField(
+                            kind="token",
+                            visibility="secret",
+                            value_source="existing_source",
+                            resolution_order=[
+                                CatalogSourceRef(source="env", env_var="TEST_RECIPE_E2E_TS_KEY")
+                            ],
+                        ),
+                    },
+                ),
+            }
+        ),
+        scope=scope,
+    )
+
+    def _configure_e2e(rt: Any) -> None:
+        rt.broker.ssh_keyscan_executable = str(fake_keyscan_bin)
+        rt.broker.sudo_search_paths = (str(fake_sudo_bin),)
+        rt.broker.tailscale_search_paths = (str(fake_ts_bin),)
+
+    async def _invoke_with_access_hook(agent: Any, tool_fn: Any, **kwargs: Any) -> dict[str, Any]:
+        set_agent_ref(agent)
+        fn_name = tool_fn._tool_func.__name__
+        decision = decide_call(agent, fn_name, kwargs)
+        assert decision is not None
+        if not decision.allowed:
+            return {
+                "status": "access_denied",
+                "error_code": "hook_access_denied",
+                "reason": decision.reason,
+            }
+        result = tool_fn._tool_func(**kwargs)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return json.loads(result)
+
+    async with _running_ssh_broker(
+        instance,
+        lead,
+        monkeypatch,
+        root_token="recipe-e2e-broker-root-token",
+        configure_runtime=_configure_e2e,
+    ) as (_broker_service, _server, _root_token):
+        # 1. Enroll target under real Cedar.
+        target_expiry = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        staged_target = await _invoke_with_access_hook(
+            lead,
+            tools.plan_execution_ssh_target,
+            target_id="recipe_host_01",
+            host="198.51.100.88",
+            port=2222,
+            username="ops",
+            platform="linux",
+            credential_key="recipe_ssh_key",
+            credential_public_key_fingerprint=client_pub_fp,
+            bootstrap_credential_key="recipe_boot",
+            lifecycle="temporary",
+            expires_at_utc=target_expiry,
+            reason="Enroll host for recipe-only Tailscale bootstrap",
+        )
+        assert staged_target["status"] == "staged", staged_target
+        call_enroll = ToolCall("tooluse_recipe_enroll")
+        with pytest.raises(InterruptException):
+            await _apply(staged_target["change_id"], call_enroll)
+        decide(lead, call_enroll)
+        applied_enroll = await _apply(staged_target["change_id"], call_enroll)
+        assert applied_enroll["status"] == "applied", applied_enroll
+
+        # 2. Session A: recipe-only delegation (allow_broker_sudo=False, allowed_secret_recipes=["tailscale_up"]).
+        session_a = await _invoke_with_access_hook(
+            lead, tools.create_execution_ssh_session, target_id="recipe_host_01"
+        )
+        session_a_id = session_a["session_id"]
+        staged_recipe_only = await _invoke_with_access_hook(
+            lead,
+            tools.plan_execution_ssh_interaction,
+            session_id=session_a_id,
+            reason="Join Tailscale without unrestricted root sudo",
+            ttl_seconds=600,
+            delegated_agent_type="CodeWritingAgent",
+            allow_broker_sudo=False,
+            allowed_secret_recipes_json=json.dumps(["tailscale_up"]),
+        )
+        assert staged_recipe_only["status"] == "staged", staged_recipe_only
+        recipe_only_proposal = SSHInteractionChangeService(lead).describe(
+            staged_recipe_only["change_id"]
+        )
+        assert "secret recipes: tailscale_up (no unrestricted root sudo)" in recipe_only_proposal.title
+        assert "broker sudo (unrestricted root)" not in recipe_only_proposal.title
+        assert "secret recipes: tailscale_up (no unrestricted root sudo)" in recipe_only_proposal.summary
+        assert "broker sudo (unrestricted root)" not in recipe_only_proposal.summary
+        recipe_only_effect = "\n".join(staged_recipe_only["effect"])
+        assert "allow_broker_sudo=disabled (no unrestricted root sudo)" in recipe_only_effect
+        assert (
+            "Secret recipes: tailscale_up (no unrestricted root sudo; allowed_secret_recipes=tailscale_up)."
+            in recipe_only_effect
+        )
+        assert "Security note:" in recipe_only_effect
+
+        call_recipe_only = ToolCall("tooluse_recipe_only_deleg")
+        with pytest.raises(InterruptException):
+            await _apply(staged_recipe_only["change_id"], call_recipe_only)
+        decide(lead, call_recipe_only)
+        applied_recipe_only = await _apply(staged_recipe_only["change_id"], call_recipe_only)
+        assert applied_recipe_only["status"] == "applied", applied_recipe_only
+        assert applied_recipe_only["result"]["bounds"]["allow_broker_sudo"] is False
+        assert applied_recipe_only["result"]["bounds"]["allowed_secret_recipes"] == ["tailscale_up"]
+
+        # 3. Session B: combined allow_broker_sudo=True + allowed_secret_recipes=["tailscale_up"] (A5 & C05).
+        session_b = await _invoke_with_access_hook(
+            lead, tools.create_execution_ssh_session, target_id="recipe_host_01"
+        )
+        session_b_id = session_b["session_id"]
+        staged_sudo_and_recipe = await _invoke_with_access_hook(
+            lead,
+            tools.plan_execution_ssh_interaction,
+            session_id=session_b_id,
+            reason="Unrestricted sudo plus Tailscale recipe",
+            ttl_seconds=600,
+            delegated_agent_type="CodeWritingAgent",
+            allow_broker_sudo=True,
+            allowed_secret_recipes_json=json.dumps(["tailscale_up"]),
+        )
+        assert staged_sudo_and_recipe["status"] == "staged", staged_sudo_and_recipe
+        sudo_and_recipe_proposal = SSHInteractionChangeService(lead).describe(
+            staged_sudo_and_recipe["change_id"]
+        )
+        assert "broker sudo (unrestricted root)" in sudo_and_recipe_proposal.title
+        assert "secret recipes: tailscale_up" in sudo_and_recipe_proposal.title
+        assert "no unrestricted root sudo" not in sudo_and_recipe_proposal.title
+        assert "broker sudo (unrestricted root)" in sudo_and_recipe_proposal.summary
+        assert "secret recipes: tailscale_up" in sudo_and_recipe_proposal.summary
+        assert "no unrestricted root sudo" not in sudo_and_recipe_proposal.summary
+        sudo_and_recipe_effect = "\n".join(staged_sudo_and_recipe["effect"])
+        assert "allow_broker_sudo=ALLOWED (unrestricted root commands)" in sudo_and_recipe_effect
+        assert (
+            "Broker sudo (unrestricted root) with approved secret recipes "
+            "(allowed_secret_recipes): tailscale_up."
+            in sudo_and_recipe_effect
+        )
+        assert "Security note:" in sudo_and_recipe_effect
+
+        call_sudo_and_recipe = ToolCall("tooluse_sudo_and_recipe_deleg")
+        with pytest.raises(InterruptException):
+            await _apply(staged_sudo_and_recipe["change_id"], call_sudo_and_recipe)
+        decide(lead, call_sudo_and_recipe)
+        applied_sudo_and_recipe = await _apply(
+            staged_sudo_and_recipe["change_id"], call_sudo_and_recipe
+        )
+        assert applied_sudo_and_recipe["status"] == "applied", applied_sudo_and_recipe
+
+        # 4. C05(3): Long host + full capability list clamps Inbox title safely to <= 400 chars.
+        from runtime_hosting import ssh_network
+
+        long_host = ".".join(["subhost" + "a" * 50] * 4) + ".example.com"  # ~243 chars
+        assert len(long_host) <= 255
+        monkeypatch.setattr(
+            ssh_network, "default_ssh_host_resolver", lambda _host, _port: ("198.51.100.89",)
+        )
+        _broker_service._execution_ssh.broker.resolver = lambda _host, _port: ("198.51.100.89",)
+        staged_long_target = await _invoke_with_access_hook(
+            lead,
+            tools.plan_execution_ssh_target,
+            target_id="recipe_host_long",
+            host=long_host,
+            port=2222,
+            username="ops",
+            platform="linux",
+            credential_key="recipe_ssh_key",
+            credential_public_key_fingerprint=client_pub_fp,
+            bootstrap_credential_key="recipe_boot",
+            lifecycle="temporary",
+            expires_at_utc=target_expiry,
+            reason="Long host title clamp check",
+        )
+        assert staged_long_target.get("status") == "staged", staged_long_target
+        call_long_enroll = ToolCall("tooluse_long_enroll")
+        with pytest.raises(InterruptException):
+            await _apply(staged_long_target["change_id"], call_long_enroll)
+        decide(lead, call_long_enroll)
+        assert (await _apply(staged_long_target["change_id"], call_long_enroll))["status"] == "applied"
+        session_long = await _invoke_with_access_hook(
+            lead, tools.create_execution_ssh_session, target_id="recipe_host_long"
+        )
+        staged_long_del = await _invoke_with_access_hook(
+            lead,
+            tools.plan_execution_ssh_interaction,
+            session_id=session_long["session_id"],
+            reason="Clamp title when every capability and long host/user are present",
+            ttl_seconds=600,
+            delegated_agent_type="CodeWritingAgent",
+            allow_commands=True,
+            allow_typing=True,
+            allow_password_bootstrap=True,
+            allow_broker_sudo=True,
+            allow_workspace_transfer=True,
+            allowed_secret_recipes_json=json.dumps(["tailscale_up"]),
+        )
+        assert staged_long_del["status"] == "staged", staged_long_del
+        assert len(staged_long_del["title"]) <= 400
+        assert staged_long_del["title"].endswith("…")
+
+        # 5. C05(4): list_execution_ssh_sessions distinguishes recipe-only vs sudo+recipe and unauthorized callers.
+        worker = _make_worker_agent(lead, agent_id="worker_code_ro", agent_type="CodeWritingAgent")
+        other_worker = _make_worker_agent(lead, agent_id="worker_web_ro", agent_type="WebResearchAgent")
+
+        worker_sessions = await _invoke_with_access_hook(worker, tools.list_execution_ssh_sessions)
+        by_id_worker = {item["session_id"]: item for item in worker_sessions["sessions"]}
+        entry_a = by_id_worker[session_a_id]
+        assert entry_a["usable_in_this_request"] is True
+        assert entry_a["typing_approved"] is False
+        assert entry_a["broker_sudo_approved"] is False
+        assert entry_a["approved_secret_recipes"] == ["tailscale_up"]
+
+        entry_b = by_id_worker[session_b_id]
+        assert entry_b["usable_in_this_request"] is True
+        assert entry_b["broker_sudo_approved"] is True
+        assert entry_b["approved_secret_recipes"] == ["tailscale_up"]
+
+        other_sessions = await _invoke_with_access_hook(other_worker, tools.list_execution_ssh_sessions)
+        by_id_other = {item["session_id"]: item for item in other_sessions["sessions"]}
+        assert by_id_other[session_a_id]["usable_in_this_request"] is False
+        assert by_id_other[session_a_id]["broker_sudo_approved"] is False
+        assert by_id_other[session_a_id]["approved_secret_recipes"] == []
+        assert "CodeWritingAgent" in by_id_other[session_a_id]["unusable_reason"]
+
+        # 6. A3: On recipe-only Session A, tailscale_up succeeds while free-form sudo command is refused.
+        ts_res = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
+            session_id=session_a_id,
+            secret_recipe="tailscale_up",
+            extra_secret_field="tailscale_auth_key",
+            recipe_params_json=json.dumps({"hostname": "recipe-only-e2e", "ssh": True}),
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+        assert ts_res["status"] == "completed", ts_res
+        assert ts_key not in ts_res["stdout"]
+        ts_data = json.loads(ts_record.read_text(encoding="utf-8"))
+        assert ts_data["auth_key"] == ts_key
+        assert "--hostname" in ts_data["args"] and "recipe-only-e2e" in ts_data["args"]
+
+        free_refused = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
+            session_id=session_a_id,
+            command="id",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+        assert free_refused["error_code"] == "execution_access_refused", free_refused
+        assert "allow_broker_sudo" in free_refused["error"]
+        assert "Unrestricted broker-assisted sudo" in free_refused["error"]
+
+        combined_refused = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
+            session_id=session_a_id,
+            command="id",
+            secret_recipe="tailscale_up",
+            extra_secret_field="tailscale_auth_key",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+        assert combined_refused["error_code"] == "invalid_argument", combined_refused
+        assert "Do not pass free command text together with a broker secret_recipe" in combined_refused["error"]
+
+        # 7. A5: Combined Session B (allow_broker_sudo=True + tailscale_up) continues running both free-form sudo and recipe.
+        sudo_free_ok = await _invoke_with_access_hook(
+            worker,
+            tools.run_execution_ssh_sudo,
+            session_id=session_b_id,
+            command="echo sudo-combined-ok",
+            timeout_seconds=15.0,
+            wait_seconds=5.0,
+        )
+        assert sudo_free_ok["status"] == "completed", sudo_free_ok
+        assert "sudo-combined-ok" in sudo_free_ok["stdout"]
+
+        await _invoke_with_access_hook(worker, tools.close_execution_ssh_session, session_id=session_a_id)
+        await _invoke_with_access_hook(worker, tools.close_execution_ssh_session, session_id=session_b_id)
+
+    set_agent_ref(None)
+
 
 
 
