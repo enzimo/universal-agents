@@ -34,11 +34,15 @@ from typing import Any, Protocol, runtime_checkable
 
 from assistant_gateway.application.account_links import (
     ACCOUNT_LINK_NO_ACCESS_NOTE,
+    ACCOUNT_LINK_PURPOSE_ACCOUNT,
+    ACCOUNT_LINK_PURPOSE_GATE,
     ACCOUNT_LINK_STATUS_CREATED,
     ACCOUNT_LINK_STATUS_DECLINED,
+    GATE_LINK_NO_ACCESS_NOTE,
     REASON_SESSION_EXPIRED,
     AccountLinkForm,
     AccountLinkOwner,
+    AccountLinkPurpose,
     account_link_owner_label,
     account_link_status_is_final,
 )
@@ -120,8 +124,9 @@ class GatewayLinkResultWatches(Protocol):
         owner: AccountLinkOwner,
         restart_command: str,
         target: LinkResultTarget,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> None:
-        """Watch one account link form until it is used or expires."""
+        """Watch one account or gate link form until it is used or expires."""
 
     def watch_sign_in(
         self,
@@ -148,14 +153,25 @@ def _form_result(outcome: BrokerSessionOutcome) -> dict[str, Any]:
     return result if isinstance(result, dict) else {}
 
 
-def created_link_mismatch(outcome: BrokerSessionOutcome, *, tool_id: str, owner: str) -> bool:
-    """Whether the broker reports a created link for another tool or owner than the form's."""
+def created_link_mismatch(
+    outcome: BrokerSessionOutcome,
+    *,
+    tool_id: str,
+    owner: str,
+    purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
+) -> bool:
+    """Whether the broker reports a created link for another tool, owner or purpose than the form's."""
 
     result = _form_result(outcome)
+    reported_purpose = str(result.get("purpose") or ACCOUNT_LINK_PURPOSE_ACCOUNT)
     return (
         outcome.ending == WATCH_FINISHED
         and str(result.get("status") or "") == ACCOUNT_LINK_STATUS_CREATED
-        and (result.get("tool_id") != tool_id or result.get("owner_kind") != owner)
+        and (
+            result.get("tool_id") != tool_id
+            or result.get("owner_kind") != owner
+            or reported_purpose != purpose
+        )
     )
 
 
@@ -166,17 +182,21 @@ def account_link_result_text(
     tool_id: str,
     owner: str,
     restart_command: str,
+    purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
 ) -> str:
-    """The message for one ``/link`` account link form; ``tool_words`` is "Crawl4AI (mcp:crawl4ai)"."""
+    """The message for one ``/link`` account or gate link form; ``tool_words`` is "Crawl4AI (mcp:crawl4ai)"."""
 
+    gate = purpose == ACCOUNT_LINK_PURPOSE_GATE
+    what = "team gate link" if gate else "account link"
+    no_access = GATE_LINK_NO_ACCESS_NOTE if gate else ACCOUNT_LINK_NO_ACCESS_NOTE
     expired = (
-        f"The account link form for {tool_words} expired; nothing was linked. "
+        f"The {what} form for {tool_words} expired; nothing was linked. "
         f"Run {restart_command} again."
     )
     if outcome.ending == WATCH_EXPIRED:
         return expired
     unconfirmed = (
-        f"Couldn't confirm whether the account link for {tool_words} finished. "
+        f"Couldn't confirm whether the {what} for {tool_words} finished. "
         f"Check {ACCESS_PAGE_BY_TOOL}."
     )
     if outcome.ending != WATCH_FINISHED:
@@ -184,15 +204,15 @@ def account_link_result_text(
     result = _form_result(outcome)
     status = str(result.get("status") or outcome.payload.get("status") or "")
     if status == ACCOUNT_LINK_STATUS_CREATED:
-        if created_link_mismatch(outcome, tool_id=tool_id, owner=owner):
+        if created_link_mismatch(outcome, tool_id=tool_id, owner=owner, purpose=purpose):
             # Never tell a person a different or unnamed link exists.
             return unconfirmed
         return (
-            f"Linked {account_link_owner_label(owner)} to {tool_words}. {ACCESS_PAGE_BY_TOOL} lists it. "
-            f"{ACCOUNT_LINK_NO_ACCESS_NOTE}"
+            f"Linked {account_link_owner_label(owner, purpose=purpose)} to {tool_words}. "
+            f"{ACCESS_PAGE_BY_TOOL} lists it. {no_access}"
         )
     if status == ACCOUNT_LINK_STATUS_DECLINED:
-        return f"The account link form for {tool_words} was closed without linking anything."
+        return f"The {what} form for {tool_words} was closed without linking anything."
     if result.get("reason_code") == REASON_SESSION_EXPIRED:
         return expired
     why = _sentence(str(result.get("error") or ""))
@@ -281,9 +301,10 @@ class GatewayLinkResults:
         owner: AccountLinkOwner,
         restart_command: str,
         target: LinkResultTarget,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> None:
         self._watches.start(
-            self._finish_account_link(form, tool_id, owner, restart_command, target),
+            self._finish_account_link(form, tool_id, owner, restart_command, target, purpose),
             name=f"gateway_link_result_{form.session_id[:12]}",
         )
 
@@ -338,6 +359,7 @@ class GatewayLinkResults:
         owner: AccountLinkOwner,
         restart_command: str,
         target: LinkResultTarget,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> None:
         outcome = await watch_broker_session(
             read_status=lambda: self._broker.get_account_link_status(
@@ -349,12 +371,13 @@ class GatewayLinkResults:
             poll_interval_seconds=self._poll_interval_seconds,
             on_read_failed=lambda error: self._log_read_failed(_PAGE_ACCOUNT_LINK, target, error),
         )
-        if created_link_mismatch(outcome, tool_id=tool_id, owner=owner):
+        if created_link_mismatch(outcome, tool_id=tool_id, owner=owner, purpose=purpose):
             self._logger.error(
-                "The broker reported a link for another tool or owner than the /link form's. "
-                "event=gateway_link_result_mismatch tool_id=%s owner=%s session_key=%s correlation_id=%s",
+                "The broker reported a link for another tool, owner or purpose than the /link form's. "
+                "event=gateway_link_result_mismatch tool_id=%s owner=%s purpose=%s session_key=%s correlation_id=%s",
                 tool_id,
                 owner,
+                purpose,
                 target.session_key,
                 target.correlation_id,
             )
@@ -364,9 +387,14 @@ class GatewayLinkResults:
             tool_id=tool_id,
             owner=owner,
             restart_command=restart_command,
+            purpose=purpose,
         )
         await self._post(target, text, page=_PAGE_ACCOUNT_LINK, outcome=outcome, owner=owner)
-        if _page_completed(outcome, sign_in=False) and not created_link_mismatch(outcome, tool_id=tool_id, owner=owner):
+        if (
+            purpose == ACCOUNT_LINK_PURPOSE_ACCOUNT
+            and _page_completed(outcome, sign_in=False)
+            and not created_link_mismatch(outcome, tool_id=tool_id, owner=owner, purpose=purpose)
+        ):
             await self._tell_waiting_tasks(target, tool_id=tool_id, kind=TOOL_SETUP_ACCOUNT_LINK, owner=owner)
 
     async def _finish_sign_in(

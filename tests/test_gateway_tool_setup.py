@@ -505,19 +505,75 @@ async def test_an_approved_proposals_forms_are_watched_until_they_end(setup_gate
         released.set()
 
     form = await setups.open_proposal_link(
-        request_id="access_req_1:http:portainer",
+        request_id="access_req_1:http:portainer:account",
         person_id=owner,
         person_roles=gateway._request_context_service.team_roles(owner),
         tool_id="http:portainer",
         owner="team",
         reason="Restart the stack",
+        purpose="account",
     )
-    setups.after_proposal_links(request_id="access_req_1", forms=[(form, "http:portainer", "team")], then=release)
+    setups.after_proposal_links(
+        request_id="access_req_1",
+        forms=[(form, "http:portainer", "team", "account")],
+        then=release,
+    )
     await asyncio.sleep(0.05)
     assert not released.is_set(), "the task waits while the approver's form is open"
 
     broker.complete(form.session_id)
     await asyncio.wait_for(released.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_proposals_gate_form_passes_gate_purpose_and_verifies_result(setup_gateway) -> None:
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    setups = gateway._credential_workflow.tool_setups
+    released = asyncio.Event()
+
+    async def release() -> None:
+        released.set()
+
+    form = await setups.open_proposal_link(
+        request_id="access_req_gate:http:portainer:gate",
+        person_id=owner,
+        person_roles=gateway._request_context_service.team_roles(owner),
+        tool_id="http:portainer",
+        owner="team",
+        reason="Pass the Cloudflare gate",
+        purpose="gate",
+    )
+    assert broker.requests[-1]["purpose"] == "gate"
+    setups.after_proposal_links(
+        request_id="access_req_gate",
+        forms=[(form, "http:portainer", "team", "gate")],
+        then=release,
+    )
+    broker.complete(form.session_id)
+    await asyncio.wait_for(released.wait(), timeout=5)
+
+    # A gate form whose broker result claims purpose="account" is rejected as a mismatch.
+    wrong = account_link_page_ending(
+        BrokerSessionOutcome(
+            ending=WATCH_FINISHED,
+            payload={
+                "status": "account_link_created",
+                "result": {
+                    "status": "account_link_created",
+                    "link_id": "link-1",
+                    "tool_id": "http:portainer",
+                    "owner_kind": "team",
+                    "purpose": "account",
+                },
+            },
+        ),
+        what="the team gate credential for Portainer",
+        tool_id="http:portainer",
+        owner="team",
+        purpose="gate",
+    )
+    assert (wrong.status, wrong.reason_code) == ("unavailable", "tool_setup_link_mismatch")
 
 
 @pytest.mark.asyncio
@@ -556,7 +612,7 @@ async def test_after_proposal_links_reports_each_form_ending_as_it_finishes(setu
     )
     setups.after_proposal_links(
         request_id="access_req_2",
-        forms=[(form_one, "http:portainer", "team"), (form_two, "cli:x", "team")],
+        forms=[(form_one, "http:portainer", "team", "account"), (form_two, "cli:x", "team", "account")],
         then=release,
         on_form_ended=on_form_ended,
     )
@@ -614,7 +670,7 @@ async def test_after_proposal_links_watch_failure_clears_link_and_waits_for_sibl
 
     real_page = setups._account_link_page
 
-    def patched_page(tool_id: str, owner_kind: str, form):
+    def patched_page(tool_id: str, owner_kind: str, form, *, purpose: str = "account"):
         if tool_id == "http:portainer":
             async def boom():
                 raise ValueError("malformed expires_at_utc")
@@ -626,12 +682,12 @@ async def test_after_proposal_links_watch_failure_clears_link_and_waits_for_sibl
                 expires_at_utc=form.expires_at_utc,
                 watch=boom,
             )
-        return real_page(tool_id, owner_kind, form)
+        return real_page(tool_id, owner_kind, form, purpose=purpose)
 
     monkeypatch.setattr(setups, "_account_link_page", patched_page)
     setups.after_proposal_links(
         request_id="access_req_3",
-        forms=[(form_one, "http:portainer", "team"), (form_two, "cli:x", "team")],
+        forms=[(form_one, "http:portainer", "team", "account"), (form_two, "cli:x", "team", "account")],
         then=release,
         on_form_ended=on_form_ended,
     )

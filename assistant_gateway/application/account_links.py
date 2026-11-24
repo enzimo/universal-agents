@@ -42,13 +42,17 @@ from assistant_gateway.application.ports import (
     GatewaySecureBroker,
     GatewaySecureBrokerRefusal,
 )
-from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind
+from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind, LinkPurpose
+from secure_tools.chat_commands import link_command
 
 
 AccountLinkOwner = Literal["team", "person"]
+AccountLinkPurpose = Literal["account", "gate"]
 
 ACCOUNT_LINK_OWNER_TEAM: AccountLinkOwner = "team"
 ACCOUNT_LINK_OWNER_PERSON: AccountLinkOwner = "person"
+ACCOUNT_LINK_PURPOSE_ACCOUNT: AccountLinkPurpose = "account"
+ACCOUNT_LINK_PURPOSE_GATE: AccountLinkPurpose = "gate"
 
 ACCOUNT_LINK_STATUS_CREATED = "account_link_created"
 ACCOUNT_LINK_STATUS_DECLINED = "account_link_declined"
@@ -73,13 +77,30 @@ REASON_SESSION_INVALID = "account_link_session_invalid"
 REASON_TEAM_ADMIN_REQUIRED = "account_link_team_admin_required"
 
 ACCOUNT_LINK_NO_ACCESS_NOTE = "Linking an account gives nobody access by itself."
+GATE_LINK_NO_ACCESS_NOTE = "Linking a gate credential gives nobody access by itself."
 ACCOUNT_LINK_FORM_ACTION_LABEL = "Open account link form"
+GATE_LINK_FORM_ACTION_LABEL = "Open gate link form"
 
 
-def account_link_owner_label(owner: str) -> str:
-    """Name whose account the link is for, from the person's point of view."""
+def account_link_owner_label(
+    owner: str, *, purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT
+) -> str:
+    """Name whose account or gate credential the link is for, from the person's point of view."""
 
+    if purpose == ACCOUNT_LINK_PURPOSE_GATE:
+        return "the team's gate credential"
     return "the team's account" if owner == ACCOUNT_LINK_OWNER_TEAM else "your own account"
+
+
+def account_link_restart_command(
+    tool_id: str,
+    owner: AccountLinkOwner,
+    *,
+    purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
+) -> str:
+    """The ``/link`` command that re-opens this form."""
+
+    return link_command(tool_id, LinkOwnerKind(owner), purpose=LinkPurpose(purpose))
 
 
 def account_link_status_is_final(payload: dict[str, Any]) -> bool:
@@ -151,6 +172,7 @@ class GatewayAccountLinks:
         tool_id: str,
         owner: AccountLinkOwner,
         reason: str,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> AccountLinkForm:
         """Open the form for ``person_id``; raise ``AccountLinkUnavailable`` if refused."""
 
@@ -168,6 +190,7 @@ class GatewayAccountLinks:
                 team_id=self._team_id,
                 tool_id=tool_id,
                 owner_kind=LinkOwnerKind(owner),
+                purpose=LinkPurpose(purpose),
                 person_id=person_id,
                 person_roles=person_roles,
                 reason=reason,
@@ -176,10 +199,11 @@ class GatewayAccountLinks:
             self._logger.warning(
                 "Account link request was not valid. "
                 "event=gateway_account_link_request_invalid request_id=%s tool_id=%s "
-                "owner=%s error=%s",
+                "owner=%s purpose=%s error=%s",
                 request_id,
                 tool_id,
                 owner,
+                purpose,
                 exc,
             )
             raise AccountLinkUnavailable(
@@ -210,10 +234,11 @@ class GatewayAccountLinks:
             ) from exc
         self._logger.info(
             "Account link form opened. event=gateway_account_link_form_opened "
-            "request_id=%s tool_id=%s owner=%s person_id=%s session_id_prefix=%s",
+            "request_id=%s tool_id=%s owner=%s purpose=%s person_id=%s session_id_prefix=%s",
             request_id,
             tool_id,
             owner,
+            request.purpose.value,
             person_id,
             session.session_id[:12],
         )
@@ -232,10 +257,11 @@ class GatewayAccountLinks:
             self._logger.warning(
                 "Broker refused the account link form. "
                 "event=gateway_account_link_refused request_id=%s tool_id=%s "
-                "owner_kind=%s person_id=%s status=%s reason_code=%s",
+                "owner_kind=%s purpose=%s person_id=%s status=%s reason_code=%s",
                 request.request_id,
                 request.tool_id,
                 request.owner_kind.value,
+                request.purpose.value,
                 request.person_id,
                 exc.status,
                 exc.reason_code or "-",
@@ -263,6 +289,10 @@ class GatewayAccountLinks:
 __all__ = [
     "ACCOUNT_LINK_FORM_ACTION_LABEL",
     "ACCOUNT_LINK_NO_ACCESS_NOTE",
+    "ACCOUNT_LINK_PURPOSE_ACCOUNT",
+    "ACCOUNT_LINK_PURPOSE_GATE",
+    "GATE_LINK_FORM_ACTION_LABEL",
+    "GATE_LINK_NO_ACCESS_NOTE",
     "ACCOUNT_LINK_OWNER_PERSON",
     "ACCOUNT_LINK_OWNER_TEAM",
     "ACCOUNT_LINK_STATUS_CREATED",
@@ -271,10 +301,12 @@ __all__ = [
     "ACCOUNT_LINK_TERMINAL_STATUSES",
     "AccountLinkForm",
     "AccountLinkOwner",
+    "AccountLinkPurpose",
     "AccountLinkUnavailable",
     "GatewayAccountLinks",
     "REASON_SESSION_EXPIRED",
     "REASON_TEAM_ADMIN_REQUIRED",
     "account_link_owner_label",
+    "account_link_restart_command",
     "account_link_status_is_final",
 ]

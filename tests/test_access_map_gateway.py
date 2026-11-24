@@ -469,6 +469,59 @@ def test_tools_list_levels_and_account_links_without_secrets(harness: Harness) -
         asyncio.run(harness.map.tool_operations("member-1", "cli:nothing", offset=0))
 
 
+def test_tools_view_displays_team_gate_credential_without_unused_warning(harness: Harness) -> None:
+    from custom_messages.contracts.access_v2 import (
+        AccountLinkV1,
+        AccountMode,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+
+    store = harness.agents.service.store
+    catalog = harness.map._requests().service.catalog
+    gated_tool = ToolDefinitionV1(
+        tool_id="http:gated_api",
+        kind=ToolKind.HTTP,
+        display_name="AAA Gated API",
+        description="API behind a team gate.",
+        hosts=("gated.example.com",),
+        account=AccountMode.NONE,
+        gate_injections=(
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="gate_key"),
+        ),
+    )
+    catalog.tools["http:gated_api"] = gated_tool
+    store.create_link(
+        AccountLinkV1(
+            link_id="link-gate-1",
+            team_id=TEAM,
+            tool_id="http:gated_api",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="gated_team_key",
+            injections=gated_tool.gate_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="owner-1"),
+            created_at_utc=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        )
+    )
+
+    first = harness.view("member-1", "tools")
+    item = next(row for row in first["items"] if row["tool_id"] == "http:gated_api")
+    assert item["uses_accounts"] is True
+    assert "/link http:gated_api gate" in item["account_words"]
+    assert len(item["links"]) == 1
+    assert item["links"][0]["purpose"] == "gate"
+    assert item["links"][0]["owner_words"] == "The team's gate credential"
+    assert "not used" not in item["links"][0]["owner_words"]
+
+
 def test_an_agent_type_link_opens_the_page_that_lists_it(harness: Harness) -> None:
     for index in range(22):
         person_grant(
