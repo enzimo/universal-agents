@@ -97,22 +97,43 @@ class GatewayTeamCommandService:
         self._request_ids = request_ids
         self._logger = logger or logging.getLogger(__name__)
 
-    async def request(self, kind: str, body: dict[str, Any], *, person_id: str) -> dict[str, Any]:
-        """``body`` without its ``request_id``: each call is a new command with a fresh id (module docstring)."""
+    def new_request_id(self) -> str:
+        """Generate one fresh command ``request_id`` (UUIDv7) so callers can bind blobs before sending."""
+
+        return self._request_ids()
+
+    async def resolve_person_ref(self, person_id: str, *, kind: str) -> str:
+        """Sync the team's people copy and return ``person_id``'s opaque reference, or raise if unrecorded."""
 
         reference = await asyncio.to_thread(self._references.person_ref, person_id)
         if reference is None:
             self._logger.warning("A person's command has no person reference to send. "
                                  "event=gateway_team_command_person_unrecorded kind=%s person=%s", kind, person_id)
             raise TeamServicesUnavailable("You are not a member of this team, so the command was not sent.")
-        request_id = self._request_ids()
-        command = {"request_id": request_id, **body}
+        return reference
+
+    async def request(
+        self,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        person_id: str,
+        request_id: str | None = None,
+        person_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """``body`` without its ``request_id``: each call is a new command with a fresh id (module docstring)."""
+
+        reference = person_ref if person_ref is not None else await self.resolve_person_ref(person_id, kind=kind)
+        resolved_request_id = request_id if request_id is not None else self._request_ids()
+        command = {"request_id": resolved_request_id, **body}
         for attempt in range(1, SEND_ATTEMPTS + 1):
             try:
-                return await self._team_services.command(kind, command, person_ref=reference, request_id=request_id)
+                return await self._team_services.command(
+                    kind, command, person_ref=reference, request_id=resolved_request_id
+                )
             except TeamServicesNoAnswer:
                 self._logger.warning("A person's command got no answer in time. event=gateway_team_command_unanswered "
-                                     "kind=%s request_id=%s attempt=%s of=%s", kind, request_id, attempt, SEND_ATTEMPTS)
+                                     "kind=%s request_id=%s attempt=%s of=%s", kind, resolved_request_id, attempt, SEND_ATTEMPTS)
         if kind in _READ_KINDS:
             raise TeamServicesNoAnswer("The team services did not answer in time. Try again in a moment.")
         raise TeamServicesNoAnswer("The team services did not answer in time, and the change may still be made. "

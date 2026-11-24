@@ -7,9 +7,10 @@ converts between them, with no I/O:
 - archive and revert reasons are the fixed texts below, written by this code and never
   typed in the browser, because they enter shared history;
 - a page version is its revision number as text (``seen_version``);
-- text travels inline, at most ``INLINE_TEXT_MAX`` characters: the contract's object
-  store for longer text does not exist yet, so a longer text is refused before sending;
-  an empty note is refused too, as the service would;
+- text starts inline here; ``GatewayKnowledgePages`` spills any field over 32,768
+  characters (or when combined inline text exceeds the frame budget) to ``UA1_BLOBS``
+  references before sending, and resolves incoming blob references before rendering;
+  an empty note is refused before sending, as the service would;
 - tags are normalized as the knowledge service stores them (``slugify``: lowercase words
   joined by hyphens, at most 80 characters, empty ones dropped), as the contract asks of
   senders;
@@ -33,14 +34,12 @@ from custom_messages.contracts.control_v1 import (
     KnowledgeReviewFlagPayload,
     KnowledgeRevisionPayload,
 )
-from knowledge_base.records import INLINE_TEXT_MAX
 from knowledge_base.text import slugify
 
 # Fixed history texts for changes that need a reason (module docstring).
 ARCHIVE_REASON = "Archived on the Web Chat Knowledge page"
 REVERT_REASON = "Reverted on the Web Chat Knowledge page"
 HISTORY_SHOWN = 50
-TOO_LONG_TEXT = "The text is {length} characters long; at most {limit} can be sent. Shorten it."
 EMPTY_NOTE_TEXT = "A note needs text. Write the note, then add it."
 
 # The contract's refusal outcomes, as the Knowledge page's codes (website_handlers.knowledge).
@@ -63,10 +62,6 @@ EditorLabel = Callable[[dict[str, Any]], str]
 
 class KnowledgeRequestNotSent(ValueError):
     """A request the gateway refuses before sending it (module docstring); its message says why."""
-
-
-class KnowledgeTextTooLong(KnowledgeRequestNotSent):
-    """Text the contract cannot carry inline (module docstring)."""
 
 
 def knowledge_request(payload: KnowledgeCommandPayload) -> tuple[str, dict[str, Any]]:
@@ -167,8 +162,6 @@ def normalized_tags(tags: Iterable[str]) -> list[str]:
 
 
 def _inline(text: str) -> dict[str, Any]:
-    if len(text) > INLINE_TEXT_MAX:
-        raise KnowledgeTextTooLong(TOO_LONG_TEXT.format(length=len(text), limit=INLINE_TEXT_MAX))
     return {"type": "inline", "text": text}
 
 

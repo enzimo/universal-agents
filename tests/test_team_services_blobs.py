@@ -893,3 +893,198 @@ async def test_c06_agent_host_delete_person_blobs_and_manager_settle_person(tmp_
     finally:
         configure_process_host(None)
     assert startup_outcome.problems == []
+
+
+@pytest.mark.asyncio
+async def test_c10_register_mismatch_or_missing_chunks_preserves_null_target_nuid_pending_delete(
+    tmp_path: Path,
+) -> None:
+    """C10: Mismatched size or missing chunks during register must NOT drop a target_nuid=None pending delete,
+    whereas a known old target_nuid whose chunks were purged IS cleared immediately."""
+
+    js = FakeJetStream()
+    clock = _Clock()
+    storage = _storage(tmp_path)
+    repo = BlobIndexRepository(storage)
+    people = _seed_people(storage, [_person(ALICE_ID, ALICE_REF), _person(BOB_ID, BOB_REF)])
+    access = AccessRepository(storage)
+    service = BlobService(repository=repo, people=people, js=js, team_id=TEAM, clock=clock)
+
+    def _chunk_count(nuid: str) -> int:
+        subj = blob_chunk_subject(nuid)
+        return sum(1 for msg in js.messages if msg.subject == subj)
+
+    # Case 1: target_nuid=None pending delete (expired or person_departed on a system-uploaded blob).
+    payload = b"shared-blob-payload-c10"
+    put = await put_blob(js, TEAM, payload, BlobOwner(agent_id="system_agent"))
+    reg = await service.register(
+        sha256=put.sha256,
+        size=len(payload),
+        owner=BlobOwner(request_id="req_alice_c10", person_ref=ALICE_REF),
+    )
+    assert reg.outcome == "ok" and reg.present is True
+
+    # Depart alice and queue the DB-level pending delete (target_nuid=None), simulating the window
+    # after remove_person_owners releases _lock and before _execute_pending_delete_locked runs.
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    removal = repo.remove_person_owners(TEAM, ALICE_REF, clock())
+    assert removal.unowned_sha256s == (put.sha256,)
+    pending_before = repo.get_pending_delete(TEAM, put.sha256)
+    assert pending_before is not None and pending_before.target_nuid is None
+
+    # A concurrent blobs.register with a mismatched size must return present=False and KEEP the pending delete.
+    mismatch = await service.register(
+        sha256=put.sha256,
+        size=len(payload) + 1,
+        owner=BlobOwner(request_id="req_bob_mismatch", person_ref=BOB_REF),
+    )
+    assert mismatch.outcome == "ok" and mismatch.present is False
+    pending_after_mismatch = repo.get_pending_delete(TEAM, put.sha256)
+    assert pending_after_mismatch is not None and pending_after_mismatch.target_nuid is None
+
+    # Now drop chunks so check_chunks_present returns False; register with matching size must still keep it.
+    await js.purge_stream("OBJ_UA1_BLOBS", subject=blob_chunk_subject(put.nuid))
+    missing_chunks = await service.register(
+        sha256=put.sha256,
+        size=len(payload),
+        owner=BlobOwner(request_id="req_bob_missing", person_ref=BOB_REF),
+    )
+    assert missing_chunks.outcome == "ok" and missing_chunks.present is False
+    assert repo.get_pending_delete(TEAM, put.sha256) is not None
+
+    # delete_person then executes the still-queued pending delete and removes the unowned blob in NATS.
+    del_res = await service.delete_person(ALICE_REF)
+    assert del_res.outcome == "ok" and del_res.blobs_deleted == 1
+    assert repo.get_pending_delete(TEAM, put.sha256) is None
+    meta_after = await stat_blob(js, TEAM, put.sha256)
+    assert meta_after is not None and meta_after.deleted is True
+
+    # Case 2: target_nuid is set to an older nuid and newer broken metadata exists under a fresh nuid.
+    payload2 = b"replaced-nuid-payload-c10"
+    old_put = await put_blob(js, TEAM, payload2, BlobOwner(request_id="req_old", person_ref=BOB_REF))
+    repo.queue_pending_delete(
+        TEAM,
+        old_put.sha256,
+        requested_at_utc=clock(),
+        reason="expired",
+        target_nuid=old_put.nuid,
+    )
+    # Overwrite with broken live metadata under a fresh nuid (missing chunks).
+    await js.purge_stream("OBJ_UA1_BLOBS", subject=blob_chunk_subject(old_put.nuid))
+    new_put = await put_blob(js, TEAM, payload2, BlobOwner(request_id="req_new", person_ref=BOB_REF))
+    assert new_put.nuid != old_put.nuid
+    await js.purge_stream("OBJ_UA1_BLOBS", subject=blob_chunk_subject(new_put.nuid))
+    # Re-plant an old chunk on old_put.nuid to confirm it gets purged and pending delete clears immediately.
+    await js.publish(blob_chunk_subject(old_put.nuid), b"old-chunk")
+
+    res2 = await service.register(
+        sha256=old_put.sha256,
+        size=len(payload2),
+        owner=BlobOwner(request_id="req_bob_check", person_ref=BOB_REF),
+    )
+    assert res2.outcome == "ok" and res2.present is False
+    assert repo.get_pending_delete(TEAM, old_put.sha256) is None
+    assert _chunk_count(old_put.nuid) == 0
+
+
+@pytest.mark.asyncio
+async def test_c11_departed_raced_upload_delete_is_crash_safe_and_handles_concurrent_write(
+    tmp_path: Path,
+) -> None:
+    """C11: Departed raced-upload deletion queues durable target_nuid pending delete before deleting,
+    and _reconcile_pending_during_register_locked handles BlobConcurrentWrite cleanly."""
+
+    js = FakeJetStream()
+    clock = _Clock()
+    storage = _storage(tmp_path)
+    repo = BlobIndexRepository(storage)
+    people = _seed_people(storage, [_person(ALICE_ID, ALICE_REF), _person(BOB_ID, BOB_REF)])
+    access = AccessRepository(storage)
+    service = BlobService(repository=repo, people=people, js=js, team_id=TEAM, clock=clock)
+
+    def _chunk_count(nuid: str) -> int:
+        subj = blob_chunk_subject(nuid)
+        return sum(1 for msg in js.messages if msg.subject == subj)
+
+    # 1. Departed person races an upload before register is refused; purge_stream fails after deleted marker.
+    payload = b"departed-raced-secret-c11"
+    put = await put_blob(js, TEAM, payload, BlobOwner(request_id="req_raced_c11", person_ref=ALICE_REF))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.REMOVED))
+
+    real_purge = js.purge_stream
+    fail_once = {"fail": True}
+
+    async def flaky_purge(stream: str, *, subject: Optional[str] = None, keep: Optional[int] = None) -> Any:
+        if fail_once["fail"] and subject == blob_chunk_subject(put.nuid):
+            fail_once["fail"] = False
+            raise RuntimeError("transient NATS error during chunk purge")
+        return await real_purge(stream, subject=subject, keep=keep)
+
+    js.purge_stream = flaky_purge  # type: ignore[method-assign]
+
+    refused = await service.register(
+        sha256=put.sha256,
+        size=len(payload),
+        owner=BlobOwner(request_id="req_raced_c11", person_ref=ALICE_REF),
+    )
+    assert refused.outcome == "not_allowed"
+    # Marker was published, chunk purge failed, and a durable pending delete row records target_nuid.
+    meta_mid = await stat_blob(js, TEAM, put.sha256)
+    assert meta_mid is not None and meta_mid.deleted is True
+    assert _chunk_count(put.nuid) == 1
+    pending = repo.get_pending_delete(TEAM, put.sha256)
+    assert pending is not None
+    assert pending.target_nuid == put.nuid
+    assert pending.reason == "person_departed"
+    assert pending.person_ref == ALICE_REF
+
+    # Retry recovers immediately on restart/upkeep and purges the departed person's chunks.
+    completed = await service.retry_pending_deletes()
+    assert completed == 1
+    assert repo.get_pending_delete(TEAM, put.sha256) is None
+    assert _chunk_count(put.nuid) == 0
+
+    # 2. Concurrent put_blob overwriting broken metadata during _reconcile_pending_during_register_locked
+    # triggers BlobConcurrentWrite on delete_blob; _delete_target_nuid_locked purges old nuid cleanly.
+    payload2 = b"concurrent-overwrite-c11"
+    old_put = await put_blob(js, TEAM, payload2, BlobOwner(request_id="req_old_c11", person_ref=ALICE_REF))
+    repo.queue_pending_delete(
+        TEAM,
+        old_put.sha256,
+        requested_at_utc=clock(),
+        reason="person_departed",
+        target_nuid=old_put.nuid,
+        person_ref=ALICE_REF,
+    )
+    meta_subj = blob_metadata_subject(blob_object_name(TEAM, old_put.sha256))
+    real_publish = js.publish
+    raced = {"done": False, "new_nuid": ""}
+
+    async def racing_publish(subject: str, data: bytes, *, headers: Optional[dict[str, str]] = None) -> Any:
+        if not raced["done"] and subject == meta_subj and json.loads(data.decode("utf-8")).get("deleted"):
+            raced["done"] = True
+            # Simulate a concurrent writer overwriting metadata with a fresh nuid right before CAS.
+            await js.purge_stream("OBJ_UA1_BLOBS", subject=blob_chunk_subject(old_put.nuid))
+            replacement = await put_blob(js, TEAM, payload2, BlobOwner(request_id="req_bob_live", person_ref=BOB_REF))
+            raced["new_nuid"] = replacement.nuid
+            await real_publish(blob_chunk_subject(old_put.nuid), b"leftover-old-chunk")
+        return await real_publish(subject, data, headers=headers)
+
+    js.publish = racing_publish  # type: ignore[method-assign]
+
+    res = await service.register(
+        sha256=old_put.sha256,
+        size=len(payload2),
+        owner=BlobOwner(request_id="req_bob_live", person_ref=BOB_REF),
+    )
+    assert res.outcome == "ok" and res.present is False
+    assert repo.get_pending_delete(TEAM, old_put.sha256) is None
+    assert _chunk_count(old_put.nuid) == 0
+    # Newer live upload stays intact and registers cleanly on the retry.
+    res_retry = await service.register(
+        sha256=old_put.sha256,
+        size=len(payload2),
+        owner=BlobOwner(request_id="req_bob_live", person_ref=BOB_REF),
+    )
+    assert res_retry.outcome == "ok" and res_retry.present is True
+    assert await get_blob(js, TEAM, old_put.sha256) == payload2

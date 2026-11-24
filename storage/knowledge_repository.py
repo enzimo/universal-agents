@@ -64,7 +64,6 @@ from knowledge_base.records import (
     KnowledgeRevision,
     KnowledgeWriteKey,
     KnowledgeWriteReceipt,
-    LongTextCounts,
     PageChange,
     PageKey,
     PageMerge,
@@ -235,7 +234,9 @@ class KnowledgeRepository(Protocol):
         write_key: Optional[KnowledgeWriteKey] = None, command_outcome: Optional[CommandOutcome] = None,
     ) -> KnowledgePage: ...
 
-    def merge_pages(self, merge: PageMerge, *, now: datetime) -> tuple[KnowledgePage, KnowledgePage]: ...
+    def merge_pages(
+        self, merge: PageMerge, *, now: datetime, command_outcome: Optional[CommandOutcome] = None
+    ) -> tuple[KnowledgePage, KnowledgePage]: ...
 
     def add_note(
         self,
@@ -278,8 +279,6 @@ class KnowledgeRepository(Protocol):
     ) -> None: ...
 
     def page_problems(self, *, team_id: str, stale_before: datetime, limit: int) -> PageProblems: ...
-
-    def count_long_texts(self, *, team_id: str, longer_than: int, larger_than_bytes: int = 0) -> LongTextCounts: ...
 
     def export_rows(self, table: str) -> list[dict[str, Any]]: ...
 
@@ -1213,7 +1212,9 @@ class _RelationalKnowledgeRepository:
             {"page_id": current.page_id, "frozen_until_utc": frozen_until},
         )
 
-    def merge_pages(self, merge: PageMerge, *, now: datetime) -> tuple[KnowledgePage, KnowledgePage]:
+    def merge_pages(
+        self, merge: PageMerge, *, now: datetime, command_outcome: Optional[CommandOutcome] = None
+    ) -> tuple[KnowledgePage, KnowledgePage]:
         """Merge one page into another in one transaction; returns (source, target) as stored.
 
         Writes the target's new revision and archives the source (both
@@ -1226,7 +1227,12 @@ class _RelationalKnowledgeRepository:
 
         try:
             with self._write() as conn:
-                return self._merge_pages(conn, merge, now=now)
+                if command_outcome is not None:
+                    command_outcome.raise_if_stored(conn, self._dialect)
+                source, target = self._merge_pages(conn, merge, now=now)
+                if command_outcome is not None:
+                    command_outcome.save(conn, self._dialect, target)
+                return source, target
         except KnowledgeError as error:
             self._save_ledger_review(error)
             self.record_refusal(
@@ -1791,59 +1797,6 @@ class _RelationalKnowledgeRepository:
             stale_pages=[(f"{team}/{row[0]}", str(row[1])) for row in stale],
             pages_with_open_notes=[(f"{team}/{row[0]}", int(row[1])) for row in noted],
             duplicate_pages=[(f"{team}/{row[0]}", f"{team}/{row[1]}") for row in duplicates],
-        )
-
-    def count_long_texts(self, *, team_id: str, longer_than: int, larger_than_bytes: int = 0) -> LongTextCounts:
-        """Pages, earlier revisions, pending contributions and open notes whose text has more than ``longer_than`` characters.
-
-        For administrators' Status page (``custom_agents.long_knowledge``): counts only,
-        never names or text, because personal pages and proposals are their person's own.
-        Every text is measured in the database. The byte size comes first because
-        PostgreSQL reads it without decompressing the text, and a text longer than
-        ``longer_than`` characters is always longer than that many bytes; LENGTH then
-        counts characters on both databases, as Python's ``len`` does.
-
-        ``larger_than_bytes`` also counts the pages whose own text fits but whose text
-        and open notes together have more bytes (``too_large_pages``): an estimate of
-        the pages too large for one reply, which also carries links, backlinks and
-        JSON escapes.
-        """
-
-        p = self._dialect.bind
-
-        def longer(column: str) -> str:
-            return f"{self._dialect.text_bytes(column)} > {p} AND LENGTH({column}) > {p}"
-
-        limit = (int(longer_than), int(longer_than))
-        notes_bytes = (
-            f"(SELECT COALESCE(SUM({self._dialect.text_bytes('n.body')}), 0) FROM knowledge_notes n "
-            f"WHERE n.page_id = pg.page_id AND n.status = {p})"
-        )
-        with self._connect() as conn:
-            row = conn.execute(
-                f"""
-                SELECT
-                  (SELECT COUNT(*) FROM knowledge_pages WHERE team_id = {p} AND {longer("body")}),
-                  (SELECT COUNT(*) FROM knowledge_revisions r JOIN knowledge_pages pg ON pg.page_id = r.page_id
-                   WHERE r.team_id = {p} AND r.revision < pg.revision AND {longer("r.body")}),
-                  (SELECT COUNT(*) FROM knowledge_contributions WHERE team_id = {p} AND status = {p}
-                   AND {longer("body")}),
-                  (SELECT COUNT(*) FROM knowledge_notes WHERE team_id = {p} AND status = {p} AND {longer("body")}),
-                  (SELECT COUNT(*) FROM knowledge_pages pg WHERE pg.team_id = {p} AND {p} > 0
-                   AND NOT ({longer("pg.body")})
-                   AND {self._dialect.text_bytes("pg.body")} + {notes_bytes} > {p})
-                """,
-                (
-                    team_id, *limit,
-                    team_id, *limit,
-                    team_id, ContributionStatus.PENDING.value, *limit,
-                    team_id, NoteStatus.OPEN.value, *limit,
-                    team_id, int(larger_than_bytes), *limit, NoteStatus.OPEN.value, int(larger_than_bytes),
-                ),
-            ).fetchone()
-        return LongTextCounts(
-            pages=int(row[0]), earlier_revisions=int(row[1]), pending_contributions=int(row[2]), open_notes=int(row[3]),
-            too_large_pages=int(row[4]),
         )
 
     # -- write helpers ---------------------------------------------------------------------

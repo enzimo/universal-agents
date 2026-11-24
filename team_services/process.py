@@ -299,16 +299,7 @@ def team_operations(
     memory = MemoryOperations(memory_store, people, lead_memory_config(config), clock, _LOGGER)
     # The team's knowledge settings: agent types cannot override them.
     settings = knowledge_settings(config.agent.knowledge)
-    # With the knowledge base off no store is opened, and its commands are answered feature_off.
-    knowledge_store = create_knowledge_repository(storage, logger=_LOGGER) if settings.enabled else None
-    knowledge = KnowledgeOperations(knowledge_store, people, settings, clock, _LOGGER, personal_memory=memory_store)
-    conversations = ConversationStore(db_path=storage.sqlite_path or "", storage_settings=storage, logger=_LOGGER,
-                                      artifacts_dir=config.layout.conversation_artifacts_dir)
-    topics = TopicOperations(conversations, people, clock, _LOGGER)
-    schedules = ScheduleOperations(ScheduleStore(storage_settings=storage, default_cron_timezone=config.user.timezone),
-                                   people, _delivery_refs(config),
-                                   SystemScheduleCheck(config, people), clock, _LOGGER)
-    families: list[OperationFamily] = [memory.family(), knowledge.family(), topics.family(), schedules.family()]
+    blob_service: Optional[BlobService] = None
     if js is not None:
         blob_service = BlobService(
             repository=BlobIndexRepository(storage),
@@ -319,6 +310,25 @@ def team_operations(
             clock=clock,
             logger=_LOGGER,
         )
+    # With the knowledge base off no store is opened, and its commands are answered feature_off.
+    knowledge_store = create_knowledge_repository(storage, logger=_LOGGER) if settings.enabled else None
+    knowledge = KnowledgeOperations(
+        knowledge_store,
+        people,
+        settings,
+        clock,
+        _LOGGER,
+        personal_memory=memory_store,
+        blobs=blob_service,
+    )
+    conversations = ConversationStore(db_path=storage.sqlite_path or "", storage_settings=storage, logger=_LOGGER,
+                                      artifacts_dir=config.layout.conversation_artifacts_dir)
+    topics = TopicOperations(conversations, people, clock, _LOGGER)
+    schedules = ScheduleOperations(ScheduleStore(storage_settings=storage, default_cron_timezone=config.user.timezone),
+                                   people, _delivery_refs(config),
+                                   SystemScheduleCheck(config, people), clock, _LOGGER)
+    families: list[OperationFamily] = [memory.family(), knowledge.family(), topics.family(), schedules.family()]
+    if blob_service is not None:
         families.append(BlobOperations(blob_service, people, _LOGGER).family())
     return families
 

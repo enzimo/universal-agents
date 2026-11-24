@@ -174,12 +174,11 @@ def test_knowledge_write_keeps_an_omitted_summary_and_clears_an_explicit_empty_s
     assert _call(alice, knowledge_read, page="personal/guide")["summary"] == ""
 
 
-def test_agents_read_and_write_whole_pages_longer_than_web_chat_shows(tmp_path):
-    """Web Chat carries at most INLINE_TEXT_MAX characters (team_services.knowledge); agents' tools carry whole
-    pages up to agent.knowledge.limits.max_body_chars, which allows 500,000."""
+def test_agents_read_and_write_whole_pages_longer_than_inline_text_limit(tmp_path):
+    """Agents' tools carry whole pages up to agent.knowledge.limits.max_body_chars (up to 500,000)."""
 
+    from custom_messages.wire.sizes import INLINE_TEXT_MAX_CHARS
     from custom_tools.providers.knowledge_curation import publish_contribution, read_contribution
-    from knowledge_base.records import INLINE_TEXT_MAX
 
     db = tmp_path / "kb.db"
     longest = {"limits": {"max_body_chars": 500_000}}
@@ -198,7 +197,7 @@ def test_agents_read_and_write_whole_pages_longer_than_web_chat_shows(tmp_path):
     reviewed = _call(alice, read_contribution, contribution_id=proposed["contribution_id"])
     published = _call(alice, publish_contribution, contribution_id=proposed["contribution_id"], base_revision=2)
 
-    assert len(first) == 500_000 and len(proposal) > INLINE_TEXT_MAX
+    assert len(first) == 500_000 and len(proposal) > INLINE_TEXT_MAX_CHARS
     assert (saved["status"], edited["revision"]) == ("saved", 2)
     assert current["body"] == second and earlier["body"] == first
     assert reviewed["text"] == proposal and reviewed["current_page"]["body"] == second

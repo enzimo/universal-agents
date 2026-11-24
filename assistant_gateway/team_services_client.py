@@ -20,9 +20,10 @@ from assistant_gateway.application.team_commands import (
 
 if TYPE_CHECKING:
     from assistant_gateway.message_host import GatewayMessageHost
+    from custom_transport.protocol1.delivery_refs import DeliveryRefs
+    from custom_transport.protocol1.knowledge_blobs import ClientBlobStore
     from storage.access_repository import AccessRepository
     from storage.config import StorageSettings
-    from custom_transport.protocol1.delivery_refs import DeliveryRefs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,6 +103,35 @@ class AccessStorePersonReferences:
         from storage.access_repository import AccessRepository
 
         return AccessRepository(self._storage)
+
+
+def gateway_blob_store(
+    host: Optional["GatewayMessageHost"],
+    *,
+    timeout_seconds: float,
+    team: Optional[str] = None,
+) -> Optional["ClientBlobStore"]:
+    """Client blob store over ``GatewayMessageHost`` for ``UA1_BLOBS`` reads and writes, or ``None`` without a host."""
+
+    if host is None:
+        return None
+    from custom_transport.protocol1.knowledge_blobs import ClientBlobStore
+
+    target_team = host.team if team is None else team
+
+    async def _get_js() -> Any:
+        return await host.blob_store_handle(timeout=timeout_seconds)
+
+    async def _register(body: dict[str, Any]) -> dict[str, Any]:
+        verified = await host.request_team("blobs.register", body, team=target_team, timeout=timeout_seconds)
+        return dict(verified.raw["body"])
+
+    return ClientBlobStore(
+        get_js=_get_js,
+        team=target_team,
+        register=_register,
+        request_ids=new_request_id,
+    )
 
 
 def gateway_delivery_refs(config: Any) -> Optional["DeliveryRefs"]:

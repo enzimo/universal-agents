@@ -209,6 +209,7 @@ from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
 from assistant_gateway.team_services_client import (
     AccessStorePersonReferences,
     MessageHostTeamServices,
+    gateway_blob_store,
     gateway_delivery_refs,
     new_request_id,
 )
@@ -761,6 +762,15 @@ def _person_references(config: GatewayInstanceConfig) -> AccessStorePersonRefere
     """People's opaque references, from the gateway's copy of the team's people."""
 
     return AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id)
+
+
+def _knowledge_blobs(runtime: object) -> Any:
+    """``UA1_BLOBS`` client over the gateway's protocol 1 host when available, else ``None``."""
+
+    return gateway_blob_store(
+        getattr(runtime, "message_host", None),
+        timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
+    )
 
 
 class UserGateway:
@@ -1555,6 +1565,7 @@ class UserGateway:
                 references=_person_references(config),
                 display_name=self.access_inbox.display_name,
                 enabled=config.agent.knowledge.enabled,
+                blobs=_knowledge_blobs(resolved_manager_runtime),
             ),
             accounts=self.account_sharing,
             file_retention=self.stored_data.settings,
