@@ -299,7 +299,9 @@ async def test_live_connected_four_step_handover_with_operator_mode_revocation(t
             stop = asyncio.Event()
             part_task = asyncio.create_task(partitions.run(stop))
 
-            # Stand-in drain hook on host-a: holds one task until handover drain releases it.
+            # Stand-in drain hook on host-a: holds one task until step-1 assertions finish
+            # and handover drain releases it, preventing steps 2-4 from racing ahead of step-1 checks.
+            allow_drain = asyncio.Event()
             held_work = True
             drain_reasons: list[str] = []
 
@@ -309,7 +311,7 @@ async def test_live_connected_four_step_handover_with_operator_mode_revocation(t
                 held_work = False
 
             async def holds_work(_agent: Any) -> bool:
-                return held_work
+                return held_work or not allow_drain.is_set()
 
             host_a = AgentProcessHost(
                 layout, host_a_profile, TEAM_A,
@@ -327,6 +329,14 @@ async def test_live_connected_four_step_handover_with_operator_mode_revocation(t
                 host_b.ensure_started(host_b_nc)
                 await host_a.wait_for_usable_partition(timeout=20)
                 await host_b.wait_for_usable_partition(timeout=20)
+                # Wait until initial partition balancing across host-a and host-b has settled so
+                # background rebalance does not release target_p while attaching the mover agent.
+                await _until(
+                    lambda: len(host_a.usable_partitions()) == PARTITIONS // 2
+                    and len(host_b.usable_partitions()) == PARTITIONS // 2
+                    and host_a.usable_partitions().isdisjoint(host_b.usable_partitions()),
+                    timeout=20,
+                )
 
                 assert host_a.host is not None and host_b.host is not None
                 assert host_a.host.connection is not None and host_b.host.connection is not None
@@ -374,9 +384,21 @@ async def test_live_connected_four_step_handover_with_operator_mode_revocation(t
                 )
                 assert refused.raw["body"]["outcome"] == "partition_not_owned"
 
+                # Release the step-2 drain gate now that step-1 RELEASED and refusal assertions passed.
+                allow_drain.set()
+
                 # Step 2 + Step 3: host-a drains, hands back, closes session handed_over, rotates NATS key,
                 # and authority immediately revokes old_nats_pub, closing old_jwt_nc!
                 await asyncio.wait_for(old_disconnected.wait(), timeout=15)
+                # $SYS.REQ.CLAIMS.UPDATE drops old_jwt_nc before ACCOUNTZ confirmation completes and
+                # before host-a finishes promoting its renewed NATS key/JWT; wait for both to settle.
+                await _until(
+                    lambda: host_a.host.identity.certificate.nats_public_key != old_nats_pub
+                    and host_a.host.connection is not None
+                    and host_a.host.connection["jwt"] != old_jwt
+                    and authority._ledger.is_nats_revocation_confirmed(old_nats_pub),
+                    timeout=15,
+                )
                 assert any("handed over" in r for r in drain_reasons), drain_reasons
                 assert host_a.host.identity.certificate.nats_public_key != old_nats_pub
                 assert authority._ledger.is_nats_revocation_confirmed(old_nats_pub) is True
