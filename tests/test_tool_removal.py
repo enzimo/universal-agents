@@ -2827,3 +2827,188 @@ def test_f5_auth_off_rollback_isolates_step_errors_and_restores_mcp_servers(
     finally:
         access_runtime._runtime_access.cache_clear()
         set_agent_ref(None)
+
+
+def test_c13_auth_off_multi_mcp_failure_and_mcp_store_rollback_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C13: multi-MCP auth-off proposals validate upfront, roll back mid-loop activations, and isolate _mcp_store errors."""
+
+    import asyncio
+    import json
+
+    from custom_agents import access_runtime
+    import custom_tools.providers.access_proposals as proposals_tool_mod
+    from custom_tools.providers.access_proposals import propose_access_change
+    from mcp_control.registry import (
+        MCPConnectionLifecycle,
+        MCPConnectionSource,
+        MCPConnectionStore,
+        _new_record,
+        descriptor_from_server_config,
+        resolve_mcp_connection_paths,
+    )
+    from tests.broker_access_support import context_verify_keys
+    from tests.task_work_support import set_agent_ref
+    from tests.test_access_request_tools import TEAM as REQ_TEAM, Context, make_agent
+
+    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    access_runtime._runtime_access.cache_clear()
+    instance = tmp_path / "instance"
+    (instance / "control").mkdir(parents=True)
+    lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
+    lead.instance_root = str(instance)
+    lead.authorization_config = {"enabled": False}
+    set_agent_ref(lead)
+
+    try:
+        mcp_store = MCPConnectionStore(resolve_mcp_connection_paths(instance))
+        pending_1 = mcp_store.save(
+            _new_record(
+                descriptor_from_server_config(
+                    {"name": "docs-one", "transport": "streamable_http", "server_url": "https://one.example.com/mcp"},
+                    source=MCPConnectionSource.AGENT_PROPOSAL,
+                    source_locator="agent-proposal:test:https://one.example.com/mcp",
+                    team_id=REQ_TEAM,
+                    owner_canonical_user_id="owner-1",
+                ),
+                lifecycle=MCPConnectionLifecycle.PENDING,
+                target_agent_types=("TeamArchitect",),
+            )
+        )
+        pending_2 = mcp_store.save(
+            _new_record(
+                descriptor_from_server_config(
+                    {"name": "docs-two", "transport": "streamable_http", "server_url": "https://two.example.com/mcp"},
+                    source=MCPConnectionSource.AGENT_PROPOSAL,
+                    source_locator="agent-proposal:test:https://two.example.com/mcp",
+                    team_id=REQ_TEAM,
+                    owner_canonical_user_id="owner-1",
+                ),
+                lifecycle=MCPConnectionLifecycle.PENDING,
+                target_agent_types=("TeamArchitect",),
+            )
+        )
+
+        # 1. Second MCP server fails upfront validation (stale digest): first MCP server is never activated.
+        update_calls: list[str] = []
+        real_update = MCPConnectionStore.update_lifecycle
+
+        def spy_update(self: MCPConnectionStore, connection_id: str, *args: object, **kwargs: object) -> object:
+            update_calls.append(connection_id)
+            return real_update(self, connection_id, *args, **kwargs)
+
+        with monkeypatch.context() as ctx_m:
+            ctx_m.setattr(MCPConnectionStore, "update_lifecycle", spy_update)
+            stale_result = json.loads(
+                asyncio.run(
+                    propose_access_change(
+                        title="Install two MCP servers with stale second digest",
+                        reason="Verify upfront validation.",
+                        tool_context=Context("tooluse-c13-stale-second"),
+                        mcp_servers=[
+                            {
+                                "connection_id": pending_1.connection_id,
+                                "record_digest": pending_1.record_digest,
+                            },
+                            {
+                                "connection_id": pending_2.connection_id,
+                                "record_digest": "0" * 64,
+                            },
+                        ],
+                        confirmed=True,
+                    )
+                )
+            )
+        assert stale_result["status"] == "refused"
+        assert "not the pending server" in stale_result["reason"]
+        assert update_calls == []
+        assert mcp_store.require(pending_1.connection_id).lifecycle is MCPConnectionLifecycle.PENDING
+        assert mcp_store.require(pending_2.connection_id).lifecycle is MCPConnectionLifecycle.PENDING
+
+        # 2. Both pass validation, first activates, second raises inside update_lifecycle:
+        # rollback restores the first MCP server back to PENDING with its original digest.
+        def fail_second_update(self: MCPConnectionStore, connection_id: str, *args: object, **kwargs: object) -> object:
+            if connection_id == pending_2.connection_id:
+                raise RuntimeError("simulated MCP store failure on second server")
+            return real_update(self, connection_id, *args, **kwargs)
+
+        with monkeypatch.context() as ctx_m:
+            ctx_m.setattr(MCPConnectionStore, "update_lifecycle", fail_second_update)
+            mid_fail_result = json.loads(
+                asyncio.run(
+                    propose_access_change(
+                        title="Install two MCP servers where second activation fails",
+                        reason="Verify mid-loop MCP rollback.",
+                        tool_context=Context("tooluse-c13-mid-loop-fail"),
+                        mcp_servers=[
+                            {
+                                "connection_id": pending_1.connection_id,
+                                "record_digest": pending_1.record_digest,
+                            },
+                            {
+                                "connection_id": pending_2.connection_id,
+                                "record_digest": pending_2.record_digest,
+                            },
+                        ],
+                        confirmed=True,
+                    )
+                )
+            )
+        assert mid_fail_result["status"] == "refused"
+        assert "simulated MCP store failure on second server" in mid_fail_result["reason"]
+        reloaded_1 = mcp_store.require(pending_1.connection_id)
+        reloaded_2 = mcp_store.require(pending_2.connection_id)
+        assert reloaded_1.lifecycle is MCPConnectionLifecycle.PENDING
+        assert reloaded_1.record_digest == pending_1.record_digest
+        assert reloaded_2.lifecycle is MCPConnectionLifecycle.PENDING
+        assert reloaded_2.record_digest == pending_2.record_digest
+
+        # 3. _mcp_store failure during rollback must not prevent earlier file rollback steps from restoring files.
+        file_gamma = write_instance_tool(instance, _http_tool("http:gamma", "gamma.example.com"))
+        bytes_gamma = file_gamma.read_bytes()
+        real_mcp_store = proposals_tool_mod._mcp_store
+        store_calls = {"count": 0}
+
+        def fail_mcp_store_during_rollback(agent_obj: object) -> object:
+            store_calls["count"] += 1
+            # Call 1: _agreement_rows; Call 2: _install_by_agreement; Call 3+: rollback.
+            if store_calls["count"] >= 3:
+                raise RuntimeError("simulated _mcp_store resolution error during rollback")
+            return real_mcp_store(agent_obj)
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        with monkeypatch.context() as ctx_m:
+            ctx_m.setattr(proposals_tool_mod, "_mcp_store", fail_mcp_store_during_rollback)
+            ctx_m.setattr(
+                AccessRepository,
+                "apply_together",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db failed after staging")),
+            )
+            isolated_result = json.loads(
+                asyncio.run(
+                    propose_access_change(
+                        title="Combined removal and MCP with broken rollback MCP store",
+                        reason="Verify file restoration runs even if _mcp_store fails during rollback.",
+                        tool_context=Context("tooluse-c13-rollback-store-error"),
+                        tool_removals=[{"tool_id": "http:gamma"}],
+                        mcp_servers=[
+                            {
+                                "connection_id": pending_1.connection_id,
+                                "record_digest": pending_1.record_digest,
+                            }
+                        ],
+                        confirmed=True,
+                    )
+                )
+            )
+        assert isolated_result["status"] == "refused"
+        assert "db failed after staging" in isolated_result["reason"]
+        assert file_gamma.exists() and file_gamma.read_bytes() == bytes_gamma
+        assert list(file_gamma.parent.glob(".removed-*.tmp")) == []
+        assert "event=proposal_agreement_rollback_step_failed" in caplog.text
+        assert "simulated _mcp_store resolution error during rollback" in caplog.text
+    finally:
+        access_runtime._runtime_access.cache_clear()
+        set_agent_ref(None)

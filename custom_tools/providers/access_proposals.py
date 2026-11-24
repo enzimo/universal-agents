@@ -357,31 +357,53 @@ def _prepare_agreement_proposal(
     return proposal, change_rows, removal_rows, store
 
 
-def _install_by_agreement(agent: Any, proposal: AccessProposalV1) -> tuple[list[Any], list[Any]]:
-    """Activate the proposed MCP servers with the person's agreement; return ``(installed, pending_originals)``."""
+def _prepare_agreement_mcp_servers(store: Any, proposal: AccessProposalV1) -> list[Any]:
+    """Validate every proposed MCP server record before activating any of them."""
 
     from mcp_control.registry import MCPConnectionLifecycle
 
-    if not proposal.mcp_servers:
-        return [], []
-    store = _mcp_store(agent)
-    approval = ChangeApprovalRecordV1(
-        mode=ChangeApprovalMode.AGREEMENT, approved_by=AGREEMENT_APPROVER, approved_at_utc=datetime.now(timezone.utc)
-    )
-    installed: list[Any] = []
-    originals: list[Any] = []
+    records: list[Any] = []
+    seen: set[str] = set()
     for item in proposal.mcp_servers:
+        if item.connection_id in seen:
+            raise ProposalRefused(
+                f"The MCP server {item.connection_id} is listed more than once in the same proposal."
+            )
+        seen.add(item.connection_id)
         record = store.require(item.connection_id)
         if record.lifecycle is not MCPConnectionLifecycle.PENDING or record.record_digest != item.record_digest:
             raise ProposalRefused(
                 f"The MCP server {record.descriptor.connection_name} is not the pending server you proposed; "
                 "propose it again."
             )
-        originals.append(record)
+        records.append(record)
+    return records
+
+
+def _install_by_agreement(
+    agent: Any,
+    proposal: AccessProposalV1,
+    *,
+    mcp_originals: list[Any],
+) -> list[Any]:
+    """Activate the proposed MCP servers with the person's agreement, recording each original before activating."""
+
+    from mcp_control.registry import MCPConnectionLifecycle
+
+    if not proposal.mcp_servers:
+        return []
+    store = _mcp_store(agent)
+    pending_records = _prepare_agreement_mcp_servers(store, proposal)
+    approval = ChangeApprovalRecordV1(
+        mode=ChangeApprovalMode.AGREEMENT, approved_by=AGREEMENT_APPROVER, approved_at_utc=datetime.now(timezone.utc)
+    )
+    installed: list[Any] = []
+    for record in pending_records:
+        mcp_originals.append(record)
         installed.append(
             store.update_lifecycle(record.connection_id, lifecycle=MCPConnectionLifecycle.ACTIVE, approval=approval)
         )
-    return installed, originals
+    return installed
 
 
 def _prepare_agreement_folders(
@@ -459,6 +481,12 @@ def _discard_agreement_staging(tools_dir: Path, removed_tools: list[RemovedFile]
             )
 
 
+def _restore_agreement_mcp(agent: Any, saved: Any) -> None:
+    """Restore one MCP server record during authorization-off rollback."""
+
+    _mcp_store(agent).save(saved)
+
+
 def _rollback_agreement_changes(
     agent: Any,
     tools_dir: Path,
@@ -502,14 +530,11 @@ def _rollback_agreement_changes(
             (f"program {'/'.join(owned.parts)}", lambda root=root, owned=owned: owned.remove(root))
             for root, owned in reversed(programs)
         ),
+        *(
+            (f"MCP server {record.connection_id}", lambda saved=record: _restore_agreement_mcp(agent, saved))
+            for record in reversed(mcp_originals)
+        ),
     ]
-    if mcp_originals:
-        mcp_store = _mcp_store(agent)
-        for record in reversed(mcp_originals):
-            def _restore_mcp(saved: Any = record) -> None:
-                mcp_store.save(saved)
-
-            steps.append((f"MCP server {record.connection_id}", _restore_mcp))
     for what, step in steps:
         try:
             step()
@@ -626,7 +651,7 @@ def apply_by_agreement(
     mcp_originals: list[Any] = []
     installed: list[Any] = []
     try:
-        installed, mcp_originals = _install_by_agreement(agent, proposal)
+        installed = _install_by_agreement(agent, proposal, mcp_originals=mcp_originals)
         _apply_agreement_files(
             layout.root,
             proposal,
