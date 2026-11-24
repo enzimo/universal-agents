@@ -1277,6 +1277,14 @@ class AccessRepository:
                 return prefix
         return None
 
+    @staticmethod
+    def _is_live_grant(grant: GrantV1, at: datetime) -> bool:
+        if grant.expires_at_utc is not None and grant.expires_at_utc <= at:
+            return False
+        if grant.uses_remaining is not None and grant.uses_remaining <= 0:
+            return False
+        return True
+
     def _grants_for_removed_tools_in(
         self, conn: Any, team_id: str, tool_ids: tuple[str, ...]
     ) -> list[tuple[str, GrantV1]]:
@@ -1316,10 +1324,12 @@ class AccessRepository:
         and ``check_tool_removal_grants`` run after the write lock is taken, as
         in ``store_planned``: new grants are stored, covered grants end, and any
         active/pending grants, blocks, account/gate links, and setup states for
-        ``revoke_tool_ids`` are revoked/cleared atomically. ``finish`` builds
-        the request's outcome from the plan; it is stored under the deciding
-        claim (``claim_id``, see ``finish_request``). Returns the plan and the
-        stored outcome.
+        ``revoke_tool_ids`` are revoked/cleared atomically (only unexpired grants
+        with uses remaining are passed to ``check_tool_removal_grants``, while
+        stale expired/spent rows are still revoked). ``finish`` builds the
+        request's outcome from the plan; it is stored under the deciding claim
+        (``claim_id``, see ``finish_request``). Returns the plan and the stored
+        outcome.
         """
 
         removed_tools = tuple(dict.fromkeys(revoke_tool_ids))
@@ -1328,9 +1338,12 @@ class AccessRepository:
             matched_removal_grants = (
                 self._grants_for_removed_tools_in(conn, team_id, removed_tools) if removed_tools else []
             )
+            live_removal_grants = [
+                grant for _, grant in matched_removal_grants if self._is_live_grant(grant, at)
+            ]
             with self._joining(conn):
-                if check_tool_removal_grants is not None and matched_removal_grants:
-                    check_tool_removal_grants([grant for _, grant in matched_removal_grants])
+                if check_tool_removal_grants is not None and live_removal_grants:
+                    check_tool_removal_grants(live_removal_grants)
                 planned = plan() if plan is not None else None
             for folder in data_folders:
                 self._insert_data_folder(conn, folder)

@@ -22,9 +22,19 @@ from access_catalog.instance_tools import (
     write_instance_tool,
 )
 from access_control import safe_open
+from access_control.account_sharing import TeamAccountSharing
 from access_control.decision_effects import EffectJournal, RemovedFile
-from access_control.proposals import proposal_digest
+from access_control.entities import PersonPrincipal
+from access_control.proposals import (
+    ProposalCompiler,
+    ProposalRefused,
+    proposal_digest,
+    proposal_summary,
+    with_tool_removal_baselines,
+)
+from access_control.tool_removals import active_grants_for_tool, tool_removal_rows
 from custom_messages.contracts.access_v2 import (
+    CHANGE_ITEMS_MAX_COUNT,
     REVIEW_SECTIONS,
     AccessLevel,
     AccessProposalV1,
@@ -36,10 +46,14 @@ from custom_messages.contracts.access_v2 import (
     GrantLifetime,
     GrantStatus,
     GrantV1,
+    HttpRouteV1,
     InjectionPlacement,
     LinkOwnerKind,
     LinkPurpose,
+    ProposedAccountLinkV1,
+    ProposedBlockV1,
     ProposedCliToolV1,
+    ProposedGrantV1,
     ProposedHttpToolChangeV1,
     ProposedHttpToolV1,
     ProposedToolRemovalV1,
@@ -48,11 +62,12 @@ from custom_messages.contracts.access_v2 import (
     SubjectRefV1,
     TargetKind,
     TargetRefV1,
+    ToolDefinitionV1,
     ToolKind,
     ToolSetupState,
     ToolSetupStateV1,
 )
-from custom_messages.contracts.cli_tool_v1 import InstalledCliV1
+from custom_messages.contracts.cli_tool_v1 import MAX_COMMANDS, InstalledCliV1
 from custom_messages.contracts.tool_setup_spec_v1 import ToolSetupSpecV1
 from storage.access_repository import AccessRepository, DecisionClaim, DecisionRecovery
 from storage.config import resolve_storage_settings
@@ -774,3 +789,498 @@ def test_revoke_links_for_tools_revokes_links_clears_setup_states_and_bumps_vers
     # Second call with no active links left does not bump the version.
     assert store.revoke_links_for_tools(TEAM, ("http:gitea",), actor=OWNER, at=later) == []
     assert store.version(TEAM) == version_before + 1
+
+
+def test_apply_together_omits_expired_and_spent_active_grants_from_check_but_still_revokes_them(
+    tmp_path: Path,
+) -> None:
+    store = _access_store(tmp_path)
+    at = datetime(2026, 11, 24, 16, 0, tzinfo=timezone.utc)
+
+    g_live = store.create(_grant("g_live", target_id="http:api"))
+    g_expired = store.create(
+        _grant("g_expired", target_id="http:api").model_copy(
+            update={"lifetime": GrantLifetime.UNTIL, "expires_at_utc": at - timedelta(minutes=5)}
+        )
+    )
+    g_exact_expiry = store.create(
+        _grant("g_exact_expiry", target_id="http:api").model_copy(
+            update={"lifetime": GrantLifetime.UNTIL, "expires_at_utc": at}
+        )
+    )
+    g_spent = store.create(
+        _grant("g_spent", target_id="http:api").model_copy(
+            update={"lifetime": GrantLifetime.ONE_TIME, "uses_remaining": 0, "task_id": "task-1"}
+        )
+    )
+
+    checked: list[str] = []
+    store.apply_together(
+        TEAM,
+        revoke_tool_ids=("http:api",),
+        check_tool_removal_grants=lambda grants: checked.extend(g.grant_id for g in grants),
+        actor=OWNER,
+        at=at,
+    )
+    assert checked == [g_live.grant_id]
+    for gid in (g_live.grant_id, g_expired.grant_id, g_exact_expiry.grant_id, g_spent.grant_id):
+        row = store.get(gid)
+        assert row is not None and row.status is GrantStatus.REVOKED
+
+    # When only expired/spent rows exist for a removed tool, check_tool_removal_grants is not called,
+    # yet stale rows are still revoked cleanly.
+    g_only_expired = store.create(
+        _grant("g_only_expired", target_id="http:stale").model_copy(
+            update={"lifetime": GrantLifetime.UNTIL, "expires_at_utc": at - timedelta(seconds=1)}
+        )
+    )
+    g_only_spent = store.create(
+        _grant("g_only_spent", target_id="http:stale").model_copy(
+            update={"lifetime": GrantLifetime.ONE_TIME, "uses_remaining": 0, "task_id": "task-1"}
+        )
+    )
+    invocations = 0
+
+    def _fail_if_called(grants: list[GrantV1]) -> None:
+        nonlocal invocations
+        invocations += 1
+        raise AssertionError(f"Unexpected check on dead grants: {[g.grant_id for g in grants]}")
+
+    store.apply_together(
+        TEAM,
+        revoke_tool_ids=("http:stale",),
+        check_tool_removal_grants=_fail_if_called,
+        actor=OWNER,
+        at=at,
+    )
+    assert invocations == 0
+    for gid in (g_only_expired.grant_id, g_only_spent.grant_id):
+        row = store.get(gid)
+        assert row is not None and row.status is GrantStatus.REVOKED
+
+
+# ---------------------------------------------------------------------------
+# ProposalCompiler validation, conflicts, and review rows (A1 + A2)
+# ---------------------------------------------------------------------------
+
+
+def _compiler(
+    root: Path,
+    store: AccessRepository,
+    *,
+    grants: list[GrantV1] | None = None,
+    links: list[AccountLinkV1] | None = None,
+) -> ProposalCompiler:
+    catalog = load_catalog(root)
+    all_grants = list(grants or ())
+    all_links = list(links or ())
+    return ProposalCompiler(
+        catalog=catalog,
+        team_id=TEAM,
+        holds=lambda _person, _target, _level: True,
+        account_sharing=TeamAccountSharing(store, TEAM),
+        instance_root=root,
+        grants_for_tool=lambda tool_id: [g for g in all_grants if g.target.id.partition("#")[0] == tool_id],
+        links_for_tool=lambda tool_id: [link for link in all_links if link.tool_id == tool_id],
+    )
+
+
+def test_proposal_compiler_refuses_ineligible_tool_removals_and_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "instance"
+    store = _access_store(tmp_path)
+    write_instance_tool(root, _http_tool("http:gitea", "gitea.example.com"))
+    write_instance_tool(root, _cli_tool("demo"))
+
+    # Operator hand-written catalog file (not proposed-*.yaml).
+    operator_file = proposed_tool_path(root, "http:gitea").parent / "custom.yaml"
+    operator_file.write_text(
+        yaml.safe_dump({"tools": [{"tool_id": "http:custom", "display_name": "Custom", "hosts": ["c.example.com"]}]}),
+        encoding="utf-8",
+    )
+
+    # Symlinked proposed-*.yaml (unsafe file).
+    outside = tmp_path / "outside.yaml"
+    outside.write_text(
+        yaml.safe_dump({"tools": [{"tool_id": "http:sym", "display_name": "Sym", "hosts": ["sym.example.com"]}]}),
+        encoding="utf-8",
+    )
+    sym_path = proposed_tool_path(root, "http:sym")
+    sym_path.symlink_to(outside)
+
+    compiler = _compiler(root, store)
+    # Add an active MCP server to the catalog to prove mcp:* is refused even when present.
+    compiler.catalog.tools["mcp:linear"] = ToolDefinitionV1(
+        tool_id="mcp:linear",
+        kind=ToolKind.MCP,
+        display_name="Linear",
+    )
+    person = PersonPrincipal("owner-1", TEAM, ("owner",))
+
+    cases = [
+        ("http:exa", "builtin_tool"),
+        ("cli:github", "builtin_tool"),
+        ("fn:access", "builtin_tool"),
+        ("mcp:linear", "mcp_tool"),
+        ("mcp:other", "mcp_tool"),
+        ("http:missing", "unknown_tool"),
+        ("http:custom", "operator_managed_file"),
+    ]
+    caplog.set_level(logging.WARNING)
+    for tool_id, reason in cases:
+        caplog.clear()
+        proposal = AccessProposalV1(
+            title=f"Remove {tool_id}",
+            reason="No longer needed.",
+            tool_removals=(ProposedToolRemovalV1(tool_id=tool_id, expected_sha256="a" * 64),),
+        )
+        with pytest.raises(ProposalRefused):
+            compiler.compile(proposal, person=person, task_id="task-1")
+        assert "event=proposal_tool_removal_refused" in caplog.text
+        assert f"reason={reason}" in caplog.text
+
+    # Symlinked proposed file: inject tool into catalog so catalog lookup succeeds, then safe_open refuses the symlink.
+    compiler.catalog.tools["http:sym"] = compiler.catalog.tools["http:gitea"].model_copy(update={"tool_id": "http:sym"})
+    caplog.clear()
+    with pytest.raises(ProposalRefused, match="cannot be removed"):
+        compiler.compile(
+            AccessProposalV1(
+                title="Remove sym",
+                reason="Unsafe.",
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:sym", expected_sha256="a" * 64),),
+            ),
+            person=person,
+            task_id="task-1",
+        )
+    assert "event=proposal_tool_removal_refused" in caplog.text
+    assert "reason=invalid_proposed_file" in caplog.text
+
+    # Missing baseline digest and mismatched baseline digest are refused.
+    caplog.clear()
+    with pytest.raises(ProposalRefused, match="missing its baseline digest"):
+        compiler.compile(
+            AccessProposalV1(
+                title="Remove Gitea",
+                reason="Retired.",
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea"),),
+            ),
+            person=person,
+            task_id="task-1",
+        )
+    assert "reason=missing_baseline" in caplog.text
+
+    caplog.clear()
+    with pytest.raises(ProposalRefused, match="changed after the proposal was prepared"):
+        compiler.compile(
+            AccessProposalV1(
+                title="Remove Gitea",
+                reason="Retired.",
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256="0" * 64),),
+            ),
+            person=person,
+            task_id="task-1",
+        )
+    assert "reason=baseline_changed" in caplog.text
+
+    # Removing a tool that another tool lists as a setup prerequisite fails with an accurate removal message.
+    write_instance_tool(
+        root,
+        _http_tool(
+            "http:dependent",
+            "dep.example.com",
+            setup=ToolSetupSpecV1(prerequisites=("http:gitea",)),
+        ),
+    )
+    dep_compiler = _compiler(root, store)
+    pinned = with_tool_removal_baselines(
+        AccessProposalV1(
+            title="Remove Gitea",
+            reason="Retired.",
+            tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea"),),
+        ),
+        instance_root=root,
+        catalog=dep_compiler.catalog,
+    )
+    with pytest.raises(ProposalRefused, match=r"A proposed tool cannot be removed:.*http:gitea"):
+        dep_compiler.compile(pinned, person=person, task_id="task-1")
+
+
+def test_proposal_compiler_refuses_duplicate_and_same_proposal_conflicts_and_pins_baselines(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "instance"
+    store = _access_store(tmp_path)
+    write_instance_tool(root, _http_tool("http:gitea", "gitea.example.com"))
+    write_instance_tool(root, _cli_tool("demo"))
+    loaded_http = read_proposed_tool_file(root, "http:gitea")
+    loaded_cli = read_proposed_tool_file(root, "cli:demo", allowed_kinds=frozenset({ToolKind.HTTP, ToolKind.CLI}))
+    compiler = _compiler(root, store)
+    person = PersonPrincipal("owner-1", TEAM, ("owner",))
+
+    # with_tool_removal_baselines overwrites any caller-supplied digest with the actual file SHA-256.
+    pinned = with_tool_removal_baselines(
+        AccessProposalV1(
+            title="Remove tools",
+            reason="Retired.",
+            tool_removals=(
+                ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256="0" * 64),
+                ProposedToolRemovalV1(tool_id="cli:demo"),
+            ),
+        ),
+        instance_root=root,
+        catalog=compiler.catalog,
+    )
+    assert pinned.tool_removals[0].expected_sha256 == loaded_http.sha256
+    assert pinned.tool_removals[1].expected_sha256 == loaded_cli.sha256
+
+    conflicts = [
+        (
+            "duplicate_removal",
+            AccessProposalV1(
+                title="Dup",
+                reason="Retired.",
+                tool_removals=(
+                    ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256=loaded_http.sha256),
+                    ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256=loaded_http.sha256),
+                ),
+            ),
+        ),
+        (
+            "conflict_with_add",
+            AccessProposalV1(
+                title="Remove+add http",
+                reason="Retired.",
+                tools=(_http_tool("http:gitea", "gitea.example.com"),),
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256=loaded_http.sha256),),
+            ),
+        ),
+        (
+            "conflict_with_add",
+            AccessProposalV1(
+                title="Remove+add cli",
+                reason="Retired.",
+                clis=(_cli_tool("demo"),),
+                tool_removals=(ProposedToolRemovalV1(tool_id="cli:demo", expected_sha256=loaded_cli.sha256),),
+            ),
+        ),
+        (
+            "conflict_with_change",
+            AccessProposalV1(
+                title="Remove+change",
+                reason="Retired.",
+                tool_changes=(
+                    ProposedHttpToolChangeV1(
+                        tool_id="http:gitea",
+                        display_name="Gitea 2",
+                        hosts=("gitea.example.com",),
+                        previous_definition_digest=loaded_http.sha256,
+                    ),
+                ),
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256=loaded_http.sha256),),
+            ),
+        ),
+        (
+            "conflict_with_grant",
+            AccessProposalV1(
+                title="Remove+grant",
+                reason="Retired.",
+                grants=(
+                    ProposedGrantV1(
+                        agent_type="TeamArchitect",
+                        target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                        level=AccessLevel.READ,
+                    ),
+                ),
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256=loaded_http.sha256),),
+            ),
+        ),
+        (
+            "conflict_with_block",
+            AccessProposalV1(
+                title="Remove+tool-block",
+                reason="Retired.",
+                blocks=(
+                    ProposedBlockV1(
+                        agent_type="Worker",
+                        target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                        reason="Stop using it.",
+                    ),
+                ),
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256=loaded_http.sha256),),
+            ),
+        ),
+        (
+            "conflict_with_block",
+            AccessProposalV1(
+                title="Remove+op-block",
+                reason="Retired.",
+                blocks=(
+                    ProposedBlockV1(
+                        agent_type="Worker",
+                        target=TargetRefV1(kind=TargetKind.OPERATION, id="http:gitea#route:delete"),
+                        reason="Stop deleting.",
+                    ),
+                ),
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256=loaded_http.sha256),),
+            ),
+        ),
+        (
+            "conflict_with_link",
+            AccessProposalV1(
+                title="Remove+link",
+                reason="Retired.",
+                account_links=(
+                    ProposedAccountLinkV1(tool_id="http:gitea", owner="team", purpose="Link Gitea"),
+                ),
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea", expected_sha256=loaded_http.sha256),),
+            ),
+        ),
+    ]
+    caplog.set_level(logging.WARNING)
+    for reason, proposal in conflicts:
+        caplog.clear()
+        with pytest.raises(ProposalRefused):
+            compiler.compile(proposal, person=person, task_id="task-1")
+        assert "event=proposal_tool_removal_refused" in caplog.text
+        assert f"reason={reason}" in caplog.text
+
+
+def test_tool_removal_rows_compiler_summary_bounded_text_and_80_row_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "instance"
+    store = _access_store(tmp_path)
+    write_instance_tool(
+        root,
+        ProposedHttpToolV1(
+            tool_id="http:gitea",
+            display_name="Gitea",
+            hosts=("gitea.example.com", "mirror.example.net"),
+            routes=(HttpRouteV1(name="delete", method="DELETE", path="/repos/**", level=AccessLevel.FULL),),
+            uses_credential=False,
+        ),
+    )
+    # Large CLI with MAX_COMMANDS (300) commands to prove overview row stays compact and bounded.
+    big_commands = {f"cmd{i}": ("read" if i < 200 else ("write" if i < 280 else "full")) for i in range(MAX_COMMANDS)}
+    write_instance_tool(
+        root,
+        ProposedCliToolV1(
+            tool_id="cli:bigcli",
+            display_name="Big CLI",
+            installed_cli=InstalledCliV1(
+                binary_path="team/tools/bigcli/bigcli",
+                sha256="b" * 64,
+                commands=big_commands,
+            ),
+        ),
+    )
+
+    long_reason = "R" * 1900
+    g_active = _grant("g_active", target_id="http:gitea").model_copy(
+        update={"level": AccessLevel.WRITE, "for_person_id": "alice", "reason": long_reason}
+    )
+    g_spent = _grant("g_spent", target_id="http:gitea").model_copy(
+        update={"lifetime": GrantLifetime.ONE_TIME, "uses_remaining": 0, "task_id": "task-1"}
+    )
+    g_expired = _grant("g_expired", target_id="http:gitea").model_copy(
+        update={"lifetime": GrantLifetime.UNTIL, "expires_at_utc": NOW - timedelta(minutes=1)}
+    )
+    g_sibling = _grant("g_sibling", target_id="http:gitea.v2")
+    b_tool = _grant("b_tool", kind=GrantKind.BLOCK, target_id="http:gitea").model_copy(update={"reason": long_reason})
+    b_op = _grant(
+        "b_op", kind=GrantKind.BLOCK, target_kind=TargetKind.OPERATION, target_id="http:gitea#route:delete"
+    )
+    l_team_acct = _link("l_team_acct", tool_id="http:gitea", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM, purpose=LinkPurpose.ACCOUNT)
+    l_person_acct = _link(
+        "l_person_acct", tool_id="http:gitea", owner_kind=LinkOwnerKind.PERSON, owner_id="alice", purpose=LinkPurpose.ACCOUNT
+    )
+    l_team_gate = _link("l_team_gate", tool_id="http:gitea", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM, purpose=LinkPurpose.GATE)
+    l_revoked = l_team_acct.model_copy(update={"link_id": "l_revoked", "status": AccountLinkStatus.REVOKED})
+
+    # Verify active_grants_for_tool excludes expired, spent, and sibling grants.
+    live_grants, live_blocks = active_grants_for_tool(
+        [g_active, g_spent, g_expired, g_sibling, b_tool, b_op], "http:gitea", now=NOW
+    )
+    assert [g.grant_id for g in live_grants] == ["g_active"]
+    assert [b.grant_id for b in live_blocks] == ["b_tool", "b_op"]
+
+    compiler = _compiler(
+        root,
+        store,
+        grants=[g_active, g_spent, g_sibling, b_tool, b_op],
+        links=[l_team_acct, l_person_acct, l_team_gate, l_revoked],
+    )
+    proposal = with_tool_removal_baselines(
+        AccessProposalV1(
+            title="Remove Gitea and Big CLI",
+            reason="Retiring old tools.",
+            tool_removals=(
+                ProposedToolRemovalV1(tool_id="http:gitea"),
+                ProposedToolRemovalV1(tool_id="cli:bigcli"),
+            ),
+        ),
+        instance_root=root,
+        catalog=compiler.catalog,
+    )
+    compiled = compiler.compile(proposal, person=PersonPrincipal("owner-1", TEAM, ("owner",)), task_id="task-1")
+    assert all(row.section == "tool_removal" for row in compiled.rows)
+    assert all(len(row.text) <= 1600 for row in compiled.rows)
+    assert proposal_summary(compiled.rows) == "Access proposal: remove 2 tools. Takes effect when approved."
+
+    by_id = {row.item_id: row.text for row in compiled.rows}
+    # Overview row for HTTP tool names display name, tool_id, kind, hosts, and impact counts.
+    assert "Remove web API tool Gitea (http:gitea)" in by_id["remove-0"]
+    assert "gitea.example.com, mirror.example.net" in by_id["remove-0"]
+    assert "Revokes 1 active grant, 2 active blocks, and 3 active credential links." in by_id["remove-0"]
+    # Explicit rows for every active grant, tool/operation block, and account/gate link (without unbounded reason).
+    assert "g_active" in by_id["remove-0-grant-0"] and "alice's work" in by_id["remove-0-grant-0"]
+    assert long_reason[:50] not in by_id["remove-0-grant-0"]
+    assert "g_spent" not in " ".join(by_id.values())
+    assert "g_sibling" not in " ".join(by_id.values())
+    assert "b_tool" in by_id["remove-0-block-0"] and "tool block" in by_id["remove-0-block-0"]
+    assert "b_op" in by_id["remove-0-block-1"] and "operation route:delete" in by_id["remove-0-block-1"]
+    link_texts = [by_id[f"remove-0-link-{i}"] for i in range(3)]
+    assert any("l_team_acct" in text and "team account link" in text for text in link_texts)
+    assert any("l_person_acct" in text and "personal account link for alice" in text for text in link_texts)
+    assert any("l_team_gate" in text and "team gate credential link" in text for text in link_texts)
+    assert "l_revoked" not in " ".join(link_texts)
+
+    # CLI overview row is compact (even with 300 commands), notes workspace files stay untouched, and notes no impact.
+    assert "Remove installed CLI tool Big CLI (cli:bigcli)" in by_id["remove-1"]
+    assert "team/tools/bigcli/bigcli" in by_id["remove-1"]
+    assert "300 classified commands (200 read, 80 write, 20 full)" in by_id["remove-1"]
+    assert "Workspace files under team/tools/bigcli/ are not deleted." in by_id["remove-1"]
+    assert "No active grants, blocks, or credential links are affected." in by_id["remove-1"]
+
+    # 80-row review card cap is enforced without silent truncation.
+    many_grants = [_grant(f"g_{i:03d}", target_id="http:gitea") for i in range(CHANGE_ITEMS_MAX_COUNT)]
+    crowded_compiler = _compiler(root, store, grants=many_grants)
+    one_removal = with_tool_removal_baselines(
+        AccessProposalV1(
+            title="Remove Gitea",
+            reason="Retired.",
+            tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea"),),
+        ),
+        instance_root=root,
+        catalog=crowded_compiler.catalog,
+    )
+    caplog.set_level(logging.WARNING)
+    caplog.clear()
+    with pytest.raises(ProposalRefused, match=f"exceeds the {CHANGE_ITEMS_MAX_COUNT}-row review card limit"):
+        crowded_compiler.compile(one_removal, person=PersonPrincipal("owner-1", TEAM, ("owner",)), task_id="task-1")
+    assert "event=proposal_review_rows_limit_exceeded" in caplog.text
+
+    # ValueError from tool_removal_rows is logged and converted to ProposalRefused (never silently truncated).
+    import access_control.proposals as proposals_mod
+
+    def _too_long(*_args, **_kwargs):
+        raise ValueError("Review row 'remove-0' is 1700 characters, exceeding the 1600-character limit.")
+
+    monkeypatch.setattr(proposals_mod, "tool_removal_rows", _too_long)
+    caplog.clear()
+    with pytest.raises(ProposalRefused, match="without hiding part of its impact"):
+        compiler.compile(one_removal, person=PersonPrincipal("owner-1", TEAM, ("owner",)), task_id="task-1")
+    assert "event=proposal_tool_removal_refused" in caplog.text
+    assert "reason=review_row_too_long" in caplog.text
+    assert callable(tool_removal_rows)

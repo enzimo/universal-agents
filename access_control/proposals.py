@@ -76,7 +76,16 @@ from access_control.cli_binaries import Downloader, fetch_https, workspaces_root
 from access_control.data_folders import DataFolderRegistry, registration_problem
 from access_control.decision_effects import EffectJournal, OwnedFile, ReplacedFile
 from access_control.proposal_clis import cli_rows, install_programs
+from access_control.proposal_errors import ProposalRefused
 from access_control.tool_change_diffs import describe_injections, tool_change_rows
+from access_control.tool_removals import (
+    active_grants_for_tool,
+    active_grants_for_tool_in_store,
+    check_tool_removal_conflicts,
+    load_removable_tool_file,
+    tool_removal_rows,
+    with_tool_removal_baselines,
+)
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal, agent_type_id
 from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, grantable_folder_id
@@ -129,10 +138,6 @@ logger = logging.getLogger(__name__)
 ACCESS_PROPOSAL_KIND = ACCESS_PROPOSAL_CHANGE
 GRANTABLE_TARGETS = frozenset({TargetKind.TOOL, TargetKind.OPERATION, TargetKind.TOOL_SET, TargetKind.FOLDER})
 MCPRecordLookup = Callable[[str], MCPConnectionRecordV1 | None]
-
-
-class ProposalRefused(ValueError):
-    """The proposal cannot be reviewed or applied as it is; the message says why."""
 
 
 def proposal_digest(proposal: AccessProposalV1) -> str:
@@ -334,6 +339,7 @@ def with_tool_change_baselines(
 _SUMMARY_SECTION_WORDS = {
     "tool": ("add {n} new tool", "add {n} new tools"),
     "tool_change": ("change {n} tool", "change {n} tools"),
+    "tool_removal": ("remove {n} tool", "remove {n} tools"),
     "access": ("give {n} access", "give {n} accesses"),
     "restriction": ("add {n} restriction", "add {n} restrictions"),
     "folder": ("register {n} folder", "register {n} folders"),
@@ -367,8 +373,12 @@ def _summary_bucket(row: ReviewItemV1) -> str:
 def proposal_summary(rows: tuple[ReviewItemV1, ...]) -> str:
     """The proposal in one line from its review rows, such as "Access proposal: add 1 new tool, give 2 accesses"."""
 
-    # A tool's extra rows (its commands, its setup steps, its change details) are not more tools.
-    items = [row for row in rows if not (row.section in {"tool", "tool_change"} and row.item_id.count("-") > 1)]
+    # A tool's extra rows (its commands, its setup steps, its change details, its removal impacts) are not more tools.
+    items = [
+        row
+        for row in rows
+        if not (row.section in {"tool", "tool_change", "tool_removal"} and row.item_id.count("-") > 1)
+    ]
     counts = {section: sum(1 for row in items if _summary_bucket(row) == section) for section in _SUMMARY_SECTION_WORDS}
     parts = [
         _SUMMARY_SECTION_WORDS[section][count != 1].format(n=count) for section, count in counts.items() if count
@@ -453,26 +463,37 @@ class ProposalCompiler:
     mcp_records: MCPRecordLookup = _no_mcp_records
     # The one agent type that keeps lasting access ("access follows the work").
     lead_agent_type: str = "TeamArchitect"
-    # Instance root for checking proposal-written tool files in tool_changes.
+    # Instance root for checking proposal-written tool files in tool_changes and tool_removals.
     instance_root: Path | None = None
-    # Active links (account and gate) for one tool_id, used for re-link and new-host warnings.
+    # Active links (account and gate) for one tool_id, used for re-link, new-host, and removal impact warnings.
     links_for_tool: Callable[[str], list[AccountLinkV1]] = lambda _tool_id: []
     # Active operation blocks on one tool_id, used to warn when route removals widen them.
     blocks_for_tool: Callable[[str], list[GrantV1]] = lambda _tool_id: []
+    # Active grants and blocks targeting one tool_id, used for tool_removals impact rows.
+    grants_for_tool: Callable[[str], list[GrantV1]] = lambda _tool_id: []
 
     def compile(
         self, proposal: AccessProposalV1, *, person: PersonPrincipal | None, task_id: str | None
     ) -> CompiledProposal:
         servers = self._servers(proposal)
+        removed_files = self._tool_removal_files(proposal)
         changed_files = self._tool_change_files(proposal)
         try:
             candidate = with_proposed_tools(
-                self.catalog, proposal.tools, proposal.clis, proposal.tool_changes
+                self.catalog,
+                proposal.tools,
+                proposal.clis,
+                proposal.tool_changes,
+                proposal.tool_removals,
             )
             for record in servers:
                 candidate.add_mcp_tool(record)
             candidate.validate()
         except (CatalogError, ValueError) as exc:
+            if proposal.tool_removals and not (proposal.tools or proposal.clis or proposal.tool_changes or servers):
+                raise ProposalRefused(f"A proposed tool cannot be removed: {exc}") from exc
+            if proposal.tool_removals:
+                raise ProposalRefused(f"The proposed tool changes cannot be applied: {exc}") from exc
             raise ProposalRefused(f"A proposed tool cannot be added: {exc}") from exc
         new_mcp = {record.descriptor.capability_id for record in servers}
         new_tools = {tool.tool_id for tool in proposal.tools} | {cli.tool_id for cli in proposal.clis} | new_mcp
@@ -482,6 +503,7 @@ class ProposalCompiler:
             rows.append(ReviewItemV1(item_id=f"tool-{index}", section="tool", text=_tool_words(tool), flags=tuple(flags)))
             rows += _setup_step_rows(index, tool)
         rows += self._tool_change_rows(proposal, changed_files)
+        rows += self._tool_removal_rows(proposal, removed_files)
         for index, cli in enumerate(proposal.clis):
             rows += cli_rows(index, cli, _setup_step_rows)
         rows += [
@@ -634,6 +656,64 @@ class ProposalCompiler:
                 raise ProposalRefused(
                     f"The proposed change to {item.tool_id} makes no changes to its current definition."
                 )
+            rows += item_rows
+        return rows
+
+    def _tool_removal_files(self, proposal: AccessProposalV1) -> list[ProposedToolFile]:
+        """Read and verify each ``tool_removals`` target file once against its pinned baseline."""
+
+        if not proposal.tool_removals:
+            return []
+        check_tool_removal_conflicts(proposal)
+        if self.instance_root is None:
+            raise ProposalRefused("Tool removals cannot be validated without an instance root.")
+        files: list[ProposedToolFile] = []
+        for item in proposal.tool_removals:
+            tool_file = load_removable_tool_file(self.instance_root, self.catalog, item.tool_id)
+            if item.expected_sha256 is None:
+                logger.warning(
+                    "Refused a proposed tool removal with no pinned baseline digest. "
+                    "event=proposal_tool_removal_refused reason=missing_baseline tool_id=%s",
+                    item.tool_id,
+                )
+                raise ProposalRefused(f"The proposed removal of {item.tool_id} is missing its baseline digest.")
+            if item.expected_sha256 != tool_file.sha256:
+                logger.warning(
+                    "Refused a proposed tool removal whose file changed after preparation. "
+                    "event=proposal_tool_removal_refused reason=baseline_changed tool_id=%s",
+                    item.tool_id,
+                )
+                raise ProposalRefused(
+                    f"The catalog file for {item.tool_id} changed after the proposal was prepared; propose it again."
+                )
+            files.append(tool_file)
+        return files
+
+    def _tool_removal_rows(
+        self, proposal: AccessProposalV1, removed_files: list[ProposedToolFile]
+    ) -> list[ReviewItemV1]:
+        rows: list[ReviewItemV1] = []
+        for index, (item, tool_file) in enumerate(zip(proposal.tool_removals, removed_files)):
+            active_grants, active_blocks = active_grants_for_tool(self.grants_for_tool(item.tool_id), item.tool_id)
+            try:
+                item_rows = tool_removal_rows(
+                    index,
+                    tool_file.definition,
+                    active_grants=active_grants,
+                    active_blocks=active_blocks,
+                    active_links=self.links_for_tool(item.tool_id),
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Refused a proposed tool removal whose impact could not fit without truncation. "
+                    "event=proposal_tool_removal_refused reason=review_row_too_long tool_id=%s error=%s",
+                    item.tool_id,
+                    exc,
+                )
+                raise ProposalRefused(
+                    f"The proposed removal of {item.tool_id} cannot be shown on the review card without hiding "
+                    f"part of its impact: {exc}"
+                ) from exc
             rows += item_rows
         return rows
 
@@ -842,6 +922,9 @@ class ProposalApplier:
                 link for link in service.store.list_links(service.team_id, purpose=None) if link.tool_id == tool_id
             ],
             blocks_for_tool=lambda tool_id: active_operation_blocks_for_tool(
+                service.store, service.team_id, tool_id, now=service.clock()
+            ),
+            grants_for_tool=lambda tool_id: active_grants_for_tool_in_store(
                 service.store, service.team_id, tool_id, now=service.clock()
             ),
         )
@@ -1320,9 +1403,12 @@ __all__ = [
     "ProposalApplier",
     "ProposalCompiler",
     "ProposalRefused",
+    "check_tool_removal_conflicts",
     "load_changeable_tool_file",
+    "load_removable_tool_file",
     "proposal_digest",
     "proposal_summary",
     "with_mcp_defaults",
     "with_tool_change_baselines",
+    "with_tool_removal_baselines",
 ]
