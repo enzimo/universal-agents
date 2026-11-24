@@ -2079,7 +2079,14 @@ class InstallationAuthority:
 
         rotation = body.get("application_key_rotation")
         if rotation:
-            issued = await self._rotation_already_issued(certificate, rotation["key"], now)
+            rot_new_nats = body.get("new_nats_public_key")
+            expected_nats_key = str(rot_new_nats) if rot_new_nats is not None else certificate.nats_public_key
+            issued = await self._rotation_already_issued(
+                certificate,
+                rotation["key"],
+                now,
+                expected_nats_key=expected_nats_key,
+            )
             if issued is not None:
                 return {"outcome": "ok", "certificate": issued}
 
@@ -2276,6 +2283,10 @@ class InstallationAuthority:
             ]
             if changed_partitions:
                 self._ledger.forget_renewal(retry_key)
+                self._ledger.record_aborted_certificate(
+                    str(record["body"]["certificate_id"]),
+                    int(parse_timestamp(str(record["body"]["expires_at"])).timestamp()),
+                )
                 non_connected_change = any(
                     p not in post_team_released or post_team_released[p][1] == "host_lost"
                     for p in changed_partitions
@@ -2331,19 +2342,28 @@ class InstallationAuthority:
             )
         return reply
 
-    async def _rotation_already_issued(self, certificate: HostCertificate, key: Mapping[str, Any],
-                                       now: datetime) -> Optional[dict[str, Any]]:
+    async def _rotation_already_issued(
+        self,
+        certificate: HostCertificate,
+        key: Mapping[str, Any],
+        now: datetime,
+        *,
+        expected_nats_key: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
         """The certificate that already replaced ``certificate`` with the rotated ``key``, as stored; ``None`` otherwise.
 
         README "Application key rotation": a retry after a lost reply names that key, and the
-        authority answers it with that certificate.
+        authority answers it with that certificate. Skips revoked keys, Dekker-aborted certificates,
+        and certificates whose NATS user key differs from ``expected_nats_key`` (C32, C35).
         """
 
         assert self._trust is not None
         for other in self._trust.store.certificates_with_key(certificate.installation, str(key.get("key_id"))):
             if (other.runtime, other.replaces) != (certificate.runtime, certificate.certificate_id) \
                     or _public_text(other) != key.get("public_key") \
-                    or self._ledger.is_nats_key_revoked(other.nats_public_key):
+                    or self._ledger.is_nats_key_revoked(other.nats_public_key) \
+                    or self._ledger.is_aborted_certificate(other.certificate_id) \
+                    or (expected_nats_key is not None and other.nats_public_key != expected_nats_key):
                 continue
             stored = await self._stored(CERTIFICATE, certificate_key(self.installation, other.runtime,
                                                                      other.membership_epoch), now)

@@ -827,9 +827,10 @@ async def test_operator_mode_authority_full_revocation_lifecycle_and_stored_rene
 
 @pytest.mark.asyncio
 async def test_several_gateways_join_with_scoped_team_and_route_credentials(tmp_path: Path) -> None:
-    """Decision 102 / A6 / C07 on live operator-mode nats-server 2.15.1:
-    Two distinct gateways plus the default single gateway join with distinct team and route grants,
-    and nats-server enforces that each gateway cannot touch teams outside its own grants."""
+    """Decision 102 / A6 / C07 / F14 (EVA-04) on live operator-mode nats-server 2.15.1:
+    Disjoint gateways (TEAM_A only vs TEAM_B only), an overlapping multi-team gateway, and the
+    default single gateway join with distinct team and route grants, and nats-server enforces
+    both allowed publishes (own team + own edge) and denied publishes (other team + other edge)."""
 
     nats_dir = tmp_path / "nats"
     nats_dir.mkdir()
@@ -839,12 +840,14 @@ async def test_several_gateways_join_with_scoped_team_and_route_credentials(tmp_
 
         gw_default = gateway_profile(TEAM_A)
         gw_alpha = gateway_profile(TEAM_A, runtime="gateway-alpha")
+        gw_beta_only = gateway_profile(TEAM_B, runtime="gateway-beta-only")
         gw_beta = gateway_profile((TEAM_A, TEAM_B), runtime="gateway-beta")
 
         auth_keys, _ = host_keys.ensure_authority_keys(layout, INSTALLATION)
         host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
         default_keys, _ = host_keys.ensure_host_keys(layout, gw_default.runtime)
         alpha_keys, _ = host_keys.ensure_host_keys(layout, gw_alpha.runtime)
+        beta_only_keys, _ = host_keys.ensure_host_keys(layout, gw_beta_only.runtime)
         beta_keys, _ = host_keys.ensure_host_keys(layout, gw_beta.runtime)
 
         write_expected_hosts(
@@ -855,6 +858,9 @@ async def test_several_gateways_join_with_scoped_team_and_route_credentials(tmp_
                 ),
                 gw_alpha.runtime: message_hosts.expected_host(
                     layout, gw_alpha, edges={TEAM_A: ("web_alpha",)}
+                ),
+                gw_beta_only.runtime: message_hosts.expected_host(
+                    layout, gw_beta_only, edges={TEAM_B: ("web_beta_only",)}
                 ),
                 gw_beta.runtime: message_hosts.expected_host(
                     layout, gw_beta, edges={TEAM_A: ("tg_beta",), TEAM_B: ("web_beta",)}
@@ -895,6 +901,7 @@ async def test_several_gateways_join_with_scoped_team_and_route_credentials(tmp_
             for profile, keys in (
                 (gw_default, default_keys),
                 (gw_alpha, alpha_keys),
+                (gw_beta_only, beta_only_keys),
                 (gw_beta, beta_keys),
             ):
                 tmp_k, tmp_j = server.issue_host_user(f"join-{profile.runtime}")
@@ -910,47 +917,97 @@ async def test_several_gateways_join_with_scoped_team_and_route_credentials(tmp_
                 )
 
             alpha_jwt = replies[gw_alpha.runtime]["connection"]["jwt"]
+            beta_only_jwt = replies[gw_beta_only.runtime]["connection"]["jwt"]
             beta_jwt = replies[gw_beta.runtime]["connection"]["jwt"]
             default_jwt = replies[GATEWAY_RUNTIME]["connection"]["jwt"]
 
             alpha_pub = set(decode_jwt_payload(alpha_jwt)["nats"]["pub"]["allow"])
+            beta_only_pub = set(decode_jwt_payload(beta_only_jwt)["nats"]["pub"]["allow"])
             beta_pub = set(decode_jwt_payload(beta_jwt)["nats"]["pub"]["allow"])
             default_pub = set(decode_jwt_payload(default_jwt)["nats"]["pub"]["allow"])
 
-            # Each gateway gets only its own teams and edges!
+            # Each gateway gets only its own teams and edges (disjoint alpha vs beta_only, overlapping beta).
             assert any(TEAM_A in s for s in alpha_pub) and not any(TEAM_B in s for s in alpha_pub)
             assert any("web_alpha" in s for s in alpha_pub) and not any("tg_beta" in s for s in alpha_pub)
 
+            assert any(TEAM_B in s for s in beta_only_pub) and not any(TEAM_A in s for s in beta_only_pub)
+            assert any("web_beta_only" in s for s in beta_only_pub) and not any("web_beta" in s and "web_beta_only" not in s for s in beta_only_pub)
+
             assert any(TEAM_A in s for s in beta_pub) and any(TEAM_B in s for s in beta_pub)
             assert any("tg_beta" in s for s in beta_pub) and any("web_beta" in s for s in beta_pub)
-            assert not any("web_alpha" in s for s in beta_pub)
+            assert not any("web_alpha" in s or "web_beta_only" in s for s in beta_pub)
 
             assert any("web_default" in s for s in default_pub) and not any(TEAM_B in s for s in default_pub)
 
-            # Live NATS enforcement: gateway-alpha connects with its issued JWT and is denied publishing to team_b.
-            alpha_user_key = NatsSigningKey.from_private_key(
-                "user",
-                __import__(
-                    "cryptography.hazmat.primitives.asymmetric.ed25519", fromlist=["Ed25519PrivateKey"]
-                ).Ed25519PrivateKey.from_private_bytes(alpha_keys.nats_seed),
-            )
-            errors: list[Exception] = []
+            # Live NATS enforcement for both disjoint gateways: own team + own edge allowed;
+            # foreign team and foreign edge on the same team are denied by nats-server!
+            ed25519 = __import__(
+                "cryptography.hazmat.primitives.asymmetric.ed25519", fromlist=["Ed25519PrivateKey"]
+            ).Ed25519PrivateKey
 
-            async def on_error(exc: Exception) -> None:
-                errors.append(exc)
+            async def _check_gateway_enforcement(
+                profile: HostProfile,
+                keys: Any,
+                jwt_token: str,
+                *,
+                allowed_subjects: list[str],
+                denied_subjects: list[str],
+            ) -> None:
+                user_key = NatsSigningKey.from_private_key("user", ed25519.from_private_bytes(keys.nats_seed))
+                errs: list[Exception] = []
 
-            alpha_nc = await nats.connect(
-                server.url,
-                **alpha_user_key.login_options(alpha_jwt),
-                inbox_prefix=f"_INBOX.{gw_alpha.runtime}".encode(),
-                allow_reconnect=False,
-                error_cb=on_error,
+                async def on_error(exc: Exception) -> None:
+                    errs.append(exc)
+
+                gw_nc = await nats.connect(
+                    server.url,
+                    **user_key.login_options(jwt_token),
+                    inbox_prefix=f"_INBOX.{profile.runtime}".encode(),
+                    allow_reconnect=False,
+                    error_cb=on_error,
+                )
+                stack.push_async_callback(gw_nc.close)
+                for subj in allowed_subjects:
+                    await gw_nc.publish(subj, b"allowed")
+                await flush_fully(gw_nc)
+                await asyncio.sleep(0.05)
+                assert errs == [], f"unexpected errors on allowed subjects {allowed_subjects}: {errs}"
+
+                for subj in denied_subjects:
+                    errs.clear()
+                    await gw_nc.publish(subj, b"forbidden")
+                    await flush_fully(gw_nc)
+                    await asyncio.sleep(0.05)
+                    assert any("permissions violation" in str(err).lower() for err in errs), (
+                        f"expected permissions violation publishing {subj}, got {errs}"
+                    )
+
+            await _check_gateway_enforcement(
+                gw_alpha,
+                alpha_keys,
+                alpha_jwt,
+                allowed_subjects=[
+                    f"ua.v1.{TEAM_A}.{gw_alpha.runtime}.svc.team",
+                    f"$JS.ACK.UA1_EDGE_WORK_{TEAM_A}.edge~{TEAM_A}~web_alpha.1",
+                ],
+                denied_subjects=[
+                    f"ua.v1.{TEAM_B}.{gw_alpha.runtime}.svc.team",
+                    f"$JS.ACK.UA1_EDGE_WORK_{TEAM_A}.edge~{TEAM_A}~tg_beta.1",
+                ],
             )
-            stack.push_async_callback(alpha_nc.close)
-            await alpha_nc.publish(f"ua.v1.{TEAM_B}.{gw_alpha.runtime}.svc.team", b"forbidden")
-            await flush_fully(alpha_nc)
-            await asyncio.sleep(0.1)
-            assert any("permissions violation" in str(err).lower() for err in errors), errors
+            await _check_gateway_enforcement(
+                gw_beta_only,
+                beta_only_keys,
+                beta_only_jwt,
+                allowed_subjects=[
+                    f"ua.v1.{TEAM_B}.{gw_beta_only.runtime}.svc.team",
+                    f"$JS.ACK.UA1_EDGE_WORK_{TEAM_B}.edge~{TEAM_B}~web_beta_only.1",
+                ],
+                denied_subjects=[
+                    f"ua.v1.{TEAM_A}.{gw_beta_only.runtime}.svc.team",
+                    f"$JS.ACK.UA1_EDGE_WORK_{TEAM_B}.edge~{TEAM_B}~web_beta.1",
+                ],
+            )
 
 
 @pytest.mark.asyncio
@@ -1595,3 +1652,166 @@ async def test_f6_live_end_to_end_cr4_credential_too_large_recovery(tmp_path: Pa
                 assert sorted(own_stable) == [0]
         finally:
             auth_svc_mod.max_credential_bytes = orig_max_bytes
+
+
+@pytest.mark.asyncio
+async def test_f14_live_s3_mixed_roles_and_fa6_renewal_refusal(tmp_path: Path) -> None:
+    """F14/EVA-05 on live operator-mode nats-server 2.15.1:
+    1. S3 mixed [lead_host, team_services] joining and renewing through InstallationAuthority fills
+       team_services templates across all partitions while scoping lead_host templates solely to the
+       host's owned partition, enforced live by nats-server.
+    2. FA-6 live host.renew (both give_up=False and give_up=True) refuses a certificate whose team
+       no longer has streams in authority._teams with team_not_allowed."""
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from custom_transport.protocol1.host_runtime import MessageHost
+
+    nats_dir = tmp_path / "nats"
+    nats_dir.mkdir()
+    with _operator_nats_server(nats_dir) as server:
+        layout = InstanceLayout.at(tmp_path / "inst-f14-s3-fa6")
+        auth_keys, _ = host_keys.ensure_authority_keys(layout, INSTALLATION)
+        auth_host_keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
+        mixed_profile = HostProfile(
+            "lead-and-ts", (TEAM_A,), ("lead_host", "team_services"), ("TeamArchitect",), 4
+        )
+        b_profile = HostProfile("worker-b", (TEAM_B,), ("worker_host",), ("researcher",), 4)
+        mixed_keys, _ = host_keys.ensure_host_keys(layout, mixed_profile.runtime)
+        host_keys.ensure_host_keys(layout, b_profile.runtime)
+
+        write_expected_hosts(
+            layout.trust_expected_hosts_path,
+            {
+                mixed_profile.runtime: message_hosts.expected_host(layout, mixed_profile),
+                b_profile.runtime: message_hosts.expected_host(layout, b_profile),
+            },
+        )
+        write_bundle(
+            layout.trust_bootstrap_path,
+            BootstrapBundle(INSTALLATION, ((auth_keys.key_id, auth_keys.public_key_text),), partitions=PARTITIONS),
+        )
+        clock = _Clock(utc_now())
+
+        async with AsyncExitStack() as stack:
+            async def _connect_host(runtime: str) -> nats.NATS:
+                uk, uj = server.issue_host_user(runtime)
+                nc = await nats.connect(
+                    server.url,
+                    **uk.login_options(uj),
+                    inbox_prefix=f"_INBOX.{runtime}".encode(),
+                    allow_reconnect=False,
+                )
+                stack.push_async_callback(nc.close)
+                return nc
+
+            auth_nc = await _connect_host(AUTHORITY_RUNTIME)
+            mixed_nc = await _connect_host(mixed_profile.runtime)
+            b_nc = await _connect_host(b_profile.runtime)
+
+            authority = InstallationAuthority(
+                layout,
+                auth_keys,
+                auth_host_keys,
+                partitions=PARTITIONS,
+                queues=TEST_QUEUE_LIMITS,
+                clock=clock,
+                credential_lifetime_seconds=300,
+                nats_account_public_key=server.installation_account.public_key,
+                nats_account_signing_key=server.installation_signing,
+            )
+            await authority.start(auth_nc, teams=[TEAM_A, TEAM_B])
+
+            # 1. S3 mixed [lead_host, team_services]: join then acquire owned partition 2 and renew.
+            mixed_host = MessageHost(layout=layout, profile=mixed_profile, nc=mixed_nc, clock=clock)
+            await mixed_host.start(report=False)
+            assert mixed_host.records is not None and mixed_host.live is not None
+            owner_key = partition_owner_key(TEAM_A, 2, PARTITIONS)
+            owner_doc = mixed_host.records.signed(
+                "partition_owner",
+                owner_key,
+                {
+                    "team": TEAM_A,
+                    "partition": 2,
+                    "state": OWNED,
+                    "host": mixed_profile.runtime,
+                    "host_epoch": mixed_host.identity.certificate.membership_epoch,
+                    "assigned_at": format_timestamp(clock()),
+                    "reason": "initial",
+                },
+                sequence=1,
+                issued_at=clock(),
+            )
+            await mixed_host.records.put("partition_owner", owner_key, owner_doc)
+            outcome = await mixed_host.renew(partitions=[2])
+            assert outcome.ok is True and mixed_host.connection is not None
+
+            claims = decode_jwt_payload(mixed_host.connection["jwt"])["nats"]
+            pub_allow = set(claims["pub"]["allow"])
+            sub_allow = set(claims["sub"]["allow"])
+            # team_services withdrawal subjects span all 0..PARTITIONS-1:
+            for p in range(PARTITIONS):
+                assert f"$JS.API.STREAM.MSG.DELETE.UA1_PART_{TEAM_A}~{p}" in pub_allow, p
+            # lead_host control subscribe spans ONLY owned partition 2 (not 0, 1, or 3):
+            assert f"ua.v1.{TEAM_A}.*.ctl.agent.*.2" in sub_allow
+            for other_p in (0, 1, 3):
+                assert f"ua.v1.{TEAM_A}.*.ctl.agent.*.{other_p}" not in sub_allow
+
+            # Verify live on operator-mode nats-server that subscribing to owned partition 2 succeeds while 0 is denied.
+            mixed_user_key = NatsSigningKey.from_private_key(
+                "user", Ed25519PrivateKey.from_private_bytes(mixed_keys.nats_seed)
+            )
+            errs: list[Exception] = []
+
+            async def on_error(exc: Exception) -> None:
+                errs.append(exc)
+
+            jwt_nc = await nats.connect(
+                server.url,
+                **mixed_user_key.login_options(mixed_host.connection["jwt"]),
+                inbox_prefix=f"_INBOX.{mixed_profile.runtime}".encode(),
+                allow_reconnect=False,
+                error_cb=on_error,
+            )
+            stack.push_async_callback(jwt_nc.close)
+            sub_ok = await jwt_nc.subscribe(f"ua.v1.{TEAM_A}.*.ctl.agent.*.2")
+            await flush_fully(jwt_nc)
+            await asyncio.sleep(0.05)
+            assert errs == [], errs
+            await sub_ok.unsubscribe()
+
+            await jwt_nc.subscribe(f"ua.v1.{TEAM_A}.*.ctl.agent.*.0")
+            await flush_fully(jwt_nc)
+            await asyncio.sleep(0.05)
+            assert any("permissions violation" in str(e).lower() for e in errs), errs
+
+            # 2. FA-6 live renewal refusal (give_up=False and give_up=True) when TEAM_B has no streams.
+            b_host = MessageHost(layout=layout, profile=b_profile, nc=b_nc, clock=clock)
+            await b_host.start(report=False)
+            assert b_host.live is not None
+            authority._teams = (TEAM_A,)
+            renew_refusal = await b_host.renew()
+            assert renew_refusal.ok is False and renew_refusal.outcome == "not_allowed"
+            assert "team_not_allowed" in (renew_refusal.message or "")
+            from custom_messages.wire.kinds import CONTRACT_SHA256
+
+            b_cert = b_host.identity.certificate
+            give_up_reply = await b_host.live.request(
+                "host.renew",
+                {
+                    "renew_id": "fa6-give-up-1",
+                    "certificate_id": b_cert.certificate_id,
+                    "membership_epoch": b_cert.membership_epoch,
+                    "profile_sha256": b_profile.giving_up().digest(),
+                    "contract_sha256": CONTRACT_SHA256,
+                    "new_nats_public_key": NatsSigningKey.generate("user").public_key,
+                },
+                {
+                    "installation": INSTALLATION,
+                    "team": "_install",
+                    "target": "installation_service",
+                    "id": "authority",
+                },
+                team="_install",
+            )
+            assert give_up_reply.raw["body"]["outcome"] == "not_allowed"
+            assert "team_not_allowed" in give_up_reply.raw["body"]["message"]

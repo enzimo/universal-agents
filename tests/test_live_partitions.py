@@ -232,6 +232,10 @@ async def test_live_connected_four_step_handover_with_operator_mode_revocation(t
       blocking reconnect while the new key connects cleanly.
     - Step 4 writes ``owned`` for ``host-b``, moves the agent's placement to ``host-b``, and
       ``host-b`` renews its credential naming ``p`` and opens a session for the moved agent.
+
+    Note: ``PartitionService(..., is_nats_key_revoked=authority._ledger.is_nats_revocation_confirmed)``
+    uses an in-process test seam to exercise step 2b's operator-mode revocation contract before
+    step 11 introduces the cross-process revocation signal between separate OS processes.
     """
 
     nats_dir = tmp_path / "nats"
@@ -451,26 +455,35 @@ async def test_live_connected_four_step_handover_with_operator_mode_revocation(t
 
 @pytest.mark.asyncio
 async def test_live_cutoff_and_retired_host_bulk_release_and_lifetime_wait_fallback(tmp_path: Path) -> None:
-    """A4, A7, A9 on real nats-server 2.15.1:
+    """A4, A7, A9, F14 (EVA-03) on real nats-server 2.15.1:
 
-    1. Retired host (authority.retire_host with OperatorModeRevoker): all of its partitions are
-       released at once (``host_lost``) and reassigned to a surviving host as a group immediately.
-    2. External-server fallback (LifetimeWaitRevoker / is_nats_key_revoked=None): a cut-off host's
-       partitions stay ``released`` until ``credential_lifetime_seconds + clock_skew_seconds`` passes,
-       then reassign cleanly.
+    1. Retired host (authority.retire_host with OperatorModeRevoker): disconnects host-a's active
+       operator-mode JWT connection immediately, writes intermediate ``released`` (``host_lost``)
+       records for all of host-a's partitions, and reassigns partitions + placed agents to host-b
+       as a group (``previous_host``, ``handed_over=True``, old session closed).
+    2. External-server fallback (real InstallationAuthority wired with LifetimeWaitRevoker +
+       follow_placements): a cut-off host's partitions stay ``released`` until
+       ``credential_lifetime_seconds + clock_skew_seconds`` passes, then reassign as a group to
+       host-c along with its placed agents.
+
+    Note: Part 1 passes ``is_nats_key_revoked=authority._ledger.is_nats_revocation_confirmed`` as
+    an in-process test seam verifying step 2b's operator-mode revocation contract pending step 11's
+    cross-process revocation signal.
     """
 
-    nats_dir = tmp_path / "nats"
+    import json
+
+    # Part 1: OperatorModeRevoker + SessionService with placed agents + active JWT disconnect.
+    nats_dir = tmp_path / "nats-part1"
     nats_dir.mkdir()
     with _operator_nats_server(nats_dir) as server:
-        layout = InstanceLayout.at(tmp_path / "instance")
+        layout = InstanceLayout.at(tmp_path / "instance-part1")
         svc_profile = team_services_profile(TEAM_A)
         host_a_profile = startup_agent_host_profile(TEAM_A, "host-a", "Researcher")
         host_b_profile = startup_agent_host_profile(TEAM_A, "host-b", "Researcher")
-        host_c_profile = startup_agent_host_profile(TEAM_A, "host-c", "Researcher")
         expected = {
             profile.runtime: message_hosts.expected_host(layout, profile)
-            for profile in (svc_profile, host_a_profile, host_b_profile, host_c_profile)
+            for profile in (svc_profile, host_a_profile, host_b_profile)
         }
         message_hosts.prepare_message_host_trust(layout, expected, partitions=PARTITIONS)
 
@@ -483,7 +496,6 @@ async def test_live_cutoff_and_retired_host_bulk_release_and_lifetime_wait_fallb
             svc_nc = await _connect_operator_user(stack, server, TEAM_SERVICES_RUNTIME)
             host_a_nc = await _connect_operator_user(stack, server, host_a_profile.runtime)
             host_b_nc = await _connect_operator_user(stack, server, host_b_profile.runtime)
-            host_c_nc = await _connect_operator_user(stack, server, host_c_profile.runtime)
 
             revoker = OperatorModeRevoker(server.operator_signing, server.base_claims, sys_nc)
             authority = InstallationAuthority(
@@ -502,19 +514,27 @@ async def test_live_cutoff_and_retired_host_bulk_release_and_lifetime_wait_fallb
             services_host = MessageHost(layout, svc_profile, svc_nc)
             live = await services_host.start()
             assert services_host.records is not None
-            lock = asyncio.Lock()
+            sessions = SessionService(services_host.records, live.trust, live.identity.installation, services_host.clock)
             partitions = PartitionService(
                 services_host.records,
                 live.trust,
                 live.identity.installation,
                 TEAM_A,
-                lock,
+                sessions._changing,
                 services_host.clock,
                 credential_lifetime_seconds=300,
                 credentials_enforced=True,
                 is_nats_key_revoked=authority._ledger.is_nats_revocation_confirmed,
                 cut_off_grace_seconds=0.0,
             )
+            sessions.ensure_partitions = partitions.ensure_unowned_assigned
+            team_svc = TeamServices(sessions)
+            sub = await live.serve(
+                "svc.team",
+                Receiver(live.identity.installation, TEAM_A, "team_services", TEAM_A, TEAM_SERVICES_RUNTIME),
+                team_svc.handle,
+            )
+            await flush_fully(svc_nc)
 
             host_a = MessageHost(layout, host_a_profile, host_a_nc)
             host_b = MessageHost(layout, host_b_profile, host_b_nc)
@@ -524,79 +544,249 @@ async def test_live_cutoff_and_retired_host_bulk_release_and_lifetime_wait_fallb
 
             owners_before = await _read_all_owners(services_host, TEAM_A, PARTITIONS)
             assert len(owners_before) == PARTITIONS
-            host_a_parts = {p for p, b in owners_before.items() if b.host == host_a_profile.runtime}
-            host_b_parts = {p for p, b in owners_before.items() if b.host == host_b_profile.runtime}
+            host_a_parts = sorted(p for p, b in owners_before.items() if b.host == host_a_profile.runtime)
+            host_b_parts = sorted(p for p, b in owners_before.items() if b.host == host_b_profile.runtime)
             assert len(host_a_parts) == PARTITIONS // 2 and len(host_b_parts) == PARTITIONS // 2
 
-            # Part 1: Administrator retires host-a; authority revokes its certificate and NATS key immediately.
-            old_a_nats_pub = host_a.identity.certificate.nats_public_key
-            await authority.retire_host(host_a_profile.runtime, reason="decommissioned")
-            assert authority._ledger.is_nats_revocation_confirmed(old_a_nats_pub) is True
-            # Reconcile releases all of host-a's partitions at once and reassigns them to host-b.
-            await partitions.reconcile()
-            await partitions.reconcile()
-            owners_after_retire = await _read_all_owners(services_host, TEAM_A, PARTITIONS)
-            assert all(
-                body.state == OWNED and body.host == host_b_profile.runtime
-                for body in owners_after_retire.values()
+            # Place a real agent on host-a via SessionService so Part 1 verifies group placement handover.
+            agent_a_id = draw_agent_id(TEAM_A, [host_a_parts[0]], prefix="reta", partition_count=PARTITIONS)
+            assert host_a.live is not None
+            open_a = await host_a.live.request(
+                "sessions.open",
+                {
+                    "request_id": "open-retire-a",
+                    "agent": agent_a_id,
+                    "agent_type": "Researcher",
+                    "definition_sha256": DEFINITION,
+                },
+                {"installation": live.identity.installation, "team": TEAM_A, "target": "team_services", "id": TEAM_A},
+                team=TEAM_A,
             )
+            assert open_a.raw["body"]["outcome"] == "ok"
+            session_a_id = str(open_a.raw["body"]["session"]["body"]["session"])
 
-            # Part 2: External-server LifetimeWaitRevoker fallback for a cut-off host.
+            # Open an active operator-mode JWT connection for host-a and assert retire_host drops it immediately.
+            assert host_a.connection is not None
+            old_a_nats_pub = host_a.identity.certificate.nats_public_key
+            old_a_signing = _signing_key_from_seed(host_a.identity.keys.nats_seed)
+            host_a_disconnected = asyncio.Event()
+
+            async def _on_a_disconnect() -> None:
+                host_a_disconnected.set()
+
+            host_a_jwt_nc = await nats.connect(
+                server.url,
+                **old_a_signing.login_options(host_a.connection["jwt"]),
+                inbox_prefix=f"_INBOX.{host_a_profile.runtime}".encode(),
+                allow_reconnect=False,
+                disconnected_cb=_on_a_disconnect,
+            )
+            stack.push_async_callback(host_a_jwt_nc.close)
+            await flush_fully(host_a_jwt_nc)
+            assert host_a_jwt_nc.is_connected
+
+            # Watch UA1_PLACEMENT to prove intermediate RELEASED/host_lost records are written before OWNED.
+            seen_released: set[int] = set()
+            watch_stop = asyncio.Event()
+
+            async def _watch_releases() -> None:
+                assert services_host.records is not None
+                async for key, raw in services_host.records.watch(
+                    "partition_owner", f"{TEAM_A}.partition.>", team=TEAM_A
+                ):
+                    if watch_stop.is_set():
+                        return
+                    if raw:
+                        body = json.loads(raw).get("body", {})
+                        if body.get("state") == RELEASED and body.get("reason") == "host_lost":
+                            seen_released.add(int(body["partition"]))
+
+            watch_task = asyncio.create_task(_watch_releases())
+            try:
+                await asyncio.sleep(0.05)
+                await authority.retire_host(host_a_profile.runtime, reason="decommissioned")
+                await asyncio.wait_for(host_a_disconnected.wait(), timeout=5.0)
+                assert authority._ledger.is_nats_revocation_confirmed(old_a_nats_pub) is True
+
+                await partitions.reconcile()
+                await _until(lambda: set(host_a_parts) <= seen_released, timeout=5.0)
+                owners_after_retire = await _read_all_owners(services_host, TEAM_A, PARTITIONS)
+                assert all(
+                    body.state == OWNED and body.host == host_b_profile.runtime
+                    for body in owners_after_retire.values()
+                )
+                for p in host_a_parts:
+                    assert owners_after_retire[p].previous_host == host_a_profile.runtime
+
+                # Placed agent moved as a group to host-b with previous_host, handed_over=True, and closed old session.
+                moved_a = await services_host.records.read_report(
+                    "placement", f"{TEAM_A}.{agent_a_id}", now=services_host.clock()
+                )
+                assert moved_a is not None
+                assert moved_a.record.body.host == host_b_profile.runtime
+                assert moved_a.record.body.previous_host == host_a_profile.runtime
+                assert moved_a.record.body.handed_over is True
+                closed_a = live.trust.store.agent_session(live.identity.installation, TEAM_A, session_a_id)
+                assert closed_a is not None and closed_a.ends_at <= services_host.clock()
+            finally:
+                watch_stop.set()
+                watch_task.cancel()
+                await asyncio.gather(watch_task, return_exceptions=True)
+                await sub.unsubscribe()
+
+    # Part 2: Real InstallationAuthority wired with LifetimeWaitRevoker + follow_placements,
+    # real placed agent on host-b, natural host liveness discovery (no private _seen_live mutation).
+    nats_dir2 = tmp_path / "nats-part2"
+    nats_dir2.mkdir()
+    with _operator_nats_server(nats_dir2) as server2:
+        layout2 = InstanceLayout.at(tmp_path / "instance-part2")
+        svc2_profile = team_services_profile(TEAM_A)
+        host_b2_profile = startup_agent_host_profile(TEAM_A, "host-b", "Researcher")
+        host_c2_profile = startup_agent_host_profile(TEAM_A, "host-c", "Researcher")
+        expected2 = {
+            profile.runtime: message_hosts.expected_host(layout2, profile)
+            for profile in (svc2_profile, host_b2_profile, host_c2_profile)
+        }
+        message_hosts.prepare_message_host_trust(layout2, expected2, partitions=PARTITIONS)
+        fake_clock = _Clock(utc_now())
+
+        async with AsyncExitStack() as stack2:
+            auth2_nc = await _connect_operator_user(stack2, server2, AUTHORITY_RUNTIME)
+            svc2_nc = await _connect_operator_user(stack2, server2, TEAM_SERVICES_RUNTIME)
+            host_b2_nc = await _connect_operator_user(stack2, server2, host_b2_profile.runtime)
+            host_c2_nc = await _connect_operator_user(stack2, server2, host_c2_profile.runtime)
+
             wait_revoker = LifetimeWaitRevoker()
             assert wait_revoker.supports_instant_revocation is False
-            fake_clock = _Clock(utc_now())
-            host_c = MessageHost(layout, host_c_profile, host_c_nc, clock=fake_clock)
-            await host_c.start()
-            # Delete host-b's liveness record to simulate a cut-off host.
-            hosts_bucket = await svc_nc.jetstream().key_value("UA1_HOSTS")
-            await hosts_bucket.delete(host_b_profile.runtime)
+            ext_authority = InstallationAuthority(
+                layout2,
+                host_keys.load_authority_keys(layout2),
+                host_keys.load_host_keys(layout2, AUTHORITY_RUNTIME),
+                partitions=PARTITIONS,
+                queues=TEST_QUEUE_LIMITS,
+                clock=fake_clock,
+                nats_account_signing_key=server2.installation_signing,
+                nats_account_public_key=server2.installation_account.public_key,
+                revoker=wait_revoker,
+                credential_lifetime_seconds=60,
+            )
+            await ext_authority.start(auth2_nc, teams=[TEAM_A])
 
+            follow_stop = asyncio.Event()
+            follow_task = asyncio.create_task(ext_authority.follow_placements(follow_stop))
+
+            svc2_host = MessageHost(layout2, svc2_profile, svc2_nc, clock=fake_clock)
+            live2 = await svc2_host.start()
+            assert svc2_host.records is not None
+            sessions2 = SessionService(svc2_host.records, live2.trust, live2.identity.installation, fake_clock)
             ext_partitions = PartitionService(
-                services_host.records,
-                live.trust,
-                live.identity.installation,
+                svc2_host.records,
+                live2.trust,
+                live2.identity.installation,
                 TEAM_A,
-                lock,
+                sessions2._changing,
                 fake_clock,
                 credential_lifetime_seconds=60,
                 credentials_enforced=True,
                 is_nats_key_revoked=None,
                 cut_off_grace_seconds=0.0,
             )
-            ext_partitions._seen_live.add(host_b_profile.runtime)
-            # First reconcile releases all of host-b's partitions as host_lost.
-            await ext_partitions.reconcile()
-            owners_released = await _read_all_owners(services_host, TEAM_A, PARTITIONS, now=fake_clock())
-            assert all(
-                body.state == RELEASED and body.host == host_b_profile.runtime and body.reason == "host_lost"
-                for body in owners_released.values()
+            sessions2.ensure_partitions = ext_partitions.ensure_unowned_assigned
+            sub2 = await live2.serve(
+                "svc.team",
+                Receiver(live2.identity.installation, TEAM_A, "team_services", TEAM_A, TEAM_SERVICES_RUNTIME),
+                TeamServices(sessions2).handle,
             )
-            # Before credential_lifetime_seconds + clock_skew_seconds, nothing reassigns.
-            fake_clock.now = fake_clock.now + timedelta(seconds=30)
-            await host_c.publish_liveness("accepting")
-            await ext_partitions.reconcile()
-            owners_still_waiting = await _read_all_owners(services_host, TEAM_A, PARTITIONS, now=fake_clock())
-            assert all(body.state == RELEASED for body in owners_still_waiting.values())
+            await flush_fully(svc2_nc)
 
-            # After credential_lifetime_seconds + clock_skew_seconds, all partitions move to host-c.
-            fake_clock.now = fake_clock.now + timedelta(seconds=60 + CLOCK_SKEW_SECONDS + 5)
-            await host_c.publish_liveness("accepting")
-            await ext_partitions.reconcile()
-            owners_moved = await _read_all_owners(services_host, TEAM_A, PARTITIONS, now=fake_clock())
-            assert all(
-                body.state == OWNED and body.host == host_c_profile.runtime
-                for body in owners_moved.values()
-            )
+            try:
+                host_b2 = MessageHost(layout2, host_b2_profile, host_b2_nc, clock=fake_clock)
+                await host_b2.start()
+                # Normal reconcile discovers host-b live and assigns all PARTITIONS to it.
+                await ext_partitions.reconcile()
+                b2_owners = await _read_all_owners(svc2_host, TEAM_A, PARTITIONS, now=fake_clock())
+                assert len(b2_owners) == PARTITIONS and all(b.host == host_b2_profile.runtime for b in b2_owners.values())
+
+                # Place a real agent on host-b so Part 2 verifies group placement move after lifetime wait.
+                agent_b_id = draw_agent_id(TEAM_A, [0], prefix="cutb", partition_count=PARTITIONS)
+                assert host_b2.live is not None
+                open_b = await host_b2.live.request(
+                    "sessions.open",
+                    {
+                        "request_id": "open-cutoff-b",
+                        "agent": agent_b_id,
+                        "agent_type": "Researcher",
+                        "definition_sha256": DEFINITION,
+                    },
+                    {"installation": live2.identity.installation, "team": TEAM_A, "target": "team_services", "id": TEAM_A},
+                    team=TEAM_A,
+                )
+                assert open_b.raw["body"]["outcome"] == "ok"
+                session_b_id = str(open_b.raw["body"]["session"]["body"]["session"])
+
+                host_c2 = MessageHost(layout2, host_c2_profile, host_c2_nc, clock=fake_clock)
+                await host_c2.start()
+
+                # Cut off host-b: stop its heartbeats and advance clock past its liveness expires_at + skew
+                # (respecting C29 forged-delete resistance) while keeping host-c live.
+                fake_clock.now = fake_clock.now + timedelta(seconds=120)
+                await host_c2.publish_liveness("accepting")
+
+                await ext_partitions.reconcile()
+                owners_released = await _read_all_owners(svc2_host, TEAM_A, PARTITIONS, now=fake_clock())
+                assert all(
+                    body.state == RELEASED and body.host == host_b2_profile.runtime and body.reason == "host_lost"
+                    for body in owners_released.values()
+                )
+                # Let ext_authority.follow_placements process the host_lost release with LifetimeWaitRevoker:
+                # key is recorded revoked in ledger, but instant confirmation remains False (external server).
+                b2_nats_pub = host_b2.identity.certificate.nats_public_key
+                await _until(lambda: ext_authority._ledger.is_nats_key_revoked(b2_nats_pub), timeout=5.0)
+                assert ext_authority._ledger.is_nats_revocation_confirmed(b2_nats_pub) is False
+
+                # Before credential_lifetime_seconds + clock_skew_seconds, nothing reassigns.
+                fake_clock.now = fake_clock.now + timedelta(seconds=30)
+                await host_c2.publish_liveness("accepting")
+                await ext_partitions.reconcile()
+                owners_still_waiting = await _read_all_owners(svc2_host, TEAM_A, PARTITIONS, now=fake_clock())
+                assert all(body.state == RELEASED for body in owners_still_waiting.values())
+
+                # After credential_lifetime_seconds + clock_skew_seconds, all partitions and placed agent move to host-c.
+                fake_clock.now = fake_clock.now + timedelta(seconds=60 + CLOCK_SKEW_SECONDS + 5)
+                await host_c2.publish_liveness("accepting")
+                await ext_partitions.reconcile()
+                owners_moved = await _read_all_owners(svc2_host, TEAM_A, PARTITIONS, now=fake_clock())
+                assert all(
+                    body.state == OWNED and body.host == host_c2_profile.runtime
+                    for body in owners_moved.values()
+                )
+                moved_b = await svc2_host.records.read_report(
+                    "placement", f"{TEAM_A}.{agent_b_id}", now=fake_clock()
+                )
+                assert moved_b is not None
+                assert moved_b.record.body.host == host_c2_profile.runtime
+                assert moved_b.record.body.previous_host == host_b2_profile.runtime
+                assert moved_b.record.body.handed_over is True
+                closed_b = live2.trust.store.agent_session(live2.identity.installation, TEAM_A, session_b_id)
+                assert closed_b is not None and closed_b.ends_at <= fake_clock()
+            finally:
+                follow_stop.set()
+                follow_task.cancel()
+                await asyncio.gather(follow_task, return_exceptions=True)
+                await sub2.unsubscribe()
 
 
 @pytest.mark.asyncio
 async def test_live_several_gateways_join_and_connect_with_scoped_credentials(tmp_path: Path) -> None:
-    """A6, A9 on real operator-mode nats-server 2.15.1:
+    """A6, A9, F14 (EVA-04) on real operator-mode nats-server 2.15.1:
 
-    Several gateway runtimes join one installation serving two teams with disjoint and overlapping
-    team/route grants, each receives a valid NATS user JWT scoped only to its own teams and routes
-    and connects to NATS cleanly, while the default single-gateway profile continues to work.
+    Several gateway runtimes join one installation serving two teams with strictly disjoint
+    (gateway-alpha on TEAM_A vs gateway-beta-only on TEAM_B) and overlapping (gateway-multi on
+    TEAM_A + TEAM_B) team/route grants, alongside the default single-gateway profile. Verifies
+    scoped JWT permissions, live NATS connections, and end-to-end GatewayMessageHost.command(..., team=TEAM_B).
     """
+
+    import json
 
     nats_dir = tmp_path / "nats"
     nats_dir.mkdir()
@@ -604,13 +794,17 @@ async def test_live_several_gateways_join_and_connect_with_scoped_credentials(tm
         layout = InstanceLayout.at(tmp_path / "instance")
         default_gw = gateway_profile(TEAM_A)
         alpha_gw = gateway_profile(TEAM_A, runtime="gateway-alpha")
+        beta_only_gw = gateway_profile(TEAM_B, runtime="gateway-beta-only")
         multi_gw = gateway_profile((TEAM_A, TEAM_B), runtime="gateway-multi")
+        ts_b_profile = team_services_profile(TEAM_B)
         expected = {
             default_gw.runtime: message_hosts.expected_host(layout, default_gw),
             alpha_gw.runtime: message_hosts.expected_host(layout, alpha_gw, edges={TEAM_A: ("web",)}),
+            beta_only_gw.runtime: message_hosts.expected_host(layout, beta_only_gw, edges={TEAM_B: ("web_b",)}),
             multi_gw.runtime: message_hosts.expected_host(
                 layout, multi_gw, edges={TEAM_A: ("slack",), TEAM_B: ("tg",)}
             ),
+            ts_b_profile.runtime: message_hosts.expected_host(layout, ts_b_profile),
         }
         message_hosts.prepare_message_host_trust(layout, expected, partitions=PARTITIONS)
 
@@ -628,9 +822,33 @@ async def test_live_several_gateways_join_and_connect_with_scoped_credentials(tm
             )
             await authority.start(auth_nc, teams=[TEAM_A, TEAM_B])
 
-            # Start all three gateways (default single-gateway + two scoped gateways).
+            # Serve TEAM_B's svc.team so gw_multi.command(..., team=TEAM_B) runs end-to-end.
+            ts_b_nc = await _connect_operator_user(stack, server, ts_b_profile.runtime)
+            ts_b_host = MessageHost(layout, ts_b_profile, ts_b_nc)
+            ts_b_live = await ts_b_host.start()
+            reply_body = json.loads(
+                (Path(__file__).resolve().parents[1] / "contracts/messages/v1/examples/valid/memory.list.reply/last-page.json")
+                .read_text(encoding="utf-8")
+            )["body"]
+            received_b: list[Any] = []
+
+            async def answer_b(verified: Any) -> dict[str, Any]:
+                received_b.append(verified)
+                return reply_body
+
+            sub_b = await ts_b_live.serve(
+                "svc.team",
+                Receiver(ts_b_live.identity.installation, TEAM_B, "team_services", TEAM_B, ts_b_profile.runtime),
+                answer_b,
+            )
+            await flush_fully(ts_b_nc)
+
+            # Start all four gateways (default + disjoint alpha & beta-only + overlapping multi).
             gw_default = GatewayMessageHost(layout, TEAM_A)
             gw_alpha = GatewayMessageHost(layout, TEAM_A, runtime_id="gateway-alpha", edges={TEAM_A: ("web",)})
+            gw_beta_only = GatewayMessageHost(
+                layout, TEAM_B, runtime_id="gateway-beta-only", teams=(TEAM_B,), edges={TEAM_B: ("web_b",)}
+            )
             gw_multi = GatewayMessageHost(
                 layout, TEAM_A, runtime_id="gateway-multi",
                 teams=(TEAM_A, TEAM_B),
@@ -639,33 +857,57 @@ async def test_live_several_gateways_join_and_connect_with_scoped_credentials(tm
             try:
                 gw_default.start(await _connect_operator_user(stack, server, GATEWAY_RUNTIME))
                 gw_alpha.start(await _connect_operator_user(stack, server, "gateway-alpha"))
+                gw_beta_only.start(await _connect_operator_user(stack, server, "gateway-beta-only"))
                 gw_multi.start(await _connect_operator_user(stack, server, "gateway-multi"))
                 await gw_default.ready(timeout=15)
                 await gw_alpha.ready(timeout=15)
+                await gw_beta_only.ready(timeout=15)
                 await gw_multi.ready(timeout=15)
 
                 assert gw_default.host is not None and gw_default.host.connection is not None
                 assert gw_alpha.host is not None and gw_alpha.host.connection is not None
+                assert gw_beta_only.host is not None and gw_beta_only.host.connection is not None
                 assert gw_multi.host is not None and gw_multi.host.connection is not None
 
-                # Inspect issued JWT permissions: alpha sees TEAM_A + web only (no TEAM_B, no slack/tg).
+                # Inspect issued JWT permissions: alpha sees TEAM_A + web only; beta-only sees TEAM_B + web_b only.
                 alpha_claims = decode_jwt_payload(gw_alpha.host.connection["jwt"])["nats"]
                 alpha_all = set(alpha_claims["pub"]["allow"]) | set(alpha_claims["sub"]["allow"])
                 assert any(TEAM_A in s for s in alpha_all)
                 assert not any(TEAM_B in s for s in alpha_all)
                 assert any(f"edge~{TEAM_A}~web" in s for s in alpha_all)
-                assert not any("slack" in s or "tg" in s for s in alpha_all)
+                assert not any("slack" in s or "tg" in s or "web_b" in s for s in alpha_all)
 
-                # Multi-gateway sees both TEAM_A (slack) and TEAM_B (tg), not web.
+                beta_only_claims = decode_jwt_payload(gw_beta_only.host.connection["jwt"])["nats"]
+                beta_only_all = set(beta_only_claims["pub"]["allow"]) | set(beta_only_claims["sub"]["allow"])
+                assert any(TEAM_B in s for s in beta_only_all)
+                assert not any(TEAM_A in s for s in beta_only_all)
+                assert any(f"edge~{TEAM_B}~web_b" in s for s in beta_only_all)
+                assert not any("tg" in s or "slack" in s for s in beta_only_all)
+
+                # Multi-gateway sees both TEAM_A (slack) and TEAM_B (tg), not web or web_b.
                 multi_claims = decode_jwt_payload(gw_multi.host.connection["jwt"])["nats"]
                 multi_all = set(multi_claims["pub"]["allow"]) | set(multi_claims["sub"]["allow"])
                 assert any(TEAM_A in s for s in multi_all) and any(TEAM_B in s for s in multi_all)
                 assert any(f"edge~{TEAM_A}~slack" in s for s in multi_all)
                 assert any(f"edge~{TEAM_B}~tg" in s for s in multi_all)
-                assert not any(f"edge~{TEAM_A}~web" in s for s in multi_all)
+                assert not any(f"edge~{TEAM_A}~web" in s or f"edge~{TEAM_B}~web_b" in s for s in multi_all)
+
+                # Multi-team GatewayMessageHost.command(..., team=TEAM_B) succeeds end-to-end against TEAM_B.
+                person_ref = "p-AbCdEfGhIjKlMnOpQrStUv"
+                list_body = {"request_id": "cmd-team-b-1", "bank": "usermem", "sort": "memory_id", "offset": 0, "limit": 10}
+                reply = await gw_multi.command("memory.list", list_body, person_ref=person_ref, team=TEAM_B, timeout=10)
+                assert reply.raw["body"] == reply_body
+                assert len(received_b) == 1
+                assert received_b[0].frame.issuer.runtime == "gateway-multi"
+                assert received_b[0].authority is not None and received_b[0].authority.token.person == person_ref
 
                 # Every gateway's issued user JWT actually connects to operator-mode NATS.
-                for gw, runtime in ((gw_default, GATEWAY_RUNTIME), (gw_alpha, "gateway-alpha"), (gw_multi, "gateway-multi")):
+                for gw, runtime in (
+                    (gw_default, GATEWAY_RUNTIME),
+                    (gw_alpha, "gateway-alpha"),
+                    (gw_beta_only, "gateway-beta-only"),
+                    (gw_multi, "gateway-multi"),
+                ):
                     assert gw.host is not None and gw.host.connection is not None
                     gw_signing = _signing_key_from_seed(gw.host.identity.keys.nats_seed)
                     nc_jwt = await nats.connect(
@@ -680,6 +922,8 @@ async def test_live_several_gateways_join_and_connect_with_scoped_credentials(tm
                     exp = parse_timestamp(gw.host.connection["expires_at"])
                     assert 840 <= (exp - utc_now()).total_seconds() <= 910
             finally:
+                await sub_b.unsubscribe()
                 await gw_default.close()
                 await gw_alpha.close()
+                await gw_beta_only.close()
                 await gw_multi.close()

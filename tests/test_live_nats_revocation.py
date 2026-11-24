@@ -435,11 +435,23 @@ async def test_operator_mode_revoker_prunes_expired_entries_and_empty_permission
                 error_cb=on_error,
             )
             try:
+                # F14/EVA-06: Verify publish and subscribe violations separately on a deny-all JWT.
                 await denied_nc.publish("foo.bar", b"nope")
+                await flush_fully(denied_nc)
+                await asyncio.sleep(0.1)
+                assert any(
+                    "permissions violation" in str(err).lower() and "publish" in str(err).lower()
+                    for err in errors
+                ), errors
+
+                errors.clear()
                 await denied_nc.subscribe("foo.bar")
                 await flush_fully(denied_nc)
                 await asyncio.sleep(0.1)
-                assert any("permissions violation" in str(err).lower() for err in errors), errors
+                assert any(
+                    "permissions violation" in str(err).lower() and "subscription" in str(err).lower()
+                    for err in errors
+                ), errors
             finally:
                 await denied_nc.close()
         finally:

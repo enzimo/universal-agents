@@ -152,6 +152,7 @@ class _SignedCluster:
         signer_runtime: str = "team-services",
         sequence: Optional[int] = None,
         assigned_at: Optional[datetime] = None,
+        host_epoch: Optional[int] = None,
     ) -> tuple[str, bytes]:
         if sequence is None:
             self.seq += 1
@@ -178,7 +179,7 @@ class _SignedCluster:
                     "partition": partition,
                     "state": state,
                     "host": host,
-                    "host_epoch": self.certs[host].membership_epoch,
+                    "host_epoch": self.certs[host].membership_epoch if host_epoch is None else host_epoch,
                     "assigned_at": _ts(assigned_at or self.now),
                     "reason": reason,
                 },
@@ -1379,3 +1380,127 @@ async def test_f12_handover_deadline_margin_rejoin_pause_and_tracker_caught_up(t
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_c36_host_epoch_bump_at_same_assigned_at_reruns_step3(tmp_path: Path) -> None:
+    """C36: Updating a RELEASED record from host_epoch=1 to host_epoch=2 at unchanged assigned_at
+    (from a C33 post-write Dekker sweep) clears the prior completion match, keeps _is_renewal_paused()
+    true, and drives a fresh step-3 renewal."""
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=True)
+    host.credential_partitions = frozenset({0, 1})
+    process = AgentProcessHost(
+        cluster.layout, host.profile, TEAM, host=host, loop=asyncio.get_running_loop(), drain_poll_seconds=0.01
+    )
+    process._stop = asyncio.Event()
+    process._joined = asyncio.Event()
+    process._joined.set()
+    process._partition_wake = asyncio.Event()
+    process.partitions = HostPartitionTracker(host, TEAM)
+
+    k0, raw0 = cluster.sign_partition_owner(0, state=OWNED, host="worker-1", host_epoch=1, sequence=100)
+    await process.partitions.apply_event(k0, raw0)
+    t0 = cluster.now
+    k1, raw1 = cluster.sign_partition_owner(
+        1, state=RELEASED, host="worker-1", host_epoch=1, assigned_at=t0, reason="operator", sequence=101
+    )
+    await process.partitions.apply_event(k1, raw1)
+    assert process._is_renewal_paused() is True
+
+    # First step-3 completes for (t0, host_epoch=1).
+    assert await process._sync_partitions_once() is False
+    assert len(host.renew_calls) == 1
+    assert host.renew_calls[0][1] is True
+    assert process._completed_handovers[1] == (t0, 1)
+    assert process._is_renewal_paused() is False
+
+    # Post-write Dekker sweep bumps RELEASED.host_epoch from 1 -> 2 at the exact same assigned_at=t0.
+    k1_swept, raw1_swept = cluster.sign_partition_owner(
+        1, state=RELEASED, host="worker-1", host_epoch=2, assigned_at=t0, reason="operator", sequence=102
+    )
+    await process.partitions.apply_event(k1_swept, raw1_swept)
+    assert process._is_renewal_paused() is True
+
+    # Coordinator clears (t0, 1), runs a fresh step-3 renewal, and records (t0, 2).
+    assert await process._sync_partitions_once() is False
+    assert len(host.renew_calls) == 2
+    assert host.renew_calls[1][1] is True
+    assert process._completed_handovers[1] == (t0, 2)
+    assert process._is_renewal_paused() is False
+
+
+from tests.test_schedule_worker_service import lead  # noqa: E402, F401
+
+
+@pytest.mark.asyncio
+async def test_f14_agent_instantiation_service_and_universal_agent_partition_id_wiring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lead: Any  # noqa: F811
+) -> None:
+    """F14/EVA-05: Real AgentInstantiationService.launch and real UniversalAgent.__init__ /
+    assign_partition_agent_id draw partition-scoped IDs inside owned partitions and keep
+    auto-generated IDs out of UniversalAgent.model_fields_set."""
+
+    from custom_agents.agent_instantiation_service import AgentInstantiationService
+    from custom_agents.strands_agent import UniversalAgent
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=False)
+    process = AgentProcessHost(cluster.layout, host.profile, TEAM, host=host, loop=asyncio.get_running_loop())
+    process._joined = asyncio.Event()
+    process._joined.set()
+    process._stop = asyncio.Event()
+    process.partitions = HostPartitionTracker(host, TEAM)
+    owned = frozenset({2, 5})
+    for p in owned:
+        k, raw = cluster.sign_partition_owner(p, state=OWNED, host="worker-1")
+        await process.partitions.apply_event(k, raw)
+
+    # 1. Real AgentInstantiationService.launch draws a partition-scoped worker ID inside owned partitions.
+    lead.team_id = TEAM
+    configure_process_host(process)
+    try:
+        launched = AgentInstantiationService(lead).launch(
+            agent_type="Worker", owner_id="owner-1", request_id="f14-launch-1", source="manual"
+        )
+        assert launched.status in {"starting", "started"}
+        assert launched.agent_id is not None
+        assert len(launched.agent_id) <= 32 and AGENT_ID_PATTERN.fullmatch(launched.agent_id)
+        assert agent_partition(TEAM, launched.agent_id, PARTITIONS) in owned
+
+        # 2. Real UniversalAgent.__init__ auto_partition_id draws an owned-partition ID and keeps "id"
+        #    out of model_fields_set (so consumer scope stays PROCESS, not operator-pinned ROUTE).
+        agent = UniversalAgent(
+            role="partition wiring check",
+            tools=[],
+            team_id=TEAM,
+            workspace_dir=str(tmp_path / "ws1"),
+        )
+        assert len(agent.id) <= 32 and AGENT_ID_PATTERN.fullmatch(agent.id)
+        assert agent_partition(TEAM, agent.id, PARTITIONS) in owned
+        assert "id" not in agent.model_fields_set
+
+        # 3. When UniversalAgent is constructed before partitions are usable, assign_partition_agent_id
+        #    (called by UniversalAgent._connect_nats) adopts an owned-partition ID on the real agent.
+        configure_process_host(None)
+        early_agent = UniversalAgent(
+            role="late partition wiring check",
+            tools=[],
+            team_id=TEAM,
+            workspace_dir=str(tmp_path / "ws2"),
+        )
+        assert "id" not in early_agent.model_fields_set
+        configure_process_host(process)
+        # Ensure early_agent starts in a non-owned partition so assign_partition_agent_id must adopt a new ID.
+        if agent_partition(TEAM, early_agent.id, PARTITIONS) in owned:
+            other_p = next(p for p in range(PARTITIONS) if p not in owned)
+            early_agent._adopt_agent_id(draw_agent_id(TEAM, [other_p], PARTITIONS, prefix="agent"))
+            early_agent.model_fields_set.discard("id")
+        fake_adapter = SimpleNamespace(nats_connection=SimpleNamespace())
+        monkeypatch.setattr(process, "ensure_started", lambda nc: None)
+        await assign_partition_agent_id(early_agent, fake_adapter)
+        assert agent_partition(TEAM, early_agent.id, PARTITIONS) in owned
+        assert "id" not in early_agent.model_fields_set
+    finally:
+        configure_process_host(None)

@@ -399,6 +399,33 @@ def test_the_gateway_service_runs_no_host_on_an_instance_the_launcher_never_prep
     assert caplog.text.count("event=gateway_host_not_prepared") == 2
 
 
+def test_prepared_gateway_host_passes_runtime_teams_and_edges(tmp_path: Path) -> None:
+    """F14/EVA-04: prepared_gateway_host forwards multi-gateway runtime, teams, and edges options."""
+
+    config = _config(tmp_path, prepared=True)
+    host = prepared_gateway_host(
+        config.layout,
+        "team_a",
+        runtime="gateway-east",
+        teams=("team_a", "team_b"),
+        edges={"team_a": ("web_a",), "team_b": ("tg_b",)},
+    )
+    assert host is not None
+    assert host.runtime == "gateway-east"
+    assert host.team == "team_a"
+    assert host.teams == ("team_a", "team_b")
+    assert host.edges == {"team_a": ("web_a",), "team_b": ("tg_b",)}
+    assert (
+        prepared_gateway_host(
+            InstanceLayout.at(tmp_path / "unprepared"),
+            "team_a",
+            runtime="gateway-east",
+            teams=("team_a", "team_b"),
+        )
+        is None
+    )
+
+
 def test_command_line_gateways_load_no_host_code() -> None:
     """The host's modules cost command-line runs half a second to import; only the gateway service loads them."""
 

@@ -80,6 +80,9 @@ class IssueLedger:
         # Latest issued NATS user JWT exp (unix seconds) per nats_public_key (F15/FA-9/SEC-08),
         # so revocation pruning follows the short JWT lifetime instead of the 30-day certificate end.
         self._nats_key_jwt_expires: dict[str, int] = {}
+        # Certificates written to UA1_CERTS then aborted by a post-write Dekker check (C35):
+        # certificate_id -> expires_at (unix seconds), so _rotation_already_issued never hands them out.
+        self._aborted_certificates: dict[str, int] = {}
 
     @classmethod
     def open(cls, folder: Path, installation: str, *, logger: logging.Logger = _LOGGER) -> "IssueLedger":
@@ -127,11 +130,14 @@ class IssueLedger:
             }
             raw_jwt_exp = document.get("nats_key_jwt_expires") or {}
             ledger._nats_key_jwt_expires = {str(k): int(v) for k, v in raw_jwt_exp.items()}
+            raw_aborted = document.get("aborted_certificates") or {}
+            ledger._aborted_certificates = {str(k): int(v) for k, v in raw_aborted.items()}
         except (KeyError, TypeError, ValueError, AttributeError) as error:
             ledger._epochs, ledger._renewals, ledger._revocations = {}, {}, None
             ledger._revoked_nats_keys, ledger._confirmed_nats_revocations, ledger._bootstrap_nats_keys = {}, {}, set()
             ledger._certificate_partitions = {}
             ledger._nats_key_jwt_expires = {}
+            ledger._aborted_certificates = {}
             ledger._set_aside(error)
         return ledger
 
@@ -277,12 +283,26 @@ class IssueLedger:
     def record_bootstrap_nats_key(self, nats_public_key: str) -> None:
         self._bootstrap_nats_keys.add(nats_public_key)
 
+    def record_aborted_certificate(self, certificate_id: str, expires_at_ts: int) -> None:
+        """Mark a certificate aborted by a post-write Dekker check so rotation retries skip it (C35)."""
+
+        self._aborted_certificates[str(certificate_id)] = max(
+            self._aborted_certificates.get(str(certificate_id), 0), int(expires_at_ts)
+        )
+
+    def is_aborted_certificate(self, certificate_id: str) -> bool:
+        return str(certificate_id) in self._aborted_certificates
+
     # -- saving -----------------------------------------------------------------------------------
 
     def save(self, now: datetime) -> None:
         """Write the ledger atomically and durably, dropping renewal answers older than the retention."""
 
         self._renewals = {key: held for key, held in self._renewals.items() if now - held.stored_at < OUTCOME_RETENTION}
+        now_ts = int(now.timestamp())
+        self._aborted_certificates = {
+            cert_id: exp for cert_id, exp in self._aborted_certificates.items() if exp > now_ts
+        }
         renewals_doc: dict[str, dict[str, Any]] = {}
         for key, held in sorted(self._renewals.items()):
             entry: dict[str, Any] = {
@@ -315,4 +335,6 @@ class IssueLedger:
             }
         if self._nats_key_jwt_expires:
             document["nats_key_jwt_expires"] = dict(sorted(self._nats_key_jwt_expires.items()))
+        if self._aborted_certificates:
+            document["aborted_certificates"] = dict(sorted(self._aborted_certificates.items()))
         write_private_file(self.path, json.dumps(document, sort_keys=True).encode())

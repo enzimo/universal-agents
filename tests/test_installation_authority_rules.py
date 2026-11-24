@@ -1838,3 +1838,238 @@ async def test_c32_dekker_abort_preserves_live_key_for_connected_handover_and_dr
     assert auth3._ledger.renewal("worker-1|renew-c32-3", now3) is None
     await deferred3[0]()
     assert revoked3 == [k1_3]
+
+
+@pytest.mark.asyncio
+async def test_c35_rotation_already_issued_skips_same_key_dekker_aborted_cert(tmp_path: Path) -> None:
+    """C35: A same-key renewal carrying application_key_rotation that aborts on post-write Dekker
+    during a connected handover leaves K1 unrevoked; a subsequent step-3 renewal carrying the same
+    application_key_rotation and new_nats_public_key=K2 must rotate to K2 (and return connection),
+    and a same-key retry must never receive the aborted certificate."""
+
+    from custom_messages.wire.frame import VerifiedFrame
+    from custom_transport.protocol1.host_keys import ensure_authority_keys, ensure_host_keys
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from installation_authority.ledger import IssueLedger
+    from installation_authority.service import CertificateRequest
+
+    layout = InstanceLayout.at(tmp_path / "inst-c35")
+    auth_keys, _ = ensure_authority_keys(layout, "install-c35")
+    auth_host_keys, _ = ensure_host_keys(layout, AUTHORITY_RUNTIME)
+    w_keys, _ = ensure_host_keys(layout, "worker-1")
+    rotated_app, _ = ensure_host_keys(layout, "worker-1-rotated")
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+    k1 = NatsSigningKey.generate("user").public_key
+    k2 = NatsSigningKey.generate("user").public_key
+    op_acc = NatsSigningKey.generate("account")
+
+    write_expected_hosts(
+        layout.trust_expected_hosts_path,
+        {
+            "worker-1": ExpectedHost(
+                "worker-1",
+                rotated_app.key_id,
+                rotated_app.public_key_text,
+                frozenset({"worker_host"}),
+                frozenset({"team_a"}),
+                agent_types=frozenset({"researcher"}),
+                session_limit=4,
+            )
+        },
+    )
+    bundle = BootstrapBundle("install-c35", ((auth_keys.key_id, auth_keys.public_key_text),), partitions=8)
+    write_bundle(layout.trust_bootstrap_path, bundle)
+    authority = InstallationAuthority(
+        layout,
+        auth_keys,
+        auth_host_keys,
+        partitions=8,
+        queues=TEST_QUEUE_LIMITS,
+        clock=lambda: now,
+        credential_lifetime_seconds=300,
+        nats_account_public_key=op_acc.public_key,
+        nats_account_signing_key=op_acc,
+    )
+    authority._trust = PersistentTrustStore.open(bundle, layout.host_trust_dir(AUTHORITY_RUNTIME), now)
+    authority._revocations = {"body": {"revocation_epoch": 1, "entries": []}}
+    authority._teams = ("team_a",)
+    authority._started = True
+    authority.live = SimpleNamespace()  # type: ignore[assignment]
+    bucket = _Bucket()
+    authority._records = AsyncMock(return_value=bucket)  # type: ignore[method-assign]
+
+    req = CertificateRequest(
+        runtime="worker-1",
+        teams=("team_a",),
+        roles=("worker_host",),
+        agent_types=("researcher",),
+        session_limit=4,
+        connection_class="connected",
+        key_id=w_keys.key_id,
+        public_key=w_keys.public_key_text,
+        nats_public_key=k1,
+    )
+    rec = authority.certificate_record(req, epoch=1, revocation_epoch=1, issued=now)
+    authority._trust.add(json.dumps(rec).encode(), now=now)
+    authority._ledger.take_epoch("worker-1", 1)
+    authority._ledger.record_certificate_partitions(str(rec["body"]["certificate_id"]), {0: 100})
+    cert = authority._trust.store.host_certificate("install-c35", "worker-1", 1)
+    assert cert is not None
+    authority._latest_certificate = AsyncMock(return_value=rec)  # type: ignore[method-assign]
+
+    reads = 0
+
+    async def own_then_connected_release(_rt: str, _teams: Any, _now: datetime) -> Any:
+        nonlocal reads
+        reads += 1
+        if reads <= 2:
+            return {"team_a": {0: 100}}, {}
+        return {}, {"team_a": {0: (1, "operator")}}
+
+    authority._read_host_partition_ownership = own_then_connected_release  # type: ignore[method-assign]
+    revoked_keys: list[str] = []
+
+    async def track_revoke(key: str, *, revoke_until: int, now: datetime) -> Any:
+        del revoke_until, now
+        revoked_keys.append(key)
+        return SimpleNamespace(revoked=True)
+
+    authority._revoke_nats_key = track_revoke  # type: ignore[method-assign]
+
+    rotation_payload = {"key": {"key_id": rotated_app.key_id, "public_key": rotated_app.public_key_text}}
+    body_aborted = {
+        "profile_sha256": str(rec["body"]["profile_sha256"]),
+        "partitions": [0],
+        "application_key_rotation": rotation_payload,
+    }
+    vf_aborted = VerifiedFrame(
+        frame=SimpleNamespace(idempotency_key="worker-1|renew-c35-1", kind="host.renew"),  # type: ignore[arg-type]
+        body=body_aborted,
+        raw={"body": body_aborted},
+        certificate=cert,
+        session=None,
+        authority=None,
+        replay_key="rk-c35-1",
+        frame_digest="fd-c35-1",
+    )
+    reply1 = await authority._renew(vf_aborted, give_up=False, deferred=[])
+    assert reply1["outcome"] == "not_allowed"
+    assert not authority._ledger.is_nats_key_revoked(k1)
+    # The aborted epoch-2 cert is persisted as aborted in issued.json.
+    reopened = IssueLedger.open(layout.host_trust_dir(AUTHORITY_RUNTIME), "install-c35")
+    assert reopened.is_aborted_certificate("cert.worker-1.2")
+
+    # Same-key retry with same application_key_rotation (new renew_id) must NOT get aborted cert back.
+    vf_same_key_retry = VerifiedFrame(
+        frame=SimpleNamespace(idempotency_key="worker-1|renew-c35-same", kind="host.renew"),  # type: ignore[arg-type]
+        body={
+            "profile_sha256": str(rec["body"]["profile_sha256"]),
+            "partitions": [],
+            "application_key_rotation": rotation_payload,
+        },
+        raw={
+            "body": {
+                "profile_sha256": str(rec["body"]["profile_sha256"]),
+                "partitions": [],
+                "application_key_rotation": rotation_payload,
+            }
+        },
+        certificate=cert,
+        session=None,
+        authority=None,
+        replay_key="rk-c35-same",
+        frame_digest="fd-c35-same",
+    )
+    with pytest.raises(FrameRefused) as same_key_refused:
+        await authority._renew(vf_same_key_retry, give_up=False, deferred=[])
+    assert same_key_refused.value.code == "invalid_body" and same_key_refused.value.at == "/body/new_nats_public_key"
+
+    # Step 3 arrives with the same application_key_rotation and new_nats_public_key=K2:
+    # must NOT return aborted K1 cert; must mint epoch 3 with K2 + connection JWT and defer-revoke K1.
+    body_step3 = {
+        "profile_sha256": str(rec["body"]["profile_sha256"]),
+        "partitions": [],
+        "new_nats_public_key": k2,
+        "application_key_rotation": rotation_payload,
+    }
+    vf_step3 = VerifiedFrame(
+        frame=SimpleNamespace(idempotency_key="worker-1|renew-c35-step3", kind="host.renew"),  # type: ignore[arg-type]
+        body=body_step3,
+        raw={"body": body_step3},
+        certificate=cert,
+        session=None,
+        authority=None,
+        replay_key="rk-c35-step3",
+        frame_digest="fd-c35-step3",
+    )
+    deferred_step3: list[Any] = []
+    reply_step3 = await authority._renew(vf_step3, give_up=False, deferred=deferred_step3)
+    assert reply_step3["outcome"] == "ok"
+    assert reply_step3["certificate"]["body"]["membership_epoch"] == 3
+    assert reply_step3["certificate"]["body"]["nats_public_key"] == k2
+    assert "connection" in reply_step3 and "jwt" in reply_step3["connection"]
+    assert len(deferred_step3) == 1
+    await deferred_step3[0]()
+    assert revoked_keys == [k1]
+
+
+def test_f14_validate_requested_partitions_rejection_branches(tmp_path: Path) -> None:
+    """F14/EVA-05: Cover every error branch of InstallationAuthority._validate_requested_partitions."""
+
+    authority = authority_at(tmp_path)
+    worker_cert = SimpleNamespace(runtime="worker-1", roles=frozenset({"worker_host"}), teams=frozenset({"team_a"}))
+    gw_cert = SimpleNamespace(runtime="gateway", roles=frozenset({"gateway"}), teams=frozenset({"team_a"}))
+    multi_team_cert = SimpleNamespace(
+        runtime="worker-bad", roles=frozenset({"worker_host"}), teams=frozenset({"team_a", "team_b"})
+    )
+
+    assert authority._validate_requested_partitions(worker_cert, None, give_up=False, owned_by_team={}, released_by_team={}) == ()  # type: ignore[arg-type]
+    assert authority._validate_requested_partitions(worker_cert, [], give_up=False, owned_by_team={}, released_by_team={}) == ()  # type: ignore[arg-type]
+
+    for bad_asked in ("0", 0, {0: 1}):
+        with pytest.raises(FrameRefused) as refused:
+            authority._validate_requested_partitions(
+                worker_cert, bad_asked, give_up=False, owned_by_team={"team_a": {0: 1}}, released_by_team={}  # type: ignore[arg-type]
+            )
+        assert refused.value.code == "invalid_body" and refused.value.at == "/body/partitions"
+
+    with pytest.raises(FrameRefused, match="repeat") as dup:
+        authority._validate_requested_partitions(
+            worker_cert, [0, 0], give_up=False, owned_by_team={"team_a": {0: 1}}, released_by_team={}  # type: ignore[arg-type]
+        )
+    assert dup.value.at == "/body/partitions"
+
+    for bad_num in ([authority.partitions], [-1], [True], ["0"]):
+        with pytest.raises(FrameRefused, match="outside") as oob:
+            authority._validate_requested_partitions(
+                worker_cert, bad_num, give_up=False, owned_by_team={"team_a": {0: 1}}, released_by_team={}  # type: ignore[arg-type]
+            )
+        assert oob.value.at == "/body/partitions"
+
+    with pytest.raises(FrameRefused, match="giving up") as gu:
+        authority._validate_requested_partitions(
+            worker_cert, [0], give_up=True, owned_by_team={"team_a": {0: 1}}, released_by_team={}  # type: ignore[arg-type]
+        )
+    assert gu.value.at == "/body/partitions"
+
+    with pytest.raises(FrameRefused, match="lead_host or worker_host") as role_err:
+        authority._validate_requested_partitions(
+            gw_cert, [0], give_up=False, owned_by_team={"team_a": {0: 1}}, released_by_team={}  # type: ignore[arg-type]
+        )
+    assert role_err.value.at == "/body/partitions"
+
+    with pytest.raises(FrameRefused, match="exactly one team") as multi_err:
+        authority._validate_requested_partitions(
+            multi_team_cert, [0], give_up=False, owned_by_team={"team_a": {0: 1}}, released_by_team={}  # type: ignore[arg-type]
+        )
+    assert multi_err.value.at == "/body/partitions"
+
+    with pytest.raises(FrameRefused, match="owned partition record") as rel_err:
+        authority._validate_requested_partitions(
+            worker_cert, [0], give_up=False, owned_by_team={"team_a": {0: 1}}, released_by_team={"team_a": {0: (1, "operator")}}  # type: ignore[arg-type]
+        )
+    assert rel_err.value.at == "/body/partitions"
+
+    assert authority._validate_requested_partitions(
+        worker_cert, [2, 0], give_up=False, owned_by_team={"team_a": {0: 10, 2: 11}}, released_by_team={}  # type: ignore[arg-type]
+    ) == (0, 2)
