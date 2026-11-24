@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/blobs.register.reply.schema.json",
+  "title": "blobs.register reply",
+  "description": "Whether the blob is live and indexed under the requested owner, or absent so the writer must upload it first.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "present": {
+          "description": "True when the blob is live in UA1_BLOBS and this owner is now indexed; false when the writer must upload chunks and metadata and register again.",
+          "type": "boolean"
+        },
+        "expires_at": {
+          "description": "When this owner's retention expires, present when present is true.",
+          "$ref": "../common.schema.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "outcome",
+        "present"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

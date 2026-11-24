@@ -1364,6 +1364,66 @@ class AgentStatusReplyNotAllowed(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class BlobsDeletePersonBody(WireModel):
+    "Remove a departed person's blob ownership records and immediately delete every blob left with no remaining owner."
+
+    request_id: RecordId
+    person: PersonRef
+
+
+class BlobsDeletePersonReplyOk(WireModel):
+    outcome: Literal['ok']
+    owners_removed: Count
+    blobs_deleted: Count
+    blobs_kept: Count
+
+
+class BlobsDeletePersonReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class BlobsDeletePersonReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class BlobsRegisterBodyOwnerRequest(WireModel):
+    type: Literal['request']
+    request_id: RecordId
+
+
+class BlobsRegisterBodyOwnerAgent(WireModel):
+    type: Literal['agent']
+    agent_id: AgentId
+
+
+class BlobsRegisterBody(WireModel):
+    "A writer registers ownership of an object in UA1_BLOBS with the team services, confirming whether the object is already live or must be uploaded first."
+
+    request_id: RecordId
+    sha256: Sha256Digest
+    size: Count
+    owner: Annotated[Union[BlobsRegisterBodyOwnerRequest, BlobsRegisterBodyOwnerAgent], Field(discriminator='type')]
+    person: Union[PersonRef, MISSING] = Field(default=MISSING)
+
+
+class BlobsRegisterReplyOk(WireModel):
+    outcome: Literal['ok']
+    present: bool
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
+
+
+class BlobsRegisterReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class BlobsRegisterReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class CredentialFormRequestBodyTemplateReference(WireModel):
     "The non-secret template the request was built from."
 
@@ -9016,6 +9076,10 @@ AgentResumeBodyAdapter = TypeAdapter(AgentResumeBody)
 AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting, AgentResumeReplyNotAllowed], Field(discriminator='outcome')])
 AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
 AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
+BlobsDeletePersonBodyAdapter = TypeAdapter(BlobsDeletePersonBody)
+BlobsDeletePersonReplyAdapter = TypeAdapter(Annotated[Union[BlobsDeletePersonReplyOk, BlobsDeletePersonReplyNotAllowed, BlobsDeletePersonReplyRuntimeError], Field(discriminator='outcome')])
+BlobsRegisterBodyAdapter = TypeAdapter(BlobsRegisterBody)
+BlobsRegisterReplyAdapter = TypeAdapter(Annotated[Union[BlobsRegisterReplyOk, BlobsRegisterReplyNotAllowed, BlobsRegisterReplyRuntimeError], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
 CredentialFormResultBodyAdapter = TypeAdapter(CredentialFormResultBody)
 CustodyConfirmedBodyAdapter = TypeAdapter(CustodyConfirmedBody)

@@ -392,6 +392,7 @@
         "team_services",
         "edge_adapter"
       ],
+      "size_kind": "blobs",
       "writers": [
         "gateway",
         "lead_host",
@@ -404,6 +405,8 @@
     "allow_rollup_hdrs": false,
     "deny_delete": true,
     "deny_purge": false,
+    "discard": "new",
+    "max_consumers": 64,
     "storage": "file"
   },
   "partitions": {
@@ -431,7 +434,8 @@
       "pool",
       "edge",
       "team_services",
-      "dead_letter"
+      "dead_letter",
+      "blobs"
     ],
     "warn_at_percent_default": 80,
     "warn_at_percent_setting": "transport.queues.warn_at_percent"

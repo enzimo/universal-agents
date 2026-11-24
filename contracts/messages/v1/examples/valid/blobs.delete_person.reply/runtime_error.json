@@ -1,0 +1,32 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "blobs.delete_person.reply",
+  "message_id": "01928f3a-7b2c-7e14-8000-000000000e14",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "team-services-1",
+    "membership_epoch": 2,
+    "revocation_epoch": 1,
+    "key_id": "test-services-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "host",
+    "id": "gateway-1",
+    "runtime": "gateway-1"
+  },
+  "subject": "_INBOX.gateway-1.01928f3a-7b2c-7e10-8000-000000000e10",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "runtime_error",
+    "message": "The blob index or object store could not finish deleting the person's blobs."
+  },
+  "causation_id": "01928f3a-7b2c-7e10-8000-000000000e10",
+  "idempotency_key": "blobs.delete_person.reply:5SHPrlydGH3VmHm4vNuErF1qdoIQnv8f6vXJVFgqtLQ",
+  "body_digest": "W_uuYIbenbafpbdrYfZcrF_G0gksqV5z7Q4qN0Vjqoo",
+  "signature": "n-owVTfqvZDiCKVwk3zSHVDs5xVV6w0HmQ7kYxban7HP-RqRTXcTq33A7--jSn4nXfZ_Ysj-We_55Ubia73_Bw"
+}
