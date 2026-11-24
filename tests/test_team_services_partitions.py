@@ -1257,3 +1257,80 @@ async def test_watch_hosts_ignores_steady_state_heartbeats_and_draining_moves_al
 
     await partitions.reconcile()
     assert all(state == OWNED and host == "worker-2" for state, host in (await cluster.owners()).values())
+
+
+@pytest.mark.asyncio
+async def test_post_restart_host_lost_fallback_handles_clock_skew_pre_release_renewal(tmp_path: Path) -> None:
+    """C24: after a team-services restart, host_lost fails closed for pre-release renewals issued within CLOCK_SKEW_SECONDS."""
+
+    cluster = _ClusterFixture(tmp_path)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+
+    revoked_nats: set[str] = set()
+    _sessions, partitions = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=3600,
+        cut_off_grace_seconds=1.0,
+        is_nats_key_revoked=lambda k: k in revoked_nats,
+    )
+    await partitions.reconcile()
+    w1_parts = sorted(p for p, (_s, h) in (await cluster.owners()).items() if h == "worker-1")
+    p1, p2 = w1_parts[0], w1_parts[1]
+    k1 = cluster.host_keys["worker-1"].nats_public_key
+
+    # Hand over p1: worker-1 renews to epoch 2 (K2, still holding p2) with authority clock 5s ahead of team services
+    # (within CLOCK_SKEW_SECONDS) while K1 is revoked.
+    assert await partitions.release_partition(p1, reason="operator", target_host="worker-2") is True
+    cluster.issue_host(
+        "worker-1",
+        roles=("worker_host",),
+        agent_types=("researcher",),
+        new_nats_key=True,
+        issued_at_offset_seconds=5.0,
+    )
+    k2 = cluster.host_keys["worker-1"].nats_public_key
+    revoked_nats.add(k1)
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    assert (await cluster.owners())[p1] == (OWNED, "worker-2")
+    assert (await cluster.owners())[p2] == (OWNED, "worker-1")
+
+    # worker-1 goes host_lost at t0 + 2s (before K2's skewed issued_at at t0 + 5s); p2 is released with host_epoch=1.
+    cluster.remove_liveness("worker-1")
+    cluster.advance(1)
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()  # records first missing
+    cluster.advance(1)
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()  # releases p2 as host_lost at t0 + 2s
+    assert (await cluster.owners())[p2] == (RELEASED, "worker-1")
+
+    # Team services RESTART (losing in-memory _release_pre_epochs) while K2 is STILL unrevoked!
+    _sessions2, restarted = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=3600,
+        cut_off_grace_seconds=1.0,
+        is_nats_key_revoked=lambda k: k in revoked_nats,
+    )
+    await restarted.reconcile()
+    # Must NOT reassign p2 while K2 (issued at t0+5s <= released_at + skew) is still unrevoked!
+    assert (await cluster.owners())[p2] == (RELEASED, "worker-1")
+
+    # Also verify _complete_release_locked post-restart does not fall back to worker-1's skewed pre-release epoch 2
+    # when worker-2 is absent and credentials_enforced=False.
+    cluster.remove_liveness("worker-2")
+    cluster.write_liveness("worker-1")  # still at pre-release epoch 2 (issued_at = t0+5s <= released_at + skew)
+    _sessions3, restarted_shared = cluster.make_services(credentials_enforced=False)
+    await restarted_shared.reconcile()
+    assert (await cluster.owners())[p2] == (RELEASED, "worker-1")
+
+    # Once K2 IS revoked and worker-2 is back (with worker-1 still gone), step 4 completes cleanly.
+    cluster.remove_liveness("worker-1")
+    revoked_nats.add(k2)
+    cluster.write_liveness("worker-2")
+    await restarted.reconcile()
+    assert (await cluster.owners())[p2] == (OWNED, "worker-2")

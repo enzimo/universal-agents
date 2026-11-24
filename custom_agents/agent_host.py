@@ -92,6 +92,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Coroutine, Iterable, Mapping, Optional
@@ -100,12 +101,21 @@ import rfc8785
 from pydantic import TypeAdapter, ValidationError
 
 from custom_messages.wire.encoding import b64url, format_timestamp
-from custom_messages.wire.kinds import STATE_RECORDS
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, STATE_RECORDS
 from custom_messages.wire.models import RecordId
-from custom_messages.wire.partitions import agent_record_key
+from custom_messages.wire.partitions import agent_partition, agent_record_key
 from custom_agents.contract_drain import drain_agent, holds_work
 from custom_messages.wire.frame import Receiver, VerifiedFrame
 from custom_messages.wire.refusals import FrameRefused
+from custom_messages.wire.values import parse_timestamp
+from custom_transport.protocol1.contract_files import transport as contract_transport
+from custom_transport.protocol1.host_partitions import (
+    PARTITION_COMPONENT_PREFIX,
+    PARTITION_CREDENTIAL_TOO_LARGE_CODE,
+    HostPartitionTracker,
+    OwnedPartition,
+    draw_any_agent_id,
+)
 from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, MessageHost
 from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN, HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable, Unsupported
@@ -128,7 +138,8 @@ REFUSED_RETRY_SECONDS = (5.0, 300.0)
 # Why an agent has no session, as its component's code in the host record says (module docstring).
 # The gateway explains each on the Status page (``assistant_gateway.team_view``).
 REFUSAL_CODES = {"not_allowed": "session_not_allowed", "already_placed": "session_already_placed",
-                 "limit_reached": "session_limit_reached", "runtime_error": "session_runtime_error"}
+                 "limit_reached": "session_limit_reached", "runtime_error": "session_runtime_error",
+                 "partition_not_owned": "session_partition_not_owned"}
 SESSION_REFUSED_CODE = "session_refused"  # an outcome this release does not know
 # Its type is in the catalog, but the installation authority did not add it to this host's certificate.
 TYPE_NOT_GRANTED_CODE = "session_type_not_granted"
@@ -142,6 +153,7 @@ WITHOUT_SESSION_REASONS = {
     REFUSAL_CODES["already_placed"]: "it is placed on another host",
     REFUSAL_CODES["limit_reached"]: "its host already runs as many agents as it may",
     REFUSAL_CODES["runtime_error"]: "the team services could not open its session",
+    REFUSAL_CODES["partition_not_owned"]: "its partition is not owned by its host",
     SESSION_REFUSED_CODE: "its session was refused",
     TYPE_NOT_GRANTED_CODE: "its host was not granted its type",
     TYPE_NOT_CERTIFIABLE_CODE: "its type's name cannot have a session",
@@ -164,7 +176,16 @@ AGENT_RECORD_CLEANUP_SECONDS = 10.0
 # While the process drains, how often it checks whether its agents still hold work (module docstring).
 DRAIN_POLL_SECONDS = 5.0
 SESSION_CLEANUP_SECONDS = 10.0
+# How long startup waits for this host's first usable owned partition before falling back.
+PARTITION_WAIT_SECONDS = 10.0
+# How long the partition coordinator waits before retrying a failed step-3 or credential renewal.
+PARTITION_RETRY_SECONDS = 2.0
+_MAX_RECENT_DRAWS = 256
 _LOGGER = logging.getLogger(__name__)
+
+
+def _default_handover_seconds() -> float:
+    return float(contract_transport()["partitions"]["handover_seconds"])
 # The running checks of restored agents' delegated work (``report_restored_work``).
 _DEPARTURE_CHECKS: set[asyncio.Task[None]] = set()
 
@@ -323,24 +344,127 @@ class AgentProcessHost:
     # The team's live agents (module docstring).
     team_agents: Optional[TeamAgents] = None
     event_handlers: dict[str, AgentHandler] = field(default_factory=dict)
+    # Partition ownership tracking, partition-scoped IDs, and handover steps 2-3 (A3, A4).
+    partitions: Optional[HostPartitionTracker] = None
+    handover_seconds: float = field(default_factory=_default_handover_seconds)
+    partition_wait_seconds: float = PARTITION_WAIT_SECONDS
+    partition_retry_seconds: float = PARTITION_RETRY_SECONDS
+    _partition_wake: Optional[asyncio.Event] = None
+    _handover_active: bool = False
+    _completed_handovers: dict[int, datetime] = field(default_factory=dict)
+    _last_reported_rejected: frozenset[int] = frozenset()
+    _draws_lock: threading.Lock = field(default_factory=threading.Lock)
+    _recent_draws: dict[str, int] = field(default_factory=dict)
 
     # -- the agent's side (called on the agent's own loop) --------------------------------
+
+    def ensure_started(self, nc: Any) -> None:
+        """Start the host on the first agent's connection if not started yet; returns at once."""
+
+        if self.loop is None:
+            self.loop = asyncio.get_running_loop()
+            self._joined, self._stop = asyncio.Event(), asyncio.Event()
+            self._partition_wake = asyncio.Event()
+            self.host = MessageHost(self.layout, self.profile, nc, logger=self.logger,
+                                    sessions_active=lambda: sum(1 for item in self.agents.values() if item.session),
+                                    components=self._components,
+                                    renewal_partitions=self._renewal_partitions,
+                                    renewal_paused=lambda: self._handover_active)
+            self.host.on_other_contract(self._other_contract)
+            self._task = self.loop.create_task(self._run(), name="agent_process_host")
 
     def attach(self, agent: Any, *, agent_type: str, definition: str, nc: Any,
                state: tuple[str, bool] = ("starting", True)) -> None:
         """Start the host on the first agent's connection, and open this agent's session; returns at once."""
 
-        if self.loop is None:
-            self.loop = asyncio.get_running_loop()
-            self._joined, self._stop = asyncio.Event(), asyncio.Event()
-            self.host = MessageHost(self.layout, self.profile, nc, logger=self.logger,
-                                    sessions_active=lambda: sum(1 for item in self.agents.values() if item.session),
-                                    components=self._components)
-            self.host.on_other_contract(self._other_contract)
-            self._task = self.loop.create_task(self._run(), name="agent_process_host")
+        self.ensure_started(nc)
+        assert self.loop is not None
+        with self._draws_lock:
+            self._recent_draws.pop(str(agent.id), None)
         hosted = _HostedAgent(agent, agent_type, definition, display_name=str(getattr(agent, "name", "") or "")[:80],
                               state=state[0], accepting_work=state[1])
         self.loop.call_soon_threadsafe(self._spawn, lambda: self._open(hosted), "open_session")
+
+    def usable_partitions(self) -> frozenset[int]:
+        """Thread-safe snapshot of partitions this host owns and may currently use for new agents."""
+
+        if self.partitions is None:
+            return frozenset()
+        return self.partitions.usable_partitions
+
+    def _partition_loads(self, count: int) -> dict[int, int]:
+        loads: dict[int, int] = {}
+        for agent_id in list(self.agents):
+            p = agent_partition(self.team, agent_id, count)
+            loads[p] = loads.get(p, 0) + 1
+        with self._draws_lock:
+            for agent_id, p in self._recent_draws.items():
+                if agent_id not in self.agents:
+                    loads[p] = loads.get(p, 0) + 1
+        return loads
+
+    def draw_agent_id(self, *, prefix: str = "agent", token_generator: Optional[Callable[[], str]] = None) -> str:
+        """Thread-safe draw of a contract-valid (<= 32 char) agent ID inside a least-filled usable owned partition."""
+
+        tracker = self.partitions
+        if tracker is None:
+            raise ValueError("partition tracker is not active on this host")
+        count = tracker.partition_count_snapshot
+        with self._draws_lock:
+            loads: dict[int, int] = {}
+            for agent_id in list(self.agents):
+                p = agent_partition(self.team, agent_id, count)
+                loads[p] = loads.get(p, 0) + 1
+            for agent_id, p in self._recent_draws.items():
+                if agent_id not in self.agents:
+                    loads[p] = loads.get(p, 0) + 1
+            excluded = set(self.agents) | set(self._recent_draws)
+            drawn = tracker.draw_agent_id(
+                prefix=prefix,
+                partition_loads=loads,
+                exclude_ids=excluded,
+                token_generator=token_generator,
+            )
+            if len(self._recent_draws) >= _MAX_RECENT_DRAWS:
+                oldest = next(iter(self._recent_draws))
+                self._recent_draws.pop(oldest, None)
+            self._recent_draws[drawn] = agent_partition(self.team, drawn, count)
+            return drawn
+
+    async def wait_for_usable_partition(self, *, timeout: Optional[float] = None) -> frozenset[int]:
+        """Wait up to ``timeout`` seconds for this host to own at least one usable partition."""
+
+        if self.loop is None or self.loop.is_closed():
+            return frozenset()
+        wait_seconds = self.partition_wait_seconds if timeout is None else float(timeout)
+
+        async def _wait() -> frozenset[int]:
+            assert self._joined is not None and self._stop is not None
+            deadline = self.loop.time() + wait_seconds  # type: ignore[union-attr]
+            rem = max(0.0, deadline - self.loop.time())  # type: ignore[union-attr]
+            if not self._joined.is_set():
+                try:
+                    await asyncio.wait_for(_first_of(self._joined, self._drain_started, self._stop), timeout=rem)
+                except asyncio.TimeoutError:
+                    return frozenset()
+            if not self._joined.is_set() or self._stop.is_set() or self._drain_started.is_set():
+                return frozenset()
+            tracker = self.partitions
+            if tracker is None:
+                return frozenset()
+            if tracker.usable_partitions:
+                return tracker.usable_partitions
+            rem = max(0.0, deadline - self.loop.time())  # type: ignore[union-attr]
+            if rem <= 0:
+                return tracker.usable_partitions
+            try:
+                await asyncio.wait_for(_first_of(tracker.has_usable, self._drain_started, self._stop), timeout=rem)
+            except asyncio.TimeoutError:
+                pass
+            return tracker.usable_partitions
+
+        result: frozenset[int] = await self._on_host_loop(_wait())
+        return result
 
     def report(self, agent_id: str, state: str, accepting_work: bool, requests: tuple[str, ...] = ()) -> None:
         """The agent's state now and the people's requests its turns run for, from any thread; its record follows
@@ -416,10 +540,21 @@ class AgentProcessHost:
             return
         await self._close_earlier_sessions()
         await self._remove_earlier_records()
-        # The team's view and its events run as supervised steps and stop with the host (module docstring).
+        # The team's view, partition ownership tracker, and team events run as supervised steps and stop with the host.
         team_agents = self.team_agents = TeamAgents(self.host, self.team, logger=self.logger)
         team_agents.listen(self._team_changed)
         stop = self._stop
+        if self._partition_wake is None:
+            self._partition_wake = asyncio.Event()
+        if hasattr(self.host, "renewal_partitions"):
+            self.host.renewal_partitions = self._renewal_partitions
+        if hasattr(self.host, "renewal_paused"):
+            self.host.renewal_paused = lambda: self._handover_active
+        if getattr(self.host, "records", None) is not None and hasattr(self.host.records, "watch"):
+            tracker = self.partitions = HostPartitionTracker(self.host, self.team, logger=self.logger)
+            tracker.on_change(self._wake_partitions)
+            self._spawn(lambda: tracker.run(stop), "partition_watch")
+            self._spawn(lambda: self._partition_coordinator(stop), "partition_coordinator")
         self._spawn(lambda: team_agents.run(stop), "team_view")
         self._spawn(self._serve_events, "team_events")
         self._joined.set()
@@ -867,6 +1002,8 @@ class AgentProcessHost:
         message = str(body.get("message") or outcome)
         if outcome == "already_placed":
             message = f"{message} (host {body.get('host')})"
+        elif outcome == "partition_not_owned":
+            message = f"{message} (partition {body.get('partition')})"
         if outcome != "not_allowed" or hosted.agent_type in certified:
             return REFUSAL_CODES.get(outcome, SESSION_REFUSED_CODE), message
         try:
@@ -921,16 +1058,30 @@ class AgentProcessHost:
                 wait.cancel()
 
     def _components(self) -> list[dict[str, str]]:
-        """The host record's components: each agent without a session, and why (module docstring)."""
+        """The host record's components: refused partitions (CR-4) and each agent without a session."""
 
+        partition_components: list[dict[str, str]] = []
+        if self.partitions is not None:
+            for partition in sorted(self.partitions.rejected_partitions):
+                partition_components.append(
+                    {
+                        "component": f"{PARTITION_COMPONENT_PREFIX}{partition}",
+                        "state": "unhealthy",
+                        "code": PARTITION_CREDENTIAL_TOO_LARGE_CODE,
+                    }
+                )
         refused = sorted(((hosted.refusal, hosted) for hosted in self.agents.values() if hosted.refusal is not None),
                          key=lambda item: (item[0].since, str(item[1].agent.id)))
-        components = [{"component": refused_session_component(hosted.agent_type, str(hosted.agent.id)),
-                       "state": "unhealthy", "code": refusal.code} for refusal, hosted in refused]
-        if len(components) > HOST_COMPONENTS_MAX:
-            components = components[:HOST_COMPONENTS_MAX - 1] + [
-                {"component": MORE_AGENTS_COMPONENT, "state": "unhealthy", "code": MORE_AGENTS_CODE}]
-        return components
+        agent_components = [{"component": refused_session_component(hosted.agent_type, str(hosted.agent.id)),
+                             "state": "unhealthy", "code": refusal.code} for refusal, hosted in refused]
+        room = max(0, HOST_COMPONENTS_MAX - len(partition_components))
+        if len(agent_components) > room:
+            if room >= 1:
+                agent_components = agent_components[:room - 1] + [
+                    {"component": MORE_AGENTS_COMPONENT, "state": "unhealthy", "code": MORE_AGENTS_CODE}]
+            else:
+                agent_components = []
+        return (partition_components + agent_components)[:HOST_COMPONENTS_MAX]
 
     def _components_changed(self) -> None:
         """Write the host record again now, so the Status page follows (``MessageHost.report_now``)."""
@@ -1315,6 +1466,256 @@ class AgentProcessHost:
         if self.agents.get(agent_id) is hosted and self._draining is None:
             self._spawn(lambda: self._hold_session(hosted), "reopen_session")
 
+    # -- partition handovers (steps 2 & 3) and credential sync (A4, CR-4) ----------------
+
+    def _renewal_partitions(self) -> tuple[int, ...]:
+        """Owned, non-rejected partitions this host should keep on routine certificate/credential renewals."""
+
+        if self.partitions is None:
+            return ()
+        return tuple(sorted(self.partitions.owned_by_host - self.partitions.rejected_partitions))
+
+    def _wake_partitions(self) -> None:
+        if self._partition_wake is not None:
+            self._partition_wake.set()
+        # Write host liveness right away only when the rejected-partition component set actually changed.
+        if self.partitions is not None:
+            rejected = self.partitions.rejected_partitions
+            if rejected != self._last_reported_rejected:
+                self._last_reported_rejected = rejected
+                self._components_changed()
+
+    async def _partition_coordinator(self, stop: asyncio.Event) -> None:
+        """Drive step 2-3 partition handovers and credential-partition sync sequentially."""
+
+        assert self._partition_wake is not None
+        while not stop.is_set():
+            self._partition_wake.clear()
+            needs_retry = False
+            try:
+                needs_retry = await self._sync_partitions_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                needs_retry = True
+                self.logger.exception(
+                    "Partition ownership sync failed; trying again. event=agent_host_partition_sync_failed runtime=%s",
+                    self.profile.runtime,
+                )
+            if self._partition_wake.is_set():
+                continue
+            if needs_retry:
+                try:
+                    await asyncio.wait_for(_first_of(self._partition_wake, stop), timeout=self.partition_retry_seconds)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await _first_of(self._partition_wake, stop)
+
+    async def _sync_partitions_once(self) -> bool:
+        """Execute one partition handover or credential-sync pass; returns True if a retry is needed."""
+
+        tracker = self.partitions
+        host = self.host
+        if tracker is None or host is None or host.live is None:
+            return False
+
+        released = tracker.released_by_host
+        for partition in list(self._completed_handovers):
+            current_rec = released.get(partition)
+            if current_rec is None or current_rec.assigned_at != self._completed_handovers[partition]:
+                self._completed_handovers.pop(partition, None)
+
+        pending_releases = {
+            p: rec for p, rec in released.items() if self._completed_handovers.get(p) != rec.assigned_at
+        }
+        if pending_releases:
+            completed = await self._execute_handover(pending_releases)
+            return not completed
+
+        if not getattr(host, "credentials_issued", False) or self._draining is not None:
+            return False
+
+        desired = tracker.owned_by_host - tracker.rejected_partitions
+        current = frozenset(getattr(host, "credential_partitions", frozenset()))
+        if desired == current:
+            return False
+        dropping = bool(current - desired)
+        ok = await self._renew_for_partitions(desired, rotate_nats_key=dropping)
+        return not ok
+
+    def _agents_in_partitions(self, partitions: Iterable[int]) -> list[_HostedAgent]:
+        target = frozenset(partitions)
+        if not target:
+            return []
+        count = self.partitions.partition_count if self.partitions is not None else DEFAULT_PARTITION_COUNT
+        return [
+            hosted for agent_id, hosted in list(self.agents.items())
+            if agent_partition(self.team, agent_id, count) in target
+        ]
+
+    def _handover_deadline(self, records: Iterable[OwnedPartition]) -> datetime:
+        """Latest time step 2 may finish: handover_seconds or earlier if credential/cert ends first."""
+
+        assert self.host is not None
+        deadlines = [rec.assigned_at + timedelta(seconds=self.handover_seconds) for rec in records]
+        cert = self.host.identity.certificate
+        cert_exp = getattr(cert, "expires_at", None)
+        if isinstance(cert_exp, datetime):
+            deadlines.append(cert_exp - timedelta(seconds=30))
+        conn = getattr(self.host, "connection", None)
+        if isinstance(conn, Mapping) and "expires_at" in conn:
+            try:
+                conn_exp = parse_timestamp(str(conn["expires_at"]))
+                conn_start = getattr(self.host, "_connection_issued_at", None) or getattr(cert, "issued_at", None)
+                if isinstance(conn_start, datetime) and conn_exp > conn_start:
+                    margin = min(timedelta(seconds=30), max(timedelta(seconds=1), (conn_exp - conn_start) / 6))
+                else:
+                    margin = timedelta(seconds=30)
+                deadlines.append(conn_exp - margin)
+            except ValueError:
+                pass
+        return min(deadlines)
+
+    async def _execute_handover(self, pending_releases: Mapping[int, OwnedPartition]) -> bool:
+        """Run handover step 2 (stop control, drain/handback, close as handed_over) and step 3 (renew + rotate key)."""
+
+        assert self.host is not None and self.partitions is not None and self._stop is not None
+        partitions_set = frozenset(pending_releases)
+        deadline = self._handover_deadline(pending_releases.values())
+        self._handover_active = True
+        try:
+            # Step 2: stop answering control addresses and drain every agent in the released partition(s).
+            reason = (
+                f"Partition(s) {sorted(partitions_set)} are being handed over away from host {self.profile.runtime}."
+            )
+            drained_ids: set[str] = set()
+            while not self._stop.is_set():
+                current_released = self.partitions.released_by_host
+                still_released = partitions_set & frozenset(current_released)
+                if not still_released:
+                    return True
+                in_part = self._agents_in_partitions(still_released)
+                for hosted in in_part:
+                    if hosted.subscription is not None:
+                        try:
+                            await hosted.subscription.unsubscribe()
+                            hosted.subscription = None
+                            hosted.subscription_failures = 0
+                        except Exception:
+                            self.logger.warning(
+                                "Could not unsubscribe a handed-over agent's control address; retrying on close. "
+                                "event=agent_host_handover_unsubscribe_failed runtime=%s agent=%s",
+                                self.profile.runtime,
+                                hosted.agent.id,
+                                exc_info=True,
+                            )
+                    agent_id = str(hosted.agent.id)
+                    if agent_id not in drained_ids:
+                        try:
+                            await self._drain_one(hosted, reason)
+                        except Exception:
+                            self.logger.warning(
+                                "Draining an agent for partition handover failed; continuing to deadline. "
+                                "event=agent_host_handover_drain_failed runtime=%s agent=%s",
+                                self.profile.runtime,
+                                agent_id,
+                                exc_info=True,
+                            )
+                        drained_ids.add(agent_id)
+                holding = [hosted for hosted in in_part if await self._still_holds(hosted)]
+                if not holding or self.host.clock() >= deadline:
+                    break
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.drain_poll_seconds)
+                except asyncio.TimeoutError:
+                    pass
+
+            if self._stop.is_set():
+                return False
+
+            # Close sessions of every agent in the released partition(s) as handed_over so placements survive step 4.
+            closing_sessions: set[str] = set()
+            for hosted in self._agents_in_partitions(partitions_set):
+                if hosted.session is not None:
+                    closing_sessions.add(hosted.session)
+                await self._close(str(hosted.agent.id), "handed_over", hosted=hosted)
+            while not self._stop.is_set() and any(s in self._pending_closes for s in closing_sessions):
+                for session in list(closing_sessions):
+                    if session in self._pending_closes:
+                        await self._try_close(session)
+                if not any(s in self._pending_closes for s in closing_sessions):
+                    break
+                if self.host.clock() >= deadline:
+                    break
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=min(self.drain_poll_seconds, 0.5))
+                except asyncio.TimeoutError:
+                    pass
+
+            if self._stop.is_set():
+                return False
+
+            # Step 3: under issued credentials, renew with a new NATS key omitting released partitions
+            # (taking up any partitions gained during step 2). Under shared NATS login, step 3 renews nothing.
+            if getattr(self.host, "credentials_issued", False):
+                desired = self.partitions.owned_by_host - self.partitions.rejected_partitions
+                ok = await self._renew_for_partitions(desired, rotate_nats_key=True)
+                if not ok:
+                    return False
+
+            for p, rec in pending_releases.items():
+                self._completed_handovers[p] = rec.assigned_at
+            self.logger.info(
+                "Finished partition handover steps 2-3. event=agent_host_partition_handover_done "
+                "runtime=%s partitions=%s credentials_issued=%s",
+                self.profile.runtime,
+                sorted(partitions_set),
+                bool(getattr(self.host, "credentials_issued", False)),
+            )
+            return True
+        finally:
+            self._handover_active = False
+
+    async def _renew_for_partitions(self, desired: frozenset[int], *, rotate_nats_key: bool) -> bool:
+        """Renew the host's credential for ``desired`` partitions, rejecting and dropping any that exceed the size limit."""
+
+        assert self.host is not None and self.partitions is not None and self._stop is not None
+        working = frozenset(desired)
+        while not self._stop.is_set():
+            outcome = await self.host.renew(partitions=sorted(working), rotate_nats_key=rotate_nats_key)
+            if outcome.ok:
+                self.partitions.refresh_usable()
+                return True
+            if outcome.credential_too_large:
+                current = frozenset(getattr(self.host, "credential_partitions", frozenset()))
+                newly_added = sorted(working - current)
+                if newly_added:
+                    drop = newly_added[-1]
+                elif working:
+                    drop = max(working)
+                else:
+                    self.logger.error(
+                        "Credential renewal exceeded max_credential_bytes even with no partitions; cannot shrink further. "
+                        "event=agent_host_credential_too_large_empty runtime=%s message=%s",
+                        self.profile.runtime,
+                        outcome.message,
+                    )
+                    return False
+                self.partitions.mark_rejected(drop)
+                self.logger.warning(
+                    "Partition %s did not fit this host's NATS credential; marking it unhealthy and renewing without it. "
+                    "event=agent_host_partition_credential_too_large runtime=%s partition=%s message=%s",
+                    drop,
+                    self.profile.runtime,
+                    drop,
+                    outcome.message,
+                )
+                working = working - {drop}
+                continue
+            return False
+        return False
+
     # -- another contract (module docstring) ---------------------------------------------
 
     def _other_contract(self, theirs: str) -> None:
@@ -1500,6 +1901,66 @@ def agent_definition_sha256(agent: Any) -> str:
         # Every type the team runs has a definition; without one the placement names the type alone.
         definition = {"named_agent_type": agent.named_agent_type}
     return definition_sha256(launch_definition_digest(definition))
+
+
+def draw_launch_agent_id(team_id: str, *, prefix: str = "agent") -> str:
+    """Draw a contract-valid (<= 32 char) agent ID for a dynamically launched worker.
+
+    When this process has an active ``AgentProcessHost`` for ``team_id`` with at least one
+    usable owned partition, the ID is drawn inside its least-filled usable owned partition.
+    Otherwise (standalone tests or before partitions are assigned), returns a <= 32-char ID
+    matching the contract's ``agent_id`` pattern.
+    """
+
+    host = process_host()
+    if host is not None and host.team == team_id and host.usable_partitions():
+        try:
+            return str(host.draw_agent_id(prefix=prefix))
+        except Exception:
+            host.logger.warning(
+                "Could not draw a partition-scoped worker agent ID; falling back to an unconstrained contract ID. "
+                "event=agent_host_draw_id_fallback team=%s",
+                team_id,
+                exc_info=True,
+            )
+    return draw_any_agent_id(prefix=prefix)
+
+
+async def assign_partition_agent_id(agent: Any, adapter: Any) -> None:
+    """Before subscribing or attaching a lead/startup agent, draw its auto-generated ID inside an owned partition.
+
+    Explicit operator-pinned IDs (``"id" in agent.model_fields_set``) and dynamically launched
+    workers (``agent._worker_launch is not None``, already drawn at launch time) keep their ID.
+    """
+
+    host = process_host()
+    if host is None or host.team != getattr(agent, "team_id", None):
+        return
+    if "id" in getattr(agent, "model_fields_set", set()) or getattr(agent, "_worker_launch", None) is not None:
+        return
+    host.ensure_started(adapter.nats_connection)
+    usable = await host.wait_for_usable_partition()
+    if not usable or host.partitions is None:
+        return
+    count = host.partitions.partition_count_snapshot
+    current_id = str(getattr(agent, "id", "") or "")
+    if current_id and agent_partition(host.team, current_id, count) in usable:
+        return
+    try:
+        new_agent_id = host.draw_agent_id(prefix="agent")
+    except Exception:
+        host.logger.warning(
+            "Could not draw a partition-scoped startup agent ID; keeping initial ID. "
+            "event=agent_host_startup_id_fallback agent=%s",
+            getattr(agent, "id", None),
+            exc_info=True,
+        )
+        return
+    adopt = getattr(agent, "_adopt_agent_id", None)
+    if callable(adopt):
+        adopt(new_agent_id)
+    else:
+        agent.id = new_agent_id
 
 
 def attach_agent(agent: Any, adapter: Any) -> None:

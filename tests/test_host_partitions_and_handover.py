@@ -1,0 +1,686 @@
+"""Unit tests for host partition tracking, partition-scoped agent IDs, and host handover steps 2-3 (A3, A4, CR-4)."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Optional, Sequence
+
+import pytest
+
+from custom_agents.agent_host import (
+    REFUSAL_CODES,
+    AgentProcessHost,
+    _HostedAgent,
+    assign_partition_agent_id,
+    draw_launch_agent_id,
+)
+from custom_agents.agent_requests import configure_process_host
+from custom_messages.wire.encoding import format_timestamp
+from custom_messages.wire.kinds import PROTOCOL
+from custom_messages.wire.partitions import OWNED, RELEASED, agent_partition, partition_owner_key
+from custom_messages.wire.trust import AuthorityKey, TrustStore, sign_state
+from custom_transport.protocol1.host_keys import ensure_authority_keys, ensure_host_keys
+from custom_transport.protocol1.host_partitions import (
+    AGENT_ID_PATTERN,
+    PARTITION_COMPONENT_PREFIX,
+    PARTITION_CREDENTIAL_TOO_LARGE_CODE,
+    HostPartitionTracker,
+    draw_agent_id,
+    draw_any_agent_id,
+)
+from custom_transport.protocol1.host_runtime import RenewalOutcome
+from custom_transport.protocol1.joining import HostProfile
+from custom_transport.protocol1.trust_state import PersistentTrustStore
+from runtime_settings.instance_layout import InstanceLayout
+
+INSTALLATION = "inst_host_part"
+TEAM = "team_alpha"
+PARTITIONS = 8
+DEFINITION = "DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0"
+
+
+def _ts(dt: datetime) -> str:
+    return format_timestamp(dt)
+
+
+class _SignedCluster:
+    """Minimal signed-record builder for host partition tracker and handover tests."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.layout = InstanceLayout.at(tmp_path / "inst")
+        self.now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+        self.authority = ensure_authority_keys(self.layout, INSTALLATION)[0]
+        self.trust = PersistentTrustStore(
+            TrustStore(
+                INSTALLATION,
+                [AuthorityKey(INSTALLATION, self.authority.key_id, self.authority.private_key.public_key())],
+                partition_count=PARTITIONS,
+            ),
+            self.layout.host_trust_dir("worker-1") / "trust.json",
+        )
+        # Seed a current revocations record so state records verify.
+        rev_doc = sign_state(
+            {
+                "record": "revocations",
+                "protocol": PROTOCOL,
+                "key": f"revocations.{INSTALLATION}",
+                "writer": {"type": "authority", "installation": INSTALLATION, "key_id": self.authority.key_id},
+                "sequence": 1,
+                "issued_at": _ts(self.now),
+                "expires_at": _ts(self.now + timedelta(hours=24)),
+                "body": {
+                    "installation": INSTALLATION,
+                    "revocation_epoch": 1,
+                    "entries": [],
+                    "expires_at": _ts(self.now + timedelta(hours=24)),
+                },
+            },
+            self.authority.private_key,
+        )
+        self.trust.add(json.dumps(rev_doc).encode(), now=self.now)
+        self.keys: dict[str, Any] = {}
+        self.certs: dict[str, Any] = {}
+        self.epochs: dict[str, int] = {}
+        self.seq = 100
+
+        self.issue_host("team-services", roles=("team_services",), agent_types=(), session_limit=0)
+        self.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), session_limit=4)
+        self.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",), session_limit=4)
+
+    def issue_host(
+        self,
+        runtime: str,
+        *,
+        roles: tuple[str, ...],
+        agent_types: tuple[str, ...],
+        session_limit: int,
+    ) -> Any:
+        keys = self.keys.get(runtime) or ensure_host_keys(self.layout, runtime)[0]
+        self.keys[runtime] = keys
+        epoch = self.epochs.get(runtime, 0) + 1
+        self.epochs[runtime] = epoch
+        cert_doc = sign_state(
+            {
+                "record": "certificate",
+                "protocol": PROTOCOL,
+                "key": f"host.{INSTALLATION}.{runtime}.{epoch}",
+                "writer": {"type": "authority", "installation": INSTALLATION, "key_id": self.authority.key_id},
+                "sequence": epoch,
+                "issued_at": _ts(self.now),
+                "expires_at": _ts(self.now + timedelta(days=30)),
+                "body": {
+                    "certificate_id": f"cert-{runtime}-{epoch}",
+                    "installation": INSTALLATION,
+                    "runtime": runtime,
+                    "teams": [TEAM],
+                    "roles": list(roles),
+                    "agent_types": list(agent_types),
+                    "session_limit": session_limit,
+                    "connection_class": "connected",
+                    "protocol": PROTOCOL,
+                    "deployment": "local",
+                    "application_key": {"key_id": keys.key_id, "public_key": keys.public_key_text},
+                    "nats_public_key": keys.nats_public_key,
+                    "membership_epoch": epoch,
+                    "revocation_epoch": 1,
+                    "profile_sha256": "A" * 43,
+                    "issued_at": _ts(self.now),
+                    "expires_at": _ts(self.now + timedelta(days=30)),
+                },
+            },
+            self.authority.private_key,
+        )
+        self.trust.add(json.dumps(cert_doc).encode(), now=self.now)
+        cert = self.trust.store.host_certificate(INSTALLATION, runtime, epoch)
+        assert cert is not None
+        self.certs[runtime] = cert
+        return cert
+
+    def sign_partition_owner(
+        self,
+        partition: int,
+        *,
+        state: str,
+        host: str,
+        reason: str = "initial",
+        signer_runtime: str = "team-services",
+        sequence: Optional[int] = None,
+        assigned_at: Optional[datetime] = None,
+    ) -> tuple[str, bytes]:
+        if sequence is None:
+            self.seq += 1
+            sequence = self.seq
+        key = partition_owner_key(TEAM, partition, PARTITIONS)
+        signer_keys = self.keys[signer_runtime]
+        signer_cert = self.certs[signer_runtime]
+        doc = sign_state(
+            {
+                "record": "partition_owner",
+                "protocol": PROTOCOL,
+                "key": key,
+                "writer": {
+                    "type": "host",
+                    "installation": INSTALLATION,
+                    "runtime": signer_runtime,
+                    "membership_epoch": signer_cert.membership_epoch,
+                    "key_id": signer_keys.key_id,
+                },
+                "sequence": sequence,
+                "issued_at": _ts(self.now),
+                "body": {
+                    "team": TEAM,
+                    "partition": partition,
+                    "state": state,
+                    "host": host,
+                    "host_epoch": self.certs[host].membership_epoch,
+                    "assigned_at": _ts(assigned_at or self.now),
+                    "reason": reason,
+                },
+            },
+            signer_keys.application_key,
+        )
+        return key, json.dumps(doc).encode()
+
+
+class _FakeSubscription:
+    def __init__(self) -> None:
+        self.unsubscribed = 0
+
+    async def unsubscribe(self) -> None:
+        self.unsubscribed += 1
+
+
+class _FakeRecords:
+    def __init__(self) -> None:
+        self.written: list[dict[str, Any]] = []
+        self.removed: list[str] = []
+        self.values: dict[str, dict[str, Any]] = {}
+
+    def signed(self, record: str, key: str, body: dict[str, Any], *, sequence: int, issued_at: datetime,
+               expires_at: Optional[datetime] = None) -> dict[str, Any]:
+        return {"record": record, "key": key, "body": body}
+
+    async def put(self, record: str, key: str, document: dict[str, Any]) -> int:
+        self.written.append(document)
+        self.values[key] = document
+        return 1
+
+    async def read_report(self, record: str, key: str, *, now: datetime) -> Any:
+        if key not in self.values:
+            return None
+        return SimpleNamespace(revision=1, record=SimpleNamespace(signer=SimpleNamespace(runtime="worker-1")))
+
+    async def delete(self, record: str, key: str, *, last_revision: int) -> bool:
+        self.removed.append(key)
+        self.values.pop(key, None)
+        return True
+
+
+class _FakeMessageHost:
+    def __init__(self, cluster: _SignedCluster, runtime: str = "worker-1", *, credentials_issued: bool = False) -> None:
+        self.cluster = cluster
+        self.profile = HostProfile(runtime, (TEAM,), ("worker_host",), ("researcher",), 4)
+        self.credentials_issued = credentials_issued
+        self.credential_partitions: frozenset[int] = frozenset()
+        self.connection: Optional[dict[str, Any]] = (
+            {"jwt": "fake-jwt", "expires_at": _ts(cluster.now + timedelta(seconds=600))}
+            if credentials_issued
+            else None
+        )
+        self._connection_issued_at: Optional[datetime] = cluster.now if credentials_issued else None
+        self.records = _FakeRecords()
+        self.reports = 0
+        self.renew_calls: list[tuple[tuple[int, ...], bool]] = []
+        self.reject_partitions_on_renew: set[int] = set()
+        self.max_renew_partitions: Optional[int] = None
+        self.live = SimpleNamespace(
+            identity=SimpleNamespace(
+                installation=INSTALLATION,
+                certificate=cluster.certs[runtime],
+                sessions={},
+                with_session=lambda a, s: self.live.identity,
+                without_session=lambda a: self.live.identity,
+            ),
+            trust=cluster.trust,
+        )
+
+    @property
+    def identity(self) -> Any:
+        return self.live.identity
+
+    def clock(self) -> datetime:
+        return self.cluster.now
+
+    async def report_now(self) -> None:
+        self.reports += 1
+
+    async def renew(
+        self,
+        *,
+        partitions: Optional[Sequence[int]] = None,
+        rotate_nats_key: bool = False,
+    ) -> RenewalOutcome:
+        req = tuple(sorted(set(partitions or ())))
+        self.renew_calls.append((req, rotate_nats_key))
+        if (
+            any(p in self.reject_partitions_on_renew for p in req)
+            or (self.max_renew_partitions is not None and len(req) > self.max_renew_partitions)
+        ):
+            return RenewalOutcome(
+                ok=False,
+                outcome="not_allowed",
+                message="This host's NATS credential (70000 bytes) exceeds the 65536-byte limit (max_credential_bytes).",
+                credential_too_large=True,
+            )
+        self.credential_partitions = frozenset(req)
+        self.credentials_issued = True
+        self.connection = {"jwt": f"jwt-{len(self.renew_calls)}", "expires_at": _ts(self.cluster.now + timedelta(seconds=600))}
+        self._connection_issued_at = self.cluster.now
+        return RenewalOutcome(
+            ok=True,
+            outcome="ok",
+            certificate=self.live.identity.certificate,
+            connection=self.connection,
+            partitions=self.credential_partitions,
+            rotated_nats_key=rotate_nats_key,
+        )
+
+
+def test_draw_agent_id_respects_contract_length_and_spreads_across_least_filled_partitions() -> None:
+    """A3: generated IDs are <= 32 chars, match agent_id regex, and target least-filled owned partitions."""
+
+    usable = [1, 4, 6]
+    loads = {1: 2, 4: 1, 6: 0}
+
+    first = draw_agent_id(TEAM, usable, PARTITIONS, prefix="agent", partition_loads=loads)
+    assert len(first) <= 32
+    assert AGENT_ID_PATTERN.fullmatch(first)
+    assert agent_partition(TEAM, first, PARTITIONS) == 6
+
+    # After partition 6 reaches load 1, both 4 and 6 tie for minimum load (1) while 1 (load 2) is skipped.
+    loads[6] = 1
+    seen = {
+        agent_partition(TEAM, draw_agent_id(TEAM, usable, PARTITIONS, prefix="very_long_agent_prefix_name", partition_loads=loads), PARTITIONS)
+        for _ in range(30)
+    }
+    assert seen <= {4, 6}
+    assert 1 not in seen
+
+    # Unconstrained fallback ID is also <= 32 chars and contract-valid.
+    fallback = draw_any_agent_id(prefix="agent")
+    assert len(fallback) <= 32
+    assert AGENT_ID_PATTERN.fullmatch(fallback)
+
+    with pytest.raises(ValueError):
+        draw_agent_id(TEAM, [], PARTITIONS)
+
+
+@pytest.mark.asyncio
+async def test_tracker_verifies_signatures_enforces_replay_and_gates_usability_on_credentials(tmp_path: Path) -> None:
+    """A3: tracker ignores forged/replayed records and gates usable_partitions on credentials when issued."""
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=False)
+    tracker = HostPartitionTracker(host, TEAM)
+
+    # Forged partition_owner signed by worker-2 (not team_services) MUST be rejected.
+    key0, forged_raw = cluster.sign_partition_owner(0, state=OWNED, host="worker-1", signer_runtime="worker-2")
+    assert await tracker.apply_event(key0, forged_raw) is False
+    assert tracker.owned_by_host == frozenset()
+    assert tracker.usable_partitions == frozenset()
+
+    # Valid record from team-services under shared NATS login -> immediately usable.
+    key0, raw_owned = cluster.sign_partition_owner(0, state=OWNED, host="worker-1", sequence=200)
+    assert await tracker.apply_event(key0, raw_owned) is True
+    assert tracker.owned_by_host == frozenset({0})
+    assert tracker.usable_partitions == frozenset({0})
+    assert tracker.has_usable.is_set()
+
+    # Delete partition 0, then attempt replay of older sequence 199 -> MUST be refused!
+    assert await tracker.apply_event(key0, None) is True
+    assert tracker.owned_by_host == frozenset()
+    key0, old_raw = cluster.sign_partition_owner(0, state=OWNED, host="worker-1", sequence=199)
+    assert await tracker.apply_event(key0, old_raw) is False
+    assert tracker.owned_by_host == frozenset()
+
+    # Switch to issued-credentials mode: verified owned partition is NOT usable until credential names it.
+    host.credentials_issued = True
+    host.credential_partitions = frozenset()
+    key2, raw2 = cluster.sign_partition_owner(2, state=OWNED, host="worker-1", sequence=205)
+    assert await tracker.apply_event(key2, raw2) is True
+    assert tracker.owned_by_host == frozenset({2})
+    assert tracker.usable_partitions == frozenset()
+    assert not tracker.has_usable.is_set()
+
+    # Once host credential names partition 2, it becomes usable.
+    host.credential_partitions = frozenset({2})
+    tracker.refresh_usable()
+    assert tracker.usable_partitions == frozenset({2})
+    assert tracker.has_usable.is_set()
+
+
+@pytest.mark.asyncio
+async def test_agent_host_handover_step2_and_step3_with_credentials_and_shared_login(tmp_path: Path) -> None:
+    """A4: host unsubscribes control, drains, closes sessions as handed_over, and renews+rotates key on step 3."""
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=True)
+    host.credential_partitions = frozenset({1, 3})
+
+    drained: list[tuple[str, str]] = []
+    holding: set[str] = set()
+    closed_requests: list[dict[str, Any]] = []
+
+    async def fake_drain(agent: Any, reason: str) -> None:
+        drained.append((str(agent.id), reason))
+
+    async def fake_holds_work(agent: Any) -> bool:
+        return str(agent.id) in holding
+
+    process = AgentProcessHost(
+        cluster.layout,
+        host.profile,
+        TEAM,
+        drain_agent=fake_drain,
+        holds_work=fake_holds_work,
+        drain_poll_seconds=0.01,
+        handover_seconds=60.0,
+    )
+    process.host = host  # type: ignore[assignment]
+    process.loop = asyncio.get_running_loop()
+    process._joined, process._stop = asyncio.Event(), asyncio.Event()
+    process._joined.set()
+    process._partition_wake = asyncio.Event()
+    process.partitions = HostPartitionTracker(host, TEAM)
+
+    async def fake_request(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+        if kind == "sessions.close":
+            closed_requests.append(body)
+        return {"outcome": "ok"}
+
+    process._request = fake_request  # type: ignore[method-assign]
+
+    # Seed partitions 1 and 3 as owned; attach one agent in partition 1 and one in partition 3.
+    for p in (1, 3):
+        k, raw = cluster.sign_partition_owner(p, state=OWNED, host="worker-1")
+        await process.partitions.apply_event(k, raw)
+
+    a_p1 = draw_agent_id(TEAM, [1], PARTITIONS, prefix="wrk")
+    a_p3 = draw_agent_id(TEAM, [3], PARTITIONS, prefix="wrk")
+    sub_p1, sub_p3 = _FakeSubscription(), _FakeSubscription()
+    process.agents[a_p1] = _HostedAgent(SimpleNamespace(id=a_p1), "researcher", DEFINITION, session="s-1", subscription=sub_p1)
+    process.agents[a_p3] = _HostedAgent(SimpleNamespace(id=a_p3), "researcher", DEFINITION, session="s-3", subscription=sub_p3)
+    holding.add(a_p1)
+
+    # Team services release partition 1 (step 1) AND also assign new partition 5 while step 2 runs.
+    k1, rel1 = cluster.sign_partition_owner(1, state=RELEASED, host="worker-1", reason="operator")
+    k5, own5 = cluster.sign_partition_owner(5, state=OWNED, host="worker-1", reason="rebalanced")
+    await process.partitions.apply_event(k1, rel1)
+    await process.partitions.apply_event(k5, own5)
+
+    # Run handover in background: a_p1 holds work, so step 2 must unsubscribe + drain and wait before closing/renewing.
+    task = asyncio.create_task(process._sync_partitions_once())
+    await asyncio.sleep(0.05)
+    assert sub_p1.unsubscribed == 1
+    assert sub_p3.unsubscribed == 0
+    assert [aid for aid, _ in drained] == [a_p1]
+    assert process._handover_active is True  # routine renewals paused during step 2
+    assert host.renew_calls == []
+    assert closed_requests == []
+
+    # Release work on a_p1 -> step 2 closes s-1 as handed_over, step 3 renews with [3, 5] and rotate_nats_key=True!
+    holding.clear()
+    needs_retry = await asyncio.wait_for(task, timeout=2.0)
+    assert needs_retry is False
+    assert process._handover_active is False
+    assert a_p1 not in process.agents
+    assert a_p3 in process.agents  # unaffected partition stays running!
+    assert [(r["session"], r["reason"]) for r in closed_requests] == [("s-1", "handed_over")]
+    assert host.renew_calls == [((3, 5), True)]
+    assert process.partitions.usable_partitions == frozenset({3, 5})
+
+    # Re-running sync while partition 1 is still released (waiting for team services step 4) must NOT repeat step 3!
+    assert await process._sync_partitions_once() is False
+    assert len(host.renew_calls) == 1
+
+    # Under shared NATS login (credentials_issued=False), step 3 renews nothing!
+    host.credentials_issued = False
+    k3, rel3 = cluster.sign_partition_owner(3, state=RELEASED, host="worker-1", reason="operator")
+    await process.partitions.apply_event(k3, rel3)
+    assert await process._sync_partitions_once() is False
+    assert [(r["session"], r["reason"]) for r in closed_requests] == [("s-1", "handed_over"), ("s-3", "handed_over")]
+    assert len(host.renew_calls) == 1  # no renewal under shared login
+
+
+@pytest.mark.asyncio
+async def test_credential_too_large_renewal_marks_unhealthy_component_renews_without_it_and_clears_on_move(
+    tmp_path: Path,
+) -> None:
+    """A4 / CR-4: if renewal hits credential_too_large, host drops rejected partition, reports partition-<p>, and clears on move."""
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=True)
+    host.credential_partitions = frozenset({0})
+    host.reject_partitions_on_renew.add(4)
+
+    process = AgentProcessHost(cluster.layout, host.profile, TEAM, drain_poll_seconds=0.01)
+    process.host = host  # type: ignore[assignment]
+    process.loop = asyncio.get_running_loop()
+    process._joined, process._stop = asyncio.Event(), asyncio.Event()
+    process._joined.set()
+    process._partition_wake = asyncio.Event()
+    process.partitions = HostPartitionTracker(host, TEAM)
+    process.partitions.on_change(process._wake_partitions)
+
+    # worker-1 owns partitions 0, 2, 4; authority refuses 4 as max_credential_bytes.
+    for p in (0, 2, 4):
+        k, raw = cluster.sign_partition_owner(p, state=OWNED, host="worker-1")
+        await process.partitions.apply_event(k, raw)
+
+    assert await process._sync_partitions_once() is False
+    # First tried (0, 2, 4) -> refused; automatically rejected 4 and renewed cleanly with (0, 2)!
+    assert host.renew_calls == [((0, 2, 4), False), ((0, 2), False)]
+    assert host.credential_partitions == frozenset({0, 2})
+    assert process.partitions.rejected_partitions == frozenset({4})
+    assert process.partitions.usable_partitions == frozenset({0, 2})
+    assert process._components() == [
+        {
+            "component": f"{PARTITION_COMPONENT_PREFIX}4",
+            "state": "unhealthy",
+            "code": PARTITION_CREDENTIAL_TOO_LARGE_CODE,
+        }
+    ]
+
+    # Team services recover by reassigning partition 4 to worker-2 -> rejection & unhealthy component clear automatically!
+    k4, moved4 = cluster.sign_partition_owner(4, state=OWNED, host="worker-2", reason="rebalanced")
+    await process.partitions.apply_event(k4, moved4)
+    assert process.partitions.rejected_partitions == frozenset()
+    assert process._components() == []
+
+
+@pytest.mark.asyncio
+async def test_launch_and_startup_agent_ids_draw_in_owned_partitions_and_spread_batch_launches(tmp_path: Path) -> None:
+    """A3: dynamic worker launches and startup agents draw <= 32-char IDs inside least-filled usable owned partitions."""
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=False)
+    process = AgentProcessHost(cluster.layout, host.profile, TEAM, partition_wait_seconds=1.0)
+    process.host = host  # type: ignore[assignment]
+    process.loop = asyncio.get_running_loop()
+    process._joined, process._stop = asyncio.Event(), asyncio.Event()
+    process._joined.set()
+    process.partitions = HostPartitionTracker(host, TEAM)
+
+    owned = (1, 3, 5)
+    for p in owned:
+        k, raw = cluster.sign_partition_owner(p, state=OWNED, host="worker-1")
+        await process.partitions.apply_event(k, raw)
+
+    configure_process_host(process)
+    try:
+        # Launching 3 workers synchronously back-to-back spreads 1 per owned partition (not all in one)!
+        launched_ids = [draw_launch_agent_id(TEAM) for _ in range(3)]
+        assert all(len(aid) <= 32 and AGENT_ID_PATTERN.fullmatch(aid) for aid in launched_ids)
+        assert {agent_partition(TEAM, aid, PARTITIONS) for aid in launched_ids} == set(owned)
+
+        # Auto-generated startup agent whose initial ID falls outside owned partitions adopts a valid owned ID.
+        outside_id = draw_agent_id(TEAM, [0], PARTITIONS, prefix="agent")
+        adopted: list[str] = []
+        fake_agent = SimpleNamespace(
+            id=outside_id,
+            team_id=TEAM,
+            model_fields_set=set(),
+            _worker_launch=None,
+            _adopt_agent_id=lambda new_id: adopted.append(new_id),
+        )
+        await assign_partition_agent_id(fake_agent, SimpleNamespace(nats_connection=None))
+        assert len(adopted) == 1
+        assert len(adopted[0]) <= 32
+        assert agent_partition(TEAM, adopted[0], PARTITIONS) in set(owned)
+
+        # Operator-pinned ID ("id" in model_fields_set) is preserved untouched.
+        adopted_pinned: list[str] = []
+        pinned_agent = SimpleNamespace(
+            id=outside_id,
+            team_id=TEAM,
+            model_fields_set={"id"},
+            _worker_launch=None,
+            _adopt_agent_id=lambda new_id: adopted_pinned.append(new_id),
+        )
+        await assign_partition_agent_id(pinned_agent, SimpleNamespace(nats_connection=None))
+        assert adopted_pinned == []
+    finally:
+        configure_process_host(None)
+
+
+def test_partition_not_owned_refusal_code_is_registered() -> None:
+    """A2 / A3: partition_not_owned maps to a documented host refusal code."""
+
+    assert REFUSAL_CODES["partition_not_owned"] == "session_partition_not_owned"
+
+
+@pytest.mark.asyncio
+async def test_handover_deadline_closes_still_holding_agent_and_runs_step3(tmp_path: Path) -> None:
+    """A4: when an agent still holds work past handover_seconds (or near credential expiry), step 2 closes and step 3 runs."""
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=True)
+    host.credential_partitions = frozenset({2, 6})
+
+    closed_requests: list[dict[str, Any]] = []
+
+    async def fake_drain(agent: Any, reason: str) -> None:
+        return None
+
+    async def always_holding(agent: Any) -> bool:
+        return True
+
+    process = AgentProcessHost(
+        cluster.layout,
+        host.profile,
+        TEAM,
+        drain_agent=fake_drain,
+        holds_work=always_holding,
+        drain_poll_seconds=0.01,
+        handover_seconds=30.0,
+    )
+    process.host = host  # type: ignore[assignment]
+    process.loop = asyncio.get_running_loop()
+    process._joined, process._stop = asyncio.Event(), asyncio.Event()
+    process._joined.set()
+    process._partition_wake = asyncio.Event()
+    process.partitions = HostPartitionTracker(host, TEAM)
+
+    async def fake_request(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+        if kind == "sessions.close":
+            closed_requests.append(body)
+        return {"outcome": "ok"}
+
+    process._request = fake_request  # type: ignore[method-assign]
+
+    for p in (2, 6):
+        k, raw = cluster.sign_partition_owner(p, state=OWNED, host="worker-1")
+        await process.partitions.apply_event(k, raw)
+    a_p2 = draw_agent_id(TEAM, [2], PARTITIONS, prefix="wrk")
+    process.agents[a_p2] = _HostedAgent(SimpleNamespace(id=a_p2), "researcher", DEFINITION, session="s-2",
+                                        subscription=_FakeSubscription())
+
+    # Release partition 2 at t0; advance clock past handover_seconds (31s) so step 2 hits deadline immediately.
+    k2, rel2 = cluster.sign_partition_owner(2, state=RELEASED, host="worker-1", reason="operator", assigned_at=cluster.now)
+    await process.partitions.apply_event(k2, rel2)
+    cluster.now = cluster.now + timedelta(seconds=31)
+
+    assert await process._sync_partitions_once() is False
+    assert a_p2 not in process.agents
+    assert [(r["session"], r["reason"]) for r in closed_requests] == [("s-2", "handed_over")]
+    assert host.renew_calls == [((6,), True)]
+
+
+def test_message_host_renewal_due_tracks_connection_lifetime_and_respects_pause(tmp_path: Path) -> None:
+    """A4 / A7: MessageHost renews at 2/3 of connection credential lifetime and pauses during handover step 2."""
+
+    from custom_transport.protocol1.host_runtime import MessageHost
+
+    cluster = _SignedCluster(tmp_path)
+    now = [cluster.now]
+    paused = [False]
+    mhost = MessageHost(
+        cluster.layout,
+        HostProfile("worker-1", (TEAM,), ("worker_host",), ("researcher",), 4),
+        nc=None,
+        clock=lambda: now[0],
+        renewal_paused=lambda: paused[0],
+    )
+    mhost.live = SimpleNamespace(identity=SimpleNamespace(certificate=cluster.certs["worker-1"]))  # type: ignore[assignment]
+    # 30-day cert is nowhere near 2/3, but 600s connection credential reaches 2/3 at 400s!
+    mhost._record_join_connection({"jwt": "j", "expires_at": _ts(cluster.now + timedelta(seconds=600))})
+    assert mhost.credentials_issued is True
+    assert mhost.credential_partitions == frozenset()
+    assert mhost._renewal_due() is False
+
+    now[0] = cluster.now + timedelta(seconds=401)
+    assert mhost._renewal_due() is True
+
+    # Paused during handover step 2 -> must NOT run routine renewal!
+    paused[0] = True
+    assert mhost._renewal_due() is False
+
+
+def test_universal_agent_adopt_agent_id_preserves_process_scope_and_updates_subsystems() -> None:
+    """A3: _adopt_agent_id updates id, name suffix, task_manager, and context engine without marking id explicit."""
+
+    from custom_agents.strands_agent import UniversalAgent, _agent_consumer_scope
+    from custom_transport.base import ConsumerScope
+
+    updated_owner: list[tuple[Any, ...]] = []
+    maint_plugin = SimpleNamespace(agent_id="old_id_1234")
+    mpm = SimpleNamespace(agent_id="old_id_1234", maintenance_plugins=[maint_plugin])
+    ctx = SimpleNamespace(agent_id="old_id_1234", memory_plugin_manager=mpm)
+    tm = SimpleNamespace(set_owner_identity=lambda *args: updated_owner.append(args))
+
+    fake = SimpleNamespace(
+        id="agent_id_abcd1234",
+        name="clever-fox-1234",
+        team_id=TEAM,
+        named_agent_type="Researcher",
+        model_fields_set=set(),
+        _worker_launch=None,
+        task_manager=tm,
+        _context_engine=ctx,
+        _logger=None,
+    )
+
+    UniversalAgent._adopt_agent_id(fake, "agent_998877665544")  # type: ignore[arg-type]
+
+    assert fake.id == "agent_998877665544"
+    assert fake.name == "clever-fox-5544"
+    assert "id" not in fake.model_fields_set
+    assert _agent_consumer_scope(fake) == ConsumerScope.PROCESS
+    assert updated_owner == [("agent_998877665544", "clever-fox-5544", TEAM, "Researcher")]
+    assert ctx.agent_id == "agent_998877665544"
+    assert mpm.agent_id == "agent_998877665544"
+    assert maint_plugin.agent_id == "agent_998877665544"

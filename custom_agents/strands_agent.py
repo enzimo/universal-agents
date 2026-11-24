@@ -208,7 +208,14 @@ from custom_agents.strands_model_factory import (
     build_strands_model,
     resolve_context_window_tokens,
 )
-from custom_agents.agent_host import attach_agent, detach_agent, report_agent_state, report_restored_work
+from custom_agents.agent_host import (
+    assign_partition_agent_id,
+    attach_agent,
+    detach_agent,
+    report_agent_state,
+    report_restored_work,
+)
+from custom_agents.agent_requests import process_host
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.context_engine import (
     ContextEngine,
@@ -1306,7 +1313,21 @@ class UniversalAgent(BaseModel):
         Creates the internal Strands Agent with the configured system prompt and tools.
         """
         local_team_runtime = kwargs.pop("local_team_runtime", None)
+        auto_partition_id = False
+        if "id" not in kwargs or not kwargs.get("id"):
+            host = process_host()
+            target_team = kwargs.get("team_id", DEFAULT_TEAM_ID)
+            if host is not None and host.team == target_team and host.usable_partitions():
+                try:
+                    kwargs["id"] = host.draw_agent_id(prefix="agent")
+                    auto_partition_id = True
+                except Exception:
+                    pass
         super().__init__(**kwargs)
+        if auto_partition_id:
+            # Keep auto-generated partition IDs out of model_fields_set so _agent_consumer_scope
+            # treats them as PROCESS-scoped rather than operator-pinned ROUTE-scoped IDs.
+            self.model_fields_set.discard("id")
         self._local_team_runtime = local_team_runtime
         # Work saved or freed while another holder had the slot gets a drain
         # pass when that holder lets go (pending_work_runtime).
@@ -1490,6 +1511,38 @@ class UniversalAgent(BaseModel):
 
         # Create the internal Strands Agent
         self._create_strands_agent()
+
+    def _adopt_agent_id(self, new_agent_id: str) -> None:
+        """Update an auto-generated agent ID before NATS routes subscribe (A3 partition-scoped IDs)."""
+
+        old_id = self.id
+        if not new_agent_id or new_agent_id == old_id:
+            return
+        was_explicit = "id" in self.model_fields_set
+        old_suffix = f"-{old_id[-4:]}"
+        if old_id and self.name.endswith(old_suffix):
+            self.name = f"{self.name[:-len(old_suffix)]}-{new_agent_id[-4:]}"
+        self.id = new_agent_id
+        if not was_explicit:
+            self.model_fields_set.discard("id")
+        self._logger = logging.getLogger(f"UniversalAgent.{self.id}")
+        self.task_manager.set_owner_identity(
+            self.id, self.name, self.team_id, self.named_agent_type
+        )
+        if self._context_engine is not None:
+            if hasattr(self._context_engine, "agent_id"):
+                self._context_engine.agent_id = self.id
+            mpm = getattr(self._context_engine, "memory_plugin_manager", None)
+            if mpm is not None:
+                mpm.agent_id = self.id
+                for plugin in getattr(mpm, "maintenance_plugins", ()) or ():
+                    if hasattr(plugin, "agent_id"):
+                        plugin.agent_id = self.id
+        self._logger.info(
+            "Adopted partition-scoped agent ID. event=agent_id_partition_adopted agent_id=%s previous_agent_id=%s",
+            self.id,
+            old_id,
+        )
 
     def _create_context_engine(self) -> None:
         """Create the default context engine for outer-loop prompt assembly."""
@@ -4807,6 +4860,8 @@ class UniversalAgent(BaseModel):
         await adapter.connect(
             reconcile_topology=self.is_team_lead and not self.instance_config_path
         )
+        # Draw auto-generated lead/startup agent IDs inside an owned partition before subscribing.
+        await assign_partition_agent_id(self, adapter)
         # This process's protocol 1 host gives the agent a session; it never waits for it.
         attach_agent(self, adapter)
         try:

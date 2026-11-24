@@ -1001,7 +1001,7 @@ class PartitionService:
             base_old_certs = [
                 c for c in certs
                 if c.membership_epoch <= pre_epoch
-                or (recorded_epoch is None and c.membership_epoch > pre_epoch and c.issued_at <= released_at)
+                or (recorded_epoch is None and c.membership_epoch > pre_epoch and c.issued_at <= released_at + skew)
             ]
         else:
             # Connected handovers persist pre_epoch in rec.host_epoch at release time (C19).
@@ -1095,12 +1095,17 @@ class PartitionService:
         if target is None and rec.reason == "host_lost":
             # Fall back to old_host only if it rejoined at a strictly newer epoch with an unrevoked
             # certificate and (when credentials are enforced) an unrevoked NATS key (C22).
+            # After a team-services restart (recorded_epoch is None), also require issued_at >
+            # rec.assigned_at + skew so a pre-release renewal issued under authority clock skew
+            # cannot be mistaken for a post-release rejoin (C24).
             candidate = live_hosts.get(old_host)
             recorded_epoch = self._release_pre_epochs.get((rec.partition, old_host, rec.assigned_at))
             min_recovered_epoch = max(rec.host_epoch, recorded_epoch or 0)
+            skew = timedelta(seconds=CLOCK_SKEW_SECONDS)
             if (
                 candidate is not None
                 and candidate.certificate.membership_epoch > min_recovered_epoch
+                and (recorded_epoch is not None or candidate.certificate.issued_at > rec.assigned_at + skew)
                 and not self.trust.store.revoked(candidate.certificate)
                 and (
                     not self.credentials_enforced
