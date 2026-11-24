@@ -311,22 +311,40 @@ def test_remove_proposed_tool_file_verifies_digest_and_restores_exclusively(
         )
     assert loaded_http.path.read_bytes() == concurrent_bytes
 
-    # Happy path removes both http:* and cli:* proposed files and records before_remove.
-    seen: list[tuple[Path, str]] = []
+    # Happy path removes both http:* and cli:* proposed files and records before_remove with staging path.
+    seen: list[tuple[Path, int, int, str, Path]] = []
     current_http_sha = hashlib.sha256(concurrent_bytes).hexdigest()
+    http_stat = loaded_http.path.stat()
     removed_http = remove_proposed_tool_file(
         root,
         "http:gitea",
         expected_sha256=current_http_sha,
-        before_remove=lambda path, raw: seen.append((path, hashlib.sha256(raw).hexdigest())),
+        before_remove=lambda path, dev, ino, raw, staging: seen.append(
+            (path, dev, ino, hashlib.sha256(raw).hexdigest(), staging)
+        ),
     )
     assert removed_http == loaded_http.path
     assert not loaded_http.path.exists()
-    assert seen == [(loaded_http.path, current_http_sha)]
+    assert len(seen) == 1
+    assert seen[0][:4] == (loaded_http.path, http_stat.st_dev, http_stat.st_ino, current_http_sha)
+    assert seen[0][4].name.startswith(".removed-") and seen[0][4].name.endswith(".tmp")
+    # Standalone call (keep_staging=False) unlinks staging file immediately.
+    assert not seen[0][4].exists()
 
-    removed_cli = remove_proposed_tool_file(root, "cli:demo", expected_sha256=loaded_cli.sha256)
+    # With keep_staging=True, the staging inode stays on disk and is ignored by *.yaml catalog glob.
+    cli_staged: list[tuple[int, int, Path]] = []
+    removed_cli = remove_proposed_tool_file(
+        root,
+        "cli:demo",
+        expected_sha256=loaded_cli.sha256,
+        before_remove=lambda _path, dev, ino, _raw, staging: cli_staged.append((dev, ino, staging)),
+        keep_staging=True,
+    )
     assert removed_cli == loaded_cli.path
     assert not loaded_cli.path.exists()
+    cli_dev, cli_ino, cli_staging = cli_staged[0]
+    assert cli_staging.exists()
+    assert "cli:demo" not in load_catalog(root).tools
 
     # Missing file is refused with instance_tool_remove_missing.
     caplog.clear()
@@ -334,13 +352,23 @@ def test_remove_proposed_tool_file_verifies_digest_and_restores_exclusively(
         remove_proposed_tool_file(root, "cli:demo", expected_sha256=loaded_cli.sha256)
     assert "instance_tool_remove_missing" in caplog.text
 
-    # restore_removed_instance_tool restores exact bytes and refuses to overwrite an existing file.
-    restore_removed_instance_tool(loaded_cli.path, loaded_cli.raw_bytes)
+    # restore_removed_instance_tool restores exact bytes/inode from staging and refuses to overwrite an existing file.
+    restore_removed_instance_tool(loaded_cli.path, cli_staging, expected_device=cli_dev, expected_inode=cli_ino)
     assert loaded_cli.path.read_bytes() == loaded_cli.raw_bytes
+    assert not cli_staging.exists()
+    other_staging = loaded_cli.path.parent / ".removed-other.tmp"
+    other_staging.write_bytes(b"different")
+    other_stat = other_staging.stat()
     with pytest.raises(safe_open.UnsafePath) as exc_info:
-        restore_removed_instance_tool(loaded_cli.path, b"different")
+        restore_removed_instance_tool(
+            loaded_cli.path,
+            other_staging,
+            expected_device=other_stat.st_dev,
+            expected_inode=other_stat.st_ino,
+        )
     assert exc_info.value.reason == safe_open.REASON_DESTINATION_EXISTS
     assert loaded_cli.path.read_bytes() == loaded_cli.raw_bytes
+    other_staging.unlink()
 
 
 def test_proposal_digest_omits_empty_tool_removals_and_changes_when_non_empty() -> None:
@@ -446,19 +474,25 @@ def test_remove_proposed_tool_file_refuses_symlinks_and_concurrent_identity_chan
     assert loaded.path.is_symlink()
     assert "instance_tool_remove_conflict" in caplog.text
 
-    # Restore real file and simulate a concurrent swap between opened_file and safe_open.remove_file.
+    # Restore real file and simulate a concurrent swap between opened_file and safe_open.move_file.
     loaded.path.unlink()
     loaded.path.write_bytes(loaded.raw_bytes)
-    real_remove = safe_open.remove_file
+    real_move = safe_open.move_file
     replacement_bytes = b"tools:\n- tool_id: http:gitea\n  display_name: Swapped\n  hosts:\n  - gitea.example.com\n"
 
-    def _swap_before_unlink(directory: Path, parts: tuple[str, ...], *, expected_identity=None) -> bool:
+    def _swap_before_move(
+        directory: Path,
+        source_parts: tuple[str, ...],
+        destination_parts: tuple[str, ...],
+        *,
+        expected_identity=None,
+    ) -> bool:
         temp = directory / ".swap.tmp"
         temp.write_bytes(replacement_bytes)
-        os.replace(temp, directory / parts[0])
-        return real_remove(directory, parts, expected_identity=expected_identity)
+        os.replace(temp, directory / source_parts[0])
+        return real_move(directory, source_parts, destination_parts, expected_identity=expected_identity)
 
-    monkeypatch.setattr(safe_open, "remove_file", _swap_before_unlink)
+    monkeypatch.setattr(safe_open, "move_file", _swap_before_move)
     caplog.clear()
     with pytest.raises(CatalogError, match="changed since it was reviewed"):
         remove_proposed_tool_file(root, "http:gitea", expected_sha256=loaded.sha256)
@@ -500,67 +534,114 @@ def test_removed_file_restore_handles_pre_unlink_post_unlink_external_files_and_
     write_instance_tool(root, _http_tool("http:gitea", "gitea.example.com"))
     initial = read_proposed_tool_file(root, "http:gitea")
     directory = initial.path.parent
+    info = initial.path.stat()
+    staging = directory / ".removed-unit-test.tmp"
     store = _access_store(tmp_path)
     _claim, _recovery, journal = _journal(store)
 
-    entry = journal.prepare_removal("removed_tool_files", (initial.path.name,), initial.raw_bytes)
+    entry = journal.prepare_removal(
+        "removed_tool_files",
+        (initial.path.name,),
+        info.st_dev,
+        info.st_ino,
+        initial.raw_bytes,
+        staging_parts=(staging.name,),
+    )
     reloaded = RemovedFile.model_validate(store.decision_recoveries(TEAM)[0].effects["removed_tool_files"][0])
     assert reloaded == entry
 
-    # Crash before unlink: original bytes still on disk -> quiet no-op.
+    # Crash before staging move: staging missing, original intact -> quiet no-op.
     caplog.set_level(logging.WARNING)
     caplog.clear()
     reloaded.restore(directory)
     assert initial.path.read_bytes() == initial.raw_bytes
     assert caplog.text == ""
 
-    # Crash after unlink: missing file -> restores exact previous bytes; second pass is quiet no-op.
+    # F1: crash before staging move followed by another decision legitimately deleting target ->
+    # staging is missing so restore MUST NOT resurrect the deleted file!
     initial.path.unlink()
-    reloaded.restore(directory, lambda data: restore_removed_instance_tool(initial.path, data))
+    caplog.clear()
+    reloaded.restore(directory)
+    assert not initial.path.exists()
+    assert caplog.text == ""
+
+    # Recreate original file and move to this claim's staging inode.
+    initial.path.write_bytes(initial.raw_bytes)
+    info = initial.path.stat()
+    entry = RemovedFile.prepared(
+        (initial.path.name,), info.st_dev, info.st_ino, initial.raw_bytes, staging_parts=(staging.name,)
+    )
+    os.rename(initial.path, staging)
+    assert not initial.path.exists() and staging.exists()
+
+    # Crash after staging move: restores exact previous bytes/inode and unlinks staging; second pass is quiet no-op.
+    entry.restore(
+        directory,
+        lambda: restore_removed_instance_tool(
+            initial.path, staging, expected_device=entry.device, expected_inode=entry.inode
+        ),
+    )
     assert initial.path.read_bytes() == initial.raw_bytes
+    assert not staging.exists()
     assert "instance_tool_restored" in caplog.text
     assert "access_decision_artifact_changed" not in caplog.text
 
     caplog.clear()
-    reloaded.restore(directory, lambda data: restore_removed_instance_tool(initial.path, data))
+    entry.restore(directory)
     assert caplog.text == ""
 
-    # External different file at path -> kept untouched and logged.
+    # Crash right between os.link(staging, target) and os.unlink(staging): target already holds our inode ->
+    # unlinks staging quietly without logging artifact_changed.
+    os.link(initial.path, staging)
+    caplog.clear()
+    entry.restore(directory)
+    assert initial.path.read_bytes() == initial.raw_bytes
+    assert not staging.exists()
+    assert caplog.text == ""
+
+    # External different file at target while our staging exists -> external kept, staging discarded, logged.
     external = b"tools:\n- tool_id: http:gitea\n  display_name: External\n  hosts:\n  - gitea.example.com\n"
+    os.rename(initial.path, staging)
     initial.path.write_bytes(external)
     caplog.clear()
-    reloaded.restore(directory)
+    entry.restore(directory)
     assert initial.path.read_bytes() == external
+    assert not staging.exists()
     assert "access_decision_artifact_changed" in caplog.text
 
-    # External symlink at leaf -> kept untouched (target untouched) and logged.
+    # External symlink at target while our staging exists -> symlink & target untouched, staging discarded, logged.
     outside = tmp_path / "outside.yaml"
     outside.write_bytes(b"keep-me")
     initial.path.unlink()
+    initial.path.write_bytes(initial.raw_bytes)
+    info = initial.path.stat()
+    entry = RemovedFile.prepared(
+        (initial.path.name,), info.st_dev, info.st_ino, initial.raw_bytes, staging_parts=(staging.name,)
+    )
+    os.rename(initial.path, staging)
     initial.path.symlink_to(outside)
     caplog.clear()
-    reloaded.restore(directory)
+    entry.restore(directory)
     assert initial.path.is_symlink()
     assert outside.read_bytes() == b"keep-me"
+    assert not staging.exists()
     assert "access_decision_artifact_changed" in caplog.text
 
-    # External directory at leaf -> kept untouched and logged.
+    # External directory at target while our staging exists -> directory untouched, staging discarded, logged.
     initial.path.unlink()
+    initial.path.write_bytes(initial.raw_bytes)
+    info = initial.path.stat()
+    entry = RemovedFile.prepared(
+        (initial.path.name,), info.st_dev, info.st_ino, initial.raw_bytes, staging_parts=(staging.name,)
+    )
+    os.rename(initial.path, staging)
     initial.path.mkdir()
     caplog.clear()
-    reloaded.restore(directory)
+    entry.restore(directory)
     assert initial.path.is_dir()
+    assert not staging.exists()
     assert "access_decision_artifact_changed" in caplog.text
     initial.path.rmdir()
-
-    # External multi-hardlink at leaf -> kept untouched and logged.
-    initial.path.write_bytes(initial.raw_bytes)
-    second_link = tmp_path / "hardlink.yaml"
-    os.link(initial.path, second_link)
-    caplog.clear()
-    reloaded.restore(directory)
-    assert "access_decision_artifact_changed" in caplog.text
-    second_link.unlink()
 
     # Unsafe parent directory (symlink) re-raises so recovery retries.
     bad_root = tmp_path / "bad_root"
@@ -568,33 +649,34 @@ def test_removed_file_restore_handles_pre_unlink_post_unlink_external_files_and_
     real_sub = tmp_path / "real_sub"
     real_sub.mkdir()
     (bad_root / "sub").symlink_to(real_sub)
-    nested = RemovedFile.prepared(("sub", "proposed-http-gitea.yaml"), initial.raw_bytes)
+    nested = RemovedFile.prepared(
+        ("sub", "proposed-http-gitea.yaml"),
+        info.st_dev,
+        info.st_ino,
+        initial.raw_bytes,
+        staging_parts=("sub", ".removed-nested.tmp"),
+    )
     with pytest.raises(safe_open.UnsafePath) as exc_info:
         nested.restore(bad_root)
     assert exc_info.value.reason == safe_open.REASON_LINK
 
-    # Concurrent creation race (REASON_DESTINATION_EXISTS): differing bytes logs; matching bytes is quiet.
-    initial.path.unlink()
+    # Concurrent creation race (REASON_DESTINATION_EXISTS): differing bytes logs & discards staging.
+    initial.path.write_bytes(initial.raw_bytes)
+    info = initial.path.stat()
+    entry = RemovedFile.prepared(
+        (initial.path.name,), info.st_dev, info.st_ino, initial.raw_bytes, staging_parts=(staging.name,)
+    )
+    os.rename(initial.path, staging)
 
-    def _race_different(_data: bytes) -> None:
+    def _race_different() -> None:
         initial.path.write_bytes(external)
         raise safe_open.UnsafePath("exists", reason=safe_open.REASON_DESTINATION_EXISTS)
 
     caplog.clear()
-    reloaded.restore(directory, _race_different)
+    entry.restore(directory, _race_different)
     assert initial.path.read_bytes() == external
+    assert not staging.exists()
     assert "access_decision_artifact_changed" in caplog.text
-
-    initial.path.unlink()
-
-    def _race_same(_data: bytes) -> None:
-        initial.path.write_bytes(initial.raw_bytes)
-        raise safe_open.UnsafePath("exists", reason=safe_open.REASON_DESTINATION_EXISTS)
-
-    caplog.clear()
-    reloaded.restore(directory, _race_same)
-    assert initial.path.read_bytes() == initial.raw_bytes
-    assert caplog.text == ""
 
     # prepare_removal drops unsaved in-memory entry when save_decision_recovery fails.
     real_save = store.save_decision_recovery
@@ -606,7 +688,14 @@ def test_removed_file_restore_handles_pre_unlink_post_unlink_external_files_and_
     monkeypatch.setattr(store, "save_decision_recovery", _failing_save)
     before_len = len(_recovery.effects["removed_tool_files"])
     with pytest.raises(RuntimeError, match="db dropped"):
-        journal.prepare_removal("removed_tool_files", (initial.path.name,), initial.raw_bytes)
+        journal.prepare_removal(
+            "removed_tool_files",
+            (initial.path.name,),
+            info.st_dev,
+            info.st_ino,
+            initial.raw_bytes,
+            staging_parts=(".removed-fail.tmp",),
+        )
     assert len(_recovery.effects["removed_tool_files"]) == before_len
 
 
@@ -709,10 +798,30 @@ def test_apply_together_atomically_cleans_up_removed_tool_and_rolls_back_on_refu
         _link("l_sibling", tool_id="http:api.v2", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM, purpose=LinkPurpose.ACCOUNT)
     )
 
-    # Setup states for http:api and sibling http:api.v2.
+    # Setup states and account-sharing rows for http:api and sibling http:api.v2 (F4).
+    from custom_messages.contracts.access_v2 import AccountSharing, AccountSharingV1
+
     store.put_tool_setup_state(_setup_state("alice", "http:api"))
     store.put_tool_setup_state(_setup_state("bob", "http:api"))
     store.put_tool_setup_state(_setup_state("alice", "http:api.v2"))
+    store.set_account_sharing(
+        AccountSharingV1(
+            team_id=TEAM,
+            subject="http:api",
+            sharing=AccountSharing.PRIVATE,
+            changed_by_person_id="owner-1",
+            changed_at_utc=NOW,
+        )
+    )
+    store.set_account_sharing(
+        AccountSharingV1(
+            team_id=TEAM,
+            subject="http:api.v2",
+            sharing=AccountSharing.PRIVATE,
+            changed_by_person_id="owner-1",
+            changed_at_utc=NOW,
+        )
+    )
 
     # If check_tool_removal_grants refuses, the whole transaction rolls back cleanly.
     seen_checked: list[str] = []
@@ -735,6 +844,7 @@ def test_apply_together_atomically_cleans_up_removed_tool_and_rolls_back_on_refu
     assert store.get(g_parent.grant_id).status is GrantStatus.ACTIVE  # type: ignore[union-attr]
     assert store.get_link(l_team_acct.link_id).status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
     assert len(store.tool_setup_states(TEAM)) == 3
+    assert store.account_sharing(TEAM, "http:api") is not None
 
     # When check passes, everything for http:api is cleaned up atomically and http:api.v2 stays untouched.
     store.apply_together(
@@ -759,12 +869,21 @@ def test_apply_together_atomically_cleans_up_removed_tool_and_rolls_back_on_refu
 
     remaining_states = store.tool_setup_states(TEAM)
     assert [(s.person_id, s.tool_id) for s in remaining_states] == [("alice", "http:api.v2")]
+    assert store.account_sharing(TEAM, "http:api") is None
+    assert store.account_sharing(TEAM, "http:api.v2") is not None
 
 
-def test_revoke_links_for_tools_revokes_links_clears_setup_states_and_bumps_version(tmp_path: Path) -> None:
+def test_revoke_links_for_tools_revokes_links_grants_sharing_clears_setup_states_and_bumps_version(
+    tmp_path: Path,
+) -> None:
+    from custom_messages.contracts.access_v2 import AccountSharing, AccountSharingV1
+
     store = _access_store(tmp_path)
     later = datetime(2026, 11, 24, 16, 5, tzinfo=timezone.utc)
 
+    store.create(_grant("g_old_active", target_id="http:gitea"))
+    store.create(_grant("g_old_pending", target_id="http:gitea", status=GrantStatus.PENDING))
+    store.create(_grant("g_other_keep", target_id="http:other"))
     store.create_link(
         _link("l_acct", tool_id="http:gitea", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM, purpose=LinkPurpose.ACCOUNT)
     )
@@ -776,19 +895,71 @@ def test_revoke_links_for_tools_revokes_links_clears_setup_states_and_bumps_vers
     )
     store.put_tool_setup_state(_setup_state("alice", "http:gitea"))
     store.put_tool_setup_state(_setup_state("alice", "http:other"))
+    store.set_account_sharing(
+        AccountSharingV1(
+            team_id=TEAM,
+            subject="http:gitea",
+            sharing=AccountSharing.PRIVATE,
+            changed_by_person_id="owner-1",
+            changed_at_utc=NOW,
+        )
+    )
+    store.set_account_sharing(
+        AccountSharingV1(
+            team_id=TEAM,
+            subject="http:other",
+            sharing=AccountSharing.PRIVATE,
+            changed_by_person_id="owner-1",
+            changed_at_utc=NOW,
+        )
+    )
 
     version_before = store.version(TEAM)
     revoked = store.revoke_links_for_tools(TEAM, ("http:gitea",), actor=OWNER, at=later)
     assert set(revoked) == {"l_acct", "l_gate"}
     assert store.version(TEAM) == version_before + 1
+    assert store.get("g_old_active").status is GrantStatus.REVOKED  # type: ignore[union-attr]
+    assert store.get("g_old_pending").status is GrantStatus.REVOKED  # type: ignore[union-attr]
+    assert store.get("g_other_keep").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
     assert store.get_link("l_acct").status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
     assert store.get_link("l_gate").status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
     assert store.get_link("l_other").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
     assert [(s.person_id, s.tool_id) for s in store.tool_setup_states(TEAM)] == [("alice", "http:other")]
+    assert store.account_sharing(TEAM, "http:gitea") is None
+    assert store.account_sharing(TEAM, "http:other") is not None
 
-    # Second call with no active links left does not bump the version.
+    # Second call with no active links, grants, or sharing rows left does not bump the version.
     assert store.revoke_links_for_tools(TEAM, ("http:gitea",), actor=OWNER, at=later) == []
     assert store.version(TEAM) == version_before + 1
+
+
+def test_active_grants_for_tool_in_store_filters_expired_spent_revoked_and_siblings(tmp_path: Path) -> None:
+    """F8: unit test for active_grants_for_tool_in_store querying real AccessRepository."""
+
+    from access_control.tool_removals import active_grants_for_tool_in_store
+
+    store = _access_store(tmp_path)
+    at = datetime(2026, 11, 24, 16, 0, tzinfo=timezone.utc)
+    for item in (
+        _grant("g_live", target_id="http:api"),
+        _grant("g_pending", target_id="http:api", status=GrantStatus.PENDING),
+        _grant("b_tool", kind=GrantKind.BLOCK, target_id="http:api"),
+        _grant("b_op", kind=GrantKind.BLOCK, target_kind=TargetKind.OPERATION, target_id="http:api#route:delete"),
+        _grant("g_expired", target_id="http:api").model_copy(
+            update={"lifetime": GrantLifetime.UNTIL, "expires_at_utc": at - timedelta(seconds=1)}
+        ),
+        _grant("g_spent", target_id="http:api").model_copy(
+            update={"lifetime": GrantLifetime.ONE_TIME, "uses_remaining": 0, "task_id": "t-1"}
+        ),
+        _grant("g_revoked", target_id="http:api", status=GrantStatus.REVOKED),
+        _grant("g_denied", target_id="http:api", status=GrantStatus.DENIED),
+        _grant("g_sibling", target_id="http:api.v2"),
+        _grant("b_sibling_op", kind=GrantKind.BLOCK, target_kind=TargetKind.OPERATION, target_id="http:api.v2#route:delete"),
+    ):
+        store.create(item)
+
+    found = active_grants_for_tool_in_store(store, TEAM, "http:api", now=at)
+    assert [g.grant_id for g in found] == ["b_tool", "g_live", "g_pending", "b_op"]
 
 
 def test_apply_together_omits_expired_and_spent_active_grants_from_check_but_still_revokes_them(
@@ -1666,7 +1837,7 @@ def test_end_to_end_http_and_cli_tool_removal_through_propose_access_change(
         assert [link for link in service.store.list_links(team, purpose=None) if link.tool_id == "http:portainer"] == []
         assert service.store.tool_setup_state(team, "member-1", "http:portainer") is None
 
-        # Broker access gate now refuses the removed host as unlisted_host.
+        # Broker access gate now refuses the removed host as unlisted_host AND refuses the removed cli:demo (F8).
         decision = gate.check_broker_action(
             BrokerCaller(CALLER_MANAGER),
             "secure_requests",
@@ -1681,6 +1852,22 @@ def test_end_to_end_http_and_cli_tool_removal_through_propose_access_change(
             ),
         )
         assert not decision.allowed and decision.reason_code == REASON_UNLISTED_HOST
+
+        cli_decision = gate.check_broker_action(
+            BrokerCaller(CALLER_MANAGER),
+            "demo",
+            "run",
+            {"argv": ["version"]},
+            agent_context(
+                owner.person_id,
+                agent_id="agent-lead",
+                named_agent_type="TeamArchitect",
+                roles=("owner",),
+                task_id="task-after-remove-cli",
+            ),
+        )
+        assert not cli_decision.allowed
+        assert list(http_file.parent.glob(".removed-*.tmp")) == []
 
         # Resuming the paused propose_access_change call returns applied.
         resumed = json.loads(
@@ -1771,24 +1958,83 @@ def test_tool_removal_refuses_file_changed_or_symlinked_after_review_and_rolls_b
             )
         req2 = c2.raised[0]["access_request_id"]
 
-        # Simulate a concurrent grant appearing right after the fast pre-check that reviewer cannot revoke:
-        # fail may_revoke only on the second call (inside apply_together's write transaction) after file unlink!
+        # F6: fail may_revoke ONLY AFTER remove_proposed_tool_file has actually staged the file,
+        # proving synchronous rollback in ProposalApplier._apply_items restores the staged file!
+        import access_control.proposals as proposals_mod
+
+        real_remove_proposed = proposals_mod.remove_proposed_tool_file
+        staged_state = {"staged": False, "file_gone_when_failed": False}
+
+        def spy_remove_proposed(*args, **kwargs):
+            result = real_remove_proposed(*args, **kwargs)
+            assert not http_file.exists()
+            assert len(list(http_file.parent.glob(".removed-*.tmp"))) == 1
+            staged_state["staged"] = True
+            return result
+
         original_may_revoke = AccessService.may_revoke
-        calls = {"count": 0}
 
         def fail_inside_tx(self_svc, person, grant, **kwargs):
-            calls["count"] += 1
-            if grant.grant_id == "grant_lead_portainer" and calls["count"] >= 2:
+            if staged_state["staged"] and grant.grant_id == "grant_lead_portainer":
+                staged_state["file_gone_when_failed"] = not http_file.exists()
                 return False
             return original_may_revoke(self_svc, person, grant, **kwargs)
 
-        monkeypatch.setattr(AccessService, "may_revoke", fail_inside_tx)
-        with pytest.raises(HandDownRefused, match="You cannot remove grant grant_lead_portainer"):
-            requests().decide(req2, second_admin, AccessReviewChoice.APPROVE)
-        # File was unlinked before apply_together and must now be restored with exact bytes, and DB rolled back!
+        with monkeypatch.context() as tx_ctx:
+            tx_ctx.setattr(proposals_mod, "remove_proposed_tool_file", spy_remove_proposed)
+            tx_ctx.setattr(AccessService, "may_revoke", fail_inside_tx)
+            with pytest.raises(
+                HandDownRefused,
+                match="The proposal could not be applied, so nothing changed: You cannot remove grant grant_lead_portainer",
+            ):
+                requests().decide(req2, second_admin, AccessReviewChoice.APPROVE)
+        assert staged_state["staged"] is True
+        assert staged_state["file_gone_when_failed"] is True
+        # File was staged before apply_together and must now be restored with exact bytes, no .tmp left, and DB intact!
         assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert list(http_file.parent.glob(".removed-*.tmp")) == []
         assert service.store.get("grant_lead_portainer").status is GrantStatus.ACTIVE
         assert service.store.get_request(req2).status is AccessRequestStatus.WAITING
+
+        # F6: separate unmocked real-Cedar fast pre-check refusal test:
+        # blocking second_admin on http:portainer makes real Cedar deny may_revoke(second_admin, grant_lead_portainer)
+        # BEFORE remove_proposed_tool_file ever touches disk!
+        admin_block = GrantV1(
+            grant_id="blk_second_admin_portainer",
+            team_id=world["team"],
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.USER, id=second_admin.person_id),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="http:portainer"),
+            level=AccessLevel.FULL,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id),
+            created_at_utc=service.clock(),
+        )
+        service.store.create(admin_block)
+        c3 = Context("tooluse-remove-real-cedar-precheck")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Portainer Real Cedar Precheck",
+                    reason="Retired.",
+                    tool_context=c3,
+                    tool_removals=[{"tool_id": "http:portainer"}],
+                )
+            )
+        req3 = c3.raised[0]["access_request_id"]
+        remove_called = {"called": False}
+
+        def _never_called(*args, **kwargs):
+            remove_called["called"] = True
+            return real_remove_proposed(*args, **kwargs)
+
+        with monkeypatch.context() as pre_ctx:
+            pre_ctx.setattr(proposals_mod, "remove_proposed_tool_file", _never_called)
+            with pytest.raises(HandDownRefused, match=r"You cannot remove grant grant_(?:worker|lead)_portainer"):
+                requests().decide(req3, second_admin, AccessReviewChoice.APPROVE)
+        assert remove_called["called"] is False
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert list(http_file.parent.glob(".removed-*.tmp")) == []
+        assert service.store.get_request(req3).status is AccessRequestStatus.WAITING
     finally:
         world["cleanup"]()
 
@@ -1848,15 +2094,18 @@ def test_tool_removal_crash_recovery_after_reopening_store(
 
         if committed:
             assert not http_file.exists()
+            assert list(http_file.parent.glob(".removed-*.tmp")) == []
             assert service.store.get_request(req_id).status is AccessRequestStatus.GRANTED
             assert service.store.get("grant_lead_portainer").status is GrantStatus.REVOKED
         else:
             assert http_file.exists() and http_file.read_bytes() == original_bytes
+            assert list(http_file.parent.glob(".removed-*.tmp")) == []
             assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING
             assert service.store.get("grant_lead_portainer").status is GrantStatus.ACTIVE
             # Re-approving after recovery succeeds cleanly.
             assert requests().decide(req_id, owner, AccessReviewChoice.APPROVE).status is AccessRequestStatus.GRANTED
             assert not http_file.exists()
+            assert list(http_file.parent.glob(".removed-*.tmp")) == []
     finally:
         world["cleanup"]()
 
@@ -1918,11 +2167,20 @@ def test_tool_removal_recovery_refuses_to_overwrite_external_file_and_respects_g
         assert "event=access_decision_artifact_changed" in caplog.text
         assert service.store.decision_recoveries(team, now=later) == []
 
-        # Part 2 (C01): ProposalApplier.recover must NOT restore removed_tool_files when
-        # (a) current is GRANTED by another decision (recovery.matches(current) is False), or
+        # Part 2 (C01 + F1): ProposalApplier.recover must NOT restore removed_tool_files when
+        # (a) current is GRANTED by another decision (recovery.matches(current) is False) — and unlinks its staging file, or
         # (b) current is WAITING and claimed_elsewhere is True.
         http_file.unlink()
-        removed_entry = RemovedFile.prepared((http_file.name,), original_bytes)
+        stale_staging = http_file.parent / ".removed-stale-test.tmp"
+        stale_staging.write_bytes(original_bytes)
+        stale_stat = stale_staging.stat()
+        removed_entry = RemovedFile.prepared(
+            (http_file.name,),
+            stale_stat.st_dev,
+            stale_stat.st_ino,
+            original_bytes,
+            staging_parts=(stale_staging.name,),
+        )
         base_req = service.store.get_request(req1)
         assert base_req is not None
         recovery = DecisionRecovery(
@@ -1954,6 +2212,7 @@ def test_tool_removal_recovery_refuses_to_overwrite_external_file_and_respects_g
         caplog.clear()
         applier.recover(requests(), recovery, other_granted, False)
         assert not http_file.exists()
+        assert not stale_staging.exists()
         assert "event=proposal_removals_kept" in caplog.text
 
         waiting_other_claim = base_req.model_copy(update={"status": AccessRequestStatus.WAITING})
@@ -1986,13 +2245,14 @@ def test_tool_removal_recovery_refuses_to_overwrite_external_file_and_respects_g
         with monkeypatch.context() as fail_ctx:
             fail_ctx.setattr(
                 "access_control.proposals.restore_removed_instance_tool",
-                lambda _path, _data: (_ for _ in ()).throw(PermissionError("read-only")),
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("read-only")),
             )
             requests().recover_decisions()
         assert not http_file.exists()
         assert len(service.store.decision_recoveries(team, now=retry_time)) == 1
         requests().recover_decisions()
         assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert list(http_file.parent.glob(".removed-*.tmp")) == []
         assert service.store.decision_recoveries(team, now=retry_time) == []
     finally:
         world["cleanup"]()
@@ -2118,11 +2378,14 @@ def test_tool_removal_with_authorization_off_previews_applies_revokes_links_and_
         assert tool_file.exists() and tool_file.read_bytes() == original_bytes
         assert len(store.list_links(REQ_TEAM, purpose=None)) == 2
 
-        # 5. Rollback after file removal: if link revocation raises, the removed tool file is restored atomically!
+        # 5. Rollback after file removal: if DB apply_together raises, the removed tool file, data folder,
+        # and activated MCP server are all rolled back cleanly (F5).
+        external_dir = tmp_path / "shared_data"
+        external_dir.mkdir()
         with monkeypatch.context() as fail_ctx:
             fail_ctx.setattr(
                 AccessRepository,
-                "revoke_links_for_tools",
+                "apply_together",
                 lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db down")),
             )
             failed = json.loads(
@@ -2132,15 +2395,42 @@ def test_tool_removal_with_authorization_off_previews_applies_revokes_links_and_
                         reason="Retired.",
                         tool_context=Context("tooluse-off-db-fail"),
                         tool_removals=[{"tool_id": "http:gitea"}],
+                        data_folders=[{"name": "shared_data", "path": str(external_dir), "writable": False}],
                         confirmed=True,
                     )
                 )
             )
         assert failed["status"] == "refused" and "db down" in failed["reason"]
         assert tool_file.exists() and tool_file.read_bytes() == original_bytes
+        assert list(tool_file.parent.glob(".removed-*.tmp")) == []
+        assert store.data_folders(REQ_TEAM) == []
         assert len(store.list_links(REQ_TEAM, purpose=None)) == 2
 
-        # 6. confirmed=True removes the file, revokes active links, clears setup states, and bumps version.
+        # 5b. F7 + F4: seed an old ACTIVE grant and an access_account_sharing row before auth-off apply.
+        from custom_messages.contracts.access_v2 import AccountSharing, AccountSharingV1
+
+        store.create(
+            GrantV1(
+                grant_id="g_old_auth_off",
+                team_id=REQ_TEAM,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{REQ_TEAM}/TeamArchitect"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.WRITE,
+                granted_by=SubjectRefV1(kind=SubjectKind.USER, id="owner-1"),
+                created_at_utc=now,
+            )
+        )
+        store.set_account_sharing(
+            AccountSharingV1(
+                team_id=REQ_TEAM,
+                subject="http:gitea",
+                sharing=AccountSharing.PRIVATE,
+                changed_by_person_id="owner-1",
+                changed_at_utc=now,
+            )
+        )
+
+        # 6. confirmed=True removes the file, revokes active links & old grants, clears setup states & sharing, and bumps version.
         version_before = store.version(REQ_TEAM)
         applied = json.loads(
             asyncio.run(
@@ -2155,8 +2445,11 @@ def test_tool_removal_with_authorization_off_previews_applies_revokes_links_and_
         )
         assert applied["status"] == "applied"
         assert not tool_file.exists()
+        assert list(tool_file.parent.glob(".removed-*.tmp")) == []
         assert store.list_links(REQ_TEAM, purpose=None) == []
+        assert store.get("g_old_auth_off").status is GrantStatus.REVOKED  # type: ignore[union-attr]
         assert store.tool_setup_state(REQ_TEAM, "owner-1", "http:gitea") is None
+        assert store.account_sharing(REQ_TEAM, "http:gitea") is None
         assert store.version(REQ_TEAM) > version_before
 
         # 7. C03: when storage_settings is absent in auth-off mode, removal still previews and applies cleanly.
@@ -2190,6 +2483,347 @@ def test_tool_removal_with_authorization_off_previews_applies_revokes_links_and_
         )
         assert no_store_applied["status"] == "applied"
         assert not cli_file.exists()
+    finally:
+        access_runtime._runtime_access.cache_clear()
+        set_agent_ref(None)
+
+
+def test_f1_concurrent_removal_proposals_and_stalled_claim_never_resurrect_deleted_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: concurrent removal loser and stalled-claim wakeup after maintenance reconciliation never resurrect a deleted tool."""
+
+    import asyncio
+
+    from strands.interrupt import InterruptException
+
+    import access_control.proposals as proposals_mod
+    from access_control.decisions import HandDownRefused
+    from custom_agents import access_runtime
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+    from custom_tools.providers.access_proposals import propose_access_change
+    from tests.test_access_request_tools import Context
+
+    world = _build_real_world(tmp_path, monkeypatch)
+    try:
+        instance = world["instance"]
+        service = world["service"]
+        requests = world["requests"]
+        owner = world["owner"]
+        second_admin = world["second_admin"]
+
+        # Scenario 1: Two concurrent removal proposals for the same tool.
+        # Proposal 2 prepares its removal journal while Proposal 1 wins and deletes the tool file;
+        # Proposal 2 then fails in _commit_remove and rolls back — it must NOT resurrect the deleted tool!
+        http_file = write_instance_tool(instance, _http_tool("http:race", "race.example.com"))
+        access_runtime._runtime_access.cache_clear()
+
+        c1 = Context("tooluse-f1-race-1")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Race Tool 1",
+                    reason="Decommissioned.",
+                    tool_context=c1,
+                    tool_removals=[{"tool_id": "http:race"}],
+                )
+            )
+        req1 = c1.raised[0]["access_request_id"]
+
+        c2 = Context("tooluse-f1-race-2")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Race Tool 2",
+                    reason="Decommissioned too.",
+                    tool_context=c2,
+                    tool_removals=[{"tool_id": "http:race"}],
+                )
+            )
+        req2 = c2.raised[0]["access_request_id"]
+
+        real_remove = proposals_mod.remove_proposed_tool_file
+        interleaved = {"done": False}
+
+        def interleave_winner(*args, **kwargs):
+            original_before = kwargs["before_remove"]
+
+            def wrapped_before(*b_args):
+                original_before(*b_args)
+                if not interleaved["done"]:
+                    interleaved["done"] = True
+                    # Winner runs end-to-end and legitimately deletes http:race!
+                    assert requests().decide(req1, owner, AccessReviewChoice.APPROVE).status is AccessRequestStatus.GRANTED
+                    assert not http_file.exists()
+
+            kwargs["before_remove"] = wrapped_before
+            return real_remove(*args, **kwargs)
+
+        with monkeypatch.context() as race_ctx:
+            race_ctx.setattr(proposals_mod, "remove_proposed_tool_file", interleave_winner)
+            with pytest.raises(HandDownRefused, match="changed since it was reviewed"):
+                requests().decide(req2, second_admin, AccessReviewChoice.APPROVE)
+
+        assert interleaved["done"] is True
+        assert not http_file.exists()
+        assert list(http_file.parent.glob(".removed-*.tmp")) == []
+
+        # Scenario 2: Stalled claim wakes up after maintenance reconciliation AND subsequent legitimate deletion.
+        # Proposal 3 stages the file, then stalls before apply_together; maintenance restores & clears its recovery row;
+        # then Proposal 3 is legitimately approved by a new claim (deleting the file);
+        # finally the stalled first claim wakes up and enters _apply_items's except handler —
+        # require_record=True, skip_live_claim=False skips undo and NEVER resurrects the deleted tool!
+        stalled_file = write_instance_tool(instance, _http_tool("http:stalled", "stalled.example.com"))
+        access_runtime._runtime_access.cache_clear()
+
+        c3 = Context("tooluse-f1-stalled")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Stalled Tool",
+                    reason="Decommissioned.",
+                    tool_context=c3,
+                    tool_removals=[{"tool_id": "http:stalled"}],
+                )
+            )
+        req3 = c3.raised[0]["access_request_id"]
+
+        real_apply_together = service.store.apply_together
+        stall_state = {"reconciled": False}
+        undo_calls = {"count": 0}
+        real_undo = proposals_mod.ProposalApplier._undo_items
+
+        def count_undo(self_applier, *args, **kwargs):
+            undo_calls["count"] += 1
+            return real_undo(self_applier, *args, **kwargs)
+
+        def stall_before_db(*args, **kwargs):
+            if not stall_state["reconciled"]:
+                stall_state["reconciled"] = True
+                # Advance clock past claim timeout and run maintenance reconciliation.
+                later = service.clock() + timedelta(minutes=11)
+                monkeypatch.setattr(service, "clock", lambda: later)
+                requests().recover_decisions()
+                assert stalled_file.exists()
+                # Now a fresh approval legitimately deletes the tool!
+                assert requests().decide(req3, second_admin, AccessReviewChoice.APPROVE).status is AccessRequestStatus.GRANTED
+                assert not stalled_file.exists()
+                # Stalled first claim now hits DecisionClaimLost in apply_together.
+                return real_apply_together(*args, **kwargs)
+            return real_apply_together(*args, **kwargs)
+
+        with monkeypatch.context() as stall_ctx:
+            stall_ctx.setattr(service.store, "apply_together", stall_before_db)
+            stall_ctx.setattr(proposals_mod.ProposalApplier, "_undo_items", count_undo)
+            with pytest.raises(HandDownRefused):
+                requests().decide(req3, owner, AccessReviewChoice.APPROVE)
+
+        assert stall_state["reconciled"] is True
+        # Maintenance ran _undo_items once to restore before the fresh approval;
+        # the stalled wakeup must NOT run _undo_items a second time!
+        assert undo_calls["count"] == 1
+        assert not stalled_file.exists()
+        assert list(stalled_file.parent.glob(".removed-*.tmp")) == []
+    finally:
+        world["cleanup"]()
+
+
+def test_f2_refuses_new_unreviewed_grants_blocks_or_links_added_after_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F2: newly added grant, block, pending grant, or credential link after submission is refused without revoking."""
+
+    import asyncio
+
+    from strands.interrupt import InterruptException
+
+    import access_control.proposals as proposals_mod
+    from access_control.decisions import HandDownRefused
+    from custom_agents import access_runtime
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+    from custom_tools.providers.access_proposals import propose_access_change
+    from tests.test_access_request_tools import Context
+
+    world = _build_real_world(tmp_path, monkeypatch)
+    try:
+        instance = world["instance"]
+        service = world["service"]
+        requests = world["requests"]
+        owner = world["owner"]
+        team = world["team"]
+
+        http_file = write_instance_tool(instance, _http_tool("http:clean", "clean.example.com"))
+        original_bytes = http_file.read_bytes()
+        access_runtime._runtime_access.cache_clear()
+
+        # Submit removal when 0 grants, blocks, or links exist on http:clean.
+        ctx = Context("tooluse-f2-clean")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Clean Tool",
+                    reason="No longer needed.",
+                    tool_context=ctx,
+                    tool_removals=[{"tool_id": "http:clean"}],
+                )
+            )
+        req_id = ctx.raised[0]["access_request_id"]
+        now = service.clock()
+        owner_ref = SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id)
+
+        # 1. New active grant added before approval -> refused before touching disk.
+        new_grant = GrantV1(
+            grant_id="g_post_submit",
+            team_id=team,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="http:clean"),
+            level=AccessLevel.READ,
+            granted_by=owner_ref,
+            created_at_utc=now,
+        )
+        service.store.create(new_grant)
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        with pytest.raises(HandDownRefused, match="New access grants or restrictions were added"):
+            requests().decide(req_id, owner, AccessReviewChoice.APPROVE)
+        assert "event=proposal_tool_removal_impact_changed" in caplog.text
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert service.store.get("g_post_submit").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+        service.store.revoke("g_post_submit", actor=owner_ref, at=now)
+
+        # 2. New active credential link racing in AFTER file staging (inside apply_together lock) ->
+        # refused under DB write lock, link stays ACTIVE, and staged file is restored cleanly!
+        real_remove = proposals_mod.remove_proposed_tool_file
+        raced_link = AccountLinkV1(
+            link_id="l_raced_in",
+            team_id=team,
+            tool_id="http:clean",
+            purpose=LinkPurpose.ACCOUNT,
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=team,
+            credential_key="cred-raced",
+            created_by=owner_ref,
+            created_at_utc=now,
+        )
+
+        def inject_link_after_staging(*args, **kwargs):
+            result = real_remove(*args, **kwargs)
+            assert not http_file.exists()
+            service.store.create_link(raced_link)
+            return result
+
+        with monkeypatch.context() as race_ctx:
+            race_ctx.setattr(proposals_mod, "remove_proposed_tool_file", inject_link_after_staging)
+            with pytest.raises(HandDownRefused, match="New credential links were added"):
+                requests().decide(req_id, owner, AccessReviewChoice.APPROVE)
+
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert list(http_file.parent.glob(".removed-*.tmp")) == []
+        assert service.store.get_link("l_raced_in").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+        assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING  # type: ignore[union-attr]
+    finally:
+        world["cleanup"]()
+
+
+def test_f5_auth_off_rollback_isolates_step_errors_and_restores_mcp_servers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F5: auth-off rollback isolates per-step failures and restores activated MCP records to pending."""
+
+    import asyncio
+    import json
+
+    from custom_agents import access_runtime
+    import custom_tools.providers.access_proposals as proposals_tool_mod
+    from custom_tools.providers.access_proposals import propose_access_change
+    from mcp_control.registry import (
+        MCPConnectionLifecycle,
+        MCPConnectionSource,
+        MCPConnectionStore,
+        _new_record,
+        descriptor_from_server_config,
+        resolve_mcp_connection_paths,
+    )
+    from tests.broker_access_support import context_verify_keys
+    from tests.task_work_support import set_agent_ref
+    from tests.test_access_request_tools import TEAM as REQ_TEAM, Context, make_agent
+
+    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    access_runtime._runtime_access.cache_clear()
+    instance = tmp_path / "instance"
+    (instance / "control").mkdir(parents=True)
+    lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
+    lead.instance_root = str(instance)
+    lead.authorization_config = {"enabled": False}
+    set_agent_ref(lead)
+
+    try:
+        file_a = write_instance_tool(instance, _http_tool("http:alpha", "alpha.example.com"))
+        write_instance_tool(instance, _http_tool("http:beta", "beta.example.com"))
+        bytes_a = file_a.read_bytes()
+
+        # Register a pending MCP server to include in the same auth-off proposal.
+        mcp_store = MCPConnectionStore(resolve_mcp_connection_paths(instance))
+        descriptor = descriptor_from_server_config(
+            {"name": "docs", "transport": "streamable_http", "server_url": "https://docs.example.com/mcp"},
+            source=MCPConnectionSource.AGENT_PROPOSAL,
+            source_locator="agent-proposal:test:https://docs.example.com/mcp",
+            team_id=REQ_TEAM,
+            owner_canonical_user_id="owner-1",
+        )
+        pending_record = mcp_store.save(
+            _new_record(
+                descriptor,
+                lifecycle=MCPConnectionLifecycle.PENDING,
+                target_agent_types=("TeamArchitect",),
+            )
+        )
+
+        # Make apply_together fail AND make restoring the FIRST removed file (file_b, reversed order) raise OSError:
+        # rollback must STILL restore file_a AND put the MCP server back to PENDING!
+        real_restore = proposals_tool_mod.restore_removed_instance_tool
+        first_failed = {"done": False}
+
+        def fail_first_restore(path: Path, staging_path: Path, *, expected_device: int, expected_inode: int) -> None:
+            if not first_failed["done"]:
+                first_failed["done"] = True
+                raise OSError("simulated disk error on first restore")
+            real_restore(path, staging_path, expected_device=expected_device, expected_inode=expected_inode)
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        with monkeypatch.context() as ctx_m:
+            ctx_m.setattr(proposals_tool_mod, "restore_removed_instance_tool", fail_first_restore)
+            ctx_m.setattr(
+                AccessRepository,
+                "apply_together",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db transaction failed")),
+            )
+            result = json.loads(
+                asyncio.run(
+                    propose_access_change(
+                        title="Combined removal and MCP install",
+                        reason="Test rollback isolation.",
+                        tool_context=Context("tooluse-f5-isolated-rollback"),
+                        tool_removals=[{"tool_id": "http:alpha"}, {"tool_id": "http:beta"}],
+                        mcp_servers=[
+                            {
+                                "connection_id": pending_record.connection_id,
+                                "record_digest": pending_record.record_digest,
+                            }
+                        ],
+                        confirmed=True,
+                    )
+                )
+            )
+        assert result["status"] == "refused" and "db transaction failed" in result["reason"]
+        assert first_failed["done"] is True
+        assert "event=proposal_agreement_rollback_step_failed" in caplog.text
+        # Even though file_b's restore raised, file_a was still restored AND the MCP server was restored to PENDING!
+        assert file_a.exists() and file_a.read_bytes() == bytes_a
+        reloaded_mcp = mcp_store.require(pending_record.connection_id)
+        assert reloaded_mcp.lifecycle is MCPConnectionLifecycle.PENDING
+        assert reloaded_mcp.record_digest == pending_record.record_digest
     finally:
         access_runtime._runtime_access.cache_clear()
         set_agent_ref(None)

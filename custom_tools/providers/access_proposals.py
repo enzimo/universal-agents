@@ -94,7 +94,7 @@ from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers.access import ACCESS_REQUEST_INTERRUPT_NAME
 from custom_tools.runtime_context import active_task_context, get_agent_ref
 from id_generation import new_id
-from storage.access_repository import AccessRepository
+from storage.access_repository import AccessRepository, AccessStoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -245,33 +245,35 @@ def _agreement_rows(
     return rows
 
 
-def _prepare_agreement_proposal(
-    agent: Any, instance_root: Path, proposal: AccessProposalV1
-) -> tuple[AccessProposalV1, list[str], list[str], AccessRepository | None]:
-    """Validate proposed tool additions, replacements, and removals before agreement or apply."""
+def _validate_agreement_catalog(catalog: Any, proposal: AccessProposalV1) -> None:
+    if not (proposal.tools or proposal.clis or proposal.tool_changes or proposal.tool_removals):
+        return
+    try:
+        with_proposed_tools(
+            catalog,
+            proposal.tools,
+            proposal.clis,
+            proposal.tool_changes,
+            proposal.tool_removals,
+        )
+    except (CatalogError, ValueError) as exc:
+        if proposal.tool_removals and not (proposal.tools or proposal.clis or proposal.tool_changes):
+            raise ProposalRefused(f"A proposed tool cannot be removed: {exc}") from exc
+        if proposal.tool_removals:
+            raise ProposalRefused(f"The proposed tool changes cannot be applied: {exc}") from exc
+        raise ProposalRefused(f"A proposed tool cannot be added: {exc}") from exc
 
-    catalog = load_catalog(instance_root)
-    proposal = with_tool_removal_baselines(proposal, instance_root=instance_root, catalog=catalog)
-    proposal = with_tool_change_baselines(proposal, instance_root=instance_root, catalog=catalog)
-    if proposal.tools or proposal.clis or proposal.tool_changes or proposal.tool_removals:
-        try:
-            with_proposed_tools(
-                catalog,
-                proposal.tools,
-                proposal.clis,
-                proposal.tool_changes,
-                proposal.tool_removals,
-            )
-        except (CatalogError, ValueError) as exc:
-            if proposal.tool_removals and not (proposal.tools or proposal.clis or proposal.tool_changes):
-                raise ProposalRefused(f"A proposed tool cannot be removed: {exc}") from exc
-            if proposal.tool_removals:
-                raise ProposalRefused(f"The proposed tool changes cannot be applied: {exc}") from exc
-            raise ProposalRefused(f"A proposed tool cannot be added: {exc}") from exc
-    store = _optional_access_store(agent) if (proposal.tool_changes or proposal.tool_removals or proposal.data_folders) else None
-    team_id = str(getattr(agent, "team_id", "") or "")
-    all_links = store.list_links(team_id, purpose=None) if store is not None and team_id else []
-    now = datetime.now(timezone.utc)
+
+def _agreement_tool_change_rows(
+    instance_root: Path,
+    catalog: Any,
+    proposal: AccessProposalV1,
+    *,
+    all_links: list[Any],
+    store: AccessRepository | None,
+    team_id: str,
+    now: datetime,
+) -> list[str]:
     change_rows: list[str] = []
     for index, item in enumerate(proposal.tool_changes):
         tool_file = load_changeable_tool_file(instance_root, catalog, item.tool_id)
@@ -279,16 +281,13 @@ def _prepare_agreement_proposal(
             raise ProposalRefused(
                 f"The catalog file for {item.tool_id} changed after the proposal was prepared; propose it again."
             )
+        blocks = active_operation_blocks_for_tool(store, team_id, item.tool_id, now=now) if store and team_id else []
         diff, rows = tool_change_rows(
             index,
             current=tool_file.definition,
             proposed=tool_definition(item),
             active_links=[link for link in all_links if link.tool_id == item.tool_id],
-            active_blocks=(
-                active_operation_blocks_for_tool(store, team_id, item.tool_id, now=now)
-                if store is not None and team_id
-                else []
-            ),
+            active_blocks=blocks,
         )
         if not diff.has_changes:
             logger.warning(
@@ -298,6 +297,16 @@ def _prepare_agreement_proposal(
             )
             raise ProposalRefused(f"The proposed change to {item.tool_id} makes no changes to its current definition.")
         change_rows += [row.text for row in rows]
+    return change_rows
+
+
+def _agreement_tool_removal_rows(
+    instance_root: Path,
+    catalog: Any,
+    proposal: AccessProposalV1,
+    *,
+    all_links: list[Any],
+) -> list[str]:
     removal_rows: list[str] = []
     for index, removal in enumerate(proposal.tool_removals):
         tool_file = load_removable_tool_file(instance_root, catalog, removal.tool_id)
@@ -324,21 +333,43 @@ def _prepare_agreement_proposal(
                 f"The proposed removal of {removal.tool_id} cannot be shown without hiding part of its impact: {exc}"
             ) from exc
         removal_rows += [row.text for row in rows]
+    return removal_rows
+
+
+def _prepare_agreement_proposal(
+    agent: Any, instance_root: Path, proposal: AccessProposalV1
+) -> tuple[AccessProposalV1, list[str], list[str], AccessRepository | None]:
+    """Validate proposed tool additions, replacements, and removals before agreement or apply."""
+
+    catalog = load_catalog(instance_root)
+    proposal = with_tool_removal_baselines(proposal, instance_root=instance_root, catalog=catalog)
+    proposal = with_tool_change_baselines(proposal, instance_root=instance_root, catalog=catalog)
+    _validate_agreement_catalog(catalog, proposal)
+    needs_store = bool(proposal.tool_changes or proposal.tool_removals or proposal.data_folders)
+    store = _optional_access_store(agent) if needs_store else None
+    team_id = str(getattr(agent, "team_id", "") or "")
+    all_links = store.list_links(team_id, purpose=None) if store is not None and team_id else []
+    now = datetime.now(timezone.utc)
+    change_rows = _agreement_tool_change_rows(
+        instance_root, catalog, proposal, all_links=all_links, store=store, team_id=team_id, now=now
+    )
+    removal_rows = _agreement_tool_removal_rows(instance_root, catalog, proposal, all_links=all_links)
     return proposal, change_rows, removal_rows, store
 
 
-def _install_by_agreement(agent: Any, proposal: AccessProposalV1) -> list[Any]:
-    """Activate the proposed MCP servers with the person's agreement; the installed records."""
+def _install_by_agreement(agent: Any, proposal: AccessProposalV1) -> tuple[list[Any], list[Any]]:
+    """Activate the proposed MCP servers with the person's agreement; return ``(installed, pending_originals)``."""
 
     from mcp_control.registry import MCPConnectionLifecycle
 
     if not proposal.mcp_servers:
-        return []
+        return [], []
     store = _mcp_store(agent)
     approval = ChangeApprovalRecordV1(
         mode=ChangeApprovalMode.AGREEMENT, approved_by=AGREEMENT_APPROVER, approved_at_utc=datetime.now(timezone.utc)
     )
-    installed = []
+    installed: list[Any] = []
+    originals: list[Any] = []
     for item in proposal.mcp_servers:
         record = store.require(item.connection_id)
         if record.lifecycle is not MCPConnectionLifecycle.PENDING or record.record_digest != item.record_digest:
@@ -346,8 +377,150 @@ def _install_by_agreement(agent: Any, proposal: AccessProposalV1) -> list[Any]:
                 f"The MCP server {record.descriptor.connection_name} is not the pending server you proposed; "
                 "propose it again."
             )
-        installed.append(store.update_lifecycle(record.connection_id, lifecycle=MCPConnectionLifecycle.ACTIVE, approval=approval))
-    return installed
+        originals.append(record)
+        installed.append(
+            store.update_lifecycle(record.connection_id, lifecycle=MCPConnectionLifecycle.ACTIVE, approval=approval)
+        )
+    return installed, originals
+
+
+def _prepare_agreement_folders(
+    proposal: AccessProposalV1,
+    store: AccessRepository | None,
+    team_id: str,
+    protected_paths: tuple[Path, ...],
+    *,
+    now: datetime,
+) -> list[Any]:
+    """Validate and build ``DataFolderRecordV1`` entries for an authorization-off proposal."""
+
+    if not proposal.data_folders:
+        return []
+    if store is None:
+        raise ProposalRefused("Data folders cannot be registered without an access store.")
+    registry = DataFolderRegistry(store, team_id)
+    owner = PersonPrincipal(AGREEMENT_APPROVER, team_id, ("owner",))
+    existing = list(registry.records())
+    records = []
+    for folder in proposal.data_folders:
+        problem = registration_problem(folder.name, folder.path, protected=protected_paths, existing=existing)
+        if problem:
+            raise DataFolderRefused(problem)
+        record = registry.new_record(
+            owner,
+            name=folder.name,
+            path=folder.path,
+            writable=folder.writable,
+            reason=proposal.reason,
+            now=now,
+        )
+        records.append(record)
+        existing.append(record)
+    return records
+
+
+def _apply_agreement_db_changes(
+    store: AccessRepository | None,
+    team_id: str,
+    folder_records: list[Any],
+    proposal: AccessProposalV1,
+    *,
+    now: datetime,
+) -> None:
+    """Register data folders and clean up removed-tool DB rows in one atomic transaction."""
+
+    if store is None or not team_id:
+        return
+    removed_ids = tuple(item.tool_id for item in proposal.tool_removals)
+    if not folder_records and not removed_ids:
+        return
+    try:
+        store.apply_together(
+            team_id,
+            data_folders=folder_records,
+            revoke_tool_ids=removed_ids,
+            actor=SubjectRefV1(kind=SubjectKind.USER, id=AGREEMENT_APPROVER),
+            at=now,
+        )
+    except AccessStoreConflict as exc:
+        raise DataFolderRefused(str(exc)) from exc
+
+
+def _discard_agreement_staging(tools_dir: Path, removed_tools: list[RemovedFile]) -> None:
+    for removed_file in removed_tools:
+        try:
+            removed_file.discard_staging(tools_dir)
+        except Exception as exc:  # noqa: BLE001 - DB already committed; log and continue
+            logger.warning(
+                "Could not unlink a removal staging file after agreement apply. "
+                "event=proposal_agreement_staging_cleanup_failed path=%s error=%s",
+                "/".join(removed_file.staging_parts),
+                exc,
+            )
+
+
+def _rollback_agreement_changes(
+    agent: Any,
+    tools_dir: Path,
+    *,
+    written_tools: list[Path],
+    replaced_tools: list[ReplacedFile],
+    removed_tools: list[RemovedFile],
+    programs: list[tuple[Path, OwnedFile]],
+    mcp_originals: list[Any],
+) -> None:
+    """Undo every authorization-off file/MCP change, isolating each step so one error never aborts the rest."""
+
+    steps: list[tuple[str, Callable[[], None]]] = [
+        *((f"tool file {path.name}", lambda path=path: remove_instance_tool(path)) for path in reversed(written_tools)),
+        *(
+            (
+                f"replaced tool file {'/'.join(item.parts)}",
+                lambda item=item: item.restore(
+                    tools_dir,
+                    lambda previous, target=tools_dir.joinpath(*item.parts): restore_instance_tool(target, previous),
+                ),
+            )
+            for item in reversed(replaced_tools)
+        ),
+        *(
+            (
+                f"removed tool file {'/'.join(item.parts)}",
+                lambda item=item: item.restore(
+                    tools_dir,
+                    lambda item=item: restore_removed_instance_tool(
+                        tools_dir.joinpath(*item.parts),
+                        tools_dir.joinpath(*item.staging_parts),
+                        expected_device=item.device,
+                        expected_inode=item.inode,
+                    ),
+                ),
+            )
+            for item in reversed(removed_tools)
+        ),
+        *(
+            (f"program {'/'.join(owned.parts)}", lambda root=root, owned=owned: owned.remove(root))
+            for root, owned in reversed(programs)
+        ),
+    ]
+    if mcp_originals:
+        mcp_store = _mcp_store(agent)
+        for record in reversed(mcp_originals):
+            def _restore_mcp(saved: Any = record) -> None:
+                mcp_store.save(saved)
+
+            steps.append((f"MCP server {record.connection_id}", _restore_mcp))
+    for what, step in steps:
+        try:
+            step()
+        except Exception as exc:  # noqa: BLE001 - isolate every rollback step
+            logger.warning(
+                "A rollback step failed while undoing an authorization-off proposal. "
+                "event=proposal_agreement_rollback_step_failed part=%s error_type=%s error=%s",
+                what,
+                type(exc).__name__,
+                exc,
+            )
 
 
 def _when_tools_appear(agent: Any, installed: list[Any]) -> dict[str, str]:
@@ -364,6 +537,60 @@ def _when_tools_appear(agent: Any, installed: list[Any]) -> dict[str, str]:
     }
 
 
+def _apply_agreement_files(
+    layout_root: Path,
+    proposal: AccessProposalV1,
+    *,
+    programs: list[tuple[Path, OwnedFile]],
+    written_tools: list[Path],
+    replaced_tools: list[ReplacedFile],
+    removed_tools: list[RemovedFile],
+) -> None:
+    def prepare_program(root: Path, parts: tuple[str, ...], descriptor: int, data: bytes) -> None:
+        programs.append((root, OwnedFile.prepared(parts, descriptor, data)))
+
+    def capture_previous(
+        path: Path, descriptor: int, body: bytes, temporary: Path, previous_bytes: bytes
+    ) -> None:
+        replaced_tools.append(
+            ReplacedFile.prepared(
+                (path.name,), descriptor, body, previous_bytes, staging_parts=(temporary.name,)
+            )
+        )
+
+    def capture_removed(
+        path: Path, device: int, inode: int, previous_bytes: bytes, staging_path: Path
+    ) -> None:
+        removed_tools.append(
+            RemovedFile.prepared(
+                (path.name,), device, inode, previous_bytes, staging_parts=(staging_path.name,)
+            )
+        )
+
+    install_programs(layout_root, proposal.clis, fetch_https, before_write=prepare_program)
+    for removed in proposal.tool_removals:
+        assert removed.expected_sha256 is not None
+        remove_proposed_tool_file(
+            layout_root,
+            removed.tool_id,
+            expected_sha256=removed.expected_sha256,
+            before_remove=capture_removed,
+            keep_staging=True,
+        )
+    for proposed_http in proposal.tools:
+        written_tools.append(write_instance_tool(layout_root, proposed_http))
+    for proposed_cli in proposal.clis:
+        written_tools.append(write_instance_tool(layout_root, proposed_cli))
+    for changed in proposal.tool_changes:
+        assert changed.previous_definition_digest is not None
+        replace_instance_tool(
+            layout_root,
+            changed,
+            expected_previous_sha256=changed.previous_definition_digest,
+            before_replace=capture_previous,
+        )
+
+
 def apply_by_agreement(
     agent: Any,
     proposal: AccessProposalV1,
@@ -373,8 +600,8 @@ def apply_by_agreement(
 
     Tool changes and removals apply on ``confirmed=true`` like new tools: the
     ``confirmed=false`` preview lists trusted code's diff or removal impact rows
-    for the person, and the file write/unlink still refuses if the file changed
-    between reading its baseline and applying.
+    for the person, and the file write/stage-remove still refuses if the file
+    changed between reading its baseline and applying.
     """
 
     from custom_tools.workspace_scope import _protected, runtime_layout
@@ -389,110 +616,45 @@ def apply_by_agreement(
             "message": "Authorization is off. Explain these changes to the person, get their agreement in the "
             "conversation, and call again with confirmed=true. Grants and restrictions are not needed.",
         }
-    protected_paths = _protected(agent)
-    if proposal.data_folders:
-        if store is None:
-            raise ProposalRefused("Data folders cannot be registered without an access store.")
-        registry = DataFolderRegistry(store, str(agent.team_id))
-        existing_folders = registry.records()
-        for folder in proposal.data_folders:
-            problem = registration_problem(
-                folder.name, folder.path, protected=protected_paths, existing=existing_folders
-            )
-            if problem:
-                raise DataFolderRefused(problem)
+    now = datetime.now(timezone.utc)
+    team_id = str(getattr(agent, "team_id", "") or "")
+    folder_records = _prepare_agreement_folders(proposal, store, team_id, _protected(agent), now=now)
     programs: list[tuple[Path, OwnedFile]] = []
     written_tools: list[Path] = []
     replaced_tools: list[ReplacedFile] = []
     removed_tools: list[RemovedFile] = []
-
-    def prepare_program(root: Path, parts: tuple[str, ...], descriptor: int, data: bytes) -> None:
-        programs.append((root, OwnedFile.prepared(parts, descriptor, data)))
-
-    def capture_previous(
-        path: Path, descriptor: int, body: bytes, temporary: Path, previous_bytes: bytes
-    ) -> None:
-        replaced_tools.append(
-            ReplacedFile.prepared(
-                (path.name,), descriptor, body, previous_bytes, staging_parts=(temporary.name,)
-            )
-        )
-
-    def capture_removed(path: Path, previous_bytes: bytes) -> None:
-        removed_tools.append(RemovedFile.prepared((path.name,), previous_bytes))
-
+    mcp_originals: list[Any] = []
+    installed: list[Any] = []
     try:
-        installed = _install_by_agreement(agent, proposal)
-        install_programs(layout.root, proposal.clis, fetch_https, before_write=prepare_program)
-        for removed in proposal.tool_removals:
-            assert removed.expected_sha256 is not None
-            remove_proposed_tool_file(
-                layout.root,
-                removed.tool_id,
-                expected_sha256=removed.expected_sha256,
-                before_remove=capture_removed,
-            )
-        for proposed_http in proposal.tools:
-            written_tools.append(write_instance_tool(layout.root, proposed_http))
-        for proposed_cli in proposal.clis:
-            written_tools.append(write_instance_tool(layout.root, proposed_cli))
-        for changed in proposal.tool_changes:
-            assert changed.previous_definition_digest is not None
-            replace_instance_tool(
-                layout.root,
-                changed,
-                expected_previous_sha256=changed.previous_definition_digest,
-                before_replace=capture_previous,
-            )
-        if proposal.data_folders:
-            assert store is not None
-            registry = DataFolderRegistry(store, str(agent.team_id))
-            owner = PersonPrincipal(AGREEMENT_APPROVER, str(agent.team_id), ("owner",))
-            for folder in proposal.data_folders:
-                registry.register(
-                    owner,
-                    name=folder.name,
-                    path=folder.path,
-                    writable=folder.writable,
-                    reason=proposal.reason,
-                    protected=protected_paths,
-                    now=datetime.now(timezone.utc),
-                )
-        if proposal.tool_removals and store is not None and getattr(agent, "team_id", None):
-            store.revoke_links_for_tools(
-                str(agent.team_id),
-                (item.tool_id for item in proposal.tool_removals),
-                actor=SubjectRefV1(kind=SubjectKind.USER, id=AGREEMENT_APPROVER),
-                at=datetime.now(timezone.utc),
-            )
+        installed, mcp_originals = _install_by_agreement(agent, proposal)
+        _apply_agreement_files(
+            layout.root,
+            proposal,
+            programs=programs,
+            written_tools=written_tools,
+            replaced_tools=replaced_tools,
+            removed_tools=removed_tools,
+        )
+        _apply_agreement_db_changes(store, team_id, folder_records, proposal, now=now)
     except BaseException:
-        tools_dir = layout.instance_tools_dir
-        for path in reversed(written_tools):
-            remove_instance_tool(path)
-        for replaced in reversed(replaced_tools):
-            target_path = tools_dir.joinpath(*replaced.parts)
-
-            def _restore_replaced(previous: bytes, target: Path = target_path) -> None:
-                restore_instance_tool(target, previous)
-
-            replaced.restore(tools_dir, _restore_replaced)
-        for removed_file in reversed(removed_tools):
-            target_path = tools_dir.joinpath(*removed_file.parts)
-
-            def _restore_removed(previous: bytes, target: Path = target_path) -> None:
-                restore_removed_instance_tool(target, previous)
-
-            removed_file.restore(tools_dir, _restore_removed)
-        for root, owned in reversed(programs):
-            owned.remove(root)
+        _rollback_agreement_changes(
+            agent,
+            layout.instance_tools_dir,
+            written_tools=written_tools,
+            replaced_tools=replaced_tools,
+            removed_tools=removed_tools,
+            programs=programs,
+            mcp_originals=mcp_originals,
+        )
         logger.warning(
-            "Applying an access proposal by agreement failed; file changes were rolled back. "
+            "Applying an access proposal by agreement failed; changes were rolled back. "
             "event=proposal_agreement_apply_failed tools=%s tool_changes=%s tool_removals=%s",
             ",".join([*(t.tool_id for t in proposal.tools), *(c.tool_id for c in proposal.clis)]),
             ",".join(changed.tool_id for changed in proposal.tool_changes),
             ",".join(item.tool_id for item in proposal.tool_removals),
         )
         raise
+    _discard_agreement_staging(layout.instance_tools_dir, removed_tools)
     logger.warning(
         "An access proposal was applied on the person's agreement (authorization off). "
         "event=proposal_applied_by_agreement tools=%s tool_changes=%s tool_removals=%s mcp_servers=%s folders=%s",

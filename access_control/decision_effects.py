@@ -11,6 +11,7 @@ import base64
 import hashlib
 import logging
 import os
+import stat
 from pathlib import Path
 from typing import Callable
 
@@ -190,19 +191,33 @@ class ReplacedFile(BaseModel):
 
 
 class RemovedFile(BaseModel):
-    """A journaled removal of an existing file, storing the exact bytes to restore."""
+    """A journaled stage-removal of an existing file, owned by a claim-unique staging inode."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     parts: tuple[str, ...]
+    staging_parts: tuple[str, ...]
+    device: int
+    inode: int
     sha256: str
     size: int
     previous_b64: str
 
     @classmethod
-    def prepared(cls, parts: tuple[str, ...], previous_data: bytes) -> RemovedFile:
+    def prepared(
+        cls,
+        parts: tuple[str, ...],
+        device: int,
+        inode: int,
+        previous_data: bytes,
+        *,
+        staging_parts: tuple[str, ...],
+    ) -> RemovedFile:
         return cls(
             parts=parts,
+            staging_parts=staging_parts,
+            device=device,
+            inode=inode,
             sha256=hashlib.sha256(previous_data).hexdigest(),
             size=len(previous_data),
             previous_b64=base64.b64encode(previous_data).decode("ascii"),
@@ -211,16 +226,36 @@ class RemovedFile(BaseModel):
     def previous_bytes(self) -> bytes:
         return base64.b64decode(self.previous_b64.encode("ascii"))
 
-    def _existing_state(self, root: Path) -> str:
-        """Classify ``root/parts`` as ``'matches'``, ``'changed'``, or ``'missing'`` without following links."""
+    def discard_staging(self, root: Path) -> None:
+        """Unlink this decision's staging file if it still holds this recorded inode."""
+
+        staging = safe_open.entry_status(root, self.staging_parts)
+        if staging is None:
+            return
+        if not stat.S_ISREG(staging.st_mode) or (staging.st_dev, staging.st_ino) != (self.device, self.inode):
+            logger.warning(
+                "A decision's removal staging file changed externally; it is kept untouched. "
+                "event=access_decision_artifact_changed path=%s",
+                "/".join(self.staging_parts),
+            )
+            return
+        identity = (staging.st_dev, staging.st_ino, staging.st_mtime_ns, staging.st_ctime_ns)
+        try:
+            safe_open.remove_file(root, self.staging_parts, expected_identity=identity)
+        except safe_open.UnsafePath as exc:
+            if exc.reason != safe_open.REASON_NOT_FOUND:
+                raise
+
+    def _staging_state(self, root: Path) -> str:
+        """Classify ``root/staging_parts`` as ``'owned'``, ``'missing'``, or ``'changed'``."""
 
         try:
-            with safe_open.opened_file(root, self.parts) as (descriptor, info):
-                if info.st_size != self.size:
+            with safe_open.opened_staged_file(root, self.staging_parts) as (descriptor, info):
+                if (info.st_dev, info.st_ino) != (self.device, self.inode) or info.st_size != self.size:
                     return "changed"
                 count, digest, exceeded = _read_bounded_sha256(descriptor, self.size)
                 if not exceeded and count == self.size and digest == self.sha256:
-                    return "matches"
+                    return "owned"
                 return "changed"
         except safe_open.UnsafePath as exc:
             if exc.reason == safe_open.REASON_NOT_FOUND:
@@ -230,50 +265,81 @@ class RemovedFile(BaseModel):
                 safe_open.REASON_NOT_REGULAR_FILE,
                 safe_open.REASON_SEVERAL_LINKS,
             }:
-                if safe_open.entry_status(root, self.parts) is not None:
+                if safe_open.entry_status(root, self.staging_parts) is not None:
                     return "changed"
                 return "missing"
             raise
 
-    def restore(self, root: Path, restore: Callable[[bytes], None] | None = None) -> None:
-        """Restore the removed bytes atomically when missing; never overwrite another file or link.
+    def _target_matches_inode(self, root: Path) -> bool | None:
+        """Return ``True`` if target is our inode, ``False`` if another entry exists, or ``None`` if missing."""
 
-        - If the path still holds the exact original bytes (stopped before unlink
-          or already restored), return quietly.
-        - If another file, symlink, directory, or multi-link entry now exists at
-          the path, leave it untouched and log ``access_decision_artifact_changed``.
-        - If missing, write ``previous_bytes()`` atomically via
-          ``safe_open.write_bytes_exclusive`` (or ``restore``).
+        target = safe_open.entry_status(root, self.parts)
+        if target is None:
+            return None
+        return stat.S_ISREG(target.st_mode) and (target.st_dev, target.st_ino) == (self.device, self.inode)
+
+    def restore(self, root: Path, restore: Callable[[], None] | None = None) -> None:
+        """Restore the removed file ONLY when this decision's own staging inode still exists.
+
+        - If ``staging_parts`` is missing (never moved, already restored, or
+          discarded after commit), return quietly without recreating ``parts``.
+        - If ``staging_parts`` holds another inode/content/entry, log
+          ``access_decision_artifact_changed`` and leave everything untouched.
+        - If ``parts`` already holds this same inode (interrupted between link
+          and unlink of staging), unlink ``staging_parts`` quietly.
+        - If another entry exists at ``parts``, leave it untouched, log
+          ``access_decision_artifact_changed``, and discard ``staging_parts``.
+        - Otherwise link ``staging_parts`` back to ``parts`` atomically and
+          unlink ``staging_parts``.
         """
 
-        state = self._existing_state(root)
-        if state == "matches":
+        staging_state = self._staging_state(root)
+        if staging_state == "missing":
             return
-        if state == "changed":
+        if staging_state == "changed":
+            logger.warning(
+                "A decision's removal staging file changed externally; nothing is restored. "
+                "event=access_decision_artifact_changed path=%s",
+                "/".join(self.staging_parts),
+            )
+            return
+        target_state = self._target_matches_inode(root)
+        if target_state is True:
+            self.discard_staging(root)
+            return
+        if target_state is False:
             logger.warning(
                 "A decision's removed artifact was replaced externally before it could be restored; "
                 "the current file is kept. event=access_decision_artifact_changed path=%s",
                 "/".join(self.parts),
             )
+            self.discard_staging(root)
             return
-        previous = self.previous_bytes()
         try:
             if restore is None:
-                safe_open.write_bytes_exclusive(root, self.parts, previous)
+                safe_open.restore_staged_file(
+                    root,
+                    self.staging_parts,
+                    self.parts,
+                    expected_device=self.device,
+                    expected_inode=self.inode,
+                )
             else:
-                restore(previous)
+                restore()
         except safe_open.UnsafePath as exc:
             if exc.reason != safe_open.REASON_DESTINATION_EXISTS:
                 raise
-            after = self._existing_state(root)
-            if after == "matches":
+            after = self._target_matches_inode(root)
+            if after is True:
+                self.discard_staging(root)
                 return
-            if after == "changed":
+            if after is False:
                 logger.warning(
                     "A decision's removed artifact was replaced externally before it could be restored; "
                     "the current file is kept. event=access_decision_artifact_changed path=%s",
                     "/".join(self.parts),
                 )
+                self.discard_staging(root)
                 return
             raise
 
@@ -323,16 +389,20 @@ class EffectJournal:
         self,
         category: str,
         parts: tuple[str, ...],
+        device: int,
+        inode: int,
         previous_data: bytes,
+        *,
+        staging_parts: tuple[str, ...],
     ) -> RemovedFile:
-        removed = RemovedFile.prepared(parts, previous_data)
+        removed = RemovedFile.prepared(parts, device, inode, previous_data, staging_parts=staging_parts)
         self.recovery.effects[category].append(removed.model_dump(mode="json"))
         try:
             self.store.save_decision_recovery(self.recovery)
         except BaseException:
-            # No file has been unlinked yet. Drop the unsaved in-memory entry;
-            # if the save committed before raising, recovery sees the original
-            # bytes intact and treats it as a quiet no-op.
+            # No file has been moved yet. Drop the unsaved in-memory entry;
+            # if the save committed before raising, recovery sees staging_parts
+            # missing and treats it as a quiet no-op.
             self.recovery.effects[category].pop()
             raise
         return removed

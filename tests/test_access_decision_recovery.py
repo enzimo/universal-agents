@@ -99,6 +99,23 @@ def test_renewal_keeps_a_stale_recovery_pass_from_cleaning_live_work(repositorie
     first.renew_decision(claim, until=until + timedelta(hours=1))
 
 
+def test_claimant_cleanup_runs_while_live_but_skips_once_maintenance_reconciled(repositories):
+    first, second = repositories
+    claim, _recovery = prepare(first)
+    still_live = NOW + timedelta(milliseconds=500)
+    # Maintenance (skip_live_claim=True) skips while the claim is live.
+    with second.decision_cleanup_transaction(claim, require_record=True, skip_live_claim=True, now=still_live) as skipped:
+        assert skipped is None
+    # The claimant itself (require_record=True, skip_live_claim=False) cleans up its own live failure.
+    with first.decision_cleanup_transaction(claim, require_record=True, skip_live_claim=False, now=still_live) as state:
+        assert state is not None and state[2] is not None and not state[1]
+    assert first.decision_recoveries(TEAM) == []
+    # Once reconciled and deleted, a stalled claimant waking up with require_record=True, skip_live_claim=False
+    # gets None and must NOT replay undo.
+    with first.decision_cleanup_transaction(claim, require_record=True, skip_live_claim=False, now=still_live) as stale:
+        assert stale is None
+
+
 def test_cleanup_reads_effects_added_after_the_maintenance_scan(repositories):
     from dataclasses import replace
 

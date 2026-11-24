@@ -87,6 +87,7 @@ from access_control.tool_removals import (
     check_tool_removal_conflicts,
     grant_targets_tool,
     load_removable_tool_file,
+    reviewed_removal_impact_ids,
     tool_removal_rows,
     with_tool_removal_baselines,
 )
@@ -922,6 +923,54 @@ def _check_removal_grants_authority(
             raise HandDownRefused(f"You cannot remove grant {grant.grant_id} on {grant.target.id}.")
 
 
+def _check_removal_grants_reviewed(
+    request: AccessRequestV1,
+    grants: Iterable[GrantV1],
+    reviewed_grant_ids: frozenset[str],
+) -> None:
+    """Refuse if active/pending grants or blocks appeared after the proposal was compiled for review."""
+
+    unreviewed = [grant.grant_id for grant in grants if grant.grant_id not in reviewed_grant_ids]
+    if unreviewed:
+        logger.warning(
+            "Refused a tool removal because new grants or blocks appeared after review. "
+            "event=proposal_tool_removal_impact_changed request_id=%s unreviewed_grants=%s",
+            request.request_id,
+            ",".join(unreviewed),
+        )
+        raise HandDownRefused(
+            "New access grants or restrictions were added for a removed tool after this proposal was prepared; "
+            "TeamLead must propose the removal again so the full impact can be reviewed."
+        )
+
+
+def _check_removal_links_reviewed(
+    request: AccessRequestV1,
+    links: Iterable[AccountLinkV1],
+    reviewed_link_ids: frozenset[str],
+) -> None:
+    """Refuse if active account or gate links appeared after the proposal was compiled for review."""
+
+    unreviewed = [link.link_id for link in links if link.link_id not in reviewed_link_ids]
+    if unreviewed:
+        logger.warning(
+            "Refused a tool removal because new credential links appeared after review. "
+            "event=proposal_tool_removal_impact_changed request_id=%s unreviewed_links=%s",
+            request.request_id,
+            ",".join(unreviewed),
+        )
+        raise HandDownRefused(
+            "New credential links were added for a removed tool after this proposal was prepared; "
+            "TeamLead must propose the removal again so the full impact can be reviewed."
+        )
+
+
+def _reviewed_removal_sets(request: AccessRequestV1) -> tuple[frozenset[str], frozenset[str]]:
+    if request.change is None:
+        return frozenset(), frozenset()
+    return reviewed_removal_impact_ids(request.change.items)
+
+
 @dataclass
 class ProposalApplier:
     """Applies an approved proposal at the decision (``access_control.requests.ChangeApplier``)."""
@@ -1036,6 +1085,36 @@ class ProposalApplier:
                 service.team_id,
             )
 
+    def _precheck_tool_removals(
+        self,
+        requests: AccessRequests,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        compiled: CompiledProposal,
+    ) -> ToolCatalog | None:
+        """Capture the pre-removal catalog and run a fast impact + authority pre-check before touching disk."""
+
+        if not compiled.proposal.tool_removals:
+            return None
+        pre_removal_catalog = self.catalogs.current()
+        pre_removal_service = _service_with_catalog(requests.service, pre_removal_catalog)
+        now = requests.service.clock()
+        reviewed_grant_ids, reviewed_link_ids = _reviewed_removal_sets(request)
+        all_links = requests.service.store.list_links(requests.service.team_id, purpose=None)
+        for item in compiled.proposal.tool_removals:
+            live = active_grants_for_tool_in_store(
+                requests.service.store, requests.service.team_id, item.tool_id, now=now
+            )
+            _check_removal_grants_reviewed(request, live, reviewed_grant_ids)
+            _check_removal_grants_authority(pre_removal_service, reviewer, live)
+            tool_links = [link for link in all_links if link.tool_id == item.tool_id]
+            _check_removal_links_reviewed(request, tool_links, reviewed_link_ids)
+        return pre_removal_catalog
+
+    def _finish_committed_recovery(self, requests: AccessRequests, recovery: DecisionRecovery, claim: DecisionClaim) -> None:
+        if self._discard_removed_staging(recovery, raise_on_error=False):
+            requests.clear_recovery(claim)
+
     def _apply_items(
         self,
         requests: AccessRequests,
@@ -1056,21 +1135,7 @@ class ProposalApplier:
         as such and other errors are raised again as they were.
         """
 
-        pre_removal_catalog: ToolCatalog | None = None
-        if compiled.proposal.tool_removals:
-            # Capture the pre-removal catalog before unlinking files and run a
-            # fast authority pre-check using an unshared AccessService so we do
-            # not touch disk when the reviewer cannot revoke an existing grant
-            # or block (the write transaction re-checks authoritatively).
-            pre_removal_catalog = self.catalogs.current()
-            pre_removal_service = _service_with_catalog(requests.service, pre_removal_catalog)
-            now = requests.service.clock()
-            for item in compiled.proposal.tool_removals:
-                live = active_grants_for_tool_in_store(
-                    requests.service.store, requests.service.team_id, item.tool_id, now=now
-                )
-                _check_removal_grants_authority(pre_removal_service, reviewer, live)
-
+        pre_removal_catalog = self._precheck_tool_removals(requests, request, reviewer, compiled)
         recovery = requests.recovery_record(
             claim,
             finished,
@@ -1100,8 +1165,17 @@ class ProposalApplier:
                 staging_parts=(temporary.name,),
             )
 
-        def prepare_removal(path: Path, previous_bytes: bytes) -> None:
-            journal.prepare_removal("removed_tool_files", (path.name,), previous_bytes)
+        def prepare_removal(
+            path: Path, device: int, inode: int, previous_bytes: bytes, staging_path: Path
+        ) -> None:
+            journal.prepare_removal(
+                "removed_tool_files",
+                (path.name,),
+                device,
+                inode,
+                previous_bytes,
+                staging_parts=(staging_path.name,),
+            )
 
         def publish_effect(commit: Callable[[], None]) -> None:
             with requests.service.store.decision_effect_transaction(claim):
@@ -1127,6 +1201,7 @@ class ProposalApplier:
                     expected_sha256=removed.expected_sha256,
                     before_remove=prepare_removal,
                     publish=publish_effect,
+                    keep_staging=True,
                 )
             new_tools: tuple[ProposedHttpToolV1 | ProposedCliToolV1, ...] = (
                 *compiled.proposal.tools,
@@ -1156,15 +1231,21 @@ class ProposalApplier:
                 claim,
                 pre_removal_catalog=pre_removal_catalog,
             )
-            requests.clear_recovery(claim)
+            self._finish_committed_recovery(requests, recovery, claim)
             return applied
         except BaseException as exc:
             stored = requests.outcome_stored_despite(exc, request.request_id, reviewer, finished.decided_at_utc)
             if stored is not None:
-                requests.clear_recovery(claim)
+                self._finish_committed_recovery(requests, recovery, claim)
                 return stored
+            # Require the recovery row to still exist so a stalled claim whose
+            # recovery row was already reconciled by maintenance never replays
+            # undo, while allowing cleanup while this decision's own claim is live.
             stored = requests.reconcile_decision(
-                recovery, lambda latest, current, elsewhere: self.recover(requests, latest, current, elsewhere)
+                recovery,
+                lambda latest, current, elsewhere: self.recover(requests, latest, current, elsewhere),
+                require_record=True,
+                skip_live_claim=False,
             )
             if stored is not None:
                 return stored
@@ -1180,6 +1261,47 @@ class ProposalApplier:
                 raise HandDownRefused(f"The proposal could not be applied, so nothing changed: {exc}") from exc
             raise
 
+    def _discard_removed_staging(self, recovery: DecisionRecovery, *, raise_on_error: bool) -> bool:
+        """Unlink this decision's removal staging files after commit or when GRANTED."""
+
+        records = recovery.effects.get("removed_tool_files", ())
+        if not records:
+            return True
+        from runtime_settings.instance_layout import InstanceLayout
+
+        directory = InstanceLayout.at(self.instance_root).instance_tools_dir
+        removed = [RemovedFile.model_validate(record) for record in records]
+        failures: list[Exception] = []
+        for item in removed:
+            try:
+                item.discard_staging(directory)
+            except Exception as exc:  # noqa: BLE001 - retry on next recovery pass
+                failures.append(exc)
+                logger.exception(
+                    "Could not unlink a committed removal's staging file; Inbox recovery will retry. "
+                    "event=proposal_removal_staging_cleanup_failed request_id=%s path=%s",
+                    recovery.claim.request_id,
+                    "/".join(item.staging_parts),
+                )
+        if failures:
+            if raise_on_error:
+                raise failures[0]
+            return False
+        return True
+
+    def _keep_removed_for_other_decision(
+        self, recovery: DecisionRecovery, current: AccessRequestV1, claimed_elsewhere: bool
+    ) -> None:
+        if current.status is AccessRequestStatus.GRANTED:
+            self._discard_removed_staging(recovery, raise_on_error=True)
+        logger.warning(
+            "Another decision owns or approved this proposal; removed tool files are not restored. "
+            "event=proposal_removals_kept request_id=%s status=%s claimed_elsewhere=%s",
+            recovery.claim.request_id,
+            current.status.value,
+            claimed_elsewhere,
+        )
+
     def recover(
         self, requests: AccessRequests, recovery: DecisionRecovery,
         current: AccessRequestV1 | None, claimed_elsewhere: bool,
@@ -1187,6 +1309,7 @@ class ProposalApplier:
         """Reconcile under the store lock; an exception's type never establishes ownership."""
 
         if recovery.matches(current):
+            self._discard_removed_staging(recovery, raise_on_error=True)
             return current
         effects = recovery.effects
         from runtime_settings.instance_layout import InstanceLayout
@@ -1201,19 +1324,12 @@ class ProposalApplier:
             current.status is AccessRequestStatus.GRANTED
             or (current.status is AccessRequestStatus.WAITING and claimed_elsewhere)
         ):
-            # A newer decision may have reused these programs or unlinked the
-            # same removed tool files. Keep them even when renewal failed with
-            # a database error rather than ClaimLost.
+            # A newer decision may have reused these programs or approved the
+            # removal. Keep them even when renewal failed with a database error.
             programs = []
             if removed:
+                self._keep_removed_for_other_decision(recovery, current, claimed_elsewhere)
                 removed = []
-                logger.warning(
-                    "Another decision owns or approved this proposal; removed tool files are not restored. "
-                    "event=proposal_removals_kept request_id=%s status=%s claimed_elsewhere=%s",
-                    recovery.claim.request_id,
-                    current.status.value,
-                    claimed_elsewhere,
-                )
             if current.status is AccessRequestStatus.GRANTED:
                 written, replaced, installed = [], [], []
             logger.warning(
@@ -1254,7 +1370,12 @@ class ProposalApplier:
                 f"removed tool file {'/'.join(item.parts)}",
                 lambda item=item: item.restore(
                     directory,
-                    lambda previous, target=directory.joinpath(*item.parts): restore_removed_instance_tool(target, previous),
+                    lambda item=item: restore_removed_instance_tool(
+                        directory.joinpath(*item.parts),
+                        directory.joinpath(*item.staging_parts),
+                        expected_device=item.device,
+                        expected_inode=item.inode,
+                    ),
                 ),
             ) for item in reversed(removed)),
             *((f"program {'/'.join(owned.parts)}", lambda owned=owned: owned.remove(workspaces_root(self.instance_root))) for owned in programs),
@@ -1385,8 +1506,14 @@ class ProposalApplier:
                 revoke_ids.append(held.grant_id)
         ending = tuple(dict.fromkeys(revoke_ids))
 
+        reviewed_grant_ids, reviewed_link_ids = _reviewed_removal_sets(request)
+
         def check_removal_grants(matched: list[GrantV1]) -> None:
+            _check_removal_grants_reviewed(request, matched, reviewed_grant_ids)
             _check_removal_grants_authority(pre_removal_service or service, reviewer, matched)
+
+        def check_removal_links(matched: list[AccountLinkV1]) -> None:
+            _check_removal_links_reviewed(request, matched, reviewed_link_ids)
 
         def outcome(plan: GrantPlan | None) -> AccessRequestV1:
             assert plan is not None
@@ -1402,6 +1529,7 @@ class ProposalApplier:
             revoke_ids=ending,
             revoke_tool_ids=removed_tool_ids,
             check_tool_removal_grants=check_removal_grants if removed_tool_ids else None,
+            check_tool_removal_links=check_removal_links if removed_tool_ids else None,
             finish=outcome,
             claim_id=claim.claim_id,
             actor=SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id),

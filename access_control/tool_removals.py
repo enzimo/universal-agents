@@ -22,6 +22,7 @@ or installed CLI (``cli:*``) tool through ``AccessProposalV1.tool_removals``:
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
@@ -80,9 +81,9 @@ def grant_targets_tool(grant: GrantV1, tool_id: str) -> bool:
 
 
 def is_live_grant(grant: GrantV1, *, now: datetime | None = None) -> bool:
-    """Whether ``grant`` is active, unexpired (when ``now`` is given), and has uses remaining."""
+    """Whether ``grant`` is active or pending, unexpired (when ``now`` is given), and has uses remaining."""
 
-    if grant.status is not GrantStatus.ACTIVE:
+    if grant.status not in {GrantStatus.ACTIVE, GrantStatus.PENDING}:
         return False
     if now is not None and grant.expires_at_utc is not None and grant.expires_at_utc <= now:
         return False
@@ -98,7 +99,7 @@ def _grant_sort_key(grant: GrantV1) -> tuple[str, str, str, str]:
 def active_grants_for_tool(
     grants: Iterable[GrantV1], tool_id: str, *, now: datetime | None = None
 ) -> tuple[list[GrantV1], list[GrantV1]]:
-    """Split active, unexpired grants targeting ``tool_id`` into ``(active_grants, active_blocks)``."""
+    """Split active/pending, unexpired grants targeting ``tool_id`` into ``(active_grants, active_blocks)``."""
 
     active_access: list[GrantV1] = []
     active_blocks: list[GrantV1] = []
@@ -117,11 +118,11 @@ def active_grants_for_tool(
 def active_grants_for_tool_in_store(
     store: Any, team_id: str, tool_id: str, *, now: datetime
 ) -> list[GrantV1]:
-    """All active, unexpired grants and blocks targeting ``tool_id`` in ``store`` (stable order)."""
+    """All active or pending, unexpired grants and blocks targeting ``tool_id`` in ``store`` (stable order)."""
 
     matched = [
         grant
-        for grant in store.for_status(team_id, (GrantStatus.ACTIVE,))
+        for grant in store.for_status(team_id, (GrantStatus.ACTIVE, GrantStatus.PENDING))
         if is_live_grant(grant, now=now) and grant_targets_tool(grant, tool_id)
     ]
     matched.sort(key=_grant_sort_key)
@@ -414,10 +415,11 @@ def _grant_impact_rows(
             target_words = f"{definition.display_name} ({definition.tool_id}, operation {op})"
         else:
             target_words = f"{definition.display_name} ({definition.tool_id})"
+        status_word = "pending" if grant.status is GrantStatus.PENDING else "active"
         rows.append(
             _review_row(
                 f"remove-{index}-grant-{grant_index}",
-                f"Revoke active grant {grant.grant_id}: {who} loses {level} access to {target_words} ({scope}).",
+                f"Revoke {status_word} grant {grant.grant_id}: {who} loses {level} access to {target_words} ({scope}).",
             )
         )
     return rows
@@ -501,6 +503,48 @@ def tool_removal_rows(
     ]
 
 
+_IMPACT_ROW_ID = re.compile(r"^remove-\d+-(grant|block|link)-\d+$")
+
+
+def parse_tool_removal_row_target(item: ReviewItemV1) -> tuple[str, str] | None:
+    """Extract ``(kind, record_id)`` from a ``tool_removal`` detail row, or ``None`` for overview/host rows."""
+
+    if item.section != "tool_removal":
+        return None
+    matched = _IMPACT_ROW_ID.match(item.item_id)
+    if matched is None:
+        return None
+    kind = matched.group(1)
+    if kind in {"grant", "block"}:
+        head, sep, _ = item.text.partition(":")
+        if not sep:
+            return None
+        record_id = head.rsplit(" ", 1)[-1].strip()
+        return (kind, record_id) if record_id else None
+    head, sep, _ = item.text.partition(" on ")
+    if not sep:
+        return None
+    record_id = head.rsplit(" ", 1)[-1].strip()
+    return ("link", record_id) if record_id else None
+
+
+def reviewed_removal_impact_ids(items: Iterable[ReviewItemV1]) -> tuple[frozenset[str], frozenset[str]]:
+    """Return ``(reviewed_grant_and_block_ids, reviewed_link_ids)`` listed on a reviewed proposal card."""
+
+    grant_ids: set[str] = set()
+    link_ids: set[str] = set()
+    for item in items:
+        parsed = parse_tool_removal_row_target(item)
+        if parsed is None:
+            continue
+        kind, record_id = parsed
+        if kind == "link":
+            link_ids.add(record_id)
+        else:
+            grant_ids.add(record_id)
+    return frozenset(grant_ids), frozenset(link_ids)
+
+
 __all__ = [
     "REMOVABLE_TOOL_KINDS",
     "active_grants_for_tool",
@@ -509,6 +553,8 @@ __all__ = [
     "grant_targets_tool",
     "is_live_grant",
     "load_removable_tool_file",
+    "parse_tool_removal_row_target",
+    "reviewed_removal_impact_ids",
     "target_matches_tool",
     "tool_removal_rows",
     "with_tool_removal_baselines",

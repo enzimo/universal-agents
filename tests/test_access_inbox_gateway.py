@@ -1209,5 +1209,260 @@ def test_tool_removal_proposal_renders_under_tool_removal_section_with_full_impa
         assert "g_tool" in view["rows"][1]["text"]
         assert "b_op" in view["rows"][2]["text"] and "route:delete" in view["rows"][2]["text"]
         assert "l_gate" in view["rows"][3]["text"] and "gate credential link" in view["rows"][3]["text"]
+
+        # F8: approving through GatewayAccessInbox.decide deletes the file, cleans up DB rows, and sends resolution.
+        request_id = view["request_id"]
+        decided_view = asyncio.run(inbox.decide("owner-1", request_id, "approve"))
+        assert decided_view["status"] == "granted"
+        assert not (instance_root / "control" / "access" / "tools" / "proposed-http-gitea.yaml").exists()
+        assert list((instance_root / "control" / "access" / "tools").glob(".removed-*.tmp")) == []
+        assert store.get("g_tool").status is GrantStatus.REVOKED  # type: ignore[union-attr]
+        assert store.get("b_op").status is GrantStatus.REVOKED  # type: ignore[union-attr]
+        assert store.get_link("l_gate").status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
+        assert any(
+            getattr(envelope.msg_content, "request_id", None) == request_id for _key, envelope in manager.published
+        )
+    finally:
+        inbox.close()
+
+
+def test_tool_removal_inbox_redacts_other_peoples_records_for_non_admin_viewers(tmp_path: Path) -> None:
+    """F3: non-admin member sees overview + own/team rows only; other people's grants, blocks, and links are omitted."""
+
+    from access_catalog.instance_tools import write_instance_tool
+    from access_control.proposals import ACCESS_PROPOSAL_KIND, proposal_summary, with_tool_removal_baselines
+    from custom_messages.contracts.access_v2 import (
+        AccessProposalV1,
+        AccountLinkStatus,
+        AccountLinkV1,
+        GrantKind,
+        GrantV1,
+        LinkOwnerKind,
+        LinkPurpose,
+        ProposedHttpToolV1,
+        ProposedToolRemovalV1,
+        SubjectKind,
+        SubjectRefV1,
+    )
+
+    instance_root = tmp_path / "instance"
+    write_instance_tool(
+        instance_root,
+        ProposedHttpToolV1(
+            tool_id="http:gitea",
+            display_name="Gitea",
+            hosts=("gitea.example.com",),
+            uses_credential=True,
+        ),
+    )
+
+    storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
+    identity = Identity({"owner-1": "owner", "member-1": "member", "member-2": "member"})
+    sessions = {"conv-1": session("member-1", "conv-1", "s-member")}
+    manager = Manager()
+
+    async def emit(_event: Any) -> None:
+        return None
+
+    inbox = GatewayAccessInbox(
+        settings=GatewayAccessInboxSettings(
+            team_id=TEAM,
+            instance_name="test",
+            response_route="gateway-route",
+            lead_agent_type=LEAD,
+            inbox_url="https://ua.example/webchat",
+            instance_root=instance_root,
+            storage_settings=storage,
+            cedar_binary=str(BINARY),
+            authorization_enabled=True,
+        ),
+        memberships=MembershipRoles(identity),
+        manager_client=manager,
+        session_repository=SimpleNamespace(get_session_by_conversation_id=sessions.get),
+        proactive_session=lambda: session("owner-1", "conv-default", "s-default"),
+        emit_delivery_event=emit,
+    )
+    try:
+        requests = inbox.requests()
+        store = requests.service.store
+        now = datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc)
+        owner_ref = SubjectRefV1(kind=SubjectKind.USER, id="owner-1")
+        # Grants: member-1's own, team-wide (for_person_id=None), member-2's private agent grant, member-2's user grant.
+        for grant in (
+            GrantV1(
+                grant_id="g_member1",
+                team_id=TEAM,
+                kind=GrantKind.ACCESS,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/{LEAD}"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.READ,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id="member-1",
+            ),
+            GrantV1(
+                grant_id="g_teamwide",
+                team_id=TEAM,
+                kind=GrantKind.ACCESS,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/{LEAD}"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.READ,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id=None,
+            ),
+            GrantV1(
+                grant_id="g_member2_secret",
+                team_id=TEAM,
+                kind=GrantKind.ACCESS,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/{LEAD}"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.FULL,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id="member-2",
+            ),
+            GrantV1(
+                grant_id="g_user_member2",
+                team_id=TEAM,
+                kind=GrantKind.ACCESS,
+                subject=SubjectRefV1(kind=SubjectKind.USER, id="member-2"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.WRITE,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+            ),
+            GrantV1(
+                grant_id="b_teamwide",
+                team_id=TEAM,
+                kind=GrantKind.BLOCK,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/Worker"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.FULL,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+            ),
+            GrantV1(
+                grant_id="b_member2_private",
+                team_id=TEAM,
+                kind=GrantKind.BLOCK,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/Worker"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.FULL,
+                lifetime=GrantLifetime.TASK,
+                task_id="task-m2",
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id="member-2",
+            ),
+        ):
+            store.create(grant)
+
+        # Links: team account, member-1's personal link, member-2's personal link.
+        for link in (
+            AccountLinkV1(
+                link_id="l_team",
+                team_id=TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.TEAM,
+                owner_id=TEAM,
+                purpose=LinkPurpose.ACCOUNT,
+                credential_key="cred_team",
+                status=AccountLinkStatus.ACTIVE,
+                created_by=owner_ref,
+                created_at_utc=now,
+            ),
+            AccountLinkV1(
+                link_id="l_member1",
+                team_id=TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id="member-1",
+                purpose=LinkPurpose.ACCOUNT,
+                credential_key="cred_m1",
+                status=AccountLinkStatus.ACTIVE,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="member-1"),
+                created_at_utc=now,
+            ),
+            AccountLinkV1(
+                link_id="l_member2_secret",
+                team_id=TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id="member-2",
+                purpose=LinkPurpose.ACCOUNT,
+                credential_key="cred_m2",
+                status=AccountLinkStatus.ACTIVE,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="member-2"),
+                created_at_utc=now,
+            ),
+        ):
+            store.create_link(link)
+
+        member1 = inbox.person("member-1")
+        assert member1 is not None
+        proposal = with_tool_removal_baselines(
+            AccessProposalV1(
+                title="Remove Gitea",
+                reason="Retired.",
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea"),),
+            ),
+            instance_root=instance_root,
+            catalog=requests.service.catalog,
+        )
+        compiled = inbox.proposals.compiler(requests).compile(proposal, person=member1, task_id="task-m1")
+        store.save_plan(TEAM, "chg_rm_priv", ACCESS_PROPOSAL_KIND, compiled.digest, proposal.model_dump(mode="json"), at=now)
+        outcome = requests.submit_change(
+            requester=LEAD_AGENT,
+            person=member1,
+            proposal=ChangeProposalV1(
+                kind=ACCESS_PROPOSAL_KIND,
+                change_id="chg_rm_priv",
+                plan_digest=compiled.digest,
+                title=proposal.title,
+                summary=proposal_summary(compiled.rows),
+                effect=tuple(row.text[:1000] for row in compiled.rows[:40]),
+                items=compiled.rows,
+            ),
+            reason=proposal.reason,
+            task_id="task-m1",
+            conversation_id="conv-1",
+        )
+        assert outcome.request is not None
+        request_id = outcome.request.request_id
+
+        # Administrator sees every detail row and effect line.
+        [admin_view] = asyncio.run(inbox.inbox("owner-1"))["reviews"]
+        assert admin_view["can_decide"] is True
+        admin_text = "\n".join(row["text"] for row in admin_view["rows"])
+        admin_effect = "\n".join(admin_view["effect"])
+        for secret_id in ("g_member2_secret", "g_user_member2", "b_member2_private", "l_member2_secret"):
+            assert secret_id in admin_text and secret_id in admin_effect
+
+        # Non-admin member sees overview + own/team rows only, in BOTH inbox() and review(), rows AND effect.
+        [member_inbox_view] = asyncio.run(inbox.inbox("member-1"))["reviews"]
+        member_direct_view = asyncio.run(inbox.review("member-1", request_id))
+        assert member_direct_view is not None
+        for view in (member_inbox_view, member_direct_view):
+            assert view["can_decide"] is False
+            rows_text = "\n".join(row["text"] for row in view["rows"])
+            effect_text = "\n".join(view["effect"])
+            assert "Remove web API tool Gitea (http:gitea)" in rows_text
+            for visible_id in ("g_member1", "g_teamwide", "b_teamwide", "l_team", "l_member1"):
+                assert visible_id in rows_text and visible_id in effect_text
+            for hidden_id in ("g_member2_secret", "g_user_member2", "b_member2_private", "l_member2_secret", "member-2"):
+                assert hidden_id not in rows_text
+                assert hidden_id not in effect_text
     finally:
         inbox.close()

@@ -197,6 +197,39 @@ def opened_file(root: Path, parts: tuple[str, ...]) -> Iterator[tuple[int, os.st
         os.close(descriptor)
 
 
+@contextmanager
+def opened_staged_file(root: Path, parts: tuple[str, ...], *, max_links: int = 2) -> Iterator[tuple[int, os.stat_result]]:
+    """Open a regular staging file without following links, allowing up to ``max_links`` hard links.
+
+    Restoring a staged removal links the staging inode back to its target name
+    before unlinking the staging name, so a crash between those two calls leaves
+    ``st_nlink == 2``.
+    """
+
+    folder_parts, name = _split(_checked_parts(parts), root)
+    shown = _display(root, parts)
+    directory = open_directory(root, folder_parts)
+    try:
+        try:
+            descriptor = os.open(name, _FILE_READ_FLAGS, dir_fd=directory)
+        except OSError as exc:
+            raise _open_error(exc, name, directory, shown) from exc
+    finally:
+        os.close(directory)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafePath(f"Not a regular file: {shown}", reason=REASON_NOT_REGULAR_FILE)
+        if info.st_nlink > max_links:
+            raise UnsafePath(
+                f"Files with more than {max_links} hard links are not opened: {shown}.",
+                reason=REASON_SEVERAL_LINKS,
+            )
+        yield descriptor, info
+    finally:
+        os.close(descriptor)
+
+
 def read_bytes(root: Path, parts: tuple[str, ...], *, max_bytes: int | None = None) -> bytes:
     """The contents of ``root/parts``; larger than ``max_bytes`` is refused."""
 
@@ -468,6 +501,118 @@ def remove_file(
         os.close(directory)
 
 
+def move_file(
+    root: Path,
+    source_parts: tuple[str, ...],
+    destination_parts: tuple[str, ...],
+    *,
+    expected_identity: tuple[int, int, int, int] | None = None,
+) -> bool:
+    """Move a single-link regular file atomically without following links or overwriting an existing destination.
+
+    Returns ``True`` when the file was renamed and ``False`` when it was left
+    in place because ``expected_identity`` no longer matched.
+    """
+
+    source_folder, source_name = _split(_checked_parts(source_parts), root)
+    destination_folder, destination_name = _split(_checked_parts(destination_parts), root)
+    shown = _display(root, source_parts)
+    source = open_directory(root, source_folder)
+    try:
+        try:
+            info = os.stat(source_name, dir_fd=source, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise UnsafePath(f"Not found: {shown}", reason=REASON_NOT_FOUND) from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise UnsafePath(f"A link is not moved through this path: {shown}", reason=REASON_LINK)
+        _single_link_regular(info, shown)
+        if expected_identity is not None and (
+            info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
+        ) != expected_identity:
+            return False
+        destination = open_directory(root, destination_folder)
+        try:
+            try:
+                os.stat(destination_name, dir_fd=destination, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                target = _display(root, destination_parts)
+                raise UnsafePath(f"Already exists: {target}", reason=REASON_DESTINATION_EXISTS)
+            try:
+                os.rename(source_name, destination_name, src_dir_fd=source, dst_dir_fd=destination)
+            except FileNotFoundError as exc:
+                raise UnsafePath(f"Not found: {shown}", reason=REASON_NOT_FOUND) from exc
+            except OSError as exc:
+                target = _display(root, destination_parts)
+                raise UnsafePath(f"Cannot move {shown} to {target}: {exc.strerror}", reason=REASON_OPEN_FAILED) from exc
+            return True
+        finally:
+            os.close(destination)
+    finally:
+        os.close(source)
+
+
+def restore_staged_file(
+    root: Path,
+    staging_parts: tuple[str, ...],
+    target_parts: tuple[str, ...],
+    *,
+    expected_device: int,
+    expected_inode: int,
+) -> None:
+    """Restore a staged regular file to ``target_parts`` without following links or overwriting anything.
+
+    Uses ``os.link`` followed by ``os.unlink`` of the staging name so an
+    existing target entry (file, link, or folder) always fails atomically with
+    ``REASON_DESTINATION_EXISTS`` and is never overwritten.
+    """
+
+    staging_folder, staging_name = _split(_checked_parts(staging_parts), root)
+    target_folder, target_name = _split(_checked_parts(target_parts), root)
+    shown_staging = _display(root, staging_parts)
+    shown_target = _display(root, target_parts)
+    source = open_directory(root, staging_folder)
+    try:
+        try:
+            info = os.stat(staging_name, dir_fd=source, follow_symlinks=False)
+        except FileNotFoundError as exc:
+            raise UnsafePath(f"Not found: {shown_staging}", reason=REASON_NOT_FOUND) from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise UnsafePath(f"A link is not restored as a staged file: {shown_staging}", reason=REASON_LINK)
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafePath(f"Not a regular file: {shown_staging}", reason=REASON_NOT_REGULAR_FILE)
+        if (info.st_dev, info.st_ino) != (expected_device, expected_inode):
+            raise UnsafePath(
+                f"Staged file identity does not match: {shown_staging}",
+                reason=REASON_OPEN_FAILED,
+            )
+        destination = open_directory(root, target_folder)
+        try:
+            try:
+                os.link(
+                    staging_name,
+                    target_name,
+                    src_dir_fd=source,
+                    dst_dir_fd=destination,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                raise UnsafePath(f"Already exists: {shown_target}", reason=REASON_DESTINATION_EXISTS) from None
+            except OSError as exc:
+                raise UnsafePath(
+                    f"Cannot restore {shown_target}: {exc.strerror}", reason=REASON_OPEN_FAILED
+                ) from exc
+        finally:
+            os.close(destination)
+        try:
+            os.unlink(staging_name, dir_fd=source)
+        except FileNotFoundError:
+            pass
+    finally:
+        os.close(source)
+
+
 def move_directory(
     source_root: Path,
     source_parts: tuple[str, ...],
@@ -635,12 +780,15 @@ __all__ = [
     "folder_bytes",
     "list_directory",
     "move_directory",
+    "move_file",
     "open_directory",
     "open_root",
     "opened_file",
+    "opened_staged_file",
     "read_bytes",
     "remove_directory",
     "remove_file",
+    "restore_staged_file",
     "writable_file",
     "write_bytes",
     "write_bytes_exclusive",

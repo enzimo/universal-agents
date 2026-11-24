@@ -19,6 +19,7 @@ import hashlib
 import ipaddress
 import logging
 import os
+import secrets
 import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -459,21 +460,64 @@ def _hash_open_file(descriptor: int) -> str:
     return digest.hexdigest()
 
 
+def _open_verified_for_removal(
+    directory: Path,
+    filename: str,
+    tool_id: str,
+    expected_sha256: str,
+    *,
+    expected_dev_ino: tuple[int, int] | None = None,
+) -> tuple[int, int, int, int]:
+    """Open ``filename`` without following links, verify its SHA-256 (and optional inode), and return its identity."""
+
+    path = directory / filename
+    try:
+        with safe_open.opened_file(directory, (filename,)) as (descriptor, info):
+            current_sha256 = _hash_open_file(descriptor)
+            identity = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+    except safe_open.UnsafePath as exc:
+        logger.warning(
+            "Refused to remove a tool file that changed or became unsafe. "
+            "event=instance_tool_remove_conflict tool_id=%s path=%s reason=%s",
+            tool_id,
+            path,
+            exc.reason,
+        )
+        raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.") from exc
+    if current_sha256 != expected_sha256 or (
+        expected_dev_ino is not None and (identity[0], identity[1]) != expected_dev_ino
+    ):
+        logger.warning(
+            "Refused to remove a tool file that changed after journaling. "
+            "event=instance_tool_remove_conflict tool_id=%s path=%s",
+            tool_id,
+            path,
+        )
+        raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.")
+    return identity
+
+
 def remove_proposed_tool_file(
     instance_root: str | Path,
     tool_id: str,
     *,
     expected_sha256: str,
-    before_remove: Callable[[Path, bytes], None] | None = None,
+    before_remove: Callable[[Path, int, int, bytes, Path], None] | None = None,
     publish: Callable[[Callable[[], None]], None] | None = None,
+    keep_staging: bool = False,
 ) -> Path:
-    """Remove an existing proposal-written tool file without following links if its digest still matches.
+    """Stage-remove an existing proposal-written tool file without following links if its digest still matches.
 
     Reads the existing file, verifies its SHA-256 equals ``expected_sha256``,
-    journals the removal via ``before_remove`` before deleting anything, then
-    re-opens the file, re-verifies its digest, captures its identity, and
-    unlinks it via ``safe_open.remove_file(..., expected_identity=...)`` inside
-    ``publish`` (such as ``decision_effect_transaction``).
+    captures its ``(device, inode)``, journals the removal via ``before_remove``
+    with a claim-unique non-``.yaml`` staging filename (``.removed-<token>.tmp``),
+    then re-verifies digest and inode and atomically renames the file to that
+    staging path inside ``publish`` (such as ``decision_effect_transaction``).
+
+    When ``keep_staging`` is False (standalone callers), the staging file is
+    unlinked immediately after rename; when True (transactional appliers), the
+    caller retains the staging inode for rollback and unlinks it only after the
+    database commit succeeds or reconciliation finds the request ``GRANTED``.
     """
 
     directory = InstanceLayout.at(instance_root).instance_tools_dir
@@ -498,45 +542,31 @@ def remove_proposed_tool_file(
             existing.path,
         )
         raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.")
+    initial_identity = _open_verified_for_removal(directory, filename, tool_id, expected_sha256)
+    expected_dev_ino = (initial_identity[0], initial_identity[1])
+    staging_name = f".removed-{secrets.token_hex(12)}.tmp"
+    staging_path = directory / staging_name
     if before_remove is not None:
-        before_remove(existing.path, existing.raw_bytes)
+        before_remove(existing.path, initial_identity[0], initial_identity[1], existing.raw_bytes, staging_path)
 
     def _commit_remove() -> None:
+        identity = _open_verified_for_removal(
+            directory, filename, tool_id, expected_sha256, expected_dev_ino=expected_dev_ino
+        )
         try:
-            with safe_open.opened_file(directory, (filename,)) as (descriptor, info):
-                current_sha256 = _hash_open_file(descriptor)
-                identity = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+            moved = safe_open.move_file(directory, (filename,), (staging_name,), expected_identity=identity)
         except safe_open.UnsafePath as exc:
             logger.warning(
-                "Refused to remove a tool file that changed or became unsafe. "
+                "Refused to stage-remove a tool file that changed or became unsafe. "
                 "event=instance_tool_remove_conflict tool_id=%s path=%s reason=%s",
                 tool_id,
                 existing.path,
                 exc.reason,
             )
             raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.") from exc
-        if current_sha256 != expected_sha256:
+        if not moved:
             logger.warning(
-                "Refused to remove a tool file that changed after journaling. "
-                "event=instance_tool_remove_conflict tool_id=%s path=%s",
-                tool_id,
-                existing.path,
-            )
-            raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.")
-        try:
-            removed = safe_open.remove_file(directory, (filename,), expected_identity=identity)
-        except safe_open.UnsafePath as exc:
-            logger.warning(
-                "Refused to unlink a tool file that changed or became unsafe. "
-                "event=instance_tool_remove_conflict tool_id=%s path=%s reason=%s",
-                tool_id,
-                existing.path,
-                exc.reason,
-            )
-            raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.") from exc
-        if not removed:
-            logger.warning(
-                "Refused to unlink a tool file whose identity changed concurrently. "
+                "Refused to stage-remove a tool file whose identity changed concurrently. "
                 "event=instance_tool_remove_conflict tool_id=%s path=%s reason=identity_changed",
                 tool_id,
                 existing.path,
@@ -547,6 +577,12 @@ def remove_proposed_tool_file(
         publish(_commit_remove)
     else:
         _commit_remove()
+    if not keep_staging:
+        try:
+            safe_open.remove_file(directory, (staging_name,))
+        except safe_open.UnsafePath as exc:
+            if exc.reason != safe_open.REASON_NOT_FOUND:
+                raise
     logger.warning(
         "A proposed tool's catalog file was removed. event=instance_tool_removed tool_id=%s path=%s",
         tool_id,
@@ -555,10 +591,18 @@ def remove_proposed_tool_file(
     return existing.path
 
 
-def restore_removed_instance_tool(path: Path, previous_bytes: bytes) -> None:
-    """Restore a removed proposed tool file atomically without overwriting an existing file."""
+def restore_removed_instance_tool(
+    path: Path, staging_path: Path, *, expected_device: int, expected_inode: int
+) -> None:
+    """Restore a staged removed proposed tool file atomically without overwriting an existing file."""
 
-    safe_open.write_bytes_exclusive(path.parent, (path.name,), previous_bytes)
+    safe_open.restore_staged_file(
+        path.parent,
+        (staging_path.name,),
+        (path.name,),
+        expected_device=expected_device,
+        expected_inode=expected_inode,
+    )
     logger.warning(
         "A removed proposed tool's catalog file was restored. event=instance_tool_restored path=%s",
         path,
