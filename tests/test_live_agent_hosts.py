@@ -86,15 +86,17 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
 
         # The agent's process: its host joins on the agent's connection, and the agent gets a session.
         agent_host = AgentProcessHost(layout, profile, TEAM, handlers={"tasks.list": tasks_list})
-        agent_host.attach(_agent("researcher_1"), agent_type="Researcher", definition=DEFINITION,
-                          nc=await connect(stack, broker, RUNTIME))
-        await _until(lambda: "researcher_1" in agent_host.agents and agent_host.agents["researcher_1"].subscription)
+        agent_host.ensure_started(await connect(stack, broker, RUNTIME))
+        await agent_host.wait_for_usable_partition(timeout=15)
+        r1 = agent_host.draw_agent_id(prefix="researcher")
+        agent_host.attach(_agent(r1), agent_type="Researcher", definition=DEFINITION, nc=None)
+        await _until(lambda: r1 in agent_host.agents and agent_host.agents[r1].subscription)
 
-        body = {"request_id": "cmd-1", "agent": "researcher_1", "offset": 0, "limit": 20}
+        body = {"request_id": "cmd-1", "agent": r1, "offset": 0, "limit": 20}
         reply = await gateway.command("tasks.list", body, person_ref=PERSON)
         assert reply.raw["body"].get("queue_digest") == "digest-1", reply.raw["body"]
         # The agent saw the gateway's token, relayed by the team services.
-        assert asked == [("researcher_1", PERSON, frozenset({"team_services"}))]
+        assert asked == [(r1, PERSON, frozenset({"team_services"}))]
 
         # A slow relay must not hold the team's session request queue.
         waiting = asyncio.create_task(gateway.command("tasks.list", {**body, "request_id": "slow-command"},
@@ -102,9 +104,11 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
         extra = AgentProcessHost(layout, extra_profile, TEAM)
         try:
             await asyncio.wait_for(slow_started.wait(), timeout=3)
-            extra.attach(_agent("another_researcher"), agent_type="Researcher", definition=DEFINITION,
-                         nc=await connect(stack, broker, extra_profile.runtime))
-            await _until(lambda: _has_session(extra, "another_researcher"), timeout=3)
+            extra.ensure_started(await connect(stack, broker, extra_profile.runtime))
+            await extra.wait_for_usable_partition(timeout=10)
+            extra_id = extra.draw_agent_id(prefix="another")
+            extra.attach(_agent(extra_id), agent_type="Researcher", definition=DEFINITION, nc=None)
+            await _until(lambda: _has_session(extra, extra_id), timeout=5)
             assert not waiting.done()
         finally:
             release_slow.set()
@@ -112,15 +116,15 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
             await extra.stop()
 
         # The agent leaves: its session closes, and a command for it is answered plainly.
-        await asyncio.wrap_future(agent_host.detach("researcher_1"))
+        await asyncio.wrap_future(agent_host.detach(r1))
         gone = await gateway.command("tasks.list", {**body, "request_id": "cmd-2"}, person_ref=PERSON)
         assert gone.raw["body"] == {"outcome": "runtime_error", "message": AGENT_UNAVAILABLE_TEXT}
 
         # A host whose run stopped without closing its agent's session: its next start closes it, so its
         # one session is free again for the new run's agent (agent ids are new at every start).
-        agent_host.attach(_agent("researcher_2"), agent_type="Researcher", definition=DEFINITION,
-                          nc=await connect(stack, broker, RUNTIME))
-        await _until(lambda: "researcher_2" in agent_host.agents and agent_host.agents["researcher_2"].subscription)
+        r2 = agent_host.draw_agent_id(prefix="researcher")
+        agent_host.attach(_agent(r2), agent_type="Researcher", definition=DEFINITION, nc=None)
+        await _until(lambda: r2 in agent_host.agents and agent_host.agents[r2].subscription)
         # Upkeep rewrites placements under the team services' renewed certificate.
         # The session keeps its original placement revision.
         from team_services.sessions import SessionService
@@ -130,10 +134,12 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
         await sessions.maintain(TEAM)
         agent_host._stop.set()  # the process stops without closing its sessions
         restarted = AgentProcessHost(layout, profile, TEAM, handlers={"tasks.list": tasks_list})
-        restarted.attach(_agent("researcher_3"), agent_type="Researcher", definition=DEFINITION,
-                         nc=await connect(stack, broker, RUNTIME))
-        await _until(lambda: "researcher_3" in restarted.agents and restarted.agents["researcher_3"].subscription)
-        relayed = await gateway.command("tasks.list", {**body, "request_id": "cmd-3", "agent": "researcher_3"},
+        restarted.ensure_started(await connect(stack, broker, RUNTIME))
+        await restarted.wait_for_usable_partition(timeout=15)
+        r3 = restarted.draw_agent_id(prefix="researcher")
+        restarted.attach(_agent(r3), agent_type="Researcher", definition=DEFINITION, nc=None)
+        await _until(lambda: r3 in restarted.agents and restarted.agents[r3].subscription)
+        relayed = await gateway.command("tasks.list", {**body, "request_id": "cmd-3", "agent": r3},
                                         person_ref=PERSON)
         assert relayed.raw["body"]["outcome"] == "ok"
 
@@ -396,15 +402,23 @@ async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_u
         await js.add_stream(StreamConfig(name="WORK_Researcher", subjects=["work.Researcher"],
                                          retention=RetentionPolicy.WORK_QUEUE))
 
-        a_worker, b_worker = _QueueWorker("researcher_a", js, runs=True), _QueueWorker("researcher_b", js, runs=False)
         a_host = AgentProcessHost(layout, a_profile, TEAM)
-        b_host = AgentProcessHost(layout, b_profile, TEAM, handlers={"tasks.list": b_worker.tasks_list},
-                                  drain_agent=b_worker.drain, holds_work=b_worker.holds_work, drain_poll_seconds=0.2)
-        a_host.attach(a_worker.agent, agent_type="Researcher", definition=DEFINITION,
-                      nc=await connect(stack, broker, a_profile.runtime))
-        b_host.attach(b_worker.agent, agent_type="Researcher", definition=DEFINITION,
-                      nc=await connect(stack, broker, b_profile.runtime))
-        await _until(lambda: _has_session(a_host, "researcher_a") and _has_session(b_host, "researcher_b"))
+        b_host = AgentProcessHost(layout, b_profile, TEAM, drain_poll_seconds=0.2)
+        a_nc = await connect(stack, broker, a_profile.runtime)
+        b_nc = await connect(stack, broker, b_profile.runtime)
+        a_host.ensure_started(a_nc)
+        b_host.ensure_started(b_nc)
+        await a_host.wait_for_usable_partition(timeout=15)
+        await b_host.wait_for_usable_partition(timeout=15)
+        a_id = a_host.draw_agent_id(prefix="ra")
+        b_id = b_host.draw_agent_id(prefix="rb")
+        a_worker, b_worker = _QueueWorker(a_id, js, runs=True), _QueueWorker(b_id, js, runs=False)
+        b_host.handlers["tasks.list"] = b_worker.tasks_list
+        b_host.drain_agent = b_worker.drain
+        b_host.holds_work = b_worker.holds_work
+        a_host.attach(a_worker.agent, agent_type="Researcher", definition=DEFINITION, nc=a_nc)
+        b_host.attach(b_worker.agent, agent_type="Researcher", definition=DEFINITION, nc=b_nc)
+        await _until(lambda: _has_session(a_host, a_id) and _has_session(b_host, b_id))
         takers = [asyncio.create_task(worker.take(stop)) for worker in (a_worker, b_worker)]
 
         # B takes the first task and holds it; then A takes tasks too.
@@ -435,15 +449,16 @@ async def test_a_host_on_another_contract_drains_hands_back_its_task_and_gives_u
             # No new work: the next task goes to A. No new placement: an agent attached to B now gets no session.
             await js.publish("work.Researcher", b"task-2")
             await _until(lambda: a_worker.ran == ["task-2"])
-            late = _agent("researcher_late")
+            late_id = "researcher_late"
+            late = _agent(late_id)
             b_host.attach(late, agent_type="Researcher", definition=DEFINITION, nc=None)
             await asyncio.sleep(0.5)
-            assert b_host.agents["researcher_late"].session is None
+            assert b_host.agents[late_id].session is None
             placements = await list_keys(services_host.nc.jetstream(), "UA1_PLACEMENT")
-            assert f"{TEAM}.researcher_late" not in placements
+            assert f"{TEAM}.{late_id}" not in placements
 
             # A person's command about the task B holds still reaches it, signed as its agent.
-            body = {"request_id": "cmd-1", "agent": "researcher_b", "offset": 0, "limit": 20}
+            body = {"request_id": "cmd-1", "agent": b_id, "offset": 0, "limit": 20}
             reply = await gateway.command("tasks.list", body, person_ref=PERSON)
             assert reply.raw["body"]["queue_digest"] == "held-1", reply.raw["body"]
 

@@ -6557,13 +6557,33 @@ renamed secrets included). The authority:
   any contract, when this revision can read it, with a certificate that grants no agents,
   so a host on another contract can hand its agents over;
 - keeps every certificate it issued, so a restarted authority still recognises the
-  hosts that renew.
+  hosts that renew;
+- enforces partition-based credentials and key lifecycles (`installation_authority/service.py`,
+  `installation_authority/revocation.py`, `custom_transport/protocol1/nats_jwt.py`): joins and
+  renewals name only teams with streams (`team_not_allowed` otherwise, FA-6) and enforce
+  `single_team_roles` (every role except `gateway` and `installation_authority` serves one
+  team); `host.renew` accepts `partitions` and issues only partitions whose verified
+  `partition_owner` record is `owned` by that host (refusing unowned or `released` ones as
+  `invalid_body`), requires `new_nats_public_key` when a host gives up a partition or pool or
+  presents a revoked key, refuses reissuing credentials for any revoked NATS key or bootstrap
+  key (CR-1/S1), checks exact NATS user JWT byte size against `max_credential_bytes` (65,536,
+  using per-role filling in `custom_messages.wire.permissions.roles_permissions`, S3:
+  `credential_too_large` on join, `not_allowed` on renewal), and revokes departed/retired NATS
+  keys via `OperatorModeRevoker` (`$SYS.REQ.CLAIMS.UPDATE` with an operator signing key on the
+  bundled server, flushing step-3 renewal replies first) or falls back to
+  `LifetimeWaitRevoker` on external servers using `transport.nats.credential_lifetime_seconds`
+  (default 900 s, bounded 60–86,400 s, measured on nats-server 2.15.1 and excluded from team
+  transfer as an installation setting). Installations may also list several distinct gateway
+  runtimes in `expected-hosts.json` (`assistant_gateway/message_host.py`,
+  `docker/message_hosts.py`, decision 102), each scoped to its own team subset and per-team
+  routes (`edges`), while `"gateway"` stays the default single-gateway runtime.
 
 Hosts join with `custom_transport.protocol1.joining`, which waits for an authority that
 is still starting and checks the returned certificate against the bundle's authority
-keys. The hosts still share one NATS login, so a join returns no NATS credential. That
-login therefore needs every right a host uses; for an external NATS server, the Docker
-guide's "Message host trust" says how to set it up.
+keys. Normal startup still shares one NATS login until step 11 switches processes to per-process
+user JWTs, so a join returns no NATS credential unless the authority is configured with an
+account signing key. That shared login therefore needs every right a host uses; for an external
+NATS server, the Docker guide's "Message host trust" says how to set it up.
 
 **Every host's upkeep** (`custom_transport.protocol1.host_runtime.MessageHost`): it joins,
 reads the authority's newest revocations record at start and every half hour, renews its
@@ -6673,11 +6693,32 @@ They serve the team's address (`svc.team`) and answer, so far:
 
 - `sessions.open`: the host's certificate must allow the agent's type and have room under
   its session limit, and the agent must not run on another host (agents stay on their
-  host; `already_placed` names it). The placement is written with compare-and-set, under a
-  sequence that never goes back, also after a close deleted the key (its signed sequence is
-  the placement's fencing token); the session, naming the placement's revision, is signed
-  into `UA1_CERTS`, and its start is the placement's `placed_at`, which each new placement
-  of an agent moves later. Only the team lead's type on a lead host gets the `lead` role;
+  host; `already_placed` names it). Under the same mutation lock (`SessionService._changing`,
+  shared with `team_services.partitions.PartitionService`, CR-2), `sessions.open` re-reads
+  the agent's partition ownership record (`<team>.partition.<p>` in `UA1_PLACEMENT`) before
+  its placement compare-and-set and refuses unowned, foreign-owned or `released` partitions
+  with `partition_not_owned` naming the partition. The placement is written with
+  compare-and-set, under a sequence that never goes back, also after a close deleted the
+  key (its signed sequence is the placement's fencing token); the session, naming the
+  placement's revision, is signed into `UA1_CERTS`, and its start is the placement's
+  `placed_at`, which each new placement of an agent moves later. Only the team lead's type
+  on a lead host gets the `lead` role;
+- **Partition ownership and four-step handovers** (`team_services.partitions.PartitionService`,
+  decisions 92 and 96–100): team services maintain signed `partition_owner` records for
+  partitions `0..N-1`, assign empty partitions balanced across live lead/worker hosts after
+  checking credential fit with `custom_messages.wire.permissions.roles_permissions` and
+  `nats_jwt.user_credential_bytes`, never move an occupied partition without a handover or
+  cut-off/retired release, and execute the four-step handover (1: `released` via CAS, one
+  connected handover at a time per host; 2: old host drains and hands back within
+  `handover_seconds`; 3: old host renews with `new_nats_public_key` omitting the partition
+  and authority revokes the old key where supported; 4: `owned` written for the new host
+  with group placement moves after revocation or `credential_lifetime_seconds +
+  clock_skew_seconds`). Cut-off and retired hosts release all partitions at once, while a
+  host on another contract keeps occupied partitions until its agents finish draining so
+  control commands stay reachable. A forged host record in `UA1_HOSTS` cannot immediately
+  evict a live host before its last verified liveness record expires. If a receiving host
+  reports `partition_credential_too_large` in `UA1_HOSTS`, team services reassign the
+  partition to another fitting host or leave it unowned;
 - `sessions.renew` and `sessions.close`, for sessions on the asking host. A renewal is
   refused (`not_allowed`) for a session that has ended or whose placement is no longer the
   one it was opened for (its host and `placed_at`), so a session closed earlier never comes
@@ -6836,10 +6877,20 @@ Every other operation is answered `unsupported` at once; today's team operations
 run in the team lead's process and move here one family at a time.
 
 
-**Agent processes as hosts** (`custom_agents.agent_host`): the launcher starts the team
+**Agent processes as hosts** (`custom_agents.agent_host`,
+`custom_transport.protocol1.host_partitions`): the launcher starts the team
 lead's process as host `lead` (roles `lead_host` and `worker_host`) and each startup agent's
 process as a bounded host id derived from its label and a SHA-256 suffix (role `worker_host`), lists them for the authority, and tells
-each process its host id (`strands_main.py --host-runtime`). Every agent in the team lead's
+each process its host id (`strands_main.py --host-runtime`). Each host watches verified
+`partition_owner` records through `HostPartitionTracker` (counting `owned` records while
+hosts share one NATS login, and gating on partitions named in the current credential once
+per-process credentials are issued), draws new auto-generated agent ids (`<= 32` characters,
+preferring least-filled owned partitions, decision 98) across the team lead, startup agents
+and dynamically launched workers (`custom_agents/agent_instantiation_service.py`), and
+executes handover steps 2 and 3 (draining/handing back held work within `handover_seconds`,
+closing sessions as `handed_over`, rotating its NATS key on renewal, and excluding any
+partition whose renewal hits `not_allowed` credential size while reporting
+`partition_credential_too_large` in `UA1_HOSTS`). Every agent in the team lead's
 process has its own NATS connection and event loop, so the host joins once, on the first
 agent's connection, and each agent opens its own session when it connects
 (`sessions.open`, with its definition digest) and closes it as it leaves. Attaching never

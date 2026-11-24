@@ -208,6 +208,9 @@ class PartitionService:
         )
         self._seen_live: set[str] = set()
         self._first_missing_at: dict[str, datetime] = {}
+        # Last verified host liveness record and its expiry per runtime, so a forged/tampered
+        # record written under the shared NATS login cannot immediately evict a live host.
+        self._last_verified_hosts: dict[str, tuple[LivePartitionHost, datetime]] = {}
         self._planned_targets: dict[int, str] = {}
         # Maps (partition, host, assigned_at) -> highest host membership_epoch observed in UA1_CERTS
         # at release time, so clock skew between authority and team services cannot exclude a pre-release
@@ -677,7 +680,13 @@ class PartitionService:
                 continue
             # Prefer empty partitions first so they clear cleanly before agent-bearing partitions.
             occupied = {agent.partition for agent in placements if agent.host == host.runtime}
-            ordered = [p for p in owned_parts if p not in occupied] + [p for p in owned_parts if p in occupied]
+            if host.other_contract:
+                # A host on another contract drains its own agents and keeps them reachable on
+                # ctl.agent.<agent> while held work finishes (contract README "Versions"); release
+                # only empty partitions until its agents close and vacate the remaining ones.
+                ordered = [p for p in owned_parts if p not in occupied]
+            else:
+                ordered = [p for p in owned_parts if p not in occupied] + [p for p in owned_parts if p in occupied]
             for partition in ordered:
                 started = await self._start_connected_handover_locked(
                     partition,
@@ -1427,7 +1436,10 @@ class PartitionService:
 
     async def _read_live_hosts(self, now: datetime) -> dict[str, LivePartitionHost]:
         hosts: dict[str, LivePartitionHost] = {}
+        seen_keys: set[str] = set()
+        skew = timedelta(seconds=CLOCK_SKEW_SECONDS)
         for key in await self.records.keys(HOST_RECORD, ""):
+            seen_keys.add(key)
             try:
                 stored = await self.records.read_report(HOST_RECORD, key, now=now)
             except FrameRefused as refused:
@@ -1439,6 +1451,15 @@ class PartitionService:
                         refused.code,
                         refused.at,
                     )
+                    # Under the shared NATS login another process can overwrite a host's key with a
+                    # forged record; keep the host's last verified liveness until its own expiry passes.
+                    cached = self._last_verified_hosts.get(key)
+                    if cached is not None:
+                        prev_host, prev_expires = cached
+                        if now <= prev_expires + skew and not self.trust.store.revoked(prev_host.certificate):
+                            hosts[key] = prev_host
+                else:
+                    self._last_verified_hosts.pop(key, None)
                 continue
             if stored is None or stored.record.signer is None:
                 continue
@@ -1446,24 +1467,33 @@ class PartitionService:
             if cert.runtime != key or self.team not in cert.teams or not (cert.roles & PARTITION_OWNING_ROLES):
                 continue
             if self.trust.store.revoked(cert):
+                self._last_verified_hosts.pop(key, None)
                 continue
+            raw_expires = stored.record.document.expires_at
+            expires_at = parse_timestamp(raw_expires) if isinstance(raw_expires, str) else now
             if stored.record.other_contract:
-                hosts[key] = LivePartitionHost(
+                live_host = LivePartitionHost(
                     runtime=key,
                     certificate=cert,
                     state="draining",
                     other_contract=True,
                     refused_partitions=frozenset(),
                 )
+                hosts[key] = live_host
+                self._last_verified_hosts[key] = (live_host, expires_at)
                 continue
             body: Any = stored.record.body
-            hosts[key] = LivePartitionHost(
+            live_host = LivePartitionHost(
                 runtime=key,
                 certificate=cert,
                 state=str(body.state),
                 other_contract=False,
                 refused_partitions=parse_refused_partitions(getattr(body, "components", ())),
             )
+            hosts[key] = live_host
+            self._last_verified_hosts[key] = (live_host, expires_at)
+        for stale in [k for k in self._last_verified_hosts if k not in seen_keys]:
+            self._last_verified_hosts.pop(stale, None)
         return hosts
 
     async def _read_ownership(self, now: datetime) -> tuple[dict[int, PartitionRecord], dict[int, int]]:

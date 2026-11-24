@@ -1334,3 +1334,73 @@ async def test_post_restart_host_lost_fallback_handles_clock_skew_pre_release_re
     cluster.write_liveness("worker-2")
     await restarted.reconcile()
     assert (await cluster.owners())[p2] == (OWNED, "worker-2")
+
+
+@pytest.mark.asyncio
+async def test_forged_host_liveness_record_cannot_immediately_evict_live_host_partitions(tmp_path: Path) -> None:
+    """Under shared NATS login, an attacker overwriting UA1_HOSTS/<victim> with a forged record
+    must not strip <victim>'s partitions while its last verified liveness record has not expired."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=4)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    _sessions, partitions = cluster.make_services(credentials_enforced=False)
+    await partitions.reconcile()
+    w1_parts = {p for p, (state, h) in (await cluster.owners()).items() if state == OWNED and h == "worker-1"}
+    assert len(w1_parts) == 2
+
+    # Attacker overwrites worker-1's key in UA1_HOSTS with a forged/invalid record.
+    cluster.records._rev += 1
+    cluster.records._bucket("host")["worker-1"] = _Entry(cluster.records._rev, b'{"record": "host", "bad": true}')
+    await partitions.reconcile()
+    # worker-1's last verified liveness record has not expired yet, so it keeps its partitions.
+    owners_after_forgery = await cluster.owners()
+    for p in w1_parts:
+        assert owners_after_forgery[p] == (OWNED, "worker-1")
+
+    # Once worker-1's last verified liveness record genuinely expires past clock skew, it is treated as lost.
+    cluster.advance(100)
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    owners_after_expiry = await cluster.owners()
+    assert all(state == OWNED and h == "worker-2" for state, h in owners_after_expiry.values())
+
+
+@pytest.mark.asyncio
+async def test_other_contract_host_releases_empty_partitions_but_keeps_occupied_until_agents_close(
+    tmp_path: Path,
+) -> None:
+    """A host running another contract drains its own agents and keeps them reachable on
+    ctl.agent.<agent> while held work finishes; PartitionService releases its empty partitions
+    immediately but leaves occupied ones until its agents close."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=4)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    sessions, partitions = cluster.make_services(credentials_enforced=False)
+    await partitions.reconcile()
+
+    w1_parts = sorted(p for p, (state, h) in (await cluster.owners()).items() if state == OWNED and h == "worker-1")
+    assert len(w1_parts) == 2
+    occupied_p, empty_p = w1_parts[0], w1_parts[1]
+    aid = cluster.agent_in_partition(occupied_p)
+    opened = await sessions.open(cluster.open_frame("worker-1", aid, "researcher"))
+    assert opened["outcome"] == "ok"
+
+    # worker-1 switches to another contract digest (other_contract=True).
+    cluster.write_liveness("worker-1", contract_sha256="2" * 64)
+    await partitions.reconcile()
+    owners_draining = await cluster.owners()
+    assert owners_draining[empty_p] == (OWNED, "worker-2")
+    assert owners_draining[occupied_p] == (OWNED, "worker-1")
+
+    # Once worker-1's agent finishes and closes its session, occupied_p becomes empty and moves to worker-2.
+    session_id = opened["session"]["body"]["session"]
+    closed = await sessions.close(cluster.close_frame("worker-1", session_id, reason="exited"))
+    assert closed["outcome"] == "ok"
+    await partitions.reconcile()
+    assert (await cluster.owners())[occupied_p] == (OWNED, "worker-2")

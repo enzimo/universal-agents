@@ -107,68 +107,75 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
 
-        # Asked of Researcher-1 by name: sent to its own mailbox, and no worker took it yet (no record).
-        subtask = SimpleNamespace(task=SimpleNamespace(task_id="sub_1"), header=SimpleNamespace(to_routing_path="worker_1"),
-                                  meta=SimpleNamespace(to_agent_name="Researcher-1"))
-        lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True, pending=[subtask])
-        worker = stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False)
         lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
                                      event_handlers={"skills.changed": skills_changed})
         worker_host = AgentProcessHost(layout, worker_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
                                        event_handlers={"skills.changed": skills_changed})
         try:
-            lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION,
-                             nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
-            worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
-                               nc=await connect(stack, broker, WORKER_RUNTIME), state=("idle", True))
+            lead_nc = await connect(stack, broker, LEAD_HOST_RUNTIME)
+            worker_nc = await connect(stack, broker, WORKER_RUNTIME)
+            lead_host.ensure_started(lead_nc)
+            worker_host.ensure_started(worker_nc)
+            await lead_host.wait_for_usable_partition(timeout=15)
+            await worker_host.wait_for_usable_partition(timeout=15)
+            lead_id = lead_host.draw_agent_id(prefix="lead")
+            worker_id = worker_host.draw_agent_id(prefix="worker")
+            # Asked of Researcher-1 by name: sent to its own mailbox, and no worker took it yet (no record).
+            subtask = SimpleNamespace(task=SimpleNamespace(task_id="sub_1"), header=SimpleNamespace(to_routing_path=worker_id),
+                                      meta=SimpleNamespace(to_agent_name="Researcher-1"))
+            lead = stand_in(lead_id, "TeamLead", "TeamArchitect", is_lead=True, pending=[subtask])
+            worker = stand_in(worker_id, "Researcher-1", "Researcher", is_lead=False)
+            lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_nc, state=("idle", True))
+            worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION, nc=worker_nc, state=("idle", True))
 
             # Each directory follows the records: the lead sees the worker by name, the worker sees the lead.
-            await _until(lambda: "worker_1" in lead.known_agents.agent_map and "lead_1" in worker.known_agents.agent_map)
-            assert lead._agent_id_by_name == {"Researcher-1": "worker_1"}
-            assert worker.known_agents.agent_map["lead_1"].is_team_lead is True
+            await _until(lambda: worker_id in lead.known_agents.agent_map and lead_id in worker.known_agents.agent_map)
+            assert lead._agent_id_by_name == {"Researcher-1": worker_id}
+            assert worker.known_agents.agent_map[lead_id].is_team_lead is True
 
             # The lead reads the worker's full status. A worker's own process may not ask (the contract's senders).
-            full = await lead_host.ask("agent.status", {"level": "full"}, "worker_1", sender_agent="lead_1")
+            full = await lead_host.ask("agent.status", {"level": "full"}, worker_id, sender_agent=lead_id)
             assert full["outcome"] == "ok" and full["diagnostic_json"] == '{"llm_model": "model-x"}'
             with pytest.raises(RequestRefused) as refused:
-                await worker_host.ask("agent.status", {"level": "basic"}, "lead_1", sender_agent="worker_1")
+                await worker_host.ask("agent.status", {"level": "basic"}, lead_id, sender_agent=worker_id)
             assert refused.value.code == "wrong_sender"
 
             # Pause and resume, signed as the lead; the worker's record follows.
-            paused = await lead_host.ask("agent.pause", {"request_id": "control-1"}, "worker_1", sender_agent="lead_1")
+            paused = await lead_host.ask("agent.pause", {"request_id": "control-1"}, worker_id, sender_agent=lead_id)
             assert paused == {"outcome": "ok", "state": "paused"} and worker.paused
-            worker_host.report("worker_1", "paused", True)
-            await _until(lambda: lead.known_agents.agent_map["worker_1"].is_paused, timeout=5)
-            resumed = await lead_host.ask("agent.resume", {"request_id": "control-2"}, "worker_1", sender_agent="lead_1")
+            worker_host.report(worker_id, "paused", True)
+            await _until(lambda: lead.known_agents.agent_map[worker_id].is_paused, timeout=5)
+            resumed = await lead_host.ask("agent.resume", {"request_id": "control-2"}, worker_id, sender_agent=lead_id)
             assert resumed == {"outcome": "ok", "state": "resumed"} and not worker.paused
 
             # A task probe answers from the worker's own task records.
-            unknown = await lead_host.ask("task.probe", {"task_id": "sub_1"}, "worker_1", sender_agent="lead_1")
+            unknown = await lead_host.ask("task.probe", {"task_id": "sub_1"}, worker_id, sender_agent=lead_id)
             assert (unknown["known"], unknown["current"]) == (False, False)
             # Any agent may delegate, so a worker in its own process probes too (plan decision 70).
             lead.tasks["delegated_1"] = SimpleNamespace(
                 state="in_progress", task=SimpleNamespace(parent_task_id="requester_parent", task_state=[]))
             lead.task_manager.runtime_state_store = SimpleNamespace(get_task_custody=lambda *_: {
-                "requester_parent": SimpleNamespace(holder_agent_id="worker_1")})
-            held = await worker_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1", sender_agent="worker_1")
+                "requester_parent": SimpleNamespace(holder_agent_id=worker_id)})
+            held = await worker_host.ask("task.probe", {"task_id": "delegated_1"}, lead_id, sender_agent=worker_id)
             assert (held["known"], held["state"]) == (True, "in_progress")
 
-            stranger = stand_in("another_worker", "Researcher-2", "Researcher", is_lead=False)
+            stranger_id = lead_host.draw_agent_id(prefix="another")
+            stranger = stand_in(stranger_id, "Researcher-2", "Researcher", is_lead=False)
             lead_host.attach(stranger, agent_type="Researcher", definition=DEFINITION,
                              nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
             await _until(lambda: lead_host.agents.get(stranger.id) is not None
                          and lead_host.agents[stranger.id].session is not None)
             with pytest.raises(RequestRefused) as denied:
-                await lead_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1", sender_agent=stranger.id)
+                await lead_host.ask("task.probe", {"task_id": "delegated_1"}, lead_id, sender_agent=stranger.id)
             assert denied.value.code == "wrong_sender"
             # Custody moves on requester recovery; the old signed identity loses
             # access and the new one gains it without rewriting delegation metadata.
             lead.task_manager.runtime_state_store = SimpleNamespace(get_task_custody=lambda *_: {
                 "requester_parent": SimpleNamespace(holder_agent_id=stranger.id)})
             with pytest.raises(RequestRefused) as denied:
-                await worker_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1", sender_agent="worker_1")
+                await worker_host.ask("task.probe", {"task_id": "delegated_1"}, lead_id, sender_agent=worker_id)
             assert denied.value.code == "wrong_sender"
-            assert (await lead_host.ask("task.probe", {"task_id": "delegated_1"}, "lead_1",
+            assert (await lead_host.ask("task.probe", {"task_id": "delegated_1"}, lead_id,
                                        sender_agent=stranger.id))["known"] is True
             await asyncio.wrap_future(lead_host.detach(stranger.id))
             await _until(lambda: stranger.id not in lead.known_agents.agent_map)
@@ -179,7 +186,7 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
             worker.current_task = "task_research_1"
             snapshot = await asyncio.to_thread(capture_runtime_restart_impact, lead, "all")
             [seen] = snapshot.known_team_agents
-            assert (seen.agent_id, seen.name, seen.answered) == ("worker_1", "Researcher-1", True)
+            assert (seen.agent_id, seen.name, seen.answered) == (worker_id, "Researcher-1", True)
             assert (seen.is_executing, seen.current_task_id, seen.current_task_age_seconds) == (True, "task_research_1", 7)
             assert snapshot.interrupted_work() == {"task_research_1": "running on Researcher-1"}
             # A worker that does not answer in time is shown as not answering, within the one short wait.
@@ -197,7 +204,7 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
             [silent] = snapshot.known_team_agents
             assert (silent.answered, silent.is_executing) == (False, None)
             assert snapshot.interrupted_work() == {
-                "worker_1#not-answering": "Researcher-1 did not answer, so its work is unknown"}
+                f"{worker_id}#not-answering": "Researcher-1 did not answer, so its work is unknown"}
             released.set()
             worker_host.handlers["agent.status"] = LIVE_CONTROL_HANDLERS["agent.status"]
             worker.current_task = None
@@ -205,13 +212,13 @@ async def test_the_lead_asks_pauses_and_probes_a_worker_and_sees_it_leave(
             # The lead's skill change reaches every agent process once, marked as the lead's.
             body = {"operation": "install", "change_id": "skill_install_0123456789ab", "skill_name": "grill-me",
                     "installed_tree_sha256": "a" * 64}
-            await lead_host.announce("skills.changed", body, sender_agent="lead_1")
-            await _until(lambda: {agent for agent, _, _ in events} == {"lead_1", "worker_1"})
+            await lead_host.announce("skills.changed", body, sender_agent=lead_id)
+            await _until(lambda: {agent for agent, _, _ in events} == {lead_id, worker_id})
             assert all(role == "lead" and got == body for _, role, got in events)
 
             # The worker leaves: the lead fails the subtask it asked Researcher-1 for, and forgets it.
-            await asyncio.wrap_future(worker_host.detach("worker_1"))
-            await _until(lambda: "worker_1" not in lead.known_agents.agent_map)
+            await asyncio.wrap_future(worker_host.detach(worker_id))
+            await _until(lambda: worker_id not in lead.known_agents.agent_map)
             await _until(lambda: lead._fail_subtask_and_reconcile_parent.await_count == 1, timeout=5)
             assert lead._fail_subtask_and_reconcile_parent.await_args.kwargs["subtask_info"] is subtask
         finally:
@@ -256,20 +263,30 @@ async def test_a_worker_on_another_contract_gets_no_new_work_still_answers_probe
         await js.add_stream(StreamConfig(name="WORK_Researcher", subjects=["work.Researcher"],
                                          retention=RetentionPolicy.WORK_QUEUE))
 
-        lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True)
-        ours = _QueueWorker("worker_a", js, runs=True)
-        ours.agent = stand_in("worker_a", "Researcher-A", "Researcher", is_lead=False)
-        theirs = _QueueWorker("worker_b", js, runs=False)
-        theirs.agent = stand_in("worker_b", "Researcher-B", "Researcher", is_lead=False)
         lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
         worker_host = AgentProcessHost(layout, worker_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS),
-                                       drain_agent=theirs.drain, holds_work=theirs.holds_work, drain_poll_seconds=0.2)
+                                       drain_poll_seconds=0.2)
         lead_nc = await connect(stack, broker, LEAD_HOST_RUNTIME)
+        worker_nc = await connect(stack, broker, WORKER_RUNTIME)
+        lead_host.ensure_started(lead_nc)
+        worker_host.ensure_started(worker_nc)
+        await lead_host.wait_for_usable_partition(timeout=15)
+        await worker_host.wait_for_usable_partition(timeout=15)
+        lead_id = lead_host.draw_agent_id(prefix="lead")
+        ours_id = lead_host.draw_agent_id(prefix="wa")
+        theirs_id = worker_host.draw_agent_id(prefix="wb")
+        lead = stand_in(lead_id, "TeamLead", "TeamArchitect", is_lead=True)
+        ours = _QueueWorker(ours_id, js, runs=True)
+        ours.agent = stand_in(ours_id, "Researcher-A", "Researcher", is_lead=False)
+        theirs = _QueueWorker(theirs_id, js, runs=False)
+        theirs.agent = stand_in(theirs_id, "Researcher-B", "Researcher", is_lead=False)
+        worker_host.drain_agent = theirs.drain
+        worker_host.holds_work = theirs.holds_work
         lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_nc, state=("idle", True))
         lead_host.attach(ours.agent, agent_type="Researcher", definition=DEFINITION, nc=lead_nc, state=("idle", True))
         worker_host.attach(theirs.agent, agent_type="Researcher", definition=DEFINITION,
-                           nc=await connect(stack, broker, WORKER_RUNTIME), state=("idle", True))
-        await _until(lambda: {"worker_a", "worker_b"} <= set(lead.known_agents.agent_map))
+                           nc=worker_nc, state=("idle", True))
+        await _until(lambda: {ours_id, theirs_id} <= set(lead.known_agents.agent_map))
         monkeypatch.setattr(agent_requests, "_PROCESS_HOST", lead_host)
         takers = [asyncio.create_task(worker.take(stop)) for worker in (ours, theirs)]
         try:
@@ -285,15 +302,15 @@ async def test_a_worker_on_another_contract_gets_no_new_work_still_answers_probe
                 run_on_another_contract(worker_host.host)
                 await _until(lambda: theirs.drained.is_set(), timeout=30)  # the team services' record, within 10 s
                 await worker_host.host.report_now()  # its record names its contract now
-                await _until(lambda: lead.known_agents.agent_map["worker_b"].accepting_work is False)
+                await _until(lambda: lead.known_agents.agent_map[theirs_id].accepting_work is False)
 
                 # Still listed, taking no work: delegation picks the lead's own worker.
                 assert lead_host.team_agents is not None
-                assert lead_host.team_agents.agent("worker_b").other_contract == OTHER_CONTRACT
-                assert live_agent_status(lead, "Researcher").self_id == "worker_a"
+                assert lead_host.team_agents.agent(theirs_id).other_contract == OTHER_CONTRACT
+                assert live_agent_status(lead, "Researcher").self_id == ours_id
                 assert live_agent_status(lead, "Researcher", "Researcher-B") is None
                 # The watchdog's probe about the task it holds is still answered.
-                probe = await lead_host.ask("task.probe", {"task_id": "task-1"}, "worker_b", sender_agent="lead_1")
+                probe = await lead_host.ask("task.probe", {"task_id": "task-1"}, theirs_id, sender_agent=lead_id)
                 assert (probe["known"], probe["state"]) == (True, "accepted")
                 # No new work: the next task on the type's queue goes to the lead's worker.
                 await js.publish("work.Researcher", b"task-2")
@@ -308,7 +325,7 @@ async def test_a_worker_on_another_contract_gets_no_new_work_still_answers_probe
                 assert worker_host._draining is not None
                 await asyncio.wait_for(asyncio.shield(worker_host._draining), timeout=30)
                 assert worker_host.host.state == "drained" and not worker_host.agents
-                await _until(lambda: "worker_b" not in lead.known_agents.agent_map)
+                await _until(lambda: theirs_id not in lead.known_agents.agent_map)
                 assert worker_host.host.identity.certificate.agent_types == frozenset()
 
             # The lead's process logged the other host once, with both digests, not at every record it wrote.

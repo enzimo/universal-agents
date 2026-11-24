@@ -460,7 +460,10 @@ owner:
 - `trust/bootstrap.json`: the authority's public key, its certificate and the
   newest list of revoked hosts, which every host starts from.
 - `trust/expected-hosts.json`: the hosts the container starts, which the authority
-  approves without asking anyone.
+  approves without asking anyone. Installations serving more teams than one
+  gateway's credential holds may list several gateway runtimes here (each with
+  its own runtime id, team subset and per-team routes); `gateway` remains the
+  default single-gateway runtime.
 
 Back up `trust/` together with the NATS data (`services/nats`) while the container
 is stopped, and restore them together. To recover:

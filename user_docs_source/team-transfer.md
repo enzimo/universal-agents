@@ -344,6 +344,9 @@ the other operator secrets. These do not move:
   with the settings.
 - The credentials file itself. An instance that signs in with one has no user
   and password to move.
+- `transport.nats.credential_lifetime_seconds` (the installation's NATS user
+  credential lifetime, 900 seconds by default), which stays tied to each
+  installation's broker deployment alongside `transport.queues.partitions`.
 
 The export decides from the old instance's own settings: `instance_config.yaml`
 and its `team.env`, or its environment when it takes secrets from there. It

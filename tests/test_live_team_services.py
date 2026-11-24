@@ -21,9 +21,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, PROTOCOL
+from custom_messages.wire.partitions import OWNED
 from custom_messages.wire.trust import sign_state
 from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.host_keys import ensure_host_keys, load_authority_keys, load_host_keys
+from custom_transport.protocol1.host_partitions import draw_agent_id
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile
 from custom_transport.protocol1.live import utc_now
@@ -110,6 +112,35 @@ def audience(started: MessageHost) -> dict[str, str]:
     return {"installation": started.identity.installation, **TO_SERVICES}
 
 
+async def owned_agent_id(started: MessageHost, prefix: str = "agent", *, team: str = TEAM,
+                         exclude: set[str] | None = None, timeout: float = 15.0) -> str:
+    """Wait until ``started`` owns at least one verified partition of ``team`` and draw an agent ID in it."""
+
+    assert started.records is not None and started.live is not None
+    runtime = started.identity.certificate.runtime
+    count = started.live.trust.store.partition_count
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        owned: list[int] = []
+        try:
+            keys = await started.records.keys("partition_owner", f"{team}.partition.", team=team)
+        except Exception:
+            keys = []
+        for key in keys:
+            try:
+                stored = await started.records.read_report("partition_owner", key, now=started.clock())
+            except Exception:
+                continue
+            if stored is not None and stored.record.body.state == OWNED and stored.record.body.host == runtime:
+                owned.append(int(stored.record.body.partition))
+        if owned:
+            return draw_agent_id(team, sorted(owned), prefix=prefix, partition_count=count, exclude_ids=exclude or ())
+        if loop.time() >= deadline:
+            raise AssertionError(f"host {runtime} never owned a partition of {team} within {timeout}s")
+        await asyncio.sleep(0.05)
+
+
 async def open_session(started: MessageHost, agent: str, agent_type: str = "researcher", *, attempts: int = 50) -> dict:
     assert started.live is not None
     for _ in range(attempts):  # the team services may still be taking the lock
@@ -125,6 +156,19 @@ async def open_session(started: MessageHost, agent: str, agent_type: str = "rese
     raise AssertionError("the team services never answered")
 
 
+async def open_owned_session(started: MessageHost, prefix: str = "researcher", agent_type: str = "researcher", *,
+                             exclude: set[str] | None = None, attempts: int = 10) -> tuple[str, dict]:
+    """Draw an agent ID in a partition owned by ``started`` and open its session, retrying if a rebalance moved an empty partition."""
+
+    for _ in range(attempts):
+        agent = await owned_agent_id(started, prefix, exclude=exclude)
+        reply = await open_session(started, agent, agent_type)
+        if reply.get("outcome") != "partition_not_owned":
+            return agent, reply
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"could not open an owned session on {started.identity.certificate.runtime}")
+
+
 @pytest.mark.asyncio
 async def test_a_host_gets_renews_and_closes_its_agents_sessions(broker: str, tmp_path: Path) -> None:
     layout = InstanceLayout.at(tmp_path / "instance")
@@ -133,7 +177,7 @@ async def test_a_host_gets_renews_and_closes_its_agents_sessions(broker: str, tm
         await installation(stack, broker, layout, team_services_profile(TEAM), WORKER, OTHER)
         serving = await team_services(stack, broker, layout, stop)
         worker = await host(stack, broker, layout, WORKER)
-        opened = await open_session(worker, "researcher-1")
+        r1, opened = await open_owned_session(worker, "researcher")
         assert opened["outcome"] == "ok"
         session = opened["session"]
         assert (session["body"]["agent_role"], session["body"]["runtime"]) == ("worker", WORKER.runtime)
@@ -146,14 +190,16 @@ async def test_a_host_gets_renews_and_closes_its_agents_sessions(broker: str, tm
         # The host keeps the session and may now sign for the agent.
         assert worker.live is not None
         worker.live.trust.add(json.dumps(session).encode(), now=worker.clock())
-        worker.live.identity = worker.live.identity.with_session("researcher-1", session["body"]["session"])
-        assert worker.live.identity.issuer(TEAM, "researcher-1")["session"] == session["body"]["session"]
+        worker.live.identity = worker.live.identity.with_session(r1, session["body"]["session"])
+        assert worker.live.identity.issuer(TEAM, r1)["session"] == session["body"]["session"]
         # Another host cannot take the agent; a host cannot run more than its limit, or another type.
         other = await host(stack, broker, layout, OTHER)
-        refused = await open_session(other, "researcher-1")
+        refused = await open_session(other, r1)
         assert (refused["outcome"], refused["host"]) == ("already_placed", WORKER.runtime)
-        assert (await open_session(worker, "researcher-2"))["outcome"] == "ok"
-        assert (await open_session(worker, "researcher-3"))["outcome"] == "limit_reached"
+        r2, opened2 = await open_owned_session(worker, "researcher", exclude={r1})
+        assert opened2["outcome"] == "ok"
+        r3, opened3 = await open_owned_session(worker, "researcher", exclude={r1, r2})
+        assert opened3["outcome"] == "limit_reached"
         assert (await open_session(other, "writer-1", agent_type="writer"))["outcome"] == "not_allowed"
         renewed = await worker.live.request("sessions.renew", {"request_id": "renew-1", "session": session["body"]["session"]},
                                             audience(worker), team=TEAM)
@@ -162,8 +208,11 @@ async def test_a_host_gets_renews_and_closes_its_agents_sessions(broker: str, tm
                                                               "session": session["body"]["session"], "reason": "exited"},
                                            audience(worker), team=TEAM)
         assert closed.raw["body"]["outcome"] == "ok"
-        # Its placement is gone, so the other host may now run researcher-1.
-        assert (await open_session(other, "researcher-1"))["outcome"] == "ok"
+        # Its placement is gone; worker still owns r1's partition while other can open an agent in its own partition.
+        assert (await open_session(other, r1))["outcome"] == "partition_not_owned"
+        assert (await open_session(worker, r1))["outcome"] == "ok"
+        _, other_opened = await open_owned_session(other, "other")
+        assert other_opened["outcome"] == "ok"
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
 
@@ -262,7 +311,8 @@ async def test_a_host_that_renews_its_certificate_keeps_writing_records_readers_
         worker = await host(stack, broker, layout, WORKER)
         other = await host(stack, broker, layout, OTHER)
         assert other.records is not None and services.records is not None
-        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        r1, opened1 = await open_owned_session(worker, "researcher")
+        assert opened1["outcome"] == "ok"
         # Renewal comes on day 20 of 30; here both hosts renew at once.
         await worker.renew()
         await services.renew()
@@ -275,9 +325,9 @@ async def test_a_host_that_renews_its_certificate_keeps_writing_records_readers_
         assert report.record.signer.membership_epoch == report.record.body.certificate.membership_epoch == 2
 
         # The team services place and sign with theirs.
-        opened = await open_session(worker, "researcher-2")
+        r2, opened = await open_owned_session(worker, "researcher", exclude={r1})
         assert opened["outcome"] == "ok" and opened["session"]["writer"]["membership_epoch"] == 2
-        placement = await other.records.read_report("placement", f"{TEAM}.researcher-2", now=other.clock())
+        placement = await other.records.read_report("placement", f"{TEAM}.{r2}", now=other.clock())
         assert placement is not None and placement.record.signer is not None
         assert placement.record.signer.membership_epoch == 2
 
@@ -285,7 +335,7 @@ async def test_a_host_that_renews_its_certificate_keeps_writing_records_readers_
         # hosts write is still accepted.
         later = utc_now() + timedelta(minutes=6)
         body = placement.record.document.model_dump(mode="json")["body"]
-        moved = services.records.signed("placement", f"{TEAM}.researcher-2", body,
+        moved = services.records.signed("placement", f"{TEAM}.{r2}", body,
                                         sequence=placement.record.document.sequence + 1, issued_at=later)
         accepted = other.live.trust.store.verify(json.dumps(moved).encode(), record="placement", now=later)
         assert accepted.signer is not None and accepted.signer.membership_epoch == 2
@@ -539,7 +589,8 @@ async def test_a_host_joins_again_for_an_agent_type_added_while_it_runs(broker: 
         worker = await host(stack, broker, layout, WORKER)
         other = await host(stack, broker, layout, OTHER)
         assert other.records is not None
-        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        r1, opened_r1 = await open_owned_session(worker, "researcher")
+        assert opened_r1["outcome"] == "ok"
         assert (await open_session(worker, "analyst-1", agent_type="analyst"))["outcome"] == "not_allowed"
 
         # Not listed for this host yet: the authority refuses, and the host keeps its certificate.
@@ -567,7 +618,8 @@ async def test_a_host_joins_again_for_an_agent_type_added_while_it_runs(broker: 
         assert worker.profile.agent_types == ("analyst", "researcher")
 
         # The host signs everything with the new certificate: a session for the new type, its host record.
-        assert (await open_session(worker, "analyst-1", agent_type="analyst"))["outcome"] == "ok"
+        _, opened_a1 = await open_owned_session(worker, "analyst", agent_type="analyst", exclude={r1})
+        assert opened_a1["outcome"] == "ok"
         await worker.publish_liveness("accepting")
         report = await other.records.read_report("host", WORKER.runtime, now=other.clock())
         assert report is not None and report.record.signer is not None
@@ -711,7 +763,8 @@ async def test_a_standby_that_takes_over_signs_with_the_certificate_the_serving_
         worker = await host(stack, broker, layout, WORKER)
         other = await host(stack, broker, layout, OTHER)
         assert other.records is not None and other.live is not None
-        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        r1, opened_r1 = await open_owned_session(worker, "researcher")
+        assert opened_r1["outcome"] == "ok"
         with caplog.at_level(logging.WARNING):
             standby, second = await team_services_host(stack, broker, layout, second_stop)
             for _ in range(50):
@@ -738,7 +791,7 @@ async def test_a_standby_that_takes_over_signs_with_the_certificate_the_serving_
         assert report is not None and report.record.signer is not None
         assert report.record.signer.membership_epoch == report.record.body.certificate.membership_epoch == 2
         # So is a session it opens.
-        opened = await open_session(worker, "researcher-2")
+        _, opened = await open_owned_session(worker, "researcher", exclude={r1})
         assert opened["outcome"] == "ok" and opened["session"]["writer"]["membership_epoch"] == 2
         assert other.live.trust.add(json.dumps(opened["session"]).encode(), now=other.clock()) is True
         # And once the replaced certificate signs nothing more, what it writes is still accepted.
@@ -787,26 +840,29 @@ async def test_a_repeated_or_late_close_changes_nothing_and_never_removes_a_newe
         serving = await team_services(stack, broker, layout, stop)
         worker = await host(stack, broker, layout, WORKER)
         other = await host(stack, broker, layout, OTHER)
-        first = (await open_session(worker, "researcher-1"))["session"]
+        r1, opened_r1 = await open_owned_session(worker, "researcher")
+        first = opened_r1["session"]
         installation_id, s1 = first["body"]["installation"], first["body"]["session"]
         ended = (await close_session(worker, s1))["ended_at"]
-        s2 = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        s2 = (await open_session(worker, r1))["session"]["body"]["session"]
 
         # A retry of the first close, its reply lost: the recorded end, nothing signed again, the new placement kept.
         assert await close_session(worker, s1) == {"outcome": "ok", "ended_at": ended}
         kept = await stored_session(worker, installation_id, s1)
         assert (kept["sequence"], kept["body"]["ends_at"]) == (2, ended)
         assert (await renew_session(worker, s2))["outcome"] == "ok"
-        assert (await open_session(other, "researcher-1"))["outcome"] == "already_placed"
+        assert (await open_session(other, r1))["outcome"] == "already_placed"
 
         # Placed again without a close: closing the superseded session leaves the newer placement too.
-        s3 = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
+        s3 = (await open_session(worker, r1))["session"]["body"]["session"]
         assert (await close_session(worker, s2))["outcome"] == "ok"
         assert (await renew_session(worker, s3))["outcome"] == "ok"
-        assert (await open_session(other, "researcher-1"))["outcome"] == "already_placed"
-        # Its own close still removes it.
+        assert (await open_session(other, r1))["outcome"] == "already_placed"
+        # Its own close still removes it (other still gets partition_not_owned; worker can reopen it).
         assert (await close_session(worker, s3))["outcome"] == "ok"
-        assert (await open_session(other, "researcher-1"))["outcome"] == "ok"
+        assert await placement_of(other, r1) is None
+        assert (await open_session(other, r1))["outcome"] == "partition_not_owned"
+        assert (await open_session(worker, r1))["outcome"] == "ok"
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
 
@@ -843,16 +899,17 @@ async def test_the_placement_sequence_never_goes_back_after_a_close(broker: str,
         serving = await team_services(stack, broker, layout, stop)
         worker = await host(stack, broker, layout, WORKER)
         other = await host(stack, broker, layout, OTHER)
-        await open_session(worker, "researcher-1")
-        s2 = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
-        earlier = await placement_of(other, "researcher-1")
+        r1, opened1 = await open_owned_session(worker, "researcher")
+        assert opened1["outcome"] == "ok"
+        s2 = (await open_session(worker, r1))["session"]["body"]["session"]
+        earlier = await placement_of(other, r1)
         assert earlier is not None
         await close_session(worker, s2)
-        assert await placement_of(other, "researcher-1") is None
-        assert (await open_session(other, "researcher-1"))["outcome"] == "ok"
+        assert await placement_of(other, r1) is None
+        assert (await open_session(worker, r1))["outcome"] == "ok"
         assert other.records is not None
         held = (earlier.record.document.sequence, earlier.record.digest)
-        later = await other.records.read_report("placement", f"{TEAM}.researcher-1", now=other.clock(), held=held)
+        later = await other.records.read_report("placement", f"{TEAM}.{r1}", now=other.clock(), held=held)
         assert later is not None and later.record.document.sequence > earlier.record.document.sequence
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
@@ -892,9 +949,12 @@ async def test_only_the_team_leads_type_on_a_lead_host_gets_the_lead_role(broker
         serving = await team_services(stack, broker, layout, stop)
         lead = await host(stack, broker, layout, LEAD)
         worker = await host(stack, broker, layout, WORKER_OF_LEAD_TYPE)
-        assert (await open_session(lead, "lead-1", "TeamArchitect"))["session"]["body"]["agent_role"] == "lead"
-        assert (await open_session(lead, "researcher-1"))["session"]["body"]["agent_role"] == "worker"
-        assert (await open_session(worker, "lead-2", "TeamArchitect"))["session"]["body"]["agent_role"] == "worker"
+        _, lead_opened = await open_owned_session(lead, "lead", "TeamArchitect")
+        assert lead_opened["session"]["body"]["agent_role"] == "lead"
+        _, researcher_opened = await open_owned_session(lead, "researcher")
+        assert researcher_opened["session"]["body"]["agent_role"] == "worker"
+        _, worker_lead_opened = await open_owned_session(worker, "lead", "TeamArchitect")
+        assert worker_lead_opened["session"]["body"]["agent_role"] == "worker"
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
 
@@ -914,7 +974,8 @@ async def test_a_team_has_one_lead_session_even_after_services_restart(broker: s
         winner = first if first["outcome"] == "ok" else second
         session = winner["session"]["body"]["session"]
         other = await host(stack, broker, layout, other_profile)
-        assert (await open_session(other, "other-lead", "TeamArchitect"))["outcome"] == "not_allowed"
+        _, other_lead_reply = await open_owned_session(other, "other-lead", "TeamArchitect")
+        assert other_lead_reply["outcome"] == "not_allowed"
         # Reopening one lead ends its earlier session before the replacement
         # is signed. A delayed renewal cannot revive the old authority.
         replacement = await lead.live.request("sessions.open", {
@@ -929,7 +990,8 @@ async def test_a_team_has_one_lead_session_even_after_services_restart(broker: s
         stop = asyncio.Event()
         serving = await team_services(stack, broker, layout, stop)
         try:
-            assert (await open_session(lead, "lead-3", "TeamArchitect"))["outcome"] == "not_allowed"
+            _, lead3_reply = await open_owned_session(lead, "lead3", "TeamArchitect")
+            assert lead3_reply["outcome"] == "not_allowed"
             assert (await renew_session(lead, session))["outcome"] == "ok"
             bucket = await lead.nc.jetstream().key_value("UA1_CERTS")
             key = f"session.{lead.identity.installation}.{TEAM}.{session}"
@@ -938,14 +1000,16 @@ async def test_a_team_has_one_lead_session_even_after_services_restart(broker: s
             try:
                 # An unverified session record may be a lead's: a lead's open is answered, naming
                 # the key, and refused; a worker's open does not depend on it.
-                refused = await open_session(other, "lead-with-unreadable-records", "TeamArchitect")
+                _, refused = await open_owned_session(other, "lead-bad", "TeamArchitect")
                 assert refused["outcome"] == "runtime_error"
                 assert f"{key} (invalid_body)" in refused["message"]
-                assert (await open_session(other, "researcher-beside-bad-record"))["outcome"] == "ok"
+                _, beside_ok = await open_owned_session(other, "res-ok")
+                assert beside_ok["outcome"] == "ok"
             finally:
                 await bucket.put(key, saved.value)
             assert (await close_session(lead, session))["outcome"] == "ok"
-            assert (await open_session(lead, "lead-4", "TeamArchitect"))["outcome"] == "ok"
+            _, lead4_reply = await open_owned_session(lead, "lead4", "TeamArchitect")
+            assert lead4_reply["outcome"] == "ok"
         finally:
             stop.set()
             await asyncio.wait_for(serving, timeout=10)
@@ -963,18 +1027,21 @@ async def test_every_refused_session_request_is_logged(broker: str, tmp_path: Pa
         worker = await host(stack, broker, layout, WORKER)
         other = await host(stack, broker, layout, OTHER)
         with caplog.at_level(logging.WARNING):
-            await open_session(worker, "researcher-1")
-            await open_session(worker, "researcher-2")
+            r1, opened1 = await open_owned_session(worker, "researcher")
+            assert opened1["outcome"] == "ok"
+            r2, opened2 = await open_owned_session(worker, "researcher", exclude={r1})
+            assert opened2["outcome"] == "ok"
+            r3, limit_reply = await open_owned_session(worker, "researcher", exclude={r1, r2})
             outcomes = [(await open_session(worker, "writer-1", "writer"))["outcome"],
-                        (await open_session(other, "researcher-1"))["outcome"],
-                        (await open_session(worker, "researcher-3"))["outcome"],
+                        (await open_session(other, r1))["outcome"],
+                        limit_reply["outcome"],
                         (await renew_session(other, "s-nobody-1"))["outcome"]]
         assert outcomes == ["not_allowed", "already_placed", "limit_reached", "not_found"]
         refusals = [record.getMessage() for record in caplog.records if "event=agent_session_refused " in
                     record.getMessage()]
         for outcome, agent, runtime in [("not_allowed", "writer-1", WORKER.runtime),
-                                        ("already_placed", "researcher-1", OTHER.runtime),
-                                        ("limit_reached", "researcher-3", WORKER.runtime),
+                                        ("already_placed", r1, OTHER.runtime),
+                                        ("limit_reached", r3, WORKER.runtime),
                                         ("not_found", "-", OTHER.runtime)]:
             assert any(f"outcome={outcome} team={TEAM} agent={agent} host={runtime}" in line for line in refusals), outcome
         stop.set()
@@ -1014,12 +1081,13 @@ async def test_the_team_services_sign_their_placements_again_after_they_renew(br
         services, serving = await team_services_host(stack, broker, layout, stop)
         worker = await host(stack, broker, layout, WORKER)
         other = await host(stack, broker, layout, OTHER)
-        session = (await open_session(worker, "researcher-1"))["session"]["body"]["session"]
-        before = await placement_of(other, "researcher-1")
+        r1, opened_r1 = await open_owned_session(worker, "researcher")
+        session = opened_r1["session"]["body"]["session"]
+        before = await placement_of(other, r1)
         assert before is not None and before.record.signer.membership_epoch == 1
         await services.renew()
         for _ in range(50):
-            after = await placement_of(other, "researcher-1")
+            after = await placement_of(other, r1)
             if after is not None and after.record.signer.membership_epoch == 2:
                 break
             await asyncio.sleep(0.1)
@@ -1028,7 +1096,7 @@ async def test_the_team_services_sign_their_placements_again_after_they_renew(br
         assert after.record.document.sequence > before.record.document.sequence
         # The same placement: its session still renews, and no other host may take the agent.
         assert (await renew_session(worker, session))["outcome"] == "ok"
-        assert (await open_session(other, "researcher-1"))["outcome"] == "already_placed"
+        assert (await open_session(other, r1))["outcome"] == "already_placed"
         stop.set()
         await asyncio.wait_for(serving, timeout=10)
 
@@ -1094,10 +1162,12 @@ async def test_a_host_cannot_say_another_host_runs_another_contract(broker: str,
         serving = await team_services(stack, broker, layout, stop)
         worker = await host(stack, broker, layout, WORKER)
         attacker = await host(stack, broker, layout, OTHER)
-        assert (await open_session(worker, "researcher-1"))["outcome"] == "ok"
+        r1, opened1 = await open_owned_session(worker, "researcher")
+        assert opened1["outcome"] == "ok"
         hosts_bucket = await attacker.nc.jetstream().key_value("UA1_HOSTS")
         await hosts_bucket.put(WORKER.runtime, forged_host_record(attacker, WORKER.runtime))
-        assert (await open_session(worker, "researcher-2"))["outcome"] == "ok"
+        _, opened2 = await open_owned_session(worker, "researcher", exclude={r1})
+        assert opened2["outcome"] == "ok"
 
         learned: list[str] = []
         worker.on_other_contract(learned.append)
