@@ -48,9 +48,11 @@ from custom_agents.schedule_store import ScheduleStore
 from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
+from default_values import TRANSPORT_DEFAULTS
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
+from team_services.partitions import PartitionService
 from team_services.relays import Relays
 from team_services.schedules import ScheduleOperations, SystemScheduleCheck
 from team_services.topics import TopicOperations
@@ -84,11 +86,13 @@ def transport_config(config: GatewayInstanceConfig) -> NatsTransportConfig:
 
 
 async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
-                     families: Sequence[OperationFamily] = ()) -> None:
+                     families: Sequence[OperationFamily] = (),
+                     *,
+                     credential_lifetime_seconds: int = TRANSPORT_DEFAULTS.nats_credential_lifetime_seconds.value) -> None:
     """Serve while holding the team's lock, then close family resources after requests finish."""
 
     try:
-        await _serve_team(host, team, stop, families)
+        await _serve_team(host, team, stop, families, credential_lifetime_seconds=credential_lifetime_seconds)
     finally:
         for family in families:
             if family.close is not None:
@@ -99,7 +103,9 @@ async def serve_team(host: MessageHost, team: str, stop: asyncio.Event,
 
 
 async def _serve_team(host: MessageHost, team: str, stop: asyncio.Event,
-                      families: Sequence[OperationFamily]) -> None:
+                      families: Sequence[OperationFamily],
+                      *,
+                      credential_lifetime_seconds: int = TRANSPORT_DEFAULTS.nats_credential_lifetime_seconds.value) -> None:
     """Hold the lock, serve the team's address and keep the host and the lock up until ``stop``.
 
     ``families`` are the handlers of people's commands (``team_operations``).
@@ -116,7 +122,16 @@ async def _serve_team(host: MessageHost, team: str, stop: asyncio.Event,
     # it run out while a standby waits (module docstring).
     keeper = asyncio.create_task(lock.keep(stop))
     try:
-        await _serve_holding_lock(host, live, lock, keeper, team, stop, families)
+        await _serve_holding_lock(
+            host,
+            live,
+            lock,
+            keeper,
+            team,
+            stop,
+            families,
+            credential_lifetime_seconds=credential_lifetime_seconds,
+        )
     finally:
         if not keeper.done():
             keeper.cancel()
@@ -135,7 +150,9 @@ async def _prepare(host: MessageHost) -> None:
 
 async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock,
                               keeper: asyncio.Task[None], team: str, stop: asyncio.Event,
-                              families: Sequence[OperationFamily]) -> None:
+                              families: Sequence[OperationFamily],
+                              *,
+                              credential_lifetime_seconds: int = TRANSPORT_DEFAULTS.nats_credential_lifetime_seconds.value) -> None:
     preparing = asyncio.create_task(_prepare(host))
     await asyncio.wait({preparing, keeper}, return_when=asyncio.FIRST_COMPLETED)
     if keeper.done():
@@ -147,6 +164,17 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
     await preparing
     assert host.records is not None  # start() made them
     sessions = SessionService(host.records, live.trust, live.identity.installation, host.clock, host.logger)
+    partitions = PartitionService(
+        host.records,
+        live.trust,
+        live.identity.installation,
+        team,
+        sessions._changing,
+        host.clock,
+        host.logger,
+        credential_lifetime_seconds=credential_lifetime_seconds,
+    )
+    sessions.ensure_partitions = partitions.ensure_unowned_assigned
     services = TeamServices(sessions, families)
     subscription = await live.serve("svc.team", Receiver(live.identity.installation, team, "team_services", team,
                                                          TEAM_SERVICES_RUNTIME), services.handle,
@@ -155,6 +183,7 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
     lost = False
     upkeep: Optional[asyncio.Task[None]] = None
     maintenance: Optional[asyncio.Task[None]] = None
+    partition_task: Optional[asyncio.Task[None]] = None
     try:
         await host.publish_liveness("accepting")
         host.logger.info("The team services are serving. event=team_services_ready team=%s operations=%s", team,
@@ -162,7 +191,10 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
         # The launcher waits for this (team_services.serving): it comes with the host record, once they serve.
         mark_serving(host.layout, lock.instance, host.clock())
         upkeep = asyncio.create_task(host.keep_up(stop, drained=lambda: not lost))
-        maintenance = asyncio.create_task(_maintain(sessions, services.upkeep, team, stop, host.logger))
+        maintenance = asyncio.create_task(
+            _maintain(sessions, (partitions.maintain, *services.upkeep), team, stop, host.logger)
+        )
+        partition_task = asyncio.create_task(partitions.run(stop))
         await keeper
     except LockLost:
         lost = True  # another instance may serve now and write the record; this one writes no more
@@ -177,6 +209,9 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
             # The upkeep ends and writes its last record (drained) even when unsubscribing failed, and before
             # the caller releases the lock, so it never overwrites the record of the instance that takes over.
             stop.set()
+            if partition_task is not None:
+                partition_task.cancel()
+                await asyncio.gather(partition_task, return_exceptions=True)
             if maintenance is not None:
                 maintenance.cancel()
                 await asyncio.gather(maintenance, return_exceptions=True)
@@ -253,7 +288,13 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
     try:
         host = MessageHost(config.layout, team_services_profile(team), adapter.nats_connection, logger=_LOGGER)
         relays = Relays(host, team, config.manager.named_agent_type, _LOGGER)
-        await serve_team(host, team, stop, [*team_operations(config, host.clock), relays.family()])
+        await serve_team(
+            host,
+            team,
+            stop,
+            [*team_operations(config, host.clock), relays.family()],
+            credential_lifetime_seconds=config.transport.nats.credential_lifetime_seconds,
+        )
     except LockLost as lost:
         # Exit code 1 for the launcher's supervisor, which stops the team (module docstring).
         _LOGGER.error("The team services stop. event=team_services_stopped reason=%s", lost)

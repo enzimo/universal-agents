@@ -33,7 +33,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import AUTHORITY_TOKEN_MAX_SECONDS
@@ -74,8 +74,9 @@ class IssueLedger:
         self._confirmed_nats_revocations: dict[str, int] = {}
         # Permanent record of bootstrap bundle NATS user keys (S1): never accepted as a host's own key.
         self._bootstrap_nats_keys: set[str] = set()
-        # Granted partitions recorded per issued certificate_id (C11): distinguishes post-release recovery certs.
-        self._certificate_partitions: dict[str, tuple[int, ...]] = {}
+        # Granted partitions -> verified partition_owner sequence recorded per issued certificate_id
+        # (C11, C17): distinguishes pre-release renewals from post-recovery reassignments.
+        self._certificate_partitions: dict[str, dict[int, int]] = {}
 
     @classmethod
     def open(cls, folder: Path, installation: str, *, logger: logging.Logger = _LOGGER) -> "IssueLedger":
@@ -118,7 +119,7 @@ class IssueLedger:
             ledger._bootstrap_nats_keys = {str(k) for k in raw_bootstrap}
             raw_cert_parts = document.get("certificate_partitions") or {}
             ledger._certificate_partitions = {
-                str(cert_id): tuple(sorted(set(int(p) for p in parts)))
+                str(cert_id): {int(p): int(seq) for p, seq in parts.items()}
                 for cert_id, parts in raw_cert_parts.items()
             }
         except (KeyError, TypeError, ValueError, AttributeError) as error:
@@ -223,15 +224,22 @@ class IssueLedger:
             self._confirmed_nats_revocations.get(nats_public_key, 0), ts
         )
 
-    def record_certificate_partitions(self, certificate_id: str, partitions: Iterable[int]) -> None:
-        """Record the exact partition list granted with ``certificate_id`` (including ``()`` on join)."""
+    def record_certificate_partitions(
+        self,
+        certificate_id: str,
+        partition_sequences: Mapping[int, int],
+    ) -> None:
+        """Record ``{partition: owner_sequence}`` granted with ``certificate_id`` (empty dict on join, C11/C17)."""
 
-        self._certificate_partitions[str(certificate_id)] = tuple(sorted(set(int(p) for p in partitions)))
+        self._certificate_partitions[str(certificate_id)] = {
+            int(p): int(seq) for p, seq in sorted(partition_sequences.items())
+        }
 
-    def certificate_partitions(self, certificate_id: str) -> Optional[tuple[int, ...]]:
-        """The partitions granted with ``certificate_id``, or ``None`` if not recorded."""
+    def certificate_partitions(self, certificate_id: str) -> Optional[dict[int, int]]:
+        """The ``{partition: owner_sequence}`` map granted with ``certificate_id``, or ``None`` if not recorded."""
 
-        return self._certificate_partitions.get(str(certificate_id))
+        recorded = self._certificate_partitions.get(str(certificate_id))
+        return None if recorded is None else dict(recorded)
 
     def forget_certificate_partitions(self, certificate_id: str) -> None:
         self._certificate_partitions.pop(str(certificate_id), None)
@@ -279,6 +287,7 @@ class IssueLedger:
             document["bootstrap_nats_keys"] = sorted(self._bootstrap_nats_keys)
         if self._certificate_partitions:
             document["certificate_partitions"] = {
-                cert_id: list(parts) for cert_id, parts in sorted(self._certificate_partitions.items())
+                cert_id: {str(p): seq for p, seq in sorted(parts.items())}
+                for cert_id, parts in sorted(self._certificate_partitions.items())
             }
         write_private_file(self.path, json.dumps(document, sort_keys=True).encode())

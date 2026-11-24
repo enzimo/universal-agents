@@ -28,7 +28,7 @@ NOW = datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc)
 async def test_operation_resources_close_after_serving_also_when_startup_fails(monkeypatch) -> None:
     events = []
 
-    async def failed(*args):
+    async def failed(*args, **_kwargs):
         events.append("serve")
         raise RuntimeError("startup failed")
 
@@ -73,7 +73,7 @@ class _Adapter:
 async def test_losing_the_lock_ends_the_process_with_exit_code_1(monkeypatch, caplog, lost: LockLost) -> None:
     """The launcher's supervisor sees the exit and stops the team, rather than two instances serving."""
 
-    async def serve_team(_host, _team, _stop, _families) -> None:
+    async def serve_team(_host, _team, _stop, _families, **_kwargs) -> None:
         raise lost
 
     monkeypatch.setattr(process, "NatsTransportAdapter", _Adapter)
@@ -81,7 +81,8 @@ async def test_losing_the_lock_ends_the_process_with_exit_code_1(monkeypatch, ca
     monkeypatch.setattr(process, "team_operations", lambda _config, _clock: [])
     monkeypatch.setattr(process, "serve_team", serve_team)
     transport = SimpleNamespace(nats_servers=["nats://127.0.0.1:4222"], nats_url=None, subject_prefix="ua",
-                                nats_user=None, nats_password=None, credentials_file=None)
+                                nats_user=None, nats_password=None, credentials_file=None,
+                                nats=SimpleNamespace(credential_lifetime_seconds=3600))
     config = SimpleNamespace(manager=SimpleNamespace(team_id="team_one", named_agent_type="TeamArchitect"),
                              transport=transport, instance_name="test",
                              layout=None)
@@ -98,7 +99,14 @@ async def _answer(_verified: Any) -> dict[str, Any]:
 
 
 def _sessions() -> Any:
-    return SimpleNamespace(open=_answer, renew=_answer, close=_answer, maintain=AsyncMock())
+    return SimpleNamespace(
+        open=_answer,
+        renew=_answer,
+        close=_answer,
+        maintain=AsyncMock(),
+        _changing=asyncio.Lock(),
+        ensure_partitions=None,
+    )
 
 
 def test_the_team_services_report_each_familys_side_by_side_kinds_and_upkeep() -> None:
@@ -182,13 +190,32 @@ async def test_stopping_waits_for_a_request_still_being_handled_before_the_lock_
                            logger=logging.getLogger("test"), take_newest_certificate=AsyncMock(),
                            refresh_trust=AsyncMock(), records=object(), publish_liveness=AsyncMock(), layout=None,
                            keep_up=keep_up)
+    shared_locks: list[asyncio.Lock] = []
+    fake_sessions = _sessions()
+
+    class _FakePartitions:
+        def __init__(self, _records, _trust, _inst, _team, lock, *_args, **_kwargs) -> None:
+            shared_locks.append(lock)
+
+        async def ensure_unowned_assigned(self) -> None:
+            return None
+
+        async def maintain(self) -> None:
+            return None
+
+        async def run(self, stop_event: asyncio.Event) -> None:
+            await stop_event.wait()
+
     monkeypatch.setattr(process, "SingleInstanceLock", SimpleNamespace(on_connection=lambda *_args: _Lock(events)))
-    monkeypatch.setattr(process, "SessionService", lambda *_args: _sessions())
+    monkeypatch.setattr(process, "SessionService", lambda *_args: fake_sessions)
+    monkeypatch.setattr(process, "PartitionService", _FakePartitions)
     monkeypatch.setattr(process, "mark_serving", lambda *_args: serving.set())
     stop = asyncio.Event()
 
     served = asyncio.create_task(process.serve_team(host, "team_one", stop, []))  # type: ignore[arg-type]
     await asyncio.wait_for(serving.wait(), timeout=5)
+    assert shared_locks == [fake_sessions._changing]
+    assert fake_sessions.ensure_partitions is not None
     stop.set()
     for _ in range(100):
         if "draining" in events or served.done():

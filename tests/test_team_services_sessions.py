@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -10,11 +11,11 @@ from typing import Any, Optional
 import pytest
 
 from custom_messages.wire.models import SessionsOpenReplyAdapter
+from custom_messages.wire.partitions import OWNED, RELEASED, agent_partition, partition_owner_key
 from custom_messages.wire.refusals import FrameRefused
-from custom_messages.wire.partitions import partition_owner_key
 from custom_transport.protocol1.bucket_reads import BucketReadTimedOut
 from custom_transport.protocol1.state_records import StoredRecord
-from team_services.sessions import AGENT_SESSION, PLACEMENT, SessionService, session_key
+from team_services.sessions import AGENT_SESSION, PARTITION_OWNER, PLACEMENT, SessionService, session_key
 
 TEAM, INSTALLATION = "team_example", "install_example"
 NOW = datetime(2026, 11, 12, 9, 0, tzinfo=timezone.utc)
@@ -24,10 +25,12 @@ LONG_INSTALLATION, LONG_TEAM = "i" * 62, "t" * 24
 
 
 class _Records:
-    """The bucket reads and writes ``SessionService`` uses: no placements, session records that do not verify."""
+    """The bucket reads and writes ``SessionService`` uses: owned partitions for lead-host, bad session records."""
 
-    def __init__(self, bad_keys: list[str]) -> None:
+    def __init__(self, bad_keys: list[str], *, default_owner: Optional[str] = "lead-host") -> None:
         self.bad_keys = bad_keys
+        self.default_owner = default_owner
+        self.partition_owners: dict[str, Optional[StoredRecord]] = {}
         self.puts: list[tuple[str, str]] = []
 
     async def keys(self, record: str, prefix: str, *, team: Optional[str] = None) -> list[str]:
@@ -36,7 +39,15 @@ class _Records:
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
         raise FrameRefused("invalid_body", "a trust record is stored under another key", at="/key")
 
-    async def read_report(self, record: str, key: str, *, now: datetime) -> None:
+    async def read_report(self, record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
+        if record == PARTITION_OWNER:
+            if key in self.partition_owners:
+                return self.partition_owners[key]
+            if self.default_owner is None:
+                return None
+            team, _, part_str = key.partition(".partition.")
+            body = SimpleNamespace(team=team, partition=int(part_str), state=OWNED, host=self.default_owner, host_epoch=1)
+            return StoredRecord(1, SimpleNamespace(body=body, signer=SimpleNamespace(membership_epoch=1)))  # type: ignore[arg-type]
         return None
 
     async def revision(self, record: str, key: str) -> int:
@@ -135,10 +146,11 @@ class _PlacementBucket(_Records):
             return [key for key in self.placement_keys if key.startswith(prefix)]
         return await super().keys(record, prefix, team=team)
 
-    async def read_report(self, record: str, key: str, *, now: datetime) -> None:
+    async def read_report(self, record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
         if record == PLACEMENT:
             self.placement_reads.append(key)
-        return None
+            return None
+        return await super().read_report(record, key, now=now)
 
     def writer(self) -> SimpleNamespace:
         return SimpleNamespace(certificate=SimpleNamespace(membership_epoch=1))
@@ -178,6 +190,8 @@ class _SessionListingFails(_Records):
         return []
 
     async def read_report(self, record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
+        if record == PARTITION_OWNER:
+            return await super().read_report(record, key, now=now)
         if record != PLACEMENT or key not in self.placement_keys:
             return None
         body = SimpleNamespace(agent="lead", host="lead-host", placed_at="2026-11-12T08:00:00.000Z", handed_over=None)
@@ -219,3 +233,89 @@ async def test_a_failed_session_listing_opens_no_lead() -> None:
     records.failing = False  # the same team with a listing that ends: the lead opens
     opened = await service.open(_open("lead", "TeamArchitect"))  # type: ignore[arg-type]
     assert opened["outcome"] == "ok" and opened["session"]["body"]["agent_role"] == "lead"
+
+
+@pytest.mark.asyncio
+async def test_sessions_open_refuses_unowned_foreign_and_released_partitions(caplog) -> None:
+    """A2: sessions.open refuses unowned, foreign-owned, and released partitions with partition_not_owned."""
+
+    part = agent_partition(TEAM, "researcher-1")
+    pkey = partition_owner_key(TEAM, part)
+
+    # 1. Unowned partition (absent record)
+    records_unowned = _Records([], default_owner=None)
+    with caplog.at_level(logging.WARNING, logger="team_services.sessions"):
+        reply = await _service(records_unowned).open(_open("researcher-1", "researcher"))  # type: ignore[arg-type]
+    SessionsOpenReplyAdapter.validate_python(reply)
+    assert reply["outcome"] == "partition_not_owned"
+    assert reply["partition"] == part
+    assert records_unowned.puts == []
+
+    # 2. Foreign-owned partition
+    records_foreign = _Records([], default_owner=None)
+    records_foreign.partition_owners[pkey] = StoredRecord(
+        1,
+        SimpleNamespace(
+            body=SimpleNamespace(team=TEAM, partition=part, state=OWNED, host="worker-host-2", host_epoch=1),
+            signer=SimpleNamespace(membership_epoch=1),
+        ),  # type: ignore[arg-type]
+    )
+    reply_foreign = await _service(records_foreign).open(_open("researcher-1", "researcher"))  # type: ignore[arg-type]
+    SessionsOpenReplyAdapter.validate_python(reply_foreign)
+    assert reply_foreign["outcome"] == "partition_not_owned"
+    assert reply_foreign["partition"] == part
+    assert records_foreign.puts == []
+
+    # 3. Released partition (handover in progress)
+    records_released = _Records([], default_owner=None)
+    records_released.partition_owners[pkey] = StoredRecord(
+        2,
+        SimpleNamespace(
+            body=SimpleNamespace(team=TEAM, partition=part, state=RELEASED, host="lead-host", host_epoch=1),
+            signer=SimpleNamespace(membership_epoch=1),
+        ),  # type: ignore[arg-type]
+    )
+    reply_released = await _service(records_released).open(_open("researcher-1", "researcher"))  # type: ignore[arg-type]
+    SessionsOpenReplyAdapter.validate_python(reply_released)
+    assert reply_released["outcome"] == "partition_not_owned"
+    assert reply_released["partition"] == part
+    assert records_released.puts == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_release_and_sessions_open_cannot_place_agent_in_released_partition() -> None:
+    """A2 / CR-2: partition release and sessions.open share _changing so an open never lands in a released partition."""
+
+    part = agent_partition(TEAM, "researcher-1")
+    pkey = partition_owner_key(TEAM, part)
+    release_entered = asyncio.Event()
+    proceed_release = asyncio.Event()
+
+    records = _Records([], default_owner="lead-host")
+    service = _service(records)
+
+    async def release_under_shared_lock() -> None:
+        async with service._changing:
+            release_entered.set()
+            await proceed_release.wait()
+            records.partition_owners[pkey] = StoredRecord(
+                2,
+                SimpleNamespace(
+                    body=SimpleNamespace(team=TEAM, partition=part, state=RELEASED, host="lead-host", host_epoch=1),
+                    signer=SimpleNamespace(membership_epoch=1),
+                ),  # type: ignore[arg-type]
+            )
+
+    release_task = asyncio.create_task(release_under_shared_lock())
+    await release_entered.wait()
+    open_task = asyncio.create_task(service.open(_open("researcher-1", "researcher")))  # type: ignore[arg-type]
+    await asyncio.sleep(0.02)
+    assert not open_task.done()  # blocked on the shared mutation lock
+    proceed_release.set()
+
+    await release_task
+    reply = await open_task
+    SessionsOpenReplyAdapter.validate_python(reply)
+    assert reply["outcome"] == "partition_not_owned"
+    assert reply["partition"] == part
+    assert records.puts == []

@@ -724,15 +724,15 @@ def test_expected_hosts_persists_bootstrap_nats_expires_at(tmp_path: Path) -> No
 
 
 def test_ledger_persists_certificate_partitions_and_min_revoke_until(tmp_path: Path) -> None:
-    """C11, C12: ledger persists per-certificate granted partitions and compares confirmation timestamps."""
+    """C11, C12, C17: ledger persists per-certificate granted partition sequences and compares confirmation timestamps."""
 
     from custom_transport.protocol1.nats_jwt import NatsSigningKey
 
     now = utc_now()
     k1 = NatsSigningKey.generate("user").public_key
     ledger = IssueLedger.open(tmp_path, "install_one")
-    ledger.record_certificate_partitions("cert.worker-1.1", ())
-    ledger.record_certificate_partitions("cert.worker-1.2", (3, 1))
+    ledger.record_certificate_partitions("cert.worker-1.1", {})
+    ledger.record_certificate_partitions("cert.worker-1.2", {3: 300, 1: 100})
     ledger.record_confirmed_nats_revocation(k1, 1000)
     assert ledger.is_nats_revocation_confirmed(k1, min_revoke_until=1000)
     assert not ledger.is_nats_revocation_confirmed(k1, min_revoke_until=2000)
@@ -743,8 +743,8 @@ def test_ledger_persists_certificate_partitions_and_min_revoke_until(tmp_path: P
     ledger.save(now)
 
     reopened = IssueLedger.open(tmp_path, "install_one")
-    assert reopened.certificate_partitions("cert.worker-1.1") == ()
-    assert reopened.certificate_partitions("cert.worker-1.2") == (1, 3)
+    assert reopened.certificate_partitions("cert.worker-1.1") == {}
+    assert reopened.certificate_partitions("cert.worker-1.2") == {1: 100, 3: 300}
     assert reopened.certificate_partitions("cert.worker-1.99") is None
     assert not reopened.is_nats_revocation_confirmed(k1)
     reopened.record_confirmed_nats_revocation(k1, 2000)
@@ -1003,3 +1003,83 @@ async def test_renew_skips_placement_scan_for_non_partition_owning_roles(tmp_pat
     reply = await authority._renew(verified, give_up=False)
     assert reply["outcome"] == "ok"
     scan_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_c17_host_lost_spares_fast_reassignment_within_clock_skew_window(tmp_path: Path) -> None:
+    """C17: post-recovery reassignment + renewal within CLOCK_SKEW_SECONDS is spared using owner_sequence < release_sequence."""
+
+    from datetime import timedelta
+
+    from custom_transport.protocol1 import host_keys
+    from custom_transport.protocol1.bootstrap import BootstrapBundle, write_bundle
+    from custom_transport.protocol1.nats_jwt import NatsSigningKey
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from installation_authority.service import AUTHORITY_RUNTIME, CertificateRequest, InstallationAuthority
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    auth_keys, _ = host_keys.ensure_authority_keys(layout, "install-c17")
+    auth_host_keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
+    w_keys, _ = host_keys.ensure_host_keys(layout, "worker-1")
+    t0 = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+    k1 = NatsSigningKey.generate("user").public_key
+    k1_pre_renew = NatsSigningKey.generate("user").public_key
+    k2_recovered = NatsSigningKey.generate("user").public_key
+
+    bundle = BootstrapBundle("install-c17", ((auth_keys.key_id, auth_keys.public_key_text),), partitions=8)
+    write_bundle(layout.trust_bootstrap_path, bundle)
+    authority = InstallationAuthority(
+        layout,
+        auth_keys,
+        auth_host_keys,
+        partitions=8,
+        queues=TEST_QUEUE_LIMITS,
+        clock=lambda: t0 + timedelta(seconds=5),
+    )
+    authority._trust = PersistentTrustStore.open(bundle, layout.host_trust_dir(AUTHORITY_RUNTIME), t0)
+    authority._teams = ("team_a",)
+    authority._started = True
+
+    def _add_cert(epoch: int, nats_key: str, issued: datetime, part_seqs: dict[int, int]) -> None:
+        req = CertificateRequest(
+            runtime="worker-1",
+            teams=("team_a",),
+            roles=("worker_host",),
+            agent_types=("researcher",),
+            session_limit=4,
+            connection_class="connected",
+            key_id=w_keys.key_id,
+            public_key=w_keys.public_key_text,
+            nats_public_key=nats_key,
+        )
+        rec = authority.certificate_record(req, epoch=epoch, revocation_epoch=1, issued=issued)
+        authority._trust.add(json.dumps(rec).encode(), now=issued)
+        authority._ledger.take_epoch("worker-1", epoch)
+        authority._ledger.record_certificate_partitions(str(rec["body"]["certificate_id"]), part_seqs)
+
+    # Epoch 1: original cut-off cert (key K1) owning partition 1 at owner_sequence=100.
+    _add_cert(1, k1, t0, {1: 100})
+    # Epoch 2: a pre-release renewal (key k1_pre_renew) still carrying partition 1 from owner_sequence=100.
+    _add_cert(2, k1_pre_renew, t0 + timedelta(seconds=1), {1: 100})
+    # Epoch 3: fast recovery rejoin with fresh key K2 (partitions={}) 2 seconds later.
+    _add_cert(3, k2_recovered, t0 + timedelta(seconds=2), {})
+    # Epoch 4: fast reassignment of partition 1 at higher owner_sequence=300 and renewal 3 seconds later
+    # (well within CLOCK_SKEW_SECONDS of released_at = t0 + 1s).
+    _add_cert(4, k2_recovered, t0 + timedelta(seconds=3), {1: 300})
+
+    # Delayed host_lost release for partition 1 arrives at sequence=200, host_epoch=1, released_at=t0+1s.
+    await authority.revoke_cut_off_host_nats_key(
+        "worker-1",
+        host_epoch=1,
+        partition=1,
+        team="team_a",
+        release_sequence=200,
+        released_at=t0 + timedelta(seconds=1),
+        now=t0 + timedelta(seconds=5),
+    )
+
+    # Original epoch-1 key and pre-release epoch-2 key (owner_seq 100 < release_seq 200) are revoked.
+    assert authority._ledger.is_nats_key_revoked(k1)
+    assert authority._ledger.is_nats_key_revoked(k1_pre_renew)
+    # Recovered host's K2 (reassigned at owner_seq 300 >= release_seq 200) is deterministically spared.
+    assert not authority._ledger.is_nats_key_revoked(k2_recovered)

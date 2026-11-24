@@ -419,6 +419,7 @@ class InstallationAuthority:
                 host_epoch=release.host_epoch,
                 partition=release.partition,
                 team=release.team,
+                release_sequence=release.sequence,
                 released_at=release.issued_at,
             ),
             teams=self._teams,
@@ -436,15 +437,18 @@ class InstallationAuthority:
         host_epoch: int,
         partition: int,
         team: Optional[str] = None,
+        release_sequence: Optional[int] = None,
         released_at: Optional[datetime] = None,
         now: Optional[datetime] = None,
     ) -> list[RevocationOutcome]:
-        """Revoke the NATS user key(s) of a cut-off host that could have held ``partition`` at ``host_epoch`` (C11, C12).
+        """Revoke the NATS user key(s) of a cut-off host that could have held ``partition`` at ``host_epoch`` (C11, C12, C17).
 
         Selects the certificate at ``host_epoch`` plus any later certificate that was actually issued
-        with ``partition`` (before a post-release reassignment). A recovered host that rejoined
-        (``partitions=()``) or renewed without ``partition`` is never revoked by late or replayed
-        ``host_lost`` records. Each targeted key's ``revoke_until`` covers the latest expiry across
+        with ``partition`` from an ownership record strictly older than ``release_sequence``
+        (``owner_sequence < release_sequence``). A recovered host that rejoined (``{}``), renewed
+        without ``partition``, or was reassigned ``partition`` at a higher ownership sequence after
+        the release is never revoked by late or replayed ``host_lost`` records, even within
+        ``CLOCK_SKEW_SECONDS``. Each targeted key's ``revoke_until`` covers the latest expiry across
         all unexpired certificates of ``runtime`` sharing that NATS key.
         """
 
@@ -460,13 +464,17 @@ class InstallationAuthority:
             if cert.membership_epoch == host_epoch:
                 targeted.append(cert)
             elif cert.membership_epoch > host_epoch:
-                if released_at is not None and cert.issued_at > released_at + skew:
-                    continue
                 granted = self._ledger.certificate_partitions(cert.certificate_id)
                 if granted is not None:
-                    if partition in granted:
+                    owner_seq = granted.get(partition)
+                    if owner_seq is None:
+                        continue
+                    if release_sequence is not None:
+                        if owner_seq < release_sequence:
+                            targeted.append(cert)
+                    elif released_at is None or cert.issued_at <= released_at + skew:
                         targeted.append(cert)
-                elif released_at is not None:
+                elif released_at is not None and cert.issued_at <= released_at + skew:
                     targeted.append(cert)
 
         revoke_until_by_key = self._max_revoke_until_by_nats_key(all_certs)
@@ -1123,6 +1131,7 @@ class InstallationAuthority:
         now: datetime,
         renewal: Optional[tuple[str, str]] = None,
         partitions: tuple[int, ...] = (),
+        partition_sequences: Optional[Mapping[int, int]] = None,
         connection: Optional[Mapping[str, Any]] = None,
     ) -> dict[str, Any]:
         """Sign a certificate at the epoch above ``after_epoch`` and every one issued, keep it, then publish it.
@@ -1140,7 +1149,10 @@ class InstallationAuthority:
         record = self.certificate_record(request, epoch=epoch, revocation_epoch=revocation_epoch, issued=now,
                                          replaces=replaces)
         self._ledger.take_epoch(request.runtime, epoch)
-        self._ledger.record_certificate_partitions(str(record["body"]["certificate_id"]), partitions)
+        self._ledger.record_certificate_partitions(
+            str(record["body"]["certificate_id"]),
+            partition_sequences if partition_sequences is not None else {},
+        )
         self._trust.add(_encoded(record), now=now)
         if renewal is not None:
             self._ledger.store_renewal(
@@ -1171,16 +1183,17 @@ class InstallationAuthority:
         runtime: str,
         teams: Iterable[str],
         now: datetime,
-    ) -> tuple[dict[str, set[int]], dict[str, set[int]]]:
+    ) -> tuple[dict[str, dict[int, int]], dict[str, set[int]]]:
         """Read verified ``partition_owner`` records for ``runtime`` across ``teams`` from ``UA1_PLACEMENT``.
 
-        Returns ``(owned_by_team, released_by_team)``. Listing failures propagate fail-closed;
-        records that fail signature or key verification are logged and ignored.
+        Returns ``(owned_by_team, released_by_team)`` where ``owned_by_team[team]`` maps each owned
+        partition number to its verified ``partition_owner`` record sequence (C17). Listing failures
+        propagate fail-closed; records that fail signature or key verification are logged and ignored.
         """
 
         if self._js is None or self._trust is None:
             return {}, {}
-        owned: dict[str, set[int]] = {}
+        owned: dict[str, dict[int, int]] = {}
         released: dict[str, set[int]] = {}
         bucket = await self._js.key_value(PLACEMENT_BUCKET)
         for team in sorted(set(teams)):
@@ -1213,7 +1226,7 @@ class InstallationAuthority:
                 if rec_body.host != runtime:
                     continue
                 if rec_body.state == OWNED:
-                    owned.setdefault(team, set()).add(int(rec_body.partition))
+                    owned.setdefault(team, {})[int(rec_body.partition)] = int(verified.document.sequence)
                 elif rec_body.state == RELEASED:
                     released.setdefault(team, set()).add(int(rec_body.partition))
         return owned, released
@@ -1224,7 +1237,7 @@ class InstallationAuthority:
         asked: Any,
         *,
         give_up: bool,
-        owned_by_team: Mapping[str, set[int]],
+        owned_by_team: Mapping[str, Mapping[int, int]],
         released_by_team: Mapping[str, set[int]],
     ) -> tuple[int, ...]:
         """Validate ``host.renew`` ``partitions`` against verified ``owned`` records (A5)."""
@@ -1263,7 +1276,7 @@ class InstallationAuthority:
                 at="/body/partitions",
             )
         team = next(iter(certificate.teams))
-        owned = owned_by_team.get(team, set())
+        owned = owned_by_team.get(team, {})
         released = released_by_team.get(team, set())
         for number in asked:
             if number in released or number not in owned:
@@ -1850,6 +1863,11 @@ class InstallationAuthority:
             self.logger.info("A renewal asked for another profile than the one it keeps; the certificate states the "
                              "granted one. event=host_renewal_profile_differs runtime=%s", certificate.runtime)
         latest = await self._latest_certificate(certificate.runtime, now)
+        granted_partition_sequences: dict[int, int] = {}
+        if granted_partitions:
+            team = next(iter(certificate.teams))
+            team_owned = owned_by_team.get(team, {})
+            granted_partition_sequences = {p: team_owned[p] for p in granted_partitions}
         record = await self._issue(
             request,
             replaces=certificate.certificate_id,
@@ -1858,6 +1876,7 @@ class InstallationAuthority:
             now=now,
             renewal=(retry_key, body_sha256),
             partitions=granted_partitions,
+            partition_sequences=granted_partition_sequences,
             connection=connection,
         )
 

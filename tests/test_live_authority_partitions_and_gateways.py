@@ -1152,7 +1152,12 @@ async def test_c11_c12_c13_c16_live_recovery_pruning_default_retire_and_host_sta
                     StateRecords(authority._js, lambda: authority.live.identity, authority._trust),
                     verify=lambda raw: authority._trust.store.verify(raw, record="partition_owner", now=clock()),
                     on_host_lost=lambda rel: authority.revoke_cut_off_host_nats_key(
-                        rel.host, host_epoch=rel.host_epoch, partition=rel.partition, team=rel.team, released_at=rel.issued_at
+                        rel.host,
+                        host_epoch=rel.host_epoch,
+                        partition=rel.partition,
+                        team=rel.team,
+                        release_sequence=rel.sequence,
+                        released_at=rel.issued_at,
                     ),
                     teams=[TEAM_A],
                 )
