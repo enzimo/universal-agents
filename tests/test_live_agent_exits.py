@@ -103,38 +103,50 @@ async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool,
         services_host = MessageHost(layout, team_services_profile(TEAM),
                                     await connect(stack, broker_url, TEAM_SERVICES_RUNTIME))
         serving = asyncio.create_task(serve_team(services_host, TEAM, stop))
-        # Asked of Researcher-1 by name: sent to its own mailbox, and no worker took it (no record).
-        subtask = SimpleNamespace(task=SimpleNamespace(task_id="sub_1"), header=SimpleNamespace(to_routing_path="worker_1"),
-                                  meta=SimpleNamespace(to_agent_name="Researcher-1"))
-        lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True, pending=[subtask])
-        worker = stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False)
         lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
         worker_host = AgentProcessHost(layout, worker_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
         lead_connection = await nats.connect(proxy_url, inbox_prefix=f"_INBOX.{LEAD_HOST_RUNTIME}".encode(),
                                              allow_reconnect=True, reconnect_time_wait=0.5, max_reconnect_attempts=-1)
         stack.push_async_callback(lead_connection.close)
+        worker_connection = await connect(stack, broker_url, WORKER_RUNTIME)
         try:
+            lead_host.ensure_started(lead_connection)
+            worker_host.ensure_started(worker_connection)
+            await lead_host.wait_for_usable_partition(timeout=15)
+            await worker_host.wait_for_usable_partition(timeout=15)
+            lead_id = lead_host.draw_agent_id(prefix="lead")
+            worker_id = worker_host.draw_agent_id(prefix="worker")
+            # Asked of Researcher-1 by name: sent to its own mailbox, and no worker took it (no record).
+            subtask = SimpleNamespace(task=SimpleNamespace(task_id="sub_1"),
+                                      header=SimpleNamespace(to_routing_path=worker_id),
+                                      meta=SimpleNamespace(to_agent_name="Researcher-1"))
+            lead = stand_in(lead_id, "TeamLead", "TeamArchitect", is_lead=True, pending=[subtask])
+            worker = stand_in(worker_id, "Researcher-1", "Researcher", is_lead=False)
             lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_connection,
                              state=("idle", True))
             worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
-                               nc=await connect(stack, broker_url, WORKER_RUNTIME), state=("idle", True))
-            await _until(lambda: "worker_1" in lead.known_agents.agent_map, timeout=30)
+                               nc=worker_connection, state=("idle", True))
+            await _until(lambda: worker_id in lead.known_agents.agent_map, timeout=30)
             if process_down:
                 await lead_host.stop()
             if connection_down:
                 proxy.cut()
                 await asyncio.sleep(0.2)
-            await asyncio.wrap_future(worker_host.detach("worker_1"))  # exiting, session closed, record removed
+            await asyncio.wrap_future(worker_host.detach(worker_id))  # exiting, session closed, record removed
             if process_down:
                 # A fresh host and requester have no in-memory history of the worker.
                 # Pending subtasks are the work recovered by the restarted lead, which then
                 # checks them as UniversalAgent._connect_nats does.
-                lead = stand_in("lead_2", "TeamLead", "TeamArchitect", is_lead=True,
-                                pending=[] if restored_after_view else [subtask])
                 lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
                 agent_requests.configure_process_host(lead_host)
+                restarted_nc = await connect(stack, broker_url, LEAD_HOST_RUNTIME)
+                lead_host.ensure_started(restarted_nc)
+                await lead_host.wait_for_usable_partition(timeout=15)
+                lead2_id = lead_host.draw_agent_id(prefix="lead")
+                lead = stand_in(lead2_id, "TeamLead", "TeamArchitect", is_lead=True,
+                                pending=[] if restored_after_view else [subtask])
                 lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION,
-                                 nc=await connect(stack, broker_url, LEAD_HOST_RUNTIME), state=("idle", True))
+                                 nc=restarted_nc, state=("idle", True))
                 if restored_after_view:
                     await _until(lambda: lead_host.team_agents is not None and lead_host.team_agents.ready.is_set(),
                                  timeout=30)
@@ -144,7 +156,7 @@ async def _exit_while(broker_url: str, tmp_path: Path, *, connection_down: bool,
             if connection_down:
                 await asyncio.sleep(2.0)
                 proxy.refusing = False
-            await _until(lambda: "worker_1" not in lead.known_agents.agent_map, timeout=60)
+            await _until(lambda: worker_id not in lead.known_agents.agent_map, timeout=60)
             await _until(lambda: lead._fail_subtask_and_reconcile_parent.await_count > 0, timeout=30)
             await asyncio.sleep(1.0)  # nothing more arrives
             return lead._fail_subtask_and_reconcile_parent.await_count
@@ -203,21 +215,6 @@ async def test_the_lead_withdraws_and_fails_only_what_nobody_took_from_a_departe
     records = DelegatedTaskRepository(resolve_storage_settings(
         {"backend": "sqlite", "sqlite": {"path": str(tmp_path / "team.db")}}))
 
-    async def delegate(task_id: str) -> int:
-        """As the lead's delegation does: record the task, publish it to the worker's mailbox, keep its sequence."""
-
-        ack = await lead_work.publish(envelope=_task("worker_1", f"part {task_id}", task_id=task_id),
-                                      routing_key="worker_1",
-                                      options=TransportPublishOptions(durable=True, idempotency_key=task_id))
-        records.record_published(team_id=TEAM, task_id=task_id, parent_task_id="root", root_task_id="root",
-                                 requester_agent_id="lead_1", named_agent_type="Researcher",
-                                 target_agent_name="Researcher-1", publish_sequence=ack.seq)
-        return int(ack.seq)
-
-    def by_name(task_id: str) -> SimpleNamespace:
-        return SimpleNamespace(task=SimpleNamespace(task_id=task_id), header=SimpleNamespace(to_routing_path="worker_1"),
-                               meta=SimpleNamespace(to_agent_name="Researcher-1"))
-
     async with AsyncExitStack() as stack:
         await installation(stack, broker, layout, team_services_profile(TEAM), lead_profile, worker_profile)
         services_host = MessageHost(layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
@@ -227,31 +224,54 @@ async def test_the_lead_withdraws_and_fails_only_what_nobody_took_from_a_departe
         await worker_work.connect()
         stack.push_async_callback(worker_work.close)
 
-        taken = await delegate("sub_taken")
-        mailbox = await _subscribe_queue(worker_work, name="worker_1:direct", routing_key="worker_1",
-                                         durable_name=mapper.durable_name("agent_worker_1"))
-        delivery = await asyncio.wait_for(mailbox.get(), 10)
-        assert delivery.envelope.msg_content.task_id == "sub_taken"
-        await delivery.ack()
-        await worker_work.close()  # it takes nothing more
-        untaken = await delegate("sub_untaken")
-
-        lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True,
-                        pending=[by_name("sub_taken"), by_name("sub_untaken")])
-        lead._delegated_task_repository = records
-        lead.team_comms = SimpleNamespace(delete_work_message=lead_work.delete_work_message)
-        worker = stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False)
         lead_host = AgentProcessHost(layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
         worker_host = AgentProcessHost(layout, worker_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS))
         try:
-            lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION,
-                             nc=await connect(stack, broker, LEAD_HOST_RUNTIME), state=("idle", True))
-            worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION,
-                               nc=await connect(stack, broker, WORKER_RUNTIME), state=("idle", True))
-            await _until(lambda: "worker_1" in lead.known_agents.agent_map, timeout=30)
+            lead_nc = await connect(stack, broker, LEAD_HOST_RUNTIME)
+            worker_nc = await connect(stack, broker, WORKER_RUNTIME)
+            lead_host.ensure_started(lead_nc)
+            worker_host.ensure_started(worker_nc)
+            await lead_host.wait_for_usable_partition(timeout=15)
+            await worker_host.wait_for_usable_partition(timeout=15)
+            lead_id = lead_host.draw_agent_id(prefix="lead")
+            worker_id = worker_host.draw_agent_id(prefix="worker")
+
+            async def delegate(task_id: str) -> int:
+                """As the lead's delegation does: record the task, publish it to the worker's mailbox, keep its sequence."""
+
+                ack = await lead_work.publish(envelope=_task(worker_id, f"part {task_id}", task_id=task_id),
+                                              routing_key=worker_id,
+                                              options=TransportPublishOptions(durable=True, idempotency_key=task_id))
+                records.record_published(team_id=TEAM, task_id=task_id, parent_task_id="root", root_task_id="root",
+                                         requester_agent_id=lead_id, named_agent_type="Researcher",
+                                         target_agent_name="Researcher-1", publish_sequence=ack.seq)
+                return int(ack.seq)
+
+            def by_name(task_id: str) -> SimpleNamespace:
+                return SimpleNamespace(task=SimpleNamespace(task_id=task_id),
+                                       header=SimpleNamespace(to_routing_path=worker_id),
+                                       meta=SimpleNamespace(to_agent_name="Researcher-1"))
+
+            taken = await delegate("sub_taken")
+            mailbox = await _subscribe_queue(worker_work, name=f"{worker_id}:direct", routing_key=worker_id,
+                                             durable_name=mapper.durable_name(f"agent_{worker_id}"))
+            delivery = await asyncio.wait_for(mailbox.get(), 10)
+            assert delivery.envelope.msg_content.task_id == "sub_taken"
+            await delivery.ack()
+            await worker_work.close()  # it takes nothing more
+            untaken = await delegate("sub_untaken")
+
+            lead = stand_in(lead_id, "TeamLead", "TeamArchitect", is_lead=True,
+                            pending=[by_name("sub_taken"), by_name("sub_untaken")])
+            lead._delegated_task_repository = records
+            lead.team_comms = SimpleNamespace(delete_work_message=lead_work.delete_work_message)
+            worker = stand_in(worker_id, "Researcher-1", "Researcher", is_lead=False)
+            lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_nc, state=("idle", True))
+            worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION, nc=worker_nc, state=("idle", True))
+            await _until(lambda: worker_id in lead.known_agents.agent_map, timeout=30)
 
             with caplog.at_level(logging.INFO):
-                await asyncio.wrap_future(worker_host.detach("worker_1"))
+                await asyncio.wrap_future(worker_host.detach(worker_id))
                 await _until(lambda: lead._fail_subtask_and_reconcile_parent.await_count > 0, timeout=30)
                 await asyncio.sleep(1.0)  # nothing more arrives
 

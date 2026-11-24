@@ -100,41 +100,47 @@ async def test_the_gateway_follows_the_lead_and_the_members_from_the_records(
         stack.push_async_callback(gateway.close)
         await _until(view.ready.is_set)
 
-        lead = stand_in("lead_1", "TeamLead", "TeamArchitect", is_lead=True)
-        worker = stand_in("worker_1", "Researcher-1", "Researcher", is_lead=False)
-        worker.get_self_status = lambda info_type=None: AgentStatus(
-            self_id="worker_1", team_id=TEAM, name="Researcher-1", named_agent_type="Researcher",
-            agent_role="worker", is_paused=False, is_executing=False, has_execution_capacity=True,
-            accepting_work=True, status_type="response", available_skills=["grill-me"])
         lead_host, lead_nc = await _started(stack, broker, LEAD_HOST_RUNTIME, AgentProcessHost(
             layout, lead_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS)))
         worker_host, worker_nc = await _started(stack, broker, WORKER_RUNTIME, AgentProcessHost(
             layout, worker_profile, TEAM, handlers=dict(LIVE_CONTROL_HANDLERS)))
+        lead_host.ensure_started(lead_nc)
+        worker_host.ensure_started(worker_nc)
+        await lead_host.wait_for_usable_partition(timeout=15)
+        await worker_host.wait_for_usable_partition(timeout=15)
+        lead_id = lead_host.draw_agent_id(prefix="lead")
+        worker_id = worker_host.draw_agent_id(prefix="worker")
+        lead = stand_in(lead_id, "TeamLead", "TeamArchitect", is_lead=True)
+        worker = stand_in(worker_id, "Researcher-1", "Researcher", is_lead=False)
+        worker.get_self_status = lambda info_type=None: AgentStatus(
+            self_id=worker_id, team_id=TEAM, name="Researcher-1", named_agent_type="Researcher",
+            agent_role="worker", is_paused=False, is_executing=False, has_execution_capacity=True,
+            accepting_work=True, status_type="response", available_skills=["grill-me"])
         lead_host.attach(lead, agent_type="TeamArchitect", definition=DEFINITION, nc=lead_nc, state=("idle", True))
         worker_host.attach(worker, agent_type="Researcher", definition=DEFINITION, nc=worker_nc, state=("idle", True))
 
         # The lead's record reaches the view the lead follower reads; both members reach the Team page's records.
-        await _until(lambda: "lead_1" in view.live())
-        assert view.live()["lead_1"].is_lead and view.live()["lead_1"].agent_type == "TeamArchitect"
-        await _until(lambda: latest("worker_1") is not None)
-        assert (latest("worker_1").name, latest("worker_1").is_team_lead) == ("Researcher-1", False)
+        await _until(lambda: lead_id in view.live())
+        assert view.live()[lead_id].is_lead and view.live()[lead_id].agent_type == "TeamArchitect"
+        await _until(lambda: latest(worker_id) is not None)
+        assert (latest(worker_id).name, latest(worker_id).is_team_lead) == ("Researcher-1", False)
         # What only the agent can say (its skills) arrives once a page asks for it (the Team tab opens).
         assert not any(status.available_skills for status in view.statuses())
         view.want_details()
-        await _until(lambda: any(status.self_id == "worker_1" and status.available_skills == ["grill-me"]
+        await _until(lambda: any(status.self_id == worker_id and status.available_skills == ["grill-me"]
                                  for status in view.statuses()), timeout=10)
-        assert view.live_ids() == {"lead_1", "worker_1"}
+        assert view.live_ids() == {lead_id, worker_id}
 
         # A worker becoming busy is shown as it happens, with no ask, and keeps its skills.
-        worker_host.report("worker_1", "busy", True)
-        await _until(lambda: latest("worker_1").is_executing, timeout=5)
-        assert next(status for status in view.statuses() if status.self_id == "worker_1").available_skills == [
+        worker_host.report(worker_id, "busy", True)
+        await _until(lambda: latest(worker_id).is_executing, timeout=5)
+        assert next(status for status in view.statuses() if status.self_id == worker_id).available_skills == [
             "grill-me"]
 
         # The lead leaves: it is gone from the view, and the Team page shows it leaving.
         await lead_host.stop()
-        await _until(lambda: "lead_1" not in view.live())
-        assert latest("lead_1").is_exiting and view.departure_reason("lead_1") == "exiting"
+        await _until(lambda: lead_id not in view.live())
+        assert latest(lead_id).is_exiting and view.departure_reason(lead_id) == "exiting"
 
 
 @pytest.mark.asyncio

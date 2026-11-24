@@ -45,13 +45,16 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Optional, Protocol
 
 from pydantic import TypeAdapter, ValidationError
 
 from custom_messages.wire.models import AgentId
+from custom_messages.wire.partitions import RELEASED
 from custom_messages.wire.refusals import FrameRefused
-from custom_messages.wire.trust import PLACEMENT, VerifiedRecord
+from custom_messages.wire.trust import PARTITION_OWNER, PLACEMENT, VerifiedRecord
+from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.state_records import require_record_key
 from installation_authority.queues import AgentBacklog
 
@@ -317,6 +320,112 @@ class PlacedConsumers:
                                  refused.at)
             return False
         return True
+
+
+@dataclass(frozen=True)
+class HostLostRelease:
+    """Verified ``host_lost`` partition release observed in ``UA1_PLACEMENT`` (C01, C11)."""
+
+    team: str
+    partition: int
+    host: str
+    host_epoch: int
+    key: str
+    sequence: int
+    issued_at: datetime
+
+
+class ReleasedPartitionWatcher:
+    """Watches ``<team>.partition.*`` in ``UA1_PLACEMENT`` and triggers NATS key revocation
+    for verified ``host_lost`` released records (C01, C11)."""
+
+    def __init__(
+        self,
+        records: PlacementRecords,
+        *,
+        verify: Callable[[bytes], VerifiedRecord],
+        on_host_lost: Callable[[HostLostRelease], Awaitable[Any]],
+        teams: Iterable[str],
+        verify_keyed: Optional[Callable[[str, bytes], VerifiedRecord]] = None,
+        logger: logging.Logger = _LOGGER,
+        retry_seconds: float = RETRY_SECONDS,
+    ) -> None:
+        self._records = records
+        self._verify = verify
+        self._verify_keyed = verify_keyed
+        self._on_host_lost = on_host_lost
+        self.teams = tuple(sorted(set(teams)))
+        self._logger = logger
+        self._retry_seconds = retry_seconds
+        self._handled_releases: dict[str, int] = {}
+
+    async def run(self, stop: asyncio.Event) -> None:
+        if not self.teams:
+            await stop.wait()
+            return
+        tasks = [asyncio.create_task(self._follow(team, stop)) for team in self.teams]
+        try:
+            await stop.wait()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _follow(self, team: str, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            try:
+                async for key, raw in self._records.watch(PARTITION_OWNER, f"{team}.partition.*", team=team):
+                    if stop.is_set():
+                        return
+                    if raw is None:
+                        continue
+                    await self._handle_record(team, key, raw)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.warning(
+                    "Partition release watch failed; reopening in %s seconds. "
+                    "event=authority_release_watch_failed team=%s",
+                    self._retry_seconds,
+                    team,
+                    exc_info=True,
+                )
+            if await _stopped_within(stop, self._retry_seconds):
+                return
+
+    async def _handle_record(self, team: str, key: str, raw: bytes) -> None:
+        try:
+            verified = self._verify_keyed(key, raw) if self._verify_keyed is not None else self._verify(raw)
+            require_record_key(verified, key)
+            body: Any = verified.body
+            if body.team != team:
+                raise FrameRefused("invalid_body", "partition_owner team differs from watch team", at="/body/team")
+        except FrameRefused as refused:
+            self._logger.warning(
+                "A partition ownership record did not verify and is ignored for host_lost revocation. "
+                "event=authority_partition_owner_refused team=%s key=%s code=%s at=%s",
+                team,
+                key,
+                refused.code,
+                refused.at,
+            )
+            return
+        if body.state != RELEASED or body.reason != "host_lost":
+            return
+        sequence = int(verified.document.sequence)
+        if self._handled_releases.get(key, -1) >= sequence:
+            return
+        release = HostLostRelease(
+            team=team,
+            partition=int(body.partition),
+            host=str(body.host),
+            host_epoch=int(body.host_epoch),
+            key=key,
+            sequence=sequence,
+            issued_at=parse_timestamp(verified.document.issued_at),
+        )
+        await self._on_host_lost(release)
+        self._handled_releases[key] = sequence
 
 
 async def _stopped_within(stop: asyncio.Event, seconds: float) -> bool:

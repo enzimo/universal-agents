@@ -42,7 +42,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from custom_messages.wire.frame import VerifiedFrame
 from custom_messages.wire.kinds import CONTRACT_SHA256
@@ -72,13 +72,33 @@ class GatewayHostUnavailable(RuntimeError):
     """The gateway is not a protocol 1 host yet, or this process does not run one."""
 
 
-def gateway_profile(team: str) -> HostProfile:
-    return HostProfile(GATEWAY_RUNTIME, (team,), (GATEWAY_ROLE,), software={"name": "universal-agents",
-                                                                            "version": release_version()})
+def gateway_profile(
+    team: str | Iterable[str],
+    *,
+    runtime: str = GATEWAY_RUNTIME,
+) -> HostProfile:
+    """Host profile for one gateway runtime serving ``team`` (one team id or several, decision 102)."""
+
+    teams = (team,) if isinstance(team, str) else tuple(sorted(set(team)))
+    if not teams:
+        raise ValueError("a gateway profile must name at least one team")
+    return HostProfile(
+        runtime,
+        teams,
+        (GATEWAY_ROLE,),
+        software={"name": "universal-agents", "version": release_version()},
+    )
 
 
-def prepared_gateway_host(layout: InstanceLayout, team: str,
-                          logger: logging.Logger = _LOGGER) -> Optional[GatewayMessageHost]:
+def prepared_gateway_host(
+    layout: InstanceLayout,
+    team: str,
+    logger: logging.Logger = _LOGGER,
+    *,
+    runtime: str = GATEWAY_RUNTIME,
+    teams: Optional[Iterable[str]] = None,
+    edges: Optional[Mapping[str, tuple[str, ...]]] = None,
+) -> Optional[GatewayMessageHost]:
     """The gateway service's host when the launcher prepared this instance's message hosts, else ``None``.
 
     Without the launcher's bootstrap bundle the gateway cannot join, so it runs no host and
@@ -90,7 +110,15 @@ def prepared_gateway_host(layout: InstanceLayout, team: str,
                        "(start it with the launcher). event=gateway_host_not_prepared path=%s",
                        layout.trust_bootstrap_path)
         return None
-    return GatewayMessageHost(layout, team, logger)
+    team_tuple = tuple(sorted(set(teams))) if teams is not None else (team,)
+    return GatewayMessageHost(
+        layout,
+        team,
+        logger,
+        runtime_id=runtime,
+        teams=team_tuple,
+        edges=dict(edges) if edges else {},
+    )
 
 
 @dataclass
@@ -102,6 +130,10 @@ class GatewayMessageHost:
     # The contract this gateway runs: its code's, unless a test runs it on another.
     contract_sha256: str = CONTRACT_SHA256
     join_retry_seconds: float = JOIN_RETRY_SECONDS
+    # Distinct runtime id and team/route subset when an installation runs several gateways (decision 102).
+    runtime_id: str = GATEWAY_RUNTIME
+    teams: tuple[str, ...] = ()
+    edges: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _task: Optional[asyncio.Task[None]] = None
@@ -110,6 +142,19 @@ class GatewayMessageHost:
     _joined: bool = False
     # Why it cannot join while this process runs (module docstring).
     _refusal: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not self.teams:
+            self.teams = (self.team,)
+        else:
+            self.teams = tuple(sorted(set(self.teams)))
+            if self.team not in self.teams:
+                raise ValueError(f"gateway primary team {self.team!r} must be among its teams {self.teams!r}")
+        if self.edges:
+            outside = set(self.edges) - set(self.teams)
+            if outside:
+                raise ValueError(f"gateway edges name teams outside this gateway's teams: {sorted(outside)}")
+            self.edges = {t: tuple(sorted(set(routes))) for t, routes in sorted(self.edges.items())}
 
     def observe_team(self, view: Any) -> None:
         """Read the team's agent records into ``view`` once joined (``GatewayTeamView.run``)."""
@@ -120,7 +165,7 @@ class GatewayMessageHost:
     def runtime(self) -> str:
         """The host id, which also names the reply inbox of the connection it runs on (``reply_inbox_runtime``)."""
 
-        return GATEWAY_RUNTIME
+        return self.runtime_id
 
     def start(self, nc: Any) -> None:
         """Join and keep the host up in the background; returns at once. After ``close`` it joins anew."""
@@ -133,9 +178,15 @@ class GatewayMessageHost:
         self._joined, self._refusal = False, None
         if self.team_view is not None:
             self.team_view.joining()  # a refusal from an earlier start no longer holds
-        self.host = MessageHost(self.layout, gateway_profile(self.team), nc, logger=self.logger,
-                                contract_sha256=self.contract_sha256)
-        self._task = asyncio.create_task(self._run(), name="gateway_message_host")
+        self.host = MessageHost(
+            self.layout,
+            gateway_profile(self.teams, runtime=self.runtime_id),
+            nc,
+            logger=self.logger,
+            contract_sha256=self.contract_sha256,
+        )
+        task_name = "gateway_message_host" if self.runtime_id == GATEWAY_RUNTIME else f"gateway_message_host_{self.runtime_id}"
+        self._task = asyncio.create_task(self._run(), name=task_name)
 
     async def _run(self) -> None:
         assert self.host is not None
@@ -203,24 +254,36 @@ class GatewayMessageHost:
             raise GatewayHostUnavailable("The gateway's host has stopped.")
         return self.host
 
-    async def command(self, kind: str, body: dict[str, Any], *, person_ref: str,
-                      timeout: float = 30.0) -> VerifiedFrame:
+    async def command(
+        self,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        person_ref: str,
+        team: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> VerifiedFrame:
         """Ask the team services for one person's operation and return its verified reply.
 
         The token is bound to the command id the contract names for ``kind``
         (``command_binding_id``: ``request_id`` for most, ``steer_id`` for ``tasks.steer``).
+        ``team`` defaults to this gateway's primary team; multi-team gateways pass the target
+        team explicitly.
         """
 
         # Before waiting for the join: either mistake is the caller's, and nothing is signed.
         command_id = command_binding_id(kind, body)
         require_person_ref(person_ref)
+        target_team = self.team if team is None else team
+        if target_team not in self.teams:
+            raise ValueError(f"gateway {self.runtime_id!r} does not serve team {target_team!r}")
         host = await self.ready(timeout)
         assert host.live is not None
-        token = command_token(host.identity, team=self.team, person_ref=person_ref, command_id=command_id,
+        token = command_token(host.identity, team=target_team, person_ref=person_ref, command_id=command_id,
                               issued=host.clock())
-        audience = {"installation": host.identity.installation, "team": self.team, "target": "team_services",
-                    "id": self.team}
-        return await host.live.request(kind, body, audience, team=self.team, authority=token, timeout=timeout)
+        audience = {"installation": host.identity.installation, "team": target_team, "target": "team_services",
+                    "id": target_team}
+        return await host.live.request(kind, body, audience, team=target_team, authority=token, timeout=timeout)
 
     async def close(self) -> None:
         """Stop the host (module docstring): raises only when the caller itself is cancelled."""

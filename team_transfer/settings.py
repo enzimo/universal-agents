@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, JsonValue, ValidationError
 
 from runtime_settings.retired_concurrency import RETIRED_CONCURRENCY_SETTING
 from runtime_settings.transport import (
+    CREDENTIAL_LIFETIME_SETTING,
     PARTITION_COUNT_SETTING,
     REPLICAS_SETTING,
     RETIRED_PRESENCE_SETTING,
@@ -80,13 +81,16 @@ _TEAM_NAMED_SETTINGS: Final[dict[tuple[str, ...], tuple[str, ...]]] = {
     ("transport", "subject_prefix"): (".", "_"),
     ("gateway", "response_queue_name"): ("_",),
 }
-# Fixed when an installation is created (runtime_settings.transport): the destination keeps
-# its own count, because another count puts queued work in other streams and a later batch
-# carrying one would stop the destination's start.
-_INSTALLATION_SETTINGS: Final = frozenset({PARTITION_COUNT_SETTING})
-_INSTALLATION_SETTING_REASON: Final = (
-    "the partition count is fixed when an instance is created; this instance keeps its own"
-)
+# Installation-scoped transport settings that never travel with a single team
+# (runtime_settings.transport): the destination installation keeps its own values.
+_INSTALLATION_SETTINGS: Final[dict[tuple[str, ...], str]] = {
+    PARTITION_COUNT_SETTING: (
+        "the partition count is fixed when an instance is created; this instance keeps its own"
+    ),
+    CREDENTIAL_LIFETIME_SETTING: (
+        "NATS credential lifetime is an installation-wide transport setting; this instance keeps its own"
+    ),
+}
 _CONFIG_KEY: Final = "settings.config"
 _MAX_VALIDATION_ROUNDS: Final = 50
 _POSTGRES_BACKEND: Final = "postgres"
@@ -124,7 +128,8 @@ class SettingsSection:
     # 13: security_layer.api_request_user_agent (default User-Agent for brokered web API requests) joined it.
     # 14: execution_control.ssh network guardrails (allowed_cidrs, allowed_domains, denied_cidrs),
     #     max_delegation_ttl_seconds and allow_password_bootstrap joined it.
-    schema_version: ClassVar[int] = 14
+    # 15: transport.nats.credential_lifetime_seconds joined it; not carried (_INSTALLATION_SETTINGS).
+    schema_version: ClassVar[int] = 15
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -427,7 +432,7 @@ def _applied(
             refused[setting.dotted] = "this version no longer has this setting"
             continue
         if setting.path in _INSTALLATION_SETTINGS:
-            refused[setting.dotted] = _INSTALLATION_SETTING_REASON
+            refused[setting.dotted] = _INSTALLATION_SETTINGS[setting.path]
             continue
         problem = _later_storage_problem(setting, base, context) or _set_path(
             candidate, setting.path, _under_root(setting.value, root)
@@ -812,10 +817,12 @@ __all__ = [
 # V14 added execution_control.ssh network guardrails, max_delegation_ttl_seconds and
 # allow_password_bootstrap; an older export has none, so the new instance takes their
 # defaults and the same step reads version 13.
+# V15 added transport.nats.credential_lifetime_seconds (excluded via _INSTALLATION_SETTINGS);
+# an older export has none, so the new instance keeps its own default and the same step reads version 14.
 
 
 def _upgraded_settings(records: SectionRecords) -> SectionRecords:
-    """An older export's records as version 14 reads them: retired settings dropped, a replica count as a whole number."""
+    """An older export's records as version 15 reads them: retired settings dropped, a replica count as a whole number."""
 
     retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
     upgraded: SectionRecords = []
@@ -829,6 +836,6 @@ def _upgraded_settings(records: SectionRecords) -> SectionRecords:
     return upgraded
 
 
-for _source in (5, 6, 7, 8, 9, 10, 11, 12, 13):
+for _source in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _upgraded_settings
 TEAM_ID_RENAMES[SettingsSection.name] = _renamed_team_settings

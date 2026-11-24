@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast
-from uuid import uuid4
 
+from custom_agents.agent_requests import draw_launch_agent_id
 from custom_agents.schedule_repair_guidance import (
     AGENT_DEFINITION_CHANGED,
     AGENT_DEFINITION_UNAVAILABLE,
@@ -400,7 +400,7 @@ class AgentInstantiationService:
             now = utc_now()
             launch = AgentLaunchV1(
                 launch_id=launch_id,
-                agent_id="agent_" + uuid4().hex,
+                agent_id=draw_launch_agent_id(self.agent.team_id),
                 team_id=self.agent.team_id,
                 owner_canonical_user_id=owner_id,
                 named_agent_type=agent_type,

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 from dataclasses import dataclass, field, replace
@@ -65,9 +66,17 @@ from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROT
 from custom_messages.wire.models import HostStateComponentsItem
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import HostCertificate
+from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import read_bundle
-from custom_transport.protocol1.host_keys import load_host_keys
+from custom_transport.protocol1.host_keys import (
+    discard_pending_nats_key,
+    load_host_keys,
+    promote_pending_nats_key,
+    rotate_nats_key,
+    stage_pending_nats_key,
+)
 from custom_transport.protocol1.identity import HostIdentity
+from custom_transport.protocol1.nats_jwt import NatsSigningKey
 from custom_transport.protocol1.joining import (
     AUTHORITY_SERVICE_ID,
     HostProfile,
@@ -75,7 +84,7 @@ from custom_transport.protocol1.joining import (
     certificate_agent_types,
     join,
 )
-from custom_transport.protocol1.live import LiveHost, utc_now
+from custom_transport.protocol1.live import LiveHost, RequestRefused, utc_now
 from custom_transport.protocol1.state_records import StateRecords, rising_sequence, require_record_key
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from release_version import release_version
@@ -113,6 +122,20 @@ class Rejoined:
     not_certifiable: frozenset[str] = frozenset()
     # The join's outcome and message when the authority refused it, as "<outcome>: <message>".
     refusal: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RenewalOutcome:
+    """Result of a ``host.renew`` call (``MessageHost.renew``)."""
+
+    ok: bool
+    outcome: str
+    message: str = ""
+    certificate: Optional[HostCertificate] = None
+    connection: Optional[dict[str, Any]] = None
+    partitions: frozenset[int] = frozenset()
+    credential_too_large: bool = False
+    rotated_nats_key: bool = False
 
 
 @dataclass
@@ -154,6 +177,19 @@ class MessageHost:
     _components_left_out: tuple[str, ...] = ()
     # Held while the certificate changes (a renewal, a new join), so one never overwrites the other's.
     _certificate_change: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Ephemeral staged NATS key used only when layout is None in unit tests without keys.json.
+    _ephemeral_pending_nats_key: Optional[NatsSigningKey] = None
+    # Active NATS user connection credential issued by the authority (None under shared NATS login).
+    connection: Optional[dict[str, Any]] = None
+    credential_partitions: frozenset[int] = frozenset()
+    credentials_issued: bool = False
+    _connection_issued_at: Optional[datetime] = None
+    _join_connection_recorded: Optional[dict[str, Any]] = None
+    # Optional callbacks supplied by AgentProcessHost to supply owned partitions on routine renewals,
+    # pause routine renewals during handover step 2, and react to updated NATS connection credentials.
+    renewal_partitions: Optional[Callable[[], Sequence[int]]] = None
+    renewal_paused: Optional[Callable[[], bool]] = None
+    on_credential: Optional[Callable[[dict[str, Any], frozenset[int], bool], Any]] = None
 
     @property
     def identity(self) -> HostIdentity:
@@ -180,9 +216,9 @@ class MessageHost:
         # renewal or a new join switches both at once. The records exist before the join, whose
         # reply may name a certificate the host reads from UA1_CERTS (fetch_trust).
         self.records = StateRecords.on_connection(self.nc, lambda: self.identity, trust, fetch_trust=self.fetch_trust)
+        self._join_connection_recorded = None
         try:
-            certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
-                                     fetch_trust=self.fetch_trust)
+            certificate, keys = await self._join_recovering_revoked_nats_key(keys, trust)
         except JoinRefused as refused:
             if refused.outcome == "protocol_mismatch":
                 self.learned_other_contract(refused.accepted_contract_sha256, "join")
@@ -190,10 +226,81 @@ class MessageHost:
         self.live = LiveHost(self.nc, HostIdentity(keys, certificate), trust, clock=self.clock, logger=self.logger,
                              fetch_trust=self.fetch_trust)
         self._started_at = now
+        join_conn = self._join_connection_recorded
+        self._join_connection_recorded = None
+        if join_conn is not None:
+            await self._notify_credential_change(join_conn, self.credential_partitions, rotated_nats_key=False)
         await self.refresh_trust()
         if report:
             await self.publish_liveness("accepting")
         return self.live
+
+    def _record_join_connection(self, connection: Mapping[str, Any]) -> None:
+        conn = dict(connection)
+        self.connection = conn
+        self._connection_issued_at = self.clock()
+        self.credentials_issued = True
+        self.credential_partitions = frozenset()
+        self._join_connection_recorded = conn
+
+    async def _notify_credential_change(
+        self,
+        connection: dict[str, Any],
+        partitions: frozenset[int],
+        *,
+        rotated_nats_key: bool,
+    ) -> None:
+        if self.on_credential is None:
+            return
+        hook_result = self.on_credential(connection, partitions, rotated_nats_key)
+        if inspect.isawaitable(hook_result):
+            await hook_result
+
+    async def _join_recovering_revoked_nats_key(
+        self,
+        keys: Any,
+        trust: PersistentTrustStore,
+        *,
+        profile: Optional[HostProfile] = None,
+    ) -> tuple[HostCertificate, Any]:
+        """Join the installation, rotating a revoked stored NATS user key once (or promoting pending first) (C16)."""
+
+        target_profile = self.profile if profile is None else profile
+        try:
+            certificate = await join(self.nc, keys, trust, target_profile, clock=self.clock, logger=self.logger,
+                                     fetch_trust=self.fetch_trust, on_connection=self._record_join_connection)
+            return certificate, keys
+        except RequestRefused as refused:
+            if refused.code != "invalid_body" or refused.at != "/body/nats_public_key":
+                raise
+            had_pending = keys.pending_nats_public_key is not None
+            self.logger.warning(
+                "Join refused the stored NATS user key; rotating the NATS user key and retrying join. "
+                "event=protocol1_join_nats_key_rotated runtime=%s used_pending=%s",
+                target_profile.runtime,
+                had_pending,
+            )
+            keys = rotate_nats_key(self.layout, target_profile.runtime, prefer_pending=True)
+            try:
+                certificate = await join(self.nc, keys, trust, target_profile, clock=self.clock, logger=self.logger,
+                                         fetch_trust=self.fetch_trust, on_connection=self._record_join_connection)
+                return certificate, keys
+            except RequestRefused as retry_refused:
+                if (
+                    not had_pending
+                    or retry_refused.code != "invalid_body"
+                    or retry_refused.at != "/body/nats_public_key"
+                ):
+                    raise
+                self.logger.warning(
+                    "Join also refused the promoted pending NATS user key; generating a fresh NATS user key and retrying once. "
+                    "event=protocol1_join_nats_key_regenerated runtime=%s",
+                    target_profile.runtime,
+                )
+                keys = rotate_nats_key(self.layout, target_profile.runtime, prefer_pending=False)
+                certificate = await join(self.nc, keys, trust, target_profile, clock=self.clock, logger=self.logger,
+                                         fetch_trust=self.fetch_trust, on_connection=self._record_join_connection)
+                return certificate, keys
 
     async def fetch_trust(self, data: bytes) -> bool:
         """Read the certificate and session a frame or a host's record of this installation names.
@@ -347,11 +454,24 @@ class MessageHost:
                 await self._renew()
 
     def _renewal_due(self) -> bool:
+        if self.renewal_paused is not None and self.renewal_paused():
+            return False
         if self.state == "drained":
             return not self._give_up_answered  # the renewal that gives up its agents, until it is answered
+        now = self.clock()
         certificate = self.identity.certificate
         life = certificate.expires_at - certificate.issued_at
-        if self.clock() < certificate.issued_at + life * 2 / 3:
+        cert_due = now >= certificate.issued_at + life * 2 / 3
+        conn_due = False
+        if self.connection is not None and "expires_at" in self.connection:
+            try:
+                conn_exp = parse_timestamp(str(self.connection["expires_at"]))
+                conn_start = self._connection_issued_at or certificate.issued_at
+                conn_life = conn_exp - conn_start
+                conn_due = conn_life <= timedelta(0) or now >= conn_start + conn_life * 2 / 3
+            except ValueError:
+                conn_due = True
+        if not cert_due and not conn_due:
             return False
         if self.installation_contract is not None:
             # Only a renewal that gives up every agent is answered (module docstring).
@@ -406,44 +526,148 @@ class MessageHost:
             self.logger.warning("The certificate is due for renewal but could not be renewed now; the upkeep asks "
                                 "again. event=protocol1_renew_failed runtime=%s", self.profile.runtime, exc_info=True)
 
-    async def renew(self) -> None:
+    async def renew(
+        self,
+        *,
+        partitions: Optional[Sequence[int]] = None,
+        rotate_nats_key: bool = False,
+    ) -> RenewalOutcome:
         """Renew the certificate now; keep the old one until the new one is held."""
 
         async with self._certificate_change:
-            await self._renew()
+            return await self._renew(partitions=partitions, rotate_nats_key=rotate_nats_key)
 
     def renewal_profile(self) -> HostProfile:
         """The profile a renewal asks for: the host's own, or none of its agents once it drained (module docstring)."""
 
         return self.profile.giving_up() if self.state == "drained" else self.profile
 
-    async def _renew(self) -> None:
+    def _stage_new_nats_public_key(self, runtime: str, *, fresh: bool = False) -> str:
+        """Stage and persist a new NATS user key before a key-rotating renewal (C03)."""
+
+        if self.layout is not None:
+            if fresh:
+                discard_pending_nats_key(self.layout, runtime)
+            staged = stage_pending_nats_key(self.layout, runtime)
+            assert staged.pending_nats_public_key is not None
+            return staged.pending_nats_public_key
+        if fresh or self._ephemeral_pending_nats_key is None:
+            self._ephemeral_pending_nats_key = NatsSigningKey.generate("user")
+        return self._ephemeral_pending_nats_key.public_key
+
+    def _promote_nats_key_if_needed(self, runtime: str, expected_public_key: Optional[str]) -> None:
+        if expected_public_key is None or self.live is None:
+            return
+        if self.layout is not None:
+            promoted = promote_pending_nats_key(self.layout, runtime, expected_public_key=expected_public_key)
+            if hasattr(self.live.identity, "with_keys"):
+                self.live.identity = self.live.identity.with_keys(promoted)
+            return
+        self._ephemeral_pending_nats_key = None
+
+    async def _renew(
+        self,
+        *,
+        partitions: Optional[Sequence[int]] = None,
+        rotate_nats_key: bool = False,
+    ) -> RenewalOutcome:
         certificate = self.identity.certificate
         assert self.live is not None
-        reply = await self.live.request("host.renew", {
-            "renew_id": self.renewal_id(certificate),
-            "certificate_id": certificate.certificate_id, "membership_epoch": certificate.membership_epoch,
-            "profile_sha256": self.renewal_profile().digest(), "contract_sha256": self.contract_sha256},
-            {"installation": certificate.installation, "team": INSTALLATION_SCOPE, "target": "installation_service",
-             "id": AUTHORITY_SERVICE_ID}, team=INSTALLATION_SCOPE)
+        giving_up_agents = self.state == "drained" and bool(getattr(certificate, "agent_types", ()))
+        if partitions is None and self.renewal_partitions is not None and self.state != "drained":
+            partitions = self.renewal_partitions()
+        requested_partitions = () if self.state == "drained" else tuple(sorted(set(partitions or ())))
+        giving_up_partitions = bool(self.credential_partitions - frozenset(requested_partitions))
+        needs_new_nats_key = rotate_nats_key or giving_up_agents or giving_up_partitions
+
+        async def _send(*, rotate: bool, fresh_key: bool = False) -> tuple[Any, Optional[str]]:
+            new_key = self._stage_new_nats_public_key(certificate.runtime, fresh=fresh_key) if rotate else None
+            body_payload: dict[str, Any] = {
+                "renew_id": self.renewal_id(
+                    certificate,
+                    partitions=requested_partitions,
+                    new_nats_public_key=new_key,
+                ),
+                "certificate_id": certificate.certificate_id,
+                "membership_epoch": certificate.membership_epoch,
+                "profile_sha256": self.renewal_profile().digest(),
+                "contract_sha256": self.contract_sha256,
+            }
+            if requested_partitions:
+                body_payload["partitions"] = list(requested_partitions)
+            if new_key is not None:
+                body_payload["new_nats_public_key"] = new_key
+            response = await self.live.request(  # type: ignore[union-attr]
+                "host.renew",
+                body_payload,
+                {"installation": certificate.installation, "team": INSTALLATION_SCOPE, "target": "installation_service",
+                 "id": AUTHORITY_SERVICE_ID},
+                team=INSTALLATION_SCOPE,
+            )
+            return response, new_key
+
+        try:
+            reply, new_nats_public_key = await _send(rotate=needs_new_nats_key, fresh_key=False)
+        except RequestRefused as refused:
+            # F1/F2: Recover when the authority requires a new NATS user key (e.g. out-of-band host_lost
+            # key revocation, ledger reset, or rejected staged key) by rotating and retrying once.
+            if refused.code == "invalid_body" and refused.at == "/body/new_nats_public_key":
+                self.logger.warning(
+                    "Renewal required a fresh NATS user key; rotating the NATS user key and retrying once. "
+                    "event=protocol1_renew_nats_key_regenerated runtime=%s was_rotating=%s",
+                    certificate.runtime,
+                    needs_new_nats_key,
+                )
+                reply, new_nats_public_key = await _send(rotate=True, fresh_key=needs_new_nats_key)
+            else:
+                raise
+
         body = reply.raw["body"]
+        outcome = str(body["outcome"])
+        message = str(body.get("message") or "")
         if self.state == "drained":
             self._give_up_answered = True
-        if body["outcome"] == "protocol_mismatch":
+        if outcome == "protocol_mismatch":
             self.learned_other_contract(body.get("accepted_contract_sha256"), "renewal")
-            return
-        if body["outcome"] != "ok":
-            self.logger.error("The certificate could not be renewed. event=protocol1_renew_refused runtime=%s outcome=%s",
-                              certificate.runtime, body["outcome"])
-            return
+            return RenewalOutcome(ok=False, outcome=outcome, message=message)
+        if outcome != "ok":
+            too_large = outcome == "not_allowed" and "max_credential_bytes" in message.lower()
+            self.logger.error("The certificate could not be renewed. event=protocol1_renew_refused runtime=%s outcome=%s "
+                              "message=%s", certificate.runtime, outcome, message)
+            return RenewalOutcome(ok=False, outcome=outcome, message=message, credential_too_large=too_large)
         self.live.trust.add(json.dumps(body["certificate"]).encode(), now=self.clock())
         renewed = self.live.trust.store.host_certificate(certificate.installation, certificate.runtime,
                                                          int(body["certificate"]["body"]["membership_epoch"]))
         assert renewed is not None
+        if new_nats_public_key is not None:
+            self._promote_nats_key_if_needed(
+                certificate.runtime,
+                getattr(renewed, "nats_public_key", new_nats_public_key),
+            )
         self.live.identity = self.live.identity.with_certificate(renewed)
+        conn: Optional[dict[str, Any]] = None
+        if isinstance(body.get("connection"), Mapping):
+            conn = dict(body["connection"])
+            self.connection = conn
+            self._connection_issued_at = self.clock()
+            self.credentials_issued = True
+            self.credential_partitions = frozenset(requested_partitions)
+            await self._notify_credential_change(
+                conn,
+                self.credential_partitions,
+                rotated_nats_key=new_nats_public_key is not None,
+            )
         self.logger.info("Renewed the host certificate. event=protocol1_renewed runtime=%s membership_epoch=%s "
-                         "agent_types=%s session_limit=%s", certificate.runtime, renewed.membership_epoch,
-                         ",".join(sorted(renewed.agent_types)), renewed.session_limit)
+                         "agent_types=%s session_limit=%s partitions=%s", certificate.runtime, renewed.membership_epoch,
+                         ",".join(sorted(renewed.agent_types)), renewed.session_limit, len(requested_partitions))
+        return RenewalOutcome(
+            ok=True,
+            outcome="ok",
+            certificate=renewed,
+            connection=conn,
+            partitions=frozenset(requested_partitions),
+            rotated_nats_key=new_nats_public_key is not None,
+        )
 
     async def rejoin(self, agent_types: Iterable[str]) -> Rejoined:
         """Join again asking for ``agent_types`` as well, and sign everything with the certificate it gives.
@@ -467,17 +691,31 @@ class MessageHost:
         requested = frozenset(agent_types)
         certifiable = certificate_agent_types(requested, self.logger)
         not_certifiable = requested - certifiable
+        rejoin_conn: Optional[dict[str, Any]] = None
         async with self._certificate_change:
             assert self.live is not None, "start() first"
             current = self.identity.certificate
             if certifiable <= current.agent_types:
                 return Rejoined(current, certifiable, not_certifiable=not_certifiable)
+            # F12/CR-5: Never rejoin while a partition handover is draining (would wipe credential_partitions).
+            if self.renewal_paused is not None and self.renewal_paused():
+                return Rejoined(
+                    current,
+                    certifiable & current.agent_types,
+                    refused=certifiable - current.agent_types,
+                    not_certifiable=not_certifiable,
+                    refusal="deferred: partition handover in progress",
+                )
             asked = frozenset(self.profile.agent_types) | current.agent_types | certifiable
             profile = replace(self.profile, agent_types=tuple(sorted(asked)))
+            self._join_connection_recorded = None
+            old_keys = self.identity.keys
             try:
-                certificate = await join(self.nc, self.identity.keys, self.live.trust, profile, clock=self.clock,
-                                         logger=self.logger, fetch_trust=self.fetch_trust)
+                certificate, new_keys = await self._join_recovering_revoked_nats_key(
+                    old_keys, self.live.trust, profile=profile
+                )
             except JoinRefused as refused:
+                self._join_connection_recorded = None
                 self.logger.warning("The authority did not grant more agent types; the host keeps its certificate. "
                                     "event=protocol1_rejoin_refused runtime=%s outcome=%s agent_types=%s message=%s",
                                     current.runtime, refused.outcome, ",".join(sorted(certifiable - current.agent_types)),
@@ -485,25 +723,45 @@ class MessageHost:
                 return Rejoined(current, certifiable & current.agent_types, refused=certifiable - current.agent_types,
                                 not_certifiable=not_certifiable, refusal=f"{refused.outcome}: {refused.message}")
             self.profile = profile
+            rotated_nats = new_keys.nats_public_key != old_keys.nats_public_key
+            if rotated_nats and hasattr(self.live.identity, "with_keys"):
+                self.live.identity = self.live.identity.with_keys(new_keys)
             self.live.identity = self.live.identity.with_certificate(certificate)
+            rejoin_conn = self._join_connection_recorded
+            self._join_connection_recorded = None
+            # F12/CR-5: Notify inside _certificate_change so async on_credential hooks stay ordered with renew().
+            if rejoin_conn is not None:
+                await self._notify_credential_change(
+                    rejoin_conn, self.credential_partitions, rotated_nats_key=rotated_nats
+                )
         self.logger.info("Joined again for more agent types. event=protocol1_rejoined runtime=%s membership_epoch=%s "
                          "agent_types=%s", certificate.runtime, certificate.membership_epoch,
                          ",".join(sorted(certificate.agent_types)))
         return Rejoined(certificate, certifiable & certificate.agent_types, refused=certifiable - certificate.agent_types,
                         not_certifiable=not_certifiable)
 
-    def renewal_id(self, certificate: HostCertificate) -> str:
+    def renewal_id(
+        self,
+        certificate: HostCertificate,
+        *,
+        partitions: Sequence[int] = (),
+        new_nats_public_key: Optional[str] = None,
+    ) -> str:
         """The id of this host's renewal of ``certificate``: kept on every retry, new after an upgrade in place.
 
         A repeated renewal id gets its stored outcome back (README "Contract digest",
         "Stored outcomes"), so the id names what renews as well as what is renewed: the
-        certificate, the profile asked for, the software release and the contract digest.
+        certificate, the profile asked for, the software release, the contract digest, and
+        any requested partitions or rotated NATS key (C03).
         A digest of them keeps every id whole within the contract's 128 characters, where
         cutting a long one could repeat another's.
         """
 
-        renewing: list[str | int] = [certificate.runtime, certificate.certificate_id, certificate.membership_epoch,
-                                     self.renewal_profile().digest(), release_version(), self.contract_sha256]
+        renewing: list[Any] = [certificate.runtime, certificate.certificate_id, certificate.membership_epoch,
+                               self.renewal_profile().digest(), release_version(), self.contract_sha256]
+        sorted_partitions = sorted(set(partitions))
+        if sorted_partitions or new_nats_public_key is not None:
+            renewing.extend([sorted_partitions, new_nats_public_key or ""])
         return f"renew-{certificate.membership_epoch}-{b64url(hashlib.sha256(rfc8785.dumps(renewing)).digest())}"
 
     # -- another contract (module docstring) ------------------------------------------------------

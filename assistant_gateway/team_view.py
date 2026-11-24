@@ -119,6 +119,9 @@ _WITHOUT_SESSION: dict[str, tuple[str, str]] = {
     REFUSAL_CODES["already_placed"]: (
         "The team services have each placed on another process.",
         "Make a team-wide restart. If this comes back, send the logs with event=agent_host_session_refused."),
+    REFUSAL_CODES["partition_not_owned"]: (
+        "The agent's partition is not owned by {where} (or is currently being handed over).",
+        "Wait for partition ownership to settle, or restart the agent so it draws an ID in a partition {where} owns."),
     MORE_AGENTS_CODE: (
         "{where} runs more agents without a session than its record can list; its log names them all.",
         "Look for event=agent_host_session_refused in that process's log for why, and act on it."),

@@ -972,6 +972,15 @@ JetStream-backed delivery where configured. Verify:
   its connection is on, and otherwise stops the start
   (`event=installation_authority_start_refused`) naming the lines that are
   missing or wrong.
+- When per-process NATS credentials are issued (operator mode),
+  `transport.nats.credential_lifetime_seconds` sets how long each issued user
+  credential lasts (default `900` seconds, or 15 minutes; valid range `60` to
+  `86400` seconds). Hosts renew before the credential expires. On the bundled
+  server, the installation authority also revokes a retiring or departing
+  host's NATS key immediately via operator-signed account claims; on an
+  external server without an operator key, partition handovers wait out this
+  lifetime plus the clock tolerance before another host takes the partition.
+  This setting belongs to the installation and is not carried by team transfer.
 
 Process-scoped consumers use this crash-cleanup delay:
 

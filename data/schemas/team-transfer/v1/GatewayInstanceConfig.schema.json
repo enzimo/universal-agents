@@ -3081,6 +3081,19 @@
       "title": "MetallicAccentSettings",
       "type": "object"
     },
+    "NatsAccountSettings": {
+      "additionalProperties": false,
+      "description": "``transport.nats``: NATS operator-mode account and user credential settings.\n\nEvery issued NATS user JWT—host credentials and bootstrap users alike—expires after\n``credential_lifetime_seconds`` (ending no later than the host's certificate). Hosts renew\nbefore expiry; on external servers without operator-mode revocation, handovers and retired\nhosts wait out this lifetime plus ``clock_skew_seconds``.",
+      "properties": {
+        "credential_lifetime_seconds": {
+          "default": 900,
+          "title": "Credential Lifetime Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "NatsAccountSettings",
+      "type": "object"
+    },
     "NetworkSettings": {
       "properties": {
         "public_origin": {
@@ -4281,6 +4294,9 @@
           "default": 5,
           "title": "Max Deliver",
           "type": "integer"
+        },
+        "nats": {
+          "$ref": "#/$defs/NatsAccountSettings"
         },
         "nats_name": {
           "anyOf": [

@@ -166,3 +166,28 @@ async def announce(agent: Any, kind: str, body: Mapping[str, Any]) -> None:
     if host is None:
         raise AgentUnreachable(NO_HOST.reason, clears=False)
     await host.announce(kind, body, sender_agent=str(agent.id))
+
+
+def draw_launch_agent_id(team_id: str, *, prefix: str = "agent") -> str:
+    """Draw a contract-valid (<= 32 char) agent ID for a dynamically launched worker.
+
+    When this process has an active ``AgentProcessHost`` for ``team_id`` with at least one
+    usable owned partition, the ID is drawn inside its least-filled usable owned partition.
+    Otherwise (standalone tests or before partitions are assigned), returns a <= 32-char ID
+    matching the contract's ``agent_id`` pattern.
+    """
+
+    from custom_transport.protocol1.host_partitions import draw_any_agent_id
+
+    host = process_host()
+    if host is not None and host.team == team_id and host.usable_partitions():
+        try:
+            return str(host.draw_agent_id(prefix=prefix))
+        except Exception:
+            host.logger.warning(
+                "Could not draw a partition-scoped worker agent ID; falling back to an unconstrained contract ID. "
+                "event=agent_host_draw_id_fallback team=%s",
+                team_id,
+                exc_info=True,
+            )
+    return draw_any_agent_id(prefix=prefix)

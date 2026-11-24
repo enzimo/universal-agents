@@ -456,12 +456,24 @@ async def test_a_renewal_that_gives_up_every_agent_is_answered_on_any_contract(b
         assert certificate.agent_types == frozenset({"researcher"}) and certificate.session_limit == 4
         worker = LiveHost(worker_nc, HostIdentity(worker_keys, certificate), trust)
 
-        async def renew(renew_id: str, profile: str, contract: str) -> dict:
+        async def renew(
+            renew_id: str,
+            profile: str,
+            contract: str,
+            *,
+            new_nats_public_key: str | None = None,
+        ) -> dict:
             current = worker.identity.certificate
-            reply = await worker.request("host.renew", {
-                "renew_id": renew_id, "certificate_id": current.certificate_id,
-                "membership_epoch": current.membership_epoch, "profile_sha256": profile, "contract_sha256": contract},
-                AUTHORITY_AUDIENCE, team="_install")
+            req_body: dict = {
+                "renew_id": renew_id,
+                "certificate_id": current.certificate_id,
+                "membership_epoch": current.membership_epoch,
+                "profile_sha256": profile,
+                "contract_sha256": contract,
+            }
+            if new_nats_public_key is not None:
+                req_body["new_nats_public_key"] = new_nats_public_key
+            reply = await worker.request("host.renew", req_body, AUTHORITY_AUDIENCE, team="_install")
             body = reply.raw["body"]
             if body["outcome"] == "ok":
                 trust.add(json.dumps(body["certificate"]).encode(), now=utc_now())
@@ -471,23 +483,43 @@ async def test_a_renewal_that_gives_up_every_agent_is_answered_on_any_contract(b
                 worker.identity = worker.identity.with_certificate(renewed)
             return body
 
-        other = await renew("renew-gives-up-1", giving_up, OTHER_CONTRACT)
+        # Dropping pools/agents requires a fresh new_nats_public_key (A5, C05).
+        with pytest.raises(RequestRefused) as missing_key:
+            await renew("renew-gives-up-missing-key", giving_up, OTHER_CONTRACT)
+        assert missing_key.value.code == "invalid_body" and missing_key.value.at == "/body/new_nats_public_key"
+
+        staged_2 = host_keys.stage_pending_nats_key(layout, WORKER.runtime)
+        assert staged_2.pending_nats_public_key is not None
+        other = await renew(
+            "renew-gives-up-1", giving_up, OTHER_CONTRACT, new_nats_public_key=staged_2.pending_nats_public_key
+        )
         assert other["outcome"] == "ok", other
         granted = other["certificate"]["body"]
         assert (granted["agent_types"], granted["session_limit"], granted["membership_epoch"]) == ([], 0, 2)
         assert granted["replaces"] == certificate.certificate_id and granted["profile_sha256"] == giving_up
         assert (granted["teams"], granted["roles"]) == ([TEAM], ["worker_host"])
+        promoted_2 = host_keys.promote_pending_nats_key(
+            layout, WORKER.runtime, expected_public_key=granted["nats_public_key"]
+        )
+        worker.identity = worker.identity.with_keys(promoted_2)
         # Asking for more than giving up, on another contract, is turned away.
         assert_mismatch("host.renew", await renew("renew-other-contract", WORKER.digest(), OTHER_CONTRACT))
-        # On this contract the same profile renews as usual.
+        # On this contract the same profile renews as usual (no pools dropped now, so same NATS key works).
         same = await renew("renew-gives-up-2", giving_up, CONTRACT_SHA256)
         assert same["outcome"] == "ok" and same["certificate"]["body"]["agent_types"] == []
         assert same["certificate"]["body"]["membership_epoch"] == 3
-        # And it narrows a certificate that still holds agents.
-        rejoined = await join(worker_nc, worker_keys, trust, WORKER)
+        # Rejoining with the old revoked NATS key is refused (CR-1), while the promoted key rejoins cleanly.
+        with pytest.raises(RequestRefused) as revoked_rejoin:
+            await join(worker_nc, worker_keys, trust, WORKER)
+        assert revoked_rejoin.value.code == "invalid_body" and revoked_rejoin.value.at == "/body/nats_public_key"
+        rejoined = await join(worker_nc, promoted_2, trust, WORKER)
         assert rejoined.agent_types == frozenset({"researcher"}) and rejoined.membership_epoch == 4
         worker.identity = worker.identity.with_certificate(rejoined)
-        narrowed = await renew("renew-gives-up-3", giving_up, CONTRACT_SHA256)
+        staged_3 = host_keys.stage_pending_nats_key(layout, WORKER.runtime)
+        assert staged_3.pending_nats_public_key is not None
+        narrowed = await renew(
+            "renew-gives-up-3", giving_up, CONTRACT_SHA256, new_nats_public_key=staged_3.pending_nats_public_key
+        )
         assert (narrowed["certificate"]["body"]["agent_types"], narrowed["certificate"]["body"]["session_limit"]) == ([], 0)
         # A give-up of another contract that this revision cannot read (it names another certificate) is turned away.
         current = worker.identity.certificate
@@ -608,9 +640,13 @@ async def test_a_join_asking_for_other_grants_gets_a_new_certificate(broker: str
         second = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)
         assert second.membership_epoch == first.membership_epoch + 1 and second.replaces == first.certificate_id
         assert second.agent_types == frozenset({"analyst", "researcher"})
-        # Asking for the same again hands that certificate back; asking for less gets a narrower one.
+        # Asking for the same again hands that certificate back; asking for less requires a new NATS key (F1/SEC-06).
         assert (await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)).membership_epoch == 2
-        narrower = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        with pytest.raises(RequestRefused) as same_key_narrow:
+            await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        assert same_key_narrow.value.code == "invalid_body" and same_key_narrow.value.at == "/body/nats_public_key"
+        rotated_keys = host_keys.rotate_nats_key(layout, WORKER.runtime)
+        narrower = await join(worker_nc, rotated_keys, host_trust(layout, WORKER.runtime), WORKER)
         assert narrower.membership_epoch == 3 and narrower.agent_types == frozenset({"researcher"})
 
 

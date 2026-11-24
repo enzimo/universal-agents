@@ -54,10 +54,12 @@ class StoredRenewal:
     certificate: Mapping[str, Any]
     body_sha256: str
     stored_at: datetime
+    partitions: tuple[int, ...] = ()
+    connection: Optional[Mapping[str, Any]] = None
 
 
 class IssueLedger:
-    """One installation authority's record of the epochs, renewal answers and revocations it signed."""
+    """One installation authority's record of the epochs, renewal answers, NATS key revocations, and revocations it signed."""
 
     def __init__(self, path: Path, installation: str, *, logger: logging.Logger = _LOGGER) -> None:
         self.path = path
@@ -66,6 +68,21 @@ class IssueLedger:
         self._epochs: dict[str, int] = {}
         self._renewals: dict[str, StoredRenewal] = {}
         self._revocations: Optional[dict[str, Any]] = None
+        # Permanent ban of revoked NATS user keys (CR-1/S1/C09): nats_public_key -> revoke_until (unix seconds).
+        self._revoked_nats_keys: dict[str, int] = {}
+        # NATS user keys whose revocation was confirmed on the server (C01/C08): nats_public_key -> revoke_until.
+        self._confirmed_nats_revocations: dict[str, int] = {}
+        # Permanent record of bootstrap bundle NATS user keys (S1): never accepted as a host's own key.
+        self._bootstrap_nats_keys: set[str] = set()
+        # Granted partitions -> verified partition_owner sequence recorded per issued certificate_id
+        # (C11, C17): distinguishes pre-release renewals from post-recovery reassignments.
+        self._certificate_partitions: dict[str, dict[int, int]] = {}
+        # Latest issued NATS user JWT exp (unix seconds) per nats_public_key (F15/FA-9/SEC-08),
+        # so revocation pruning follows the short JWT lifetime instead of the 30-day certificate end.
+        self._nats_key_jwt_expires: dict[str, int] = {}
+        # Certificates written to UA1_CERTS then aborted by a post-write Dekker check (C35):
+        # certificate_id -> expires_at (unix seconds), so _rotation_already_issued never hands them out.
+        self._aborted_certificates: dict[str, int] = {}
 
     @classmethod
     def open(cls, folder: Path, installation: str, *, logger: logging.Logger = _LOGGER) -> "IssueLedger":
@@ -90,13 +107,37 @@ class IssueLedger:
                 return ledger
             ledger._epochs = {str(runtime): int(epoch) for runtime, epoch in document["epochs"].items()}
             ledger._renewals = {
-                str(key): StoredRenewal(dict(held["certificate"]), str(held["body_sha256"]),
-                                        parse_timestamp(str(held["stored_at"])))
+                str(key): StoredRenewal(
+                    dict(held["certificate"]),
+                    str(held["body_sha256"]),
+                    parse_timestamp(str(held["stored_at"])),
+                    partitions=tuple(int(p) for p in held.get("partitions", ())),
+                    connection=dict(held["connection"]) if isinstance(held.get("connection"), dict) else None,
+                )
                 for key, held in document["renewals"].items()}
             revocations = document.get("revocations")
             ledger._revocations = dict(revocations) if isinstance(revocations, dict) else None
+            raw_revoked_nats = document.get("revoked_nats_keys") or {}
+            ledger._revoked_nats_keys = {str(k): int(v) for k, v in raw_revoked_nats.items()}
+            raw_confirmed = document.get("confirmed_nats_revocations") or {}
+            ledger._confirmed_nats_revocations = {str(k): int(v) for k, v in raw_confirmed.items()}
+            raw_bootstrap = document.get("bootstrap_nats_keys") or []
+            ledger._bootstrap_nats_keys = {str(k) for k in raw_bootstrap}
+            raw_cert_parts = document.get("certificate_partitions") or {}
+            ledger._certificate_partitions = {
+                str(cert_id): {int(p): int(seq) for p, seq in parts.items()}
+                for cert_id, parts in raw_cert_parts.items()
+            }
+            raw_jwt_exp = document.get("nats_key_jwt_expires") or {}
+            ledger._nats_key_jwt_expires = {str(k): int(v) for k, v in raw_jwt_exp.items()}
+            raw_aborted = document.get("aborted_certificates") or {}
+            ledger._aborted_certificates = {str(k): int(v) for k, v in raw_aborted.items()}
         except (KeyError, TypeError, ValueError, AttributeError) as error:
             ledger._epochs, ledger._renewals, ledger._revocations = {}, {}, None
+            ledger._revoked_nats_keys, ledger._confirmed_nats_revocations, ledger._bootstrap_nats_keys = {}, {}, set()
+            ledger._certificate_partitions = {}
+            ledger._nats_key_jwt_expires = {}
+            ledger._aborted_certificates = {}
             ledger._set_aside(error)
         return ledger
 
@@ -131,8 +172,28 @@ class IssueLedger:
         held = self._renewals.get(retry_key)
         return held if held is not None and now - held.stored_at < OUTCOME_RETENTION else None
 
-    def store_renewal(self, retry_key: str, certificate: Mapping[str, Any], body_sha256: str, now: datetime) -> None:
-        self._renewals[retry_key] = StoredRenewal(dict(certificate), body_sha256, now)
+    def store_renewal(
+        self,
+        retry_key: str,
+        certificate: Mapping[str, Any],
+        body_sha256: str,
+        now: datetime,
+        *,
+        partitions: tuple[int, ...] = (),
+        connection: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        self._renewals[retry_key] = StoredRenewal(
+            dict(certificate),
+            body_sha256,
+            now,
+            partitions=tuple(sorted(set(partitions))),
+            connection=dict(connection) if connection is not None else None,
+        )
+
+    def forget_renewal(self, retry_key: str) -> None:
+        """Drop a stored renewal answer (e.g. after a post-issue Dekker abort, C32)."""
+
+        self._renewals.pop(retry_key, None)
 
     # -- revocations ------------------------------------------------------------------------------
 
@@ -145,19 +206,135 @@ class IssueLedger:
     def keep_revocations(self, record: Mapping[str, Any]) -> None:
         self._revocations = dict(record)
 
+    # -- NATS key lifecycle (CR-1, S1, C01, C09) --------------------------------------------------
+
+    @property
+    def revoked_nats_keys(self) -> dict[str, int]:
+        """All revoked NATS user keys mapped to their ``revoke_until`` unix timestamp (permanent ban)."""
+
+        return dict(self._revoked_nats_keys)
+
+    def is_nats_key_revoked(self, nats_public_key: str) -> bool:
+        return nats_public_key in self._revoked_nats_keys
+
+    def record_revoked_nats_key(self, nats_public_key: str, revoke_until: int) -> None:
+        self._revoked_nats_keys[nats_public_key] = max(
+            self._revoked_nats_keys.get(nats_public_key, 0), int(revoke_until)
+        )
+
+    def is_nats_revocation_confirmed(
+        self,
+        nats_public_key: str,
+        *,
+        min_revoke_until: Optional[int] = None,
+    ) -> bool:
+        confirmed_until = self._confirmed_nats_revocations.get(nats_public_key)
+        if confirmed_until is None:
+            return False
+        required = int(min_revoke_until) if min_revoke_until is not None else self._revoked_nats_keys.get(nats_public_key, 0)
+        return confirmed_until >= required
+
+    def record_confirmed_nats_revocation(self, nats_public_key: str, revoke_until: int) -> None:
+        ts = int(revoke_until)
+        self._revoked_nats_keys[nats_public_key] = max(self._revoked_nats_keys.get(nats_public_key, 0), ts)
+        self._confirmed_nats_revocations[nats_public_key] = max(
+            self._confirmed_nats_revocations.get(nats_public_key, 0), ts
+        )
+
+    def record_certificate_partitions(
+        self,
+        certificate_id: str,
+        partition_sequences: Mapping[int, int],
+    ) -> None:
+        """Record ``{partition: owner_sequence}`` granted with ``certificate_id`` (empty dict on join, C11/C17)."""
+
+        self._certificate_partitions[str(certificate_id)] = {
+            int(p): int(seq) for p, seq in sorted(partition_sequences.items())
+        }
+
+    def certificate_partitions(self, certificate_id: str) -> Optional[dict[int, int]]:
+        """The ``{partition: owner_sequence}`` map granted with ``certificate_id``, or ``None`` if not recorded."""
+
+        recorded = self._certificate_partitions.get(str(certificate_id))
+        return None if recorded is None else dict(recorded)
+
+    def forget_certificate_partitions(self, certificate_id: str) -> None:
+        self._certificate_partitions.pop(str(certificate_id), None)
+
+    def record_nats_key_jwt_expiry(self, nats_public_key: str, exp_ts: int) -> None:
+        """Record the latest issued NATS user JWT ``exp`` (unix seconds) for ``nats_public_key`` (F15)."""
+
+        self._nats_key_jwt_expires[nats_public_key] = max(
+            self._nats_key_jwt_expires.get(nats_public_key, 0), int(exp_ts)
+        )
+
+    def nats_key_jwt_expiry(self, nats_public_key: str) -> Optional[int]:
+        """Latest recorded NATS user JWT ``exp`` (unix seconds) for ``nats_public_key``, or ``None``."""
+
+        return self._nats_key_jwt_expires.get(nats_public_key)
+
+    @property
+    def bootstrap_nats_keys(self) -> frozenset[str]:
+        return frozenset(self._bootstrap_nats_keys)
+
+    def is_bootstrap_nats_key(self, nats_public_key: str) -> bool:
+        return nats_public_key in self._bootstrap_nats_keys
+
+    def record_bootstrap_nats_key(self, nats_public_key: str) -> None:
+        self._bootstrap_nats_keys.add(nats_public_key)
+
+    def record_aborted_certificate(self, certificate_id: str, expires_at_ts: int) -> None:
+        """Mark a certificate aborted by a post-write Dekker check so rotation retries skip it (C35)."""
+
+        self._aborted_certificates[str(certificate_id)] = max(
+            self._aborted_certificates.get(str(certificate_id), 0), int(expires_at_ts)
+        )
+
+    def is_aborted_certificate(self, certificate_id: str) -> bool:
+        return str(certificate_id) in self._aborted_certificates
+
     # -- saving -----------------------------------------------------------------------------------
 
     def save(self, now: datetime) -> None:
         """Write the ledger atomically and durably, dropping renewal answers older than the retention."""
 
         self._renewals = {key: held for key, held in self._renewals.items() if now - held.stored_at < OUTCOME_RETENTION}
-        document = {
+        now_ts = int(now.timestamp())
+        self._aborted_certificates = {
+            cert_id: exp for cert_id, exp in self._aborted_certificates.items() if exp > now_ts
+        }
+        renewals_doc: dict[str, dict[str, Any]] = {}
+        for key, held in sorted(self._renewals.items()):
+            entry: dict[str, Any] = {
+                "certificate": held.certificate,
+                "body_sha256": held.body_sha256,
+                "stored_at": format_timestamp(held.stored_at),
+            }
+            if held.partitions:
+                entry["partitions"] = list(held.partitions)
+            if held.connection is not None:
+                entry["connection"] = dict(held.connection)
+            renewals_doc[key] = entry
+        document: dict[str, Any] = {
             "version": _VERSION,
             "installation": self.installation,
             "epochs": dict(sorted(self._epochs.items())),
-            "renewals": {key: {"certificate": held.certificate, "body_sha256": held.body_sha256,
-                               "stored_at": format_timestamp(held.stored_at)}
-                         for key, held in sorted(self._renewals.items())},
+            "renewals": renewals_doc,
             "revocations": self._revocations,
         }
+        if self._revoked_nats_keys:
+            document["revoked_nats_keys"] = dict(sorted(self._revoked_nats_keys.items()))
+        if self._confirmed_nats_revocations:
+            document["confirmed_nats_revocations"] = dict(sorted(self._confirmed_nats_revocations.items()))
+        if self._bootstrap_nats_keys:
+            document["bootstrap_nats_keys"] = sorted(self._bootstrap_nats_keys)
+        if self._certificate_partitions:
+            document["certificate_partitions"] = {
+                cert_id: {str(p): seq for p, seq in sorted(parts.items())}
+                for cert_id, parts in sorted(self._certificate_partitions.items())
+            }
+        if self._nats_key_jwt_expires:
+            document["nats_key_jwt_expires"] = dict(sorted(self._nats_key_jwt_expires.items()))
+        if self._aborted_certificates:
+            document["aborted_certificates"] = dict(sorted(self._aborted_certificates.items()))
         write_private_file(self.path, json.dumps(document, sort_keys=True).encode())

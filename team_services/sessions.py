@@ -69,13 +69,15 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from nats.js.errors import KeyWrongLastSequenceError
 
 from custom_messages.contracts.runtime_v1 import MANAGER_AGENT_TYPE
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
+from custom_messages.wire.partitions import OWNED, agent_partition, partition_owner_key
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import AgentSession, VerifiedRecord, kept_for
 from custom_messages.wire.values import parse_timestamp
@@ -84,7 +86,7 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 
 SESSION_LIFETIME = timedelta(days=7)
 LEAD_ROLE, WORKER_ROLE = "lead", "worker"
-PLACEMENT, AGENT_SESSION = "placement", "agent_session"
+PLACEMENT, AGENT_SESSION, PARTITION_OWNER = "placement", "agent_session", "partition_owner"
 HANDED_OVER = "handed_over"
 # One placement of an agent later than the one before it, so ``placed_at`` names each placement.
 _PLACED_STEP = timedelta(milliseconds=1)
@@ -135,9 +137,32 @@ class SessionService:
     installation: str
     clock: Callable[[], datetime]
     logger: logging.Logger = _LOGGER
-    # Requests run one at a time (``LiveHost.serve``); ``maintain`` takes turns with them, so no
-    # compare-and-set of a request loses to the team services' own rewrite of a placement.
+    # Requests run one at a time (``LiveHost.serve``); ``maintain`` and ``PartitionService``
+    # share this exact lock (CR-2), so partition release writes and sessions.open/close never race.
     _changing: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Optional callback (invoked while holding ``_changing``) to assign unowned partitions if
+    # a host asks to open a session before the partition watch processes its first liveness record.
+    ensure_partitions: Optional[Callable[[], Awaitable[None]]] = None
+    # Monotonic (sequence, digest) replay protection for partition_owner reads, shared with PartitionService (F13/SEC-07).
+    held_partition_owners: dict[str, tuple[int, str]] = field(default_factory=dict)
+
+    def _partition_count(self) -> int:
+        return int(getattr(self.trust.store, "partition_count", DEFAULT_PARTITION_COUNT))
+
+    async def _partition_owner(self, team: str, partition: int) -> Optional[VerifiedRecord]:
+        """The verified ``partition_owner`` record for ``(team, partition)``, or ``None`` if absent or invalid."""
+
+        key = partition_owner_key(team, partition, self._partition_count())
+        held = self.held_partition_owners.get(key)
+        try:
+            stored = await self.records.read_report(PARTITION_OWNER, key, now=self.clock(), held=held)
+        except FrameRefused as refused:
+            self._refused(PARTITION_OWNER, key, refused)
+            return None
+        if stored is None:
+            return None
+        self.held_partition_owners[key] = (int(stored.record.document.sequence), str(stored.record.digest))
+        return stored.record
 
     def _refused(self, record: str, key: str, refused: FrameRefused) -> None:
         self.logger.warning("A stored record does not verify and counts as absent. event=team_services_record_refused "
@@ -236,6 +261,26 @@ class SessionService:
             return self._refusal("sessions.open", "already_placed",
                                  f"{agent} runs on another host; it moves only by a handover.", asked,
                                  {"host": previous.body.host})
+        # Re-read the partition's ownership under the shared mutation lock before placement CAS (A2, CR-2).
+        partition = agent_partition(team, agent, self._partition_count())
+        owner = await self._partition_owner(team, partition)
+        if owner is None and self.ensure_partitions is not None:
+            await self.ensure_partitions()
+            owner = await self._partition_owner(team, partition)
+        if owner is None or owner.body.state != OWNED or owner.body.host != certificate.runtime:
+            if owner is None:
+                reason_text = f"Partition {partition} has no owner yet."
+            elif owner.body.state != OWNED:
+                reason_text = f"Partition {partition} is being moved away from {owner.body.host}."
+            else:
+                reason_text = f"Partition {partition} is owned by {owner.body.host}, not {certificate.runtime}."
+            return self._refusal(
+                "sessions.open",
+                "partition_not_owned",
+                reason_text,
+                asked,
+                {"partition": partition},
+            )
         if previous is None and len(await self._host_placements(team, certificate.runtime)) >= certificate.session_limit:
             return self._refusal("sessions.open", "limit_reached",
                                  "This host already runs as many agents as its certificate allows.", asked)

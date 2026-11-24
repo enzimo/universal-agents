@@ -6,7 +6,13 @@ from typing import Any, Final, Optional
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
 from custom_messages.contracts.runtime_v1 import TRANSPORT_NATS
 from default_values import (
-    MAX_QUEUE_MESSAGE_BYTES, MAX_QUEUE_PARTITIONS, MIN_QUEUE_BYTES, QUEUE_SENDERS_AT_CAP, TRANSPORT_DEFAULTS,
+    MAX_NATS_CREDENTIAL_LIFETIME_SECONDS,
+    MAX_QUEUE_MESSAGE_BYTES,
+    MAX_QUEUE_PARTITIONS,
+    MIN_NATS_CREDENTIAL_LIFETIME_SECONDS,
+    MIN_QUEUE_BYTES,
+    QUEUE_SENDERS_AT_CAP,
+    TRANSPORT_DEFAULTS,
 )
 from runtime_settings.values import MAX_INT64, whole_number
 
@@ -61,6 +67,10 @@ def refuse_retired_presence_setting(config: Any) -> None:
 # installation authority refuses to start with a count other than the one its teams'
 # streams were created with.
 PARTITION_COUNT_SETTING: Final = ("transport", "queues", "partitions")
+# Installation-wide NATS operator-mode user JWT lifetime (contracts/messages/v1/transport.yaml
+# nats_account.credential_lifetime_setting; owner decision 100). Does not travel with a team
+# because it governs the destination installation's NATS server and authority renewal policy.
+CREDENTIAL_LIFETIME_SETTING: Final = ("transport", "nats", "credential_lifetime_seconds")
 # The size warning ends three points below its level (assistant_gateway.storage_capacity
 # RELEASE_POINTS), so a level of 3 or less could never end; below 10 it would also be
 # raised by a handful of messages.
@@ -254,6 +264,30 @@ class QueueSettings(BaseModel):
         )
 
 
+class NatsAccountSettings(BaseModel):
+    """``transport.nats``: NATS operator-mode account and user credential settings.
+
+    Every issued NATS user JWT—host credentials and bootstrap users alike—expires after
+    ``credential_lifetime_seconds`` (ending no later than the host's certificate). Hosts renew
+    before expiry; on external servers without operator-mode revocation, handovers and retired
+    hosts wait out this lifetime plus ``clock_skew_seconds``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    credential_lifetime_seconds: int = TRANSPORT_DEFAULTS.nats_credential_lifetime_seconds.value
+
+    @field_validator("credential_lifetime_seconds", mode="before")
+    @classmethod
+    def _credential_lifetime(cls, value: Any) -> int:
+        return whole_number(
+            value,
+            name="transport.nats.credential_lifetime_seconds",
+            least=MIN_NATS_CREDENTIAL_LIFETIME_SECONDS,
+            most=MAX_NATS_CREDENTIAL_LIFETIME_SECONDS,
+        )
+
+
 class TransportSettings(BaseModel):
     type: str = TRANSPORT_DEFAULTS.type.value
     nats_url: str = TRANSPORT_DEFAULTS.nats_url.value
@@ -278,6 +312,7 @@ class TransportSettings(BaseModel):
     nats_user: Optional[str] = TRANSPORT_DEFAULTS.nats_user.value
     nats_password: Optional[str] = TRANSPORT_DEFAULTS.nats_password.value
     credentials_file: Optional[str] = TRANSPORT_DEFAULTS.credentials_file.value
+    nats: NatsAccountSettings = Field(default_factory=NatsAccountSettings)
     queues: QueueSettings = Field(default_factory=QueueSettings)
 
     @field_validator("replicas", mode="before")

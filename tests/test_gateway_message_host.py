@@ -350,6 +350,38 @@ def _config(tmp_path: Path, *, prepared: bool) -> GatewayInstanceConfig:
     return config
 
 
+def test_gateway_profile_and_host_support_several_gateways_with_team_subsets(tmp_path: Path) -> None:
+    """Decision 102 / A6 / C07: distinct gateway runtimes serve subsets of teams and routes."""
+
+    default_profile = gateway_profile("team_one")
+    assert default_profile.runtime == GATEWAY_RUNTIME and default_profile.teams == ("team_one",)
+
+    east = gateway_profile(["team_b", "team_a"], runtime="gateway-east")
+    assert east.runtime == "gateway-east" and east.teams == ("team_a", "team_b")
+
+    host = GatewayMessageHost(
+        InstanceLayout.at(tmp_path),
+        "team_a",
+        runtime_id="gateway-east",
+        teams=("team_a", "team_b"),
+        edges={"team_a": ("web_a",), "team_b": ("web_b",)},
+    )
+    assert host.runtime == "gateway-east"
+    assert host.teams == ("team_a", "team_b")
+    assert host.edges == {"team_a": ("web_a",), "team_b": ("web_b",)}
+
+    with pytest.raises(ValueError, match="does not serve team"):
+        asyncio.run(host.command("memory.list", LIST_BODY, person_ref=REFERENCE, team="team_other"))
+    with pytest.raises(ValueError, match="outside this gateway's teams"):
+        GatewayMessageHost(
+            InstanceLayout.at(tmp_path),
+            "team_a",
+            runtime_id="gateway-east",
+            teams=("team_a",),
+            edges={"team_other": ("web",)},
+        )
+
+
 def test_only_the_gateway_service_runs_the_gateway_host_and_takes_replies_on_its_inbox(tmp_path: Path) -> None:
     config = _config(tmp_path, prepared=True)
     service = NatsGatewayManagerRuntime.for_gateway_service(config)
@@ -365,6 +397,33 @@ def test_the_gateway_service_runs_no_host_on_an_instance_the_launcher_never_prep
         assert NatsGatewayManagerRuntime.for_gateway_service(_config(tmp_path, prepared=False)).message_host is None
         assert prepared_gateway_host(InstanceLayout.at(tmp_path / "other"), "team_one") is None
     assert caplog.text.count("event=gateway_host_not_prepared") == 2
+
+
+def test_prepared_gateway_host_passes_runtime_teams_and_edges(tmp_path: Path) -> None:
+    """F14/EVA-04: prepared_gateway_host forwards multi-gateway runtime, teams, and edges options."""
+
+    config = _config(tmp_path, prepared=True)
+    host = prepared_gateway_host(
+        config.layout,
+        "team_a",
+        runtime="gateway-east",
+        teams=("team_a", "team_b"),
+        edges={"team_a": ("web_a",), "team_b": ("tg_b",)},
+    )
+    assert host is not None
+    assert host.runtime == "gateway-east"
+    assert host.team == "team_a"
+    assert host.teams == ("team_a", "team_b")
+    assert host.edges == {"team_a": ("web_a",), "team_b": ("tg_b",)}
+    assert (
+        prepared_gateway_host(
+            InstanceLayout.at(tmp_path / "unprepared"),
+            "team_a",
+            runtime="gateway-east",
+            teams=("team_a", "team_b"),
+        )
+        is None
+    )
 
 
 def test_command_line_gateways_load_no_host_code() -> None:

@@ -80,7 +80,20 @@ from custom_transport.protocol1.trust_state import PersistentTrustStore
 from custom_transport.send_barrier import before_send
 
 _SUBJECT_ROOT = SUBJECT_PREFIX.split("{team}", 1)[0]
-Handler = Callable[[VerifiedFrame], Awaitable[Mapping[str, Any]]]
+@dataclass(frozen=True)
+class ReplyWithAfterFlush:
+    """A handler reply paired with an async callback run after the reply is published and flushed.
+
+    Used by the installation authority when revoking a host's old NATS key (handover step 3) or
+    bootstrap key: flushing the reply first delivers the new credential before nats-server closes
+    the old connection (C01).
+    """
+
+    body: Mapping[str, Any]
+    after_flush: Callable[[], Awaitable[None]]
+
+
+Handler = Callable[[VerifiedFrame], Awaitable[Mapping[str, Any] | ReplyWithAfterFlush]]
 # Reads the certificate or session a frame names from UA1_CERTS into the trust store;
 # returns whether it took anything new (README "Who sent it": receivers look records up).
 TrustFetcher = Callable[[bytes], Awaitable[bool]]
@@ -444,8 +457,13 @@ class LiveHost:
         """Run the handler and answer on the requester's inbox; a request with no reply subject (an event) gets nothing."""
 
         frame = verified.frame
+        after_flush: Optional[Callable[[], Awaitable[None]]] = None
         try:
-            body = await served.handler(verified)
+            result = await served.handler(verified)
+            if isinstance(result, ReplyWithAfterFlush):
+                body, after_flush = result.body, result.after_flush
+            else:
+                body = result
         except Unsupported:
             await self._refuse(answer_to, FrameRefused(UNSUPPORTED, at="/kind"))
             return
@@ -463,20 +481,36 @@ class LiveHost:
             await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
             return
         if answer_to is None:
+            if after_flush is not None:
+                await self._run_after_flush(after_flush, frame)
             return
         team = INSTALLATION_SCOPE if frame.issuer.team == INSTALLATION_SCOPE else served.receiver.team
         try:
-            reply = self.sign(f"{frame.kind}{REPLY_SUFFIX}", body, reply_audience(frame), team=team, agent=served.agent,
-                              subject=answer_to, answering=frame)
+            try:
+                reply = self.sign(f"{frame.kind}{REPLY_SUFFIX}", body, reply_audience(frame), team=team, agent=served.agent,
+                                  subject=answer_to, answering=frame)
+            except Exception:
+                # A reply the schema refuses is this host's defect; the requester still stops waiting.
+                self.logger.exception("A reply could not be built. event=protocol1_reply_failed kind=%s message_id=%s",
+                                      frame.kind, frame.message_id)
+                await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
+                return
+            data, headers = self.encode(reply)
+            await before_send()
+            await self.nc.publish(answer_to, data, headers=headers)
+            if after_flush is not None:
+                await self.nc.flush()
+        finally:
+            if after_flush is not None:
+                await self._run_after_flush(after_flush, frame)
+
+    async def _run_after_flush(self, after_flush: Callable[[], Awaitable[None]], frame: Frame) -> None:
+        try:
+            await after_flush()
         except Exception:
-            # A reply the schema refuses is this host's defect; the requester still stops waiting.
-            self.logger.exception("A reply could not be built. event=protocol1_reply_failed kind=%s message_id=%s",
+            self.logger.exception("A post-reply callback failed after the answer was flushed. "
+                                  "event=protocol1_after_flush_failed kind=%s message_id=%s",
                                   frame.kind, frame.message_id)
-            await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
-            return
-        data, headers = self.encode(reply)
-        await before_send()
-        await self.nc.publish(answer_to, data, headers=headers)
 
     async def _refuse(self, answer_to: Optional[str], refused: FrameRefused) -> None:
         """Answer a refused request at once, with only its code and known pointer (README "Refused requests")."""

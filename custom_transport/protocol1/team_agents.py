@@ -708,6 +708,10 @@ class TeamAgents:
         if held is not None and held.record.body.state in _GONE_STATES and held.record.signer is not None \
                 and held.record.signer.runtime == last.host and str(held.record.body.session) == last.session:
             return EXITING
+        placement = self._placements.get(agent_id)
+        if placement is not None and getattr(placement.record.body, "handed_over", None) is True:
+            # A kept handover placement means the agent is moving between hosts, not exiting for good (F8/GEN-4/FA-7).
+            return None
         session = self._host.live.trust.store.agent_session(self._host.identity.installation, self.team, last.session)
         if session is not None and session.agent == agent_id and session.runtime == last.host \
                 and session.ends_at <= now and not self._later_session_known(session):

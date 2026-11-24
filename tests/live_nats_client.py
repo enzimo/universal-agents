@@ -75,9 +75,9 @@ def nats_transport_config_from_env(
     """Build the live-test transport with the production NATS auth contract."""
 
     settings = transport if transport is not None else resolve_live_transport_settings()
-    # transport.queues sizes the protocol 1 streams the installation authority creates; it is no
-    # connection setting.
-    values = settings.model_dump(exclude={"type", "nats_url", "queues"})
+    # transport.queues and transport.nats configure protocol 1 streams and operator-mode
+    # credentials rather than a single NATS client connection.
+    values = settings.model_dump(exclude={"type", "nats_url", "nats", "queues"})
     for source, target in (
         ("nats_servers", "servers"),
         ("nats_name", "name"),

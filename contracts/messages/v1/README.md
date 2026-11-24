@@ -940,10 +940,10 @@ placed or ends. NATS checks a user's permissions only when it connects, and ackn
 are not signed, so a credential that names a partition must stop working before another host
 reads that partition's queues. Every credential stops on its own: each user JWT ends after
 the lifetime `transport.nats.credential_lifetime_seconds` holds (`nats_account` in
-`transport.yaml`; step 2 measures the renewal load and sets it), and hosts renew before it
-ends. On the bundled server the authority also revokes a NATS key at once; on an external
-server, whose operator gives no operator key, a credential stops only when it ends ("NATS
-users and the account").
+`transport.yaml`; default 900 seconds, 15 minutes, bounded to 60–86,400 seconds from nats-server
+2.15.1 renewal-load measurements), and hosts renew before it ends. On the bundled server the
+authority also revokes a NATS key at once; on an external server, whose operator gives no operator
+key, a credential stops only when it ends ("NATS users and the account").
 
 A partition moves only whole, with every agent placed in it: moving one agent to another
 host moves the other agents of its partition too, and no path copies one agent's queued
@@ -964,11 +964,11 @@ connected host hands a partition over in this order:
    during step 2 would have to be left out of step 3's renewal, whose new key ends the
    connection that its own step 2 still needs. So the partitions of one connected host move
    one at a time, each taking a handover and, where the authority cannot revoke, the
-   credential lifetime after its step 3. Whether one handover may release several
-   partitions of a host together is not settled yet (an open point for step 2, beside the
-   credential lifetime it sets): the records are written one by one, so the old host would
-   need to know when the set is complete before it starts. A host that is cut off or retired
-   is the exception: all its partitions are released at once (below).
+   credential lifetime after its step 3. Connected-host handovers are therefore never batched
+   (no overlapping `released` record on the same connected host until step 4 finishes); no
+   schema extension is needed, and step-2 drain connections are never cut early by a second
+   release. A host that is cut off or retired is the exception: all its partitions are
+   released at once (below).
 2. The old host stops pulling the inboxes and answering the control addresses of the
    partition's agents. It keeps reading their control queues while it finishes, or hands
    back with `task.handback`, every task they admitted, and acknowledges their messages
@@ -1041,10 +1041,11 @@ which both still fit, at most 128 partitions.
 The gateway stays installation-wide, so its credential grows with the teams it serves and
 their routes (its edges): 1,265 bytes of permission JSON for each team and 466 more for each
 route of that team, with the longest ids. At most 27 teams fit with one route each, and 17
-with three. An installation with more teams than its gateway's credential holds gets
-`credential_too_large` for that gateway once hosts have their own NATS users; whether
-several gateway runtimes may then each serve some of the teams is not settled yet (an open
-point for step 2). `tests/test_message_contract.py` recomputes these figures from the
+with three. An installation with more teams than one gateway's credential holds may run
+several gateway runtimes, each with its own runtime id, key pair and `expected-hosts.json`
+entry naming its own subset of teams and per-team routes (`edges`), so each gateway's
+credential carries grants only for the teams and routes it serves (`gateway` remains the
+default single-gateway runtime). `tests/test_message_contract.py` recomputes these figures from the
 generated templates and checks that one step more does not fit.
 
 The installation authority, which issues every certificate and its credential, keeps
@@ -1074,13 +1075,20 @@ the partition it could not take up, and its later renewals, a handover's step 3 
 go on. A host counts a partition as its own, draws agent ids in it and asks for sessions and
 placements there, only once its current credential names it. A partition whose new owner
 never takes it up has an owner record but no reader; its queued work waits in its stream, as
-during any move, and no new agent is placed there. The team services, once they learn of the
-refusal, give the partition to another host whose credential would fit, its previous owner
-included, or leave it without an owner. How they learn of it is step 2's to build with the
-authority's check.
+during any move, and no new agent is placed there. The team services, once they learn of the refusal, give the partition to another host whose
+credential would fit, its previous owner included, or leave it without an owner: when a host's
+renewal is refused as `not_allowed` for credential size, the host excludes that partition from
+further renewal requests, reports an unhealthy `partition-<p>` component
+(`code: partition_credential_too_large`) in its signed `host` liveness record (`UA1_HOSTS`),
+and renews without it so other handovers keep working; the team services watch `UA1_HOSTS` for
+that verified component and reassign or delete the partition's ownership record.
 
 **Filling the templates.** Before installing permissions, trusted membership code fills
-each role's templates for the host (`custom_messages.wire.permissions.host_permissions`):
+each role's templates separately for the host and merges the result
+(`custom_messages.wire.permissions.roles_permissions`, which calls `host_permissions` per
+role so a certificate combining `team_services` with `lead_host` or `worker_host` fills
+`team_services`'s `{partition}` templates with `every_partition` while filling `lead_host`
+and `worker_host` templates with `owned_partitions` only):
 - `{self}` becomes its runtime id;
 - a subject that names `{partition}`, `{pool}` or `{edge}` is repeated for each partition
   the host owns (those its renewal's `partitions` names that the team services' partition
@@ -1608,12 +1616,12 @@ Joining an installation and renewing a certificate use the address `ua.v1._insta
 - **The authority's own user** (`generated/permissions/installation_authority.json`) is written by the launcher into the trust folder before any process starts, since there is no certificate yet to issue it with.
 - **The bootstrap user** (`generated/permissions/joining_host.json`, `{self}` the new host's runtime) can only send the host's own installation requests and read the replies under `_INBOX.<runtime>.join.`, where a joining host asks for its join's reply. A joined host never uses that prefix, so a leftover bootstrap login hears none of its later replies, renewals' credentials among them. The launcher writes it for the installation's own processes before they start; for a remote host the authority issues it into the bootstrap bundle an administrator makes, which names the new host's runtime ("Starting a host"). A user JWT logs in only with its private NATS key, which signs the server's challenge, so the bundle carries that key too. Like every user, it ends after the credential lifetime; a bundle given to a remote host is made when the host is about to join. Its use ends at the join: the join presents a new NATS key, never the bundle's (the authority refuses the bundle's key, `invalid_body` at `/body/nats_public_key`), and on the bundled server the authority revokes the bootstrap user's key once the join is approved.
 - **Every other process's user** comes in the `connection` of its join or renewal reply, filled from the templates of its certificate's roles ("Filling the templates") and ending no later than the certificate.
-- **Revocation** (owner decision of 2026-11-17). Every user JWT ends after `transport.nats.credential_lifetime_seconds` (`nats_account.credential_lifetime_setting`), the bootstrap user's too, and hosts renew before it ends; step 2 measures the renewal load and sets the lifetime, with its schema entry. So on any server a host that gives up a partition or pool, or is retired, loses NATS access within that lifetime. On the bundled server the authority also revokes at once: a host's old NATS key when the host renews to give up a partition or pool ("Credentials follow ownership"), its key when the host is retired, and a bootstrap user's key at the join. The authority never issues a credential for a revoked key again. Measured on nats-server 2.15.1 in operator mode:
+- **Revocation** (owner decision of 2026-11-17). Every user JWT ends after `transport.nats.credential_lifetime_seconds` (`nats_account.credential_lifetime_setting`; default 900 seconds / 15 minutes, bounded to 60–86,400 seconds, installation-scoped and excluded from team transfer), the bootstrap user's too, and hosts renew before it ends. So on any server a host that gives up a partition or pool, or is retired, loses NATS access within that lifetime. On the bundled server the authority also revokes at once: a host's old NATS key when the host renews to give up a partition or pool ("Credentials follow ownership"), its key when the host is retired, and a bootstrap user's key at the join. The authority never issues a credential for a revoked key again. Measured on nats-server 2.15.1 in operator mode:
   - NATS revokes a user only through the account JWT, which lists the user's public key with a time: every user JWT of that key issued at or before the time (in whole seconds) is refused, and the server closes the key's open connections at once (`User Authentication Revoked`);
   - the server accepts that account JWT only when the operator key or an operator signing key signs it. Signed with the account's signing key, or with the account's own key, it is refused (`account validation failed`) and the user stays connected;
-  - the signed account JWT reaches a running server as a claims update (`$SYS.REQ.CLAIMS.UPDATE`), which only a user of the server's system account can send (a user of the installation's account gets no responders), or, with the server's memory resolver, by rewriting the server's configuration and reloading it.
+  - the signed account JWT reaches a running server as a claims update (`$SYS.REQ.CLAIMS.UPDATE`) sent by a system-account user (FULL resolver: confirmed in 0.85 ms, disconnect in 0.86 ms, 50-update p50 0.30 ms / p95 0.59 ms; MEMORY resolver + SIGHUP reload took 2.12 ms without server confirmation). Renewal load measured 44,238 B (0.26 ms Ed25519 sign) for 96 partitions + 10 pools, 6,928 B (0.097 ms sign) for 8 partitions + 3 pools, and 500 live sign + connect + flush renewals in 0.189 s (2,645/s), keeping a 900 s lifetime under 1 renewal/s at 500 hosts while bounding remote bootstrap and external-server handover waits.
 
-  So the account signing key issues users but cannot revoke them. On the bundled server the authority holds an operator signing key as well (`nats_account.operator_signing_key_holder`) and sends the signed account JWT to the server; on an external server the operator key is the server operator's, under decision 89 the authority holds only the account signing key, and a credential stops when it ends. The handover waits for that end where it cannot revoke ("Credentials follow ownership").
+  So the account signing key issues users but cannot revoke them. On the bundled server the authority holds an operator signing key as well (`nats_account.operator_signing_key_holder`) and pushes the signed account JWT over `$SYS.REQ.CLAIMS.UPDATE` (`installation_authority.revocation.OperatorModeRevoker`), flushing step-3 renewal replies before revoking so the renewing host receives its new credential before its old connection closes; on an external server the operator key is the server operator's, under decision 89 the authority holds only the account signing key (`LifetimeWaitRevoker`), and a credential stops when it ends. The handover waits for that end where it cannot revoke ("Credentials follow ownership").
 
 **Starting a host.** A new host starts from a bootstrap bundle that an administrator, or the local installation itself, gives it. The bundle holds:
 - the installation's authority keys;
@@ -1789,7 +1797,7 @@ What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
 - **Agent records.** The key is `<team>.<partition>.<agent>` of the body, where the partition is the agent's ("Partitions", `custom_messages.wire.partitions.agent_record_key`), and the team is one the writer's certificate serves. A host's write grant names the partitions it owns, so only the owner of an agent's partition can store its record; a key with another partition, or the two-part key of an earlier release, is refused (`invalid_body` at `/key`). A host's grant covers every key of its partitions, including keys that end in another partition's agent, so a reader takes an event, a deletion included, only under the key the agent's own partition gives and ignores any other (logged as `invalid_body` at `/key`): a deletion elsewhere removes no agent from its view. A reader accepts an agent record only from the host its placement names, with the same agent type. Its session must name the same agent, type and host and still be current; only that session decides its role. The reader checks these joins, since verification of one record cannot establish them. Readers bind every report to its actual bucket key and retain replay protection after deletion, separately for each signing host. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person. The record may also carry `requests`: the root task ids of the people's requests the agent's model turns ran for now or since its previous record (at most about 2 seconds earlier, the write interval), each from the verified gateway-signed context of the turn's task, never from a message field, and none for scheduled runs or system work. They are opaque task ids and name no person; a reader maps an id only through its own record of a person's request and ignores ids it does not hold (the gateway's Web Chat agent trail). A reader built before `requests` existed refuses a record that carries it as an unknown field, so while the label is a pre-release a working agent drops out of such a reader's view until that reader runs this contract too. Hosts remove their agents' records after writing `exiting` and closing their sessions, and retry unfinished cleanup. They remove only a current verified record of their own, with a conditional delete on its bucket revision. Unchanged records are refreshed with current certificates. A record whose signer cannot be verified is left in place; its key alone authorizes no deletion.
 - **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
-- **Partition ownership.** The key is `<team>.partition.<partition>` of the body, in `UA1_PLACEMENT` beside the placements, and only the team services sign it. The partition is below the installation's count (`invalid_body` at `/body/partition`). The team services write it like a placement, with compare-and-set and the next sequence. Its `state` is `owned` when they give a host a partition that holds no placed agent, and when a partition with all its agents arrives at its new host, only a host whose credential would still fit ("Credential size"). It is `released`, still naming the old host, when they start moving a partition away, before the old host gives it up ("Credentials follow ownership"). The authority names only `owned` partitions in a host's credential, and a renewal by a host that a `released` record names needs a new NATS key. `host_epoch` follows the placement's rule. A partition without a record has no owner, and the team services place no agent in it, nor in a `released` one. The team services refuse a session or placement for an agent whose partition the asking host does not own (`partition_not_owned`, "Agent sessions"), and a new agent's session or placement in a `released` partition. Placement readers take only two-part keys, `<team>.<agent>`, so an ownership record is never read as a placement.
+- **Partition ownership.** The key is `<team>.partition.<partition>` of the body, in `UA1_PLACEMENT` beside the placements, and only the team services sign it. The partition is below the installation's count (`invalid_body` at `/body/partition`). The team services write it like a placement, with compare-and-set and the next sequence, under the same mutation lock as `sessions.open` and `sessions.close` (`SessionService._changing` shared with `PartitionService`): `sessions.open` re-reads the partition's ownership inside that lock before its placement compare-and-set so a concurrent release and open cannot place an agent in a released partition. Its `state` is `owned` when they give a host a partition that holds no placed agent, and when a partition with all its agents arrives at its new host, only a host whose credential would still fit ("Credential size"). It is `released`, still naming the old host, when they start moving a partition away, before the old host gives it up ("Credentials follow ownership"). The authority names only `owned` partitions in a host's credential, and a renewal by a host that a `released` record names needs a new NATS key. `host_epoch` follows the placement's rule. A partition without a record has no owner, and the team services place no agent in it, nor in a `released` one. The team services refuse a session or placement for an agent whose partition the asking host does not own (`partition_not_owned`, "Agent sessions"), and a new agent's session or placement in a `released` partition. Placement readers take only two-part keys, `<team>.<agent>`, so an ownership record is never read as a placement.
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
 - **Block list.** The key is the body's team, one the writer's certificate serves, and only the team services sign it. No block id and no person appears twice. Readers keep the highest sequence they have seen, also across restarts, and `fresh(record, now)` tells whether the list is recent enough for `fresh_check` tools ("Access on remote hosts").
 

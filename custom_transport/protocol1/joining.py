@@ -168,7 +168,8 @@ def sign_join(keys: HostKeys, installation: str, profile: HostProfile, *, join_i
 async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: HostProfile, *,
                clock: Callable[[], datetime] = utc_now, deadline_seconds: float = 120.0,
                logger: logging.Logger = _LOGGER, sleep: Callable[[float], Any] = asyncio.sleep,
-               fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None) -> HostCertificate:
+               fetch_trust: Optional[Callable[[bytes], Awaitable[bool]]] = None,
+               on_connection: Optional[Callable[[Mapping[str, Any]], None]] = None) -> HostCertificate:
     """Join the installation and return this host's certificate, kept in ``trust``.
 
     The join names the contract ``trust`` runs. Waits for an authority that is still
@@ -210,6 +211,8 @@ async def join(nc: Any, keys: HostKeys, trust: PersistentTrustStore, profile: Ho
             certificate_body = body["certificate"]["body"]
             certificate = trust.store.host_certificate(installation, profile.runtime, int(certificate_body["membership_epoch"]))
             assert certificate is not None  # verify_frame checked the certificate and add() kept it
+            if on_connection is not None and isinstance(body.get("connection"), Mapping):
+                on_connection(body["connection"])
             logger.info("Joined the installation. event=protocol1_joined runtime=%s membership_epoch=%s expires_at=%s",
                         profile.runtime, certificate.membership_epoch, certificate.expires_at.isoformat())
             return certificate
