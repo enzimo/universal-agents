@@ -877,6 +877,7 @@ NATS_CLIENT_MODULES = {
     "custom_transport/protocol1/mapping_check.py": "the partition mapping check: unsigned probes on its own probe addresses",
     "installation_authority/service.py": "the topology owner's buckets, and the certificates it keeps in UA1_CERTS",
     "installation_authority/queues.py": "the topology owner's work and dead-letter streams and team consumers",
+    "installation_authority/revocation.py": "operator-mode account claims updates on $SYS.REQ.CLAIMS.UPDATE over a system-account connection",
     "team_services/lock.py": "the team services' single-instance lock in UA1_LOCKS, an unsigned lease",
 }
 

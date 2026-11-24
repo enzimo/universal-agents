@@ -70,6 +70,15 @@ MAX_QUEUE_MESSAGE_BYTES = 263_168
 QUEUE_SENDERS_AT_CAP = 4
 
 
+# Bounds for transport.nats.credential_lifetime_seconds (contracts/messages/v1/README.md,
+# "NATS users and the account"; owner decision 100). Measured on nats-server 2.15.1:
+# 500 host renewals complete in 0.189 s (2,645/s), so the 900-second (15-minute) default
+# produces <1 renewal/s at 500 hosts while giving remote bootstrap bundles 15 minutes to
+# join and bounding external-server handover waits when operator revocation is unavailable.
+MIN_NATS_CREDENTIAL_LIFETIME_SECONDS = 60
+MAX_NATS_CREDENTIAL_LIFETIME_SECONDS = 86_400
+
+
 @dataclass(frozen=True)
 class DefaultValue(Generic[T]):
     """A default value plus operator-facing metadata."""
@@ -225,6 +234,13 @@ class TransportDefaultValues:
         "Most messages one sender may have waiting in one agent's inbox or control queue. A sender "
         "over it is refused, so one busy queue leaves room in its partition stream for the others. "
         "Raise queues_max_bytes_partition together with it (see that setting).",
+        onboarding_overridable=False,
+    )
+    nats_credential_lifetime_seconds: DefaultValue[int] = default_value(
+        900,
+        "Lifetime in seconds of every issued NATS operator-mode user JWT, including bootstrap "
+        "users (60 to 86400). Hosts renew before expiry; on external servers without operator "
+        "revocation, a removed host or handed-over partition waits for this lifetime plus clock skew.",
         onboarding_overridable=False,
     )
 

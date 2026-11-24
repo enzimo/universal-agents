@@ -21,3 +21,19 @@ def transport() -> dict[str, Any]:
     """``transport.yaml`` as generated JSON: streams, consumers, buckets and limits."""
 
     return dict(json.loads((GENERATED / "transport.json").read_text(encoding="utf-8")))
+
+
+@lru_cache(maxsize=None)
+def role_permissions(role: str) -> dict[str, Any]:
+    """The generated NATS permission templates for one host role (``generated/permissions/<role>.json``)."""
+
+    path = GENERATED / "permissions" / f"{role}.json"
+    if not path.is_file():
+        raise ValueError(f"unknown protocol 1 permission role: {role!r}")
+    return dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def max_credential_bytes() -> int:
+    """The contract's NATS user JWT byte limit (``transport.yaml`` ``limits.max_credential_bytes``)."""
+
+    return int(transport()["limits"]["max_credential_bytes"])

@@ -17,16 +17,21 @@ installation's). No placeholder ever becomes a wildcard.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Any, Mapping
+from dataclasses import dataclass, field, replace
+from typing import Any, Iterable, Mapping
 
-from custom_messages.wire.kinds import MAX_PARTITION_COUNT
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, MAX_PARTITION_COUNT
+from custom_messages.wire.partitions import every_partition
 
 # Placeholders that name one partition, pool or edge; each belongs to one team.
 RECEIVER_PLACEHOLDERS = ("partition", "pool", "edge")
 TEAM_PLACEHOLDER, SELF_PLACEHOLDER = "team", "self"
 INSTALLATION_PLACEHOLDER, PEER_PLACEHOLDER = "installation", "peer"
+# Roles whose {partition} templates mean every partition of each team they serve rather than
+# only the partitions the host owns (README, "Filling the templates"; PR #151 S3).
+EVERY_PARTITION_ROLES = frozenset({"team_services"})
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
+_SECONDS = re.compile(r"(\d+)s")
 
 
 @dataclass(frozen=True)
@@ -101,3 +106,52 @@ def host_permissions(document: Mapping[str, Any], placement: HostPlacement) -> d
     if "allow_responses" in document:
         filled["allow_responses"] = document["allow_responses"]
     return filled
+
+
+def _seconds(value: str) -> int:
+    match = _SECONDS.fullmatch(value)
+    if match is None:
+        raise ValueError(f"allow_responses expires in whole seconds, not {value!r}")
+    return int(match.group(1))
+
+
+def roles_permissions(
+    documents: Iterable[Mapping[str, Any]],
+    placement: HostPlacement,
+    *,
+    partition_count: int = DEFAULT_PARTITION_COUNT,
+) -> dict[str, Any]:
+    """Fill and merge every role document on one host certificate (README, "Filling the templates", S3).
+
+    Each role's ``{partition}`` templates use that role's own partition set: ``team_services``
+    gets every partition of its team (for withdrawal), while ``lead_host`` and ``worker_host``
+    get only the partitions the host owns (``placement.partitions``). Combining ``team_services``
+    with ``lead_host`` or ``worker_host`` on one certificate therefore keeps withdrawal across all
+    partitions without leaking consumer pull, live control, or agent-record write grants onto
+    unowned partitions.
+    """
+
+    publish: set[str] = set()
+    subscribe: set[str] = set()
+    response_max: int | None = None
+    response_seconds: int | None = None
+    for document in documents:
+        role = document.get("role")
+        role_placement = (
+            replace(placement, partitions=every_partition(placement.teams, partition_count))
+            if role in EVERY_PARTITION_ROLES
+            else placement
+        )
+        filled = host_permissions(document, role_placement)
+        publish.update(filled["publish"])
+        subscribe.update(filled["subscribe"])
+        responses = filled.get("allow_responses")
+        if responses is not None:
+            current_max = int(responses["max"])
+            current_seconds = _seconds(str(responses["expires"]))
+            response_max = current_max if response_max is None else max(response_max, current_max)
+            response_seconds = current_seconds if response_seconds is None else max(response_seconds, current_seconds)
+    merged: dict[str, Any] = {"publish": sorted(publish), "subscribe": sorted(subscribe)}
+    if response_max is not None and response_seconds is not None:
+        merged["allow_responses"] = {"expires": f"{response_seconds}s", "max": response_max}
+    return merged

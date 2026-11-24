@@ -400,6 +400,8 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "transport.duplicate_window_seconds": "JetStream duplicate message-id window.",
     "transport.work_max_age_seconds": "Durable work/reply retention age.",
     "transport.process_consumer_inactive_threshold_seconds": "Expiry delay for unbound process-scoped JetStream consumers.",
+    "transport.nats": "NATS operator-mode account and user credential settings.",
+    "transport.nats.credential_lifetime_seconds": "Lifetime in seconds of every issued NATS user JWT, including bootstrap users (60 to 86400). Hosts renew before expiry; on external servers without operator revocation, handovers and retired hosts wait out this lifetime plus clock skew.",
     "transport.queues": "Every team's protocol 1 work and dead-letter streams. NATS sets each stream's whole byte limit aside when it creates the stream, so a team reserves partitions x partition plus the other four limits.",
     "transport.queues.max_bytes": "Byte limit of each stream, by kind (1 MiB = 1,048,576 bytes; at least 1 MiB). Lowering one drops nothing: a stream above it refuses new messages until it drains.",
     "transport.queues.max_bytes.partition": "Each of a team's partition streams, which hold the inboxes and control queues of the partition's agents. Must be at least 5 x max_messages_per_subject x 263,168 bytes (10,526,720 at a cap of 8), so lower the cap with it.",
