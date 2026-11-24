@@ -260,11 +260,14 @@ class MessageHost:
         self,
         keys: Any,
         trust: PersistentTrustStore,
+        *,
+        profile: Optional[HostProfile] = None,
     ) -> tuple[HostCertificate, Any]:
         """Join the installation, rotating a revoked stored NATS user key once (or promoting pending first) (C16)."""
 
+        target_profile = self.profile if profile is None else profile
         try:
-            certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
+            certificate = await join(self.nc, keys, trust, target_profile, clock=self.clock, logger=self.logger,
                                      fetch_trust=self.fetch_trust, on_connection=self._record_join_connection)
             return certificate, keys
         except RequestRefused as refused:
@@ -274,12 +277,12 @@ class MessageHost:
             self.logger.warning(
                 "Join refused the stored NATS user key; rotating the NATS user key and retrying join. "
                 "event=protocol1_join_nats_key_rotated runtime=%s used_pending=%s",
-                self.profile.runtime,
+                target_profile.runtime,
                 had_pending,
             )
-            keys = rotate_nats_key(self.layout, self.profile.runtime, prefer_pending=True)
+            keys = rotate_nats_key(self.layout, target_profile.runtime, prefer_pending=True)
             try:
-                certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
+                certificate = await join(self.nc, keys, trust, target_profile, clock=self.clock, logger=self.logger,
                                          fetch_trust=self.fetch_trust, on_connection=self._record_join_connection)
                 return certificate, keys
             except RequestRefused as retry_refused:
@@ -292,10 +295,10 @@ class MessageHost:
                 self.logger.warning(
                     "Join also refused the promoted pending NATS user key; generating a fresh NATS user key and retrying once. "
                     "event=protocol1_join_nats_key_regenerated runtime=%s",
-                    self.profile.runtime,
+                    target_profile.runtime,
                 )
-                keys = rotate_nats_key(self.layout, self.profile.runtime, prefer_pending=False)
-                certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
+                keys = rotate_nats_key(self.layout, target_profile.runtime, prefer_pending=False)
+                certificate = await join(self.nc, keys, trust, target_profile, clock=self.clock, logger=self.logger,
                                          fetch_trust=self.fetch_trust, on_connection=self._record_join_connection)
                 return certificate, keys
 
@@ -577,8 +580,8 @@ class MessageHost:
         giving_up_partitions = bool(self.credential_partitions - frozenset(requested_partitions))
         needs_new_nats_key = rotate_nats_key or giving_up_agents or giving_up_partitions
 
-        async def _send(fresh_key: bool = False) -> tuple[Any, Optional[str]]:
-            new_key = self._stage_new_nats_public_key(certificate.runtime, fresh=fresh_key) if needs_new_nats_key else None
+        async def _send(*, rotate: bool, fresh_key: bool = False) -> tuple[Any, Optional[str]]:
+            new_key = self._stage_new_nats_public_key(certificate.runtime, fresh=fresh_key) if rotate else None
             body_payload: dict[str, Any] = {
                 "renew_id": self.renewal_id(
                     certificate,
@@ -604,15 +607,18 @@ class MessageHost:
             return response, new_key
 
         try:
-            reply, new_nats_public_key = await _send(fresh_key=False)
+            reply, new_nats_public_key = await _send(rotate=needs_new_nats_key, fresh_key=False)
         except RequestRefused as refused:
-            if needs_new_nats_key and refused.code == "invalid_body" and refused.at == "/body/new_nats_public_key":
+            # F1/F2: Recover when the authority requires a new NATS user key (e.g. out-of-band host_lost
+            # key revocation, ledger reset, or rejected staged key) by rotating and retrying once.
+            if refused.code == "invalid_body" and refused.at == "/body/new_nats_public_key":
                 self.logger.warning(
-                    "Renewal refused the staged NATS user key; generating a fresh NATS user key and retrying once. "
-                    "event=protocol1_renew_nats_key_regenerated runtime=%s",
+                    "Renewal required a fresh NATS user key; rotating the NATS user key and retrying once. "
+                    "event=protocol1_renew_nats_key_regenerated runtime=%s was_rotating=%s",
                     certificate.runtime,
+                    needs_new_nats_key,
                 )
-                reply, new_nats_public_key = await _send(fresh_key=True)
+                reply, new_nats_public_key = await _send(rotate=True, fresh_key=needs_new_nats_key)
             else:
                 raise
 
@@ -691,13 +697,23 @@ class MessageHost:
             current = self.identity.certificate
             if certifiable <= current.agent_types:
                 return Rejoined(current, certifiable, not_certifiable=not_certifiable)
+            # F12/CR-5: Never rejoin while a partition handover is draining (would wipe credential_partitions).
+            if self.renewal_paused is not None and self.renewal_paused():
+                return Rejoined(
+                    current,
+                    certifiable & current.agent_types,
+                    refused=certifiable - current.agent_types,
+                    not_certifiable=not_certifiable,
+                    refusal="deferred: partition handover in progress",
+                )
             asked = frozenset(self.profile.agent_types) | current.agent_types | certifiable
             profile = replace(self.profile, agent_types=tuple(sorted(asked)))
             self._join_connection_recorded = None
+            old_keys = self.identity.keys
             try:
-                certificate = await join(self.nc, self.identity.keys, self.live.trust, profile, clock=self.clock,
-                                         logger=self.logger, fetch_trust=self.fetch_trust,
-                                         on_connection=self._record_join_connection)
+                certificate, new_keys = await self._join_recovering_revoked_nats_key(
+                    old_keys, self.live.trust, profile=profile
+                )
             except JoinRefused as refused:
                 self._join_connection_recorded = None
                 self.logger.warning("The authority did not grant more agent types; the host keeps its certificate. "
@@ -707,11 +723,17 @@ class MessageHost:
                 return Rejoined(current, certifiable & current.agent_types, refused=certifiable - current.agent_types,
                                 not_certifiable=not_certifiable, refusal=f"{refused.outcome}: {refused.message}")
             self.profile = profile
+            rotated_nats = new_keys.nats_public_key != old_keys.nats_public_key
+            if rotated_nats and hasattr(self.live.identity, "with_keys"):
+                self.live.identity = self.live.identity.with_keys(new_keys)
             self.live.identity = self.live.identity.with_certificate(certificate)
             rejoin_conn = self._join_connection_recorded
             self._join_connection_recorded = None
-        if rejoin_conn is not None:
-            await self._notify_credential_change(rejoin_conn, self.credential_partitions, rotated_nats_key=False)
+            # F12/CR-5: Notify inside _certificate_change so async on_credential hooks stay ordered with renew().
+            if rejoin_conn is not None:
+                await self._notify_credential_change(
+                    rejoin_conn, self.credential_partitions, rotated_nats_key=rotated_nats
+                )
         self.logger.info("Joined again for more agent types. event=protocol1_rejoined runtime=%s membership_epoch=%s "
                          "agent_types=%s", certificate.runtime, certificate.membership_epoch,
                          ",".join(sorted(certificate.agent_types)))

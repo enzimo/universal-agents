@@ -1159,3 +1159,223 @@ async def test_tracker_run_sets_ready_immediately_on_quiet_catch_up_and_prunes_m
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_f1_f2_message_host_renew_recovers_on_new_nats_public_key_refusal(tmp_path: Path) -> None:
+    """F1/F2: MessageHost._renew retries with a rotated NATS key when authority refuses without one."""
+
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.protocol1.live import HostIdentity, RequestRefused
+
+    cluster = _SignedCluster(tmp_path)
+    cert1 = cluster.certs["worker-1"]
+    keys1 = cluster.keys["worker-1"]
+    profile = HostProfile("worker-1", (TEAM,), ("worker_host",), agent_types=("researcher",), session_limit=4)
+    host = MessageHost(cluster.layout, profile, SimpleNamespace(), clock=lambda: cluster.now)
+    host.live = SimpleNamespace(
+        identity=HostIdentity(keys1, cert1),
+        trust=cluster.trust,
+    )  # type: ignore[assignment]
+
+    seen_bodies: list[dict[str, Any]] = []
+
+    async def fake_request(kind: str, body: dict[str, Any], _aud: Any, **_kwargs: Any) -> Any:
+        seen_bodies.append(dict(body))
+        if "new_nats_public_key" not in body:
+            raise RequestRefused(kind, "invalid_body", "/body/new_nats_public_key")
+        new_key = body["new_nats_public_key"]
+        cert_doc = sign_state(
+            {
+                "record": "certificate",
+                "protocol": PROTOCOL,
+                "key": f"host.{INSTALLATION}.worker-1.2",
+                "writer": {"type": "authority", "installation": INSTALLATION, "key_id": cluster.authority.key_id},
+                "sequence": 2,
+                "issued_at": _ts(cluster.now),
+                "expires_at": _ts(cluster.now + timedelta(days=30)),
+                "body": {
+                    "certificate_id": "cert-worker-1-2",
+                    "installation": INSTALLATION,
+                    "runtime": "worker-1",
+                    "teams": [TEAM],
+                    "roles": ["worker_host"],
+                    "agent_types": ["researcher"],
+                    "session_limit": 4,
+                    "connection_class": "connected",
+                    "protocol": PROTOCOL,
+                    "deployment": "local",
+                    "application_key": {"key_id": keys1.key_id, "public_key": keys1.public_key_text},
+                    "nats_public_key": new_key,
+                    "membership_epoch": 2,
+                    "revocation_epoch": 1,
+                    "profile_sha256": profile.digest(),
+                    "issued_at": _ts(cluster.now),
+                    "expires_at": _ts(cluster.now + timedelta(days=30)),
+                },
+            },
+            cluster.authority.private_key,
+        )
+        return SimpleNamespace(raw={"body": {"outcome": "ok", "certificate": cert_doc}})
+
+    host.live.request = fake_request  # type: ignore[attr-defined]
+    outcome = await host.renew(partitions=[0], rotate_nats_key=False)
+    assert outcome.ok is True and outcome.rotated_nats_key is True
+    assert len(seen_bodies) == 2
+    assert "new_nats_public_key" not in seen_bodies[0]
+    assert "new_nats_public_key" in seen_bodies[1]
+
+
+@pytest.mark.asyncio
+async def test_f8_handover_skips_exiting_record_and_preserves_handed_over_on_late_open(tmp_path: Path) -> None:
+    """F8/GEN-4/FA-7/CR-8: handed_over close writes no state=exiting record, TeamAgents skips left_for_good
+    for kept handed_over placements, and late-opening sessions in _hold_session close with handed_over."""
+
+    from custom_transport.protocol1.team_agents import TeamAgent, TeamAgents, _Held
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=False)
+    written_agent_states: list[str] = []
+    closed_reasons: list[tuple[str, str]] = []
+
+    orig_put = host.records.put
+
+    async def tracking_put(record: str, key: str, document: dict[str, Any], **kwargs: Any) -> int:
+        if record == "agent":
+            written_agent_states.append(str(document["body"]["state"]))
+        return await orig_put(record, key, document, **kwargs)
+
+    host.records.put = tracking_put  # type: ignore[method-assign]
+    process = AgentProcessHost(cluster.layout, host.profile, TEAM, host=host, loop=asyncio.get_running_loop())
+    process._stop = asyncio.Event()
+    process._joined = asyncio.Event()
+    process._joined.set()
+    process.partitions = HostPartitionTracker(host, TEAM)
+
+    async def fake_request(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+        if kind == "sessions.close":
+            closed_reasons.append((str(body["session"]), str(body["reason"])))
+        return {"outcome": "ok"}
+
+    process._request = fake_request  # type: ignore[method-assign]
+
+    # 1. handed_over close must NOT write state="exiting" to UA1_AGENTS.
+    a1 = draw_agent_id(TEAM, [1], PARTITIONS, prefix="wrk")
+    hosted1 = _HostedAgent(SimpleNamespace(id=a1), "researcher", DEFINITION, session="s-1",
+                           subscription=_FakeSubscription())
+    process.agents[a1] = hosted1
+    await process._close(a1, "handed_over", hosted=hosted1)
+    assert written_agent_states == []
+    assert closed_reasons == [("s-1", "handed_over")]
+
+    # 2. CR-8: late-opening session in _hold_session preserves close_reason="handed_over".
+    a2 = draw_agent_id(TEAM, [1], PARTITIONS, prefix="wrk")
+    hosted2 = _HostedAgent(SimpleNamespace(id=a2), "researcher", DEFINITION)
+    process.agents[a2] = hosted2
+
+    async def fake_open_session(h: _HostedAgent) -> bool:
+        await process._close(a2, "handed_over", hosted=h)
+        h.session = "s-late-2"
+        return True
+
+    process._open_session = fake_open_session  # type: ignore[method-assign]
+    await process._hold_session(hosted2)
+    assert ("s-late-2", "handed_over") in closed_reasons
+
+    # 3. TeamAgents._left_for_good_evidence returns None when placement has handed_over=True.
+    ta = TeamAgents(host, TEAM)
+    ta._placements[a1] = _Held(
+        1,
+        "d",
+        SimpleNamespace(body=SimpleNamespace(handed_over=True)),  # type: ignore[arg-type]
+    )
+    last_agent = TeamAgent(
+        agent=a1,
+        agent_type="researcher",
+        display_name=None,
+        state="idle",
+        accepting_work=True,
+        since=cluster.now,
+        host="worker-1",
+        session="s-1",
+        is_lead=False,
+    )
+    assert ta._left_for_good_evidence(a1, last_agent, cluster.now) is None
+
+
+@pytest.mark.asyncio
+async def test_f12_handover_deadline_margin_rejoin_pause_and_tracker_caught_up(tmp_path: Path) -> None:
+    """F12/FA-6/CR-5/CR-6: Handover reserves a step-3 safety margin, rejoin respects renewal_paused & lock
+    ordering for async on_credential, and HostPartitionTracker defers notifications until caught_up."""
+
+    from custom_transport.protocol1.host_partitions import OwnedPartition
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.protocol1.live import HostIdentity
+
+    cluster = _SignedCluster(tmp_path)
+    host_fake = _FakeMessageHost(cluster, "worker-1", credentials_issued=True)
+    process = AgentProcessHost(
+        cluster.layout, host_fake.profile, TEAM, host=host_fake, loop=asyncio.get_running_loop(), handover_seconds=60.0
+    )
+    rec = OwnedPartition(
+        partition=1,
+        state=RELEASED,
+        host="worker-1",
+        host_epoch=1,
+        assigned_at=cluster.now,
+        issued_at=cluster.now,
+        reason="operator",
+        sequence=10,
+        digest="d",
+    )
+    deadline = process._handover_deadline([rec])
+    assert deadline == cluster.now + timedelta(seconds=50.0)
+
+    # CR-5: rejoin defers while renewal_paused() is True.
+    cert1 = cluster.certs["worker-1"]
+    keys1 = cluster.keys["worker-1"]
+    profile = HostProfile("worker-1", (TEAM,), ("worker_host",), agent_types=("researcher",), session_limit=4)
+    real_host = MessageHost(
+        cluster.layout, profile, SimpleNamespace(), clock=lambda: cluster.now, renewal_paused=lambda: True
+    )
+    real_host.live = SimpleNamespace(identity=HostIdentity(keys1, cert1), trust=cluster.trust)  # type: ignore[assignment]
+    rejoined = await real_host.rejoin(["analyst"])
+    assert rejoined.granted == frozenset() and rejoined.refused == frozenset({"analyst"})
+    assert rejoined.refusal and "handover" in rejoined.refusal
+
+    # CR-6: HostPartitionTracker.run holds notifications and has_usable until caught_up fires.
+    k0, raw0 = cluster.sign_partition_owner(0, state=OWNED, host="worker-1", sequence=100)
+    k1, raw1 = cluster.sign_partition_owner(1, state=RELEASED, host="worker-1", sequence=101)
+    proceed_catchup = asyncio.Event()
+    notifications: list[tuple[bool, frozenset[int], set[int]]] = []
+
+    async def gated_watch(record: str, pattern: str, *, team: Optional[str] = None, caught_up: Optional[asyncio.Event] = None):
+        yield k0, raw0
+        await proceed_catchup.wait()
+        yield k1, raw1
+        if caught_up is not None:
+            caught_up.set()
+        await asyncio.Future()
+
+    host_watch = _FakeMessageHost(cluster, "worker-1", credentials_issued=False)
+    host_watch.records.watch = gated_watch  # type: ignore[attr-defined]
+    tracker = HostPartitionTracker(host_watch, TEAM)
+    tracker.on_change(
+        lambda: notifications.append((tracker.ready.is_set(), tracker.owned_by_host, set(tracker.released_by_host)))
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(tracker.run(stop))
+    try:
+        await asyncio.sleep(0.03)
+        assert notifications == []
+        assert not tracker.has_usable.is_set()
+        assert not tracker.ready.is_set()
+        proceed_catchup.set()
+        await asyncio.wait_for(tracker.ready.wait(), timeout=1.0)
+        assert len(notifications) == 1
+        assert notifications[0][1] == frozenset({0}) and notifications[0][2] == {1}
+        assert tracker.has_usable.is_set()
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

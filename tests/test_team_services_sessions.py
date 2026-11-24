@@ -39,7 +39,7 @@ class _Records:
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
         raise FrameRefused("invalid_body", "a trust record is stored under another key", at="/key")
 
-    async def read_report(self, record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
+    async def read_report(self, record: str, key: str, *, now: datetime, held: Any = None) -> Optional[StoredRecord]:
         if record == PARTITION_OWNER:
             if key in self.partition_owners:
                 return self.partition_owners[key]
@@ -47,7 +47,15 @@ class _Records:
                 return None
             team, _, part_str = key.partition(".partition.")
             body = SimpleNamespace(team=team, partition=int(part_str), state=OWNED, host=self.default_owner, host_epoch=1)
-            return StoredRecord(1, SimpleNamespace(body=body, signer=SimpleNamespace(membership_epoch=1)))  # type: ignore[arg-type]
+            return StoredRecord(
+                1,
+                SimpleNamespace(
+                    body=body,
+                    signer=SimpleNamespace(membership_epoch=1),
+                    document=SimpleNamespace(sequence=1),
+                    digest="default-owner",
+                ),  # type: ignore[arg-type]
+            )
         return None
 
     async def revision(self, record: str, key: str) -> int:
@@ -189,9 +197,9 @@ class _SessionListingFails(_Records):
             raise BucketReadTimedOut("UA1_CERTS", f"$KV.UA1_CERTS.{prefix}>", [f"{prefix}s-lead-1"], 0)
         return []
 
-    async def read_report(self, record: str, key: str, *, now: datetime) -> Optional[StoredRecord]:
+    async def read_report(self, record: str, key: str, *, now: datetime, held: Any = None) -> Optional[StoredRecord]:
         if record == PARTITION_OWNER:
-            return await super().read_report(record, key, now=now)
+            return await super().read_report(record, key, now=now, held=held)
         if record != PLACEMENT or key not in self.placement_keys:
             return None
         body = SimpleNamespace(agent="lead", host="lead-host", placed_at="2026-11-12T08:00:00.000Z", handed_over=None)
@@ -258,6 +266,8 @@ async def test_sessions_open_refuses_unowned_foreign_and_released_partitions(cap
         SimpleNamespace(
             body=SimpleNamespace(team=TEAM, partition=part, state=OWNED, host="worker-host-2", host_epoch=1),
             signer=SimpleNamespace(membership_epoch=1),
+            document=SimpleNamespace(sequence=1),
+            digest="foreign-owner",
         ),  # type: ignore[arg-type]
     )
     reply_foreign = await _service(records_foreign).open(_open("researcher-1", "researcher"))  # type: ignore[arg-type]
@@ -273,6 +283,8 @@ async def test_sessions_open_refuses_unowned_foreign_and_released_partitions(cap
         SimpleNamespace(
             body=SimpleNamespace(team=TEAM, partition=part, state=RELEASED, host="lead-host", host_epoch=1),
             signer=SimpleNamespace(membership_epoch=1),
+            document=SimpleNamespace(sequence=2),
+            digest="released-owner",
         ),  # type: ignore[arg-type]
     )
     reply_released = await _service(records_released).open(_open("researcher-1", "researcher"))  # type: ignore[arg-type]
@@ -303,6 +315,8 @@ async def test_concurrent_release_and_sessions_open_cannot_place_agent_in_releas
                 SimpleNamespace(
                     body=SimpleNamespace(team=TEAM, partition=part, state=RELEASED, host="lead-host", host_epoch=1),
                     signer=SimpleNamespace(membership_epoch=1),
+                    document=SimpleNamespace(sequence=2),
+                    digest="released-owner",
                 ),  # type: ignore[arg-type]
             )
 

@@ -486,20 +486,23 @@ class LiveHost:
             return
         team = INSTALLATION_SCOPE if frame.issuer.team == INSTALLATION_SCOPE else served.receiver.team
         try:
-            reply = self.sign(f"{frame.kind}{REPLY_SUFFIX}", body, reply_audience(frame), team=team, agent=served.agent,
-                              subject=answer_to, answering=frame)
-        except Exception:
-            # A reply the schema refuses is this host's defect; the requester still stops waiting.
-            self.logger.exception("A reply could not be built. event=protocol1_reply_failed kind=%s message_id=%s",
-                                  frame.kind, frame.message_id)
-            await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
-            return
-        data, headers = self.encode(reply)
-        await before_send()
-        await self.nc.publish(answer_to, data, headers=headers)
-        if after_flush is not None:
-            await self.nc.flush()
-            await self._run_after_flush(after_flush, frame)
+            try:
+                reply = self.sign(f"{frame.kind}{REPLY_SUFFIX}", body, reply_audience(frame), team=team, agent=served.agent,
+                                  subject=answer_to, answering=frame)
+            except Exception:
+                # A reply the schema refuses is this host's defect; the requester still stops waiting.
+                self.logger.exception("A reply could not be built. event=protocol1_reply_failed kind=%s message_id=%s",
+                                      frame.kind, frame.message_id)
+                await self._refuse(answer_to, FrameRefused(HANDLER_FAILED))
+                return
+            data, headers = self.encode(reply)
+            await before_send()
+            await self.nc.publish(answer_to, data, headers=headers)
+            if after_flush is not None:
+                await self.nc.flush()
+        finally:
+            if after_flush is not None:
+                await self._run_after_flush(after_flush, frame)
 
     async def _run_after_flush(self, after_flush: Callable[[], Awaitable[None]], frame: Frame) -> None:
         try:

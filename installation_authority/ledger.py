@@ -77,6 +77,9 @@ class IssueLedger:
         # Granted partitions -> verified partition_owner sequence recorded per issued certificate_id
         # (C11, C17): distinguishes pre-release renewals from post-recovery reassignments.
         self._certificate_partitions: dict[str, dict[int, int]] = {}
+        # Latest issued NATS user JWT exp (unix seconds) per nats_public_key (F15/FA-9/SEC-08),
+        # so revocation pruning follows the short JWT lifetime instead of the 30-day certificate end.
+        self._nats_key_jwt_expires: dict[str, int] = {}
 
     @classmethod
     def open(cls, folder: Path, installation: str, *, logger: logging.Logger = _LOGGER) -> "IssueLedger":
@@ -122,10 +125,13 @@ class IssueLedger:
                 str(cert_id): {int(p): int(seq) for p, seq in parts.items()}
                 for cert_id, parts in raw_cert_parts.items()
             }
+            raw_jwt_exp = document.get("nats_key_jwt_expires") or {}
+            ledger._nats_key_jwt_expires = {str(k): int(v) for k, v in raw_jwt_exp.items()}
         except (KeyError, TypeError, ValueError, AttributeError) as error:
             ledger._epochs, ledger._renewals, ledger._revocations = {}, {}, None
             ledger._revoked_nats_keys, ledger._confirmed_nats_revocations, ledger._bootstrap_nats_keys = {}, {}, set()
             ledger._certificate_partitions = {}
+            ledger._nats_key_jwt_expires = {}
             ledger._set_aside(error)
         return ledger
 
@@ -244,6 +250,18 @@ class IssueLedger:
     def forget_certificate_partitions(self, certificate_id: str) -> None:
         self._certificate_partitions.pop(str(certificate_id), None)
 
+    def record_nats_key_jwt_expiry(self, nats_public_key: str, exp_ts: int) -> None:
+        """Record the latest issued NATS user JWT ``exp`` (unix seconds) for ``nats_public_key`` (F15)."""
+
+        self._nats_key_jwt_expires[nats_public_key] = max(
+            self._nats_key_jwt_expires.get(nats_public_key, 0), int(exp_ts)
+        )
+
+    def nats_key_jwt_expiry(self, nats_public_key: str) -> Optional[int]:
+        """Latest recorded NATS user JWT ``exp`` (unix seconds) for ``nats_public_key``, or ``None``."""
+
+        return self._nats_key_jwt_expires.get(nats_public_key)
+
     @property
     def bootstrap_nats_keys(self) -> frozenset[str]:
         return frozenset(self._bootstrap_nats_keys)
@@ -290,4 +308,6 @@ class IssueLedger:
                 cert_id: {str(p): seq for p, seq in sorted(parts.items())}
                 for cert_id, parts in sorted(self._certificate_partitions.items())
             }
+        if self._nats_key_jwt_expires:
+            document["nats_key_jwt_expires"] = dict(sorted(self._nats_key_jwt_expires.items()))
         write_private_file(self.path, json.dumps(document, sort_keys=True).encode())

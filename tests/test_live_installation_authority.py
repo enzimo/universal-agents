@@ -640,9 +640,13 @@ async def test_a_join_asking_for_other_grants_gets_a_new_certificate(broker: str
         second = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)
         assert second.membership_epoch == first.membership_epoch + 1 and second.replaces == first.certificate_id
         assert second.agent_types == frozenset({"analyst", "researcher"})
-        # Asking for the same again hands that certificate back; asking for less gets a narrower one.
+        # Asking for the same again hands that certificate back; asking for less requires a new NATS key (F1/SEC-06).
         assert (await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), wider)).membership_epoch == 2
-        narrower = await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        with pytest.raises(RequestRefused) as same_key_narrow:
+            await join(worker_nc, worker_keys, host_trust(layout, WORKER.runtime), WORKER)
+        assert same_key_narrow.value.code == "invalid_body" and same_key_narrow.value.at == "/body/nats_public_key"
+        rotated_keys = host_keys.rotate_nats_key(layout, WORKER.runtime)
+        narrower = await join(worker_nc, rotated_keys, host_trust(layout, WORKER.runtime), WORKER)
         assert narrower.membership_epoch == 3 and narrower.agent_types == frozenset({"researcher"})
 
 

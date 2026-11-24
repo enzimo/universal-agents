@@ -346,11 +346,13 @@ class ReleasedPartitionWatcher:
         verify: Callable[[bytes], VerifiedRecord],
         on_host_lost: Callable[[HostLostRelease], Awaitable[Any]],
         teams: Iterable[str],
+        verify_keyed: Optional[Callable[[str, bytes], VerifiedRecord]] = None,
         logger: logging.Logger = _LOGGER,
         retry_seconds: float = RETRY_SECONDS,
     ) -> None:
         self._records = records
         self._verify = verify
+        self._verify_keyed = verify_keyed
         self._on_host_lost = on_host_lost
         self.teams = tuple(sorted(set(teams)))
         self._logger = logger
@@ -393,7 +395,7 @@ class ReleasedPartitionWatcher:
 
     async def _handle_record(self, team: str, key: str, raw: bytes) -> None:
         try:
-            verified = self._verify(raw)
+            verified = self._verify_keyed(key, raw) if self._verify_keyed is not None else self._verify(raw)
             require_record_key(verified, key)
             body: Any = verified.body
             if body.team != team:

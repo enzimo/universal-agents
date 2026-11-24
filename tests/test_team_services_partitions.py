@@ -782,10 +782,10 @@ async def test_cut_off_and_retired_hosts_release_all_partitions_while_intermitte
     assert len(conn_parts) >= 2 and len(edge_parts) >= 2
     conn_k1 = cluster.host_keys["worker-conn"].nats_public_key
 
-    # Both worker-conn and worker-edge go offline (liveness gone).
+    # Both worker-conn and worker-edge go offline (liveness expires past TTL + clock skew).
     cluster.remove_liveness("worker-conn")
     cluster.remove_liveness("worker-edge")
-    cluster.advance(5)
+    cluster.advance(30 + CLOCK_SKEW_SECONDS + 2)
     cluster.write_liveness("worker-live")
     await partitions.reconcile()
 
@@ -1099,8 +1099,8 @@ async def test_unowned_occupied_partition_from_cr4_refusal_checks_requirements_a
     await partitions.reconcile()
     assert (await cluster.owners())[p_lead] == (OWNED, "lead-2")
 
-    # lead-1 leaves; worker-only (lacks lead_host and MANAGER_AGENT_TYPE) joins; lead-2 refuses p_lead as credential_too_large.
-    cluster.advance(5)
+    # lead-1 leaves (liveness expires past TTL + clock skew); worker-only (lacks lead_host and MANAGER_AGENT_TYPE) joins; lead-2 refuses p_lead as credential_too_large.
+    cluster.advance(30 + CLOCK_SKEW_SECONDS + 2)
     cluster.remove_liveness("lead-1")
     cluster.issue_host("worker-only", roles=("worker_host",), agent_types=("researcher",), session_limit=8)
     cluster.write_liveness("worker-only")
@@ -1199,10 +1199,11 @@ async def test_host_lost_escalation_does_not_reassign_back_to_unrecovered_stalle
         assert (await cluster.owners())[p] == (RELEASED, "worker-1")
 
     # Authority revokes K1; worker-1 is still writing liveness at epoch 1 with owned_count=0.
-    # Even with worker-2 offline, worker-1 must NOT get partitions back while still at epoch 1!
+    # Even with worker-2 offline (liveness expired past TTL + clock skew), worker-1 must NOT get
+    # partitions back while still at epoch 1!
     revoked_nats.add(k1)
     cluster.remove_liveness("worker-2")
-    cluster.advance(2)
+    cluster.advance(30 + CLOCK_SKEW_SECONDS + 2)
     cluster.write_liveness("worker-1")
     await partitions.reconcile()
     for p in w1_parts:
@@ -1293,23 +1294,31 @@ async def test_post_restart_host_lost_fallback_handles_clock_skew_pre_release_re
     )
     k2 = cluster.host_keys["worker-1"].nats_public_key
     revoked_nats.add(k1)
-    cluster.write_liveness("worker-1")
+    # Give worker-1 a short 1s liveness TTL so its liveness genuinely expires before K2's skewed issued_at (t0+5s).
+    cluster.write_liveness("worker-1", ttl_seconds=1)
     cluster.write_liveness("worker-2")
     await partitions.reconcile()
     assert (await cluster.owners())[p1] == (OWNED, "worker-2")
     assert (await cluster.owners())[p2] == (OWNED, "worker-1")
 
-    # worker-1 goes host_lost at t0 + 2s (before K2's skewed issued_at at t0 + 5s); p2 is released with host_epoch=1.
+    # worker-1 goes host_lost at t0 + 10s (after its 1s liveness + 8s skew genuinely expires); issue a skewed
+    # pre-release epoch 3 cert at t0 + 13s (within released_at + skew) to test post-restart fail-closed!
     cluster.remove_liveness("worker-1")
-    cluster.advance(1)
+    cluster.advance(10)
+    cluster.issue_host(
+        "worker-1",
+        roles=("worker_host",),
+        agent_types=("researcher",),
+        new_nats_key=True,
+        issued_at_offset_seconds=3.0,
+    )
+    k3 = cluster.host_keys["worker-1"].nats_public_key
     cluster.write_liveness("worker-2")
-    await partitions.reconcile()  # records first missing
-    cluster.advance(1)
-    cluster.write_liveness("worker-2")
-    await partitions.reconcile()  # releases p2 as host_lost at t0 + 2s
+    await partitions.reconcile()  # releases p2 as host_lost at t0 + 10s
     assert (await cluster.owners())[p2] == (RELEASED, "worker-1")
 
-    # Team services RESTART (losing in-memory _release_pre_epochs) while K2 is STILL unrevoked!
+    # Team services RESTART (losing in-memory _release_pre_epochs) while K3 is STILL unrevoked!
+    revoked_nats.add(k2)
     _sessions2, restarted = cluster.make_services(
         credentials_enforced=True,
         credential_lifetime_seconds=3600,
@@ -1317,20 +1326,19 @@ async def test_post_restart_host_lost_fallback_handles_clock_skew_pre_release_re
         is_nats_key_revoked=lambda k: k in revoked_nats,
     )
     await restarted.reconcile()
-    # Must NOT reassign p2 while K2 (issued at t0+5s <= released_at + skew) is still unrevoked!
+    # Must NOT reassign p2 while K3 (issued at t0+13s <= released_at + skew) is still unrevoked!
     assert (await cluster.owners())[p2] == (RELEASED, "worker-1")
 
-    # Also verify _complete_release_locked post-restart does not fall back to worker-1's skewed pre-release epoch 2
-    # when worker-2 is absent and credentials_enforced=False.
+    # Also verify _complete_release_locked post-restart does not fall back to worker-1's skewed pre-release epoch 3
+    # under credentials_enforced=True when worker-2 is absent before credential_lifetime_seconds + skew elapses.
     cluster.remove_liveness("worker-2")
-    cluster.write_liveness("worker-1")  # still at pre-release epoch 2 (issued_at = t0+5s <= released_at + skew)
-    _sessions3, restarted_shared = cluster.make_services(credentials_enforced=False)
-    await restarted_shared.reconcile()
+    cluster.write_liveness("worker-1")  # still at pre-release epoch 3 (issued_at <= released_at + skew)
+    await restarted.reconcile()
     assert (await cluster.owners())[p2] == (RELEASED, "worker-1")
 
-    # Once K2 IS revoked and worker-2 is back (with worker-1 still gone), step 4 completes cleanly.
+    # Once K3 IS revoked and worker-2 is back (with worker-1 still gone), step 4 completes cleanly.
     cluster.remove_liveness("worker-1")
-    revoked_nats.add(k2)
+    revoked_nats.add(k3)
     cluster.write_liveness("worker-2")
     await restarted.reconcile()
     assert (await cluster.owners())[p2] == (OWNED, "worker-2")
@@ -1520,3 +1528,225 @@ async def test_other_contract_host_releases_empty_partitions_but_keeps_occupied_
     assert closed["outcome"] == "ok"
     await partitions.reconcile()
     assert (await cluster.owners())[occupied_p] == (OWNED, "worker-2")
+
+
+@pytest.mark.asyncio
+async def test_f2_single_host_recovers_after_drained_restart_and_host_lost_under_shared_login(
+    tmp_path: Path,
+) -> None:
+    """F2/GEN-2/FA-2/DI-3: Single-host restarts (drained) and >38s liveness blips (host_lost) recover cleanly."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=4)
+    cluster.issue_host("lead", roles=("lead_host", "worker_host"), agent_types=(MANAGER_AGENT_TYPE,))
+    cluster.write_liveness("lead")
+    _sessions, partitions = cluster.make_services(credentials_enforced=False)
+    await partitions.reconcile()
+    assert all(v == (OWNED, "lead") for v in (await cluster.owners()).values())
+
+    # 1. Clean restart (<30s): lead writes state="drained" -> partition 0 released -> lead returns "accepting".
+    cluster.advance(2)
+    cluster.write_liveness("lead", state="drained")
+    await partitions.reconcile()
+    assert (await cluster.owners())[0] == (RELEASED, "lead")
+    cluster.advance(3)
+    cluster.write_liveness("lead", state="accepting")
+    await partitions.reconcile()
+    assert all(v == (OWNED, "lead") for v in (await cluster.owners()).values())
+
+    # 2. >38s liveness blip (host_lost): all partitions released -> lead resumes heartbeating at epoch 1.
+    cluster.remove_liveness("lead")
+    cluster.advance(45)
+    await partitions.reconcile()
+    assert all(v == (RELEASED, "lead") for v in (await cluster.owners()).values())
+    cluster.advance(2)
+    cluster.write_liveness("lead", state="accepting")
+    await partitions.reconcile()
+    assert all(v == (OWNED, "lead") for v in (await cluster.owners()).values())
+
+    # 3. Enforced credentials + team-services restart + rejoin within 8s recovers once lifetime+skew passes.
+    revoked_nats: set[str] = set()
+    _s2, enforced = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=120,
+        is_nats_key_revoked=lambda k: k in revoked_nats,
+    )
+    await enforced.reconcile()
+    k1 = cluster.host_keys["lead"].nats_public_key
+    cluster.remove_liveness("lead")
+    cluster.advance(45)
+    await enforced.reconcile()
+    assert all(v == (RELEASED, "lead") for v in (await cluster.owners()).values())
+    revoked_nats.add(k1)
+    cluster.advance(2)
+    cluster.issue_host("lead", roles=("lead_host", "worker_host"), agent_types=(MANAGER_AGENT_TYPE,), new_nats_key=True)
+    cluster.write_liveness("lead", state="accepting")
+    # Team services restarts (losing _release_pre_epochs) while lead rejoined within CLOCK_SKEW_SECONDS.
+    _s3, restarted = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=120,
+        is_nats_key_revoked=lambda k: k in revoked_nats,
+    )
+    await restarted.reconcile()
+    assert all(v == (RELEASED, "lead") for v in (await cluster.owners()).values())
+    cluster.advance(120 + CLOCK_SKEW_SECONDS + 1)
+    cluster.write_liveness("lead", state="accepting")
+    await restarted.reconcile()
+    assert all(v == (OWNED, "lead") for v in (await cluster.owners()).values())
+
+
+@pytest.mark.asyncio
+async def test_f4_host_lost_waits_for_concurrent_pre_release_renewal_key(tmp_path: Path) -> None:
+    """F4/DI-2: Even when _release_pre_epochs is populated, host_lost waits for any cert issued <= released_at."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=4)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    revoked_nats: set[str] = set()
+    _sessions, partitions = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=900,
+        is_nats_key_revoked=lambda k: k in revoked_nats,
+    )
+    await partitions.reconcile()
+    p0 = next(p for p, (_s, h) in (await cluster.owners()).items() if h == "worker-1")
+    k1 = cluster.host_keys["worker-1"].nats_public_key
+
+    # Release worker-1 as host_lost at t0 (populating _release_pre_epochs=1), then a concurrent epoch-2 cert
+    # with issued_at == t0 (K2 unrevoked) lands in UA1_CERTS while K1 is already revoked.
+    await partitions.release_cut_off_host("worker-1", reason="host_lost")
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+    k2 = cluster.host_keys["worker-1"].nats_public_key
+    revoked_nats.add(k1)
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    assert (await cluster.owners())[p0] == (RELEASED, "worker-1")
+
+    # Once K2 is confirmed revoked, step 4 completes immediately.
+    revoked_nats.add(k2)
+    await partitions.reconcile()
+    assert (await cluster.owners())[p0] == (OWNED, "worker-2")
+
+
+@pytest.mark.asyncio
+async def test_f6_cr4_enforced_routes_through_handover_stops_ping_pong_and_keeps_monotonic_sequence(
+    tmp_path: Path,
+) -> None:
+    """F6/SEC-01/GEN-5/FA-4/DI-4: Under enforced credentials, CR-4 routes through released+revocation, remembers
+    refusal capacity to stop delete/reassign ping-pong, and preserves monotonic sequence across deletes."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=2)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    revoked_nats: set[str] = set()
+    _sessions, partitions = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=900,
+        is_nats_key_revoked=lambda k: k in revoked_nats,
+    )
+    await partitions.reconcile()
+    assert (await cluster.owners()) == {0: (OWNED, "worker-1"), 1: (OWNED, "worker-1")}
+    k1 = cluster.host_keys["worker-1"].nats_public_key
+
+    # worker-1 reports partition-1 credential_too_large: under enforced credentials, must enter RELEASED (NOT deleted).
+    cluster.advance(1)
+    cluster.write_liveness(
+        "worker-1",
+        components=[{"component": "partition-1", "state": "unhealthy", "code": PARTITION_CREDENTIAL_TOO_LARGE_CODE}],
+    )
+    await partitions.reconcile()
+    assert (await cluster.owners())[1] == (RELEASED, "worker-1")
+    key1 = partition_owner_key(TEAM, 1, 2)
+    seq_before_delete = partitions._held_partition_owners[key1][0]
+
+    # worker-1 completes step 3 (rotates to K2) and K1 is revoked -> step 4 deletes partition-1 (no fitting peer).
+    cluster.advance(1)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+    revoked_nats.add(k1)
+    cluster.write_liveness("worker-1")  # refusal cleared after deletion (simulating HostPartitionTracker._prune_rejected)
+    await partitions.reconcile()
+    assert 1 not in await cluster.owners()
+
+    # Subsequent reconcile with healthy worker-1 must NOT ping-pong partition-1 back to worker-1!
+    await partitions.reconcile()
+    assert 1 not in await cluster.owners()
+
+    # When worker-2 joins at the EXACT same millisecond, recreated partition-1 has sequence > seq_before_delete!
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    assert (await cluster.owners())[1] == (OWNED, "worker-2")
+    assert partitions._held_partition_owners[key1][0] > seq_before_delete
+
+
+@pytest.mark.asyncio
+async def test_f11_other_contract_draining_host_not_escalated_while_draining_occupied_partitions(
+    tmp_path: Path,
+) -> None:
+    """F11/FA-5/CR-4: Under credentials_enforced=True, an other_contract host draining occupied partitions
+    does not have empty partitions released early (which would fail step 3 with protocol_mismatch -> host_lost)."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=4)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    sessions, partitions = cluster.make_services(credentials_enforced=True, handover_seconds=30)
+    await partitions.reconcile()
+    w1_parts = sorted(p for p, (_s, h) in (await cluster.owners()).items() if h == "worker-1")
+    occ_p, empty_p = w1_parts[0], w1_parts[1]
+    aid = cluster.agent_in_partition(occ_p)
+    opened = await sessions.open(cluster.open_frame("worker-1", aid, "researcher"))
+    assert opened["outcome"] == "ok"
+
+    cluster.write_liveness("worker-1", contract_sha256="2" * 64)
+    await partitions.reconcile()
+    assert (await cluster.owners())[occ_p] == (OWNED, "worker-1")
+    assert (await cluster.owners())[empty_p] == (OWNED, "worker-1")
+
+    # Even past handover_seconds while still draining, occupied partition is never escalated to host_lost.
+    cluster.advance(35)
+    cluster.write_liveness("worker-1", contract_sha256="2" * 64)
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    assert (await cluster.owners())[occ_p] == (OWNED, "worker-1")
+
+
+@pytest.mark.asyncio
+async def test_f13_partition_owner_replay_rejected_and_ua1_hosts_delete_retained_until_expiry(
+    tmp_path: Path,
+) -> None:
+    """F13/SEC-07: Replayed partition_owner records are rejected by PartitionService and SessionService, and
+    deleting UA1_HOSTS.<runtime> under shared login does not evict a live host before its expiry + skew."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=2)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    sessions, partitions = cluster.make_services(credentials_enforced=False)
+    # Share held_partition_owners as team_services/process.py does.
+    partitions._held_partition_owners = sessions.held_partition_owners
+    await partitions.reconcile()
+
+    # Snapshot older owned(worker-1) bytes for partition 0, move partition 0 to worker-2, then replay old bytes.
+    key0 = partition_owner_key(TEAM, 0, 2)
+    old_entry = cluster.records._bucket(PARTITION_OWNER)[key0]
+    assert await partitions.release_partition(0, reason="operator", target_host="worker-2") is True
+    await partitions.reconcile()
+    assert (await cluster.owners())[0] == (OWNED, "worker-2")
+
+    cluster.records._bucket(PARTITION_OWNER)[key0] = old_entry
+    ownership_after_replay, _ = await partitions._read_ownership(cluster.now)
+    assert 0 not in ownership_after_replay
+    assert await sessions._partition_owner(TEAM, 0) is None
+
+    # Deleting UA1_HOSTS/worker-2 while its verified liveness hasn't expired keeps worker-2 live until expiry + skew.
+    cluster.remove_liveness("worker-2")
+    cluster.advance(5)
+    live_after_delete = await partitions._read_live_hosts(cluster.now)
+    assert "worker-2" in live_after_delete
+    cluster.advance(30 + CLOCK_SKEW_SECONDS)
+    live_after_expiry = await partitions._read_live_hosts(cluster.now)
+    assert "worker-2" not in live_after_expiry

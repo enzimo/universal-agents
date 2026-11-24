@@ -143,6 +143,8 @@ class SessionService:
     # Optional callback (invoked while holding ``_changing``) to assign unowned partitions if
     # a host asks to open a session before the partition watch processes its first liveness record.
     ensure_partitions: Optional[Callable[[], Awaitable[None]]] = None
+    # Monotonic (sequence, digest) replay protection for partition_owner reads, shared with PartitionService (F13/SEC-07).
+    held_partition_owners: dict[str, tuple[int, str]] = field(default_factory=dict)
 
     def _partition_count(self) -> int:
         return int(getattr(self.trust.store, "partition_count", DEFAULT_PARTITION_COUNT))
@@ -151,12 +153,16 @@ class SessionService:
         """The verified ``partition_owner`` record for ``(team, partition)``, or ``None`` if absent or invalid."""
 
         key = partition_owner_key(team, partition, self._partition_count())
+        held = self.held_partition_owners.get(key)
         try:
-            stored = await self.records.read_report(PARTITION_OWNER, key, now=self.clock())
+            stored = await self.records.read_report(PARTITION_OWNER, key, now=self.clock(), held=held)
         except FrameRefused as refused:
             self._refused(PARTITION_OWNER, key, refused)
             return None
-        return None if stored is None else stored.record
+        if stored is None:
+            return None
+        self.held_partition_owners[key] = (int(stored.record.document.sequence), str(stored.record.digest))
+        return stored.record
 
     def _refused(self, record: str, key: str, refused: FrameRefused) -> None:
         self.logger.warning("A stored record does not verify and counts as absent. event=team_services_record_refused "

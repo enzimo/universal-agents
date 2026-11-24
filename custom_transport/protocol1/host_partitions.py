@@ -331,7 +331,9 @@ class HostPartitionTracker:
                             seen.add(int(suffix))
                     result = await self._apply_raw(key, raw)
                     pruned = self._prune_rejected()
-                    if (result is not None and result[1]) or pruned:
+                    # F12/CR-6: Hold snapshots, has_usable, and listener notifications during initial
+                    # watch catch-up until caught_up sets ready, so coordinators never renew on partial state.
+                    if self.ready.is_set() and ((result is not None and result[1]) or pruned):
                         self._recompute_snapshots(notify=True)
                 if caught_up.is_set() and not stop.is_set():
                     await ready_task

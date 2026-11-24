@@ -18,6 +18,7 @@ from typing import Mapping, Optional
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.values import parse_timestamp
+from custom_transport.protocol1.nkeys import public_key_bytes
 from custom_transport.protocol1.private_files import write_private_file
 
 _VERSION = 1
@@ -49,6 +50,8 @@ class ExpectedHost:
             object.__setattr__(self, "edges", normalized)
         elif not isinstance(self.edges, dict):
             object.__setattr__(self, "edges", {})
+        if self.bootstrap_nats_public_key is not None:
+            public_key_bytes(self.bootstrap_nats_public_key)
 
 
 def read_expected_hosts(path: Path) -> dict[str, ExpectedHost]:

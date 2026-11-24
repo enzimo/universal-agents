@@ -188,6 +188,7 @@ class PartitionService:
         cut_off_grace_seconds: float = DEFAULT_CUT_OFF_GRACE_SECONDS,
         reconcile_interval_seconds: float = RECONCILE_INTERVAL_SECONDS,
         max_credential_bytes: Optional[int] = None,
+        held_partition_owners: Optional[dict[str, tuple[int, str]]] = None,
     ) -> None:
         self.records = records
         self.trust = trust
@@ -209,13 +210,23 @@ class PartitionService:
         self._seen_live: set[str] = set()
         self._first_missing_at: dict[str, datetime] = {}
         # Last verified host liveness record and its expiry per runtime, so a forged/tampered
-        # record written under the shared NATS login cannot immediately evict a live host.
+        # or forged-deleted record written under the shared NATS login cannot immediately evict a live host (C29, F13).
         self._last_verified_hosts: dict[str, tuple[LivePartitionHost, datetime]] = {}
         self._planned_targets: dict[int, str] = {}
         # Maps (partition, host, assigned_at) -> highest host membership_epoch observed in UA1_CERTS
         # at release time, so clock skew between authority and team services cannot exclude a pre-release
         # certificate on host_lost releases without altering body.host_epoch (C19).
         self._release_pre_epochs: dict[tuple[int, str, datetime], int] = {}
+        # Monotonic (sequence, digest) replay protection for partition_owner records, retained across deletes
+        # and shared with SessionService (F6/DI-4, F13/SEC-07).
+        self._held_partition_owners: dict[str, tuple[int, str]] = (
+            held_partition_owners if held_partition_owners is not None else {}
+        )
+        # Per-host CR-4 refusal memory: runtime -> (profile_fingerprint, failed_total_partitions) so leaving a
+        # partition unowned does not trigger an assign-refuse-delete-reassign ping-pong loop (F6/GEN-5/FA-4).
+        self._refused_capacity: dict[str, tuple[tuple[Any, ...], int]] = {}
+        # Tracks (host, partition) releases started from CR-4 refusal so step 4 may leave unowned if no peer fits (F6/SEC-01).
+        self._refused_release_partitions: set[tuple[str, int]] = set()
         self._woke = asyncio.Event()
 
     @property
@@ -458,6 +469,8 @@ class PartitionService:
                     await self.records.put(PARTITION_OWNER, rec.key, document, last_revision=rec.revision)
                 except KeyWrongLastSequenceError:
                     continue
+                verified_resigned = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
+                self._record_held_owner(rec.key, verified_resigned)
                 self.logger.info(
                     "Signed a partition ownership record again under the current certificate. "
                     "event=partition_owner_signed_again key=%s previous_epoch=%s membership_epoch=%s",
@@ -534,6 +547,24 @@ class PartitionService:
                     runtime, ownership, reason="host_lost", now=now, known_certs=certs
                 )
 
+    def _record_held_owner(self, key: str, verified: VerifiedRecord) -> None:
+        self._held_partition_owners[key] = (int(verified.document.sequence), str(verified.digest))
+
+    @staticmethod
+    def _profile_fingerprint(cert: HostCertificate) -> tuple[Any, ...]:
+        return (cert.teams, cert.roles, cert.agent_types, cert.session_limit, cert.connection_class)
+
+    def _record_refused_capacity(self, host: LivePartitionHost, ownership: Mapping[int, PartitionRecord]) -> None:
+        """Remember the partition count at which ``host`` refused a partition as credential_too_large (F6)."""
+
+        profile = self._profile_fingerprint(host.certificate)
+        failed_total = max(1, self._owned_count(host.runtime, ownership))
+        existing = self._refused_capacity.get(host.runtime)
+        if existing is not None and existing[0] == profile:
+            self._refused_capacity[host.runtime] = (profile, min(existing[1], failed_total))
+        else:
+            self._refused_capacity[host.runtime] = (profile, failed_total)
+
     async def _recover_refused_partitions_locked(
         self,
         live_hosts: Mapping[str, LivePartitionHost],
@@ -542,17 +573,21 @@ class PartitionService:
         placements: list[PlacedAgent],
         now: datetime,
     ) -> None:
-        """Recover partitions whose assigned host reported ``partition_credential_too_large`` (A4, CR-4)."""
+        """Recover partitions whose assigned host reported ``partition_credential_too_large`` (A4, CR-4, F6)."""
 
         for host in sorted(live_hosts.values(), key=lambda item: item.runtime):
             for partition in sorted(host.refused_partitions):
                 rec = ownership.get(partition)
                 if rec is None or rec.state != OWNED or rec.host != host.runtime:
                     continue
+                self._record_refused_capacity(host, ownership)
                 part_agents = [p for p in placements if p.partition == partition]
                 has_active_agents = any(p.host == host.runtime and not p.handed_over for p in part_agents)
-                if has_active_agents:
-                    await self._start_connected_handover_locked(
+                if self.credentials_enforced or has_active_agents:
+                    # Under enforced credentials (or with active agents), route CR-4 recovery through
+                    # released + key rotation/revocation (or lifetime wait) before reassigning or leaving
+                    # unowned so a compromised or pool-growing host cannot keep a live JWT (F6/SEC-01).
+                    started = await self._start_connected_handover_locked(
                         partition,
                         reason="rebalanced",
                         target_host=None,
@@ -560,7 +595,10 @@ class PartitionService:
                         ownership=ownership,
                         placements=placements,
                         now=now,
+                        allow_without_target=True,
                     )
+                    if started:
+                        self._refused_release_partitions.add((host.runtime, partition))
                     continue
                 target = await self._select_destination_host(
                     partition,
@@ -681,6 +719,11 @@ class PartitionService:
             # Prefer empty partitions first so they clear cleanly before agent-bearing partitions.
             occupied = {agent.partition for agent in placements if agent.host == host.runtime}
             if host.other_contract:
+                if self.credentials_enforced and occupied:
+                    # Under enforced credentials, an other_contract host can only complete a full
+                    # give-up renewal once all of its agents finish draining; releasing empty partitions
+                    # early would fail step 3 with protocol_mismatch and escalate the host to host_lost (F11).
+                    continue
                 # A host on another contract drains its own agents and keeps them reachable on
                 # ctl.agent.<agent> while held work finishes (contract README "Versions"); release
                 # only empty partitions until its agents close and vacate the remaining ones.
@@ -752,13 +795,15 @@ class PartitionService:
                 "assigned_at": format_timestamp(now),
                 "reason": reason,
             }
-            seq = rising_sequence(0, now)
+            prev_held = self._held_partition_owners.get(key)
+            seq = rising_sequence(prev_held[0] if prev_held is not None else 0, now)
             document = self.records.signed(PARTITION_OWNER, key, body, sequence=seq, issued_at=now)
             try:
                 revision = await self.records.put(PARTITION_OWNER, key, document, last_revision=last_rev)
             except KeyWrongLastSequenceError:
                 continue
             verified = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
+            self._record_held_owner(key, verified)
             ownership[partition] = PartitionRecord(partition, key, revision, verified)
             raw_revisions[partition] = revision
             self._clear_release_pre_epochs(partition)
@@ -915,9 +960,14 @@ class PartitionService:
         except KeyWrongLastSequenceError:
             return False
         verified = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
+        self._record_held_owner(rec.key, verified)
         updated = PartitionRecord(partition, rec.key, revision, verified)
         ownership[partition] = updated
-        self._release_pre_epochs[(partition, old_host, updated.assigned_at)] = release_epoch
+        # Dekker post-write cert check (F4/SEC-03): re-list UA1_CERTS after RELEASED is durable so any
+        # pre-release renewal that wrote UA1_CERTS concurrently with RELEASED is swept into pre_epoch.
+        after_certs = await self._load_host_certificates(old_host, now)
+        post_release_epoch = max([release_epoch, *(c.membership_epoch for c in after_certs)])
+        self._release_pre_epochs[(partition, old_host, updated.assigned_at)] = post_release_epoch
         if target_host is not None:
             self._planned_targets[partition] = target_host
         self.logger.info(
@@ -969,9 +1019,12 @@ class PartitionService:
             except KeyWrongLastSequenceError:
                 continue
             verified = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
+            self._record_held_owner(rec.key, verified)
             updated = PartitionRecord(partition, rec.key, revision, verified)
             ownership[partition] = updated
-            self._release_pre_epochs[(partition, runtime, updated.assigned_at)] = max(rec.host_epoch, max_known_epoch)
+            after_certs = await self._load_host_certificates(runtime, now)
+            post_max_epoch = max([rec.host_epoch, max_known_epoch, *(c.membership_epoch for c in after_certs)])
+            self._release_pre_epochs[(partition, runtime, updated.assigned_at)] = post_max_epoch
             released.append(partition)
             self.logger.warning(
                 "Released a partition for a cut-off or retired host. event=partition_released_host_lost "
@@ -1007,13 +1060,18 @@ class PartitionService:
         recorded_epoch = self._release_pre_epochs.get((rec.partition, old_host, released_at))
         pre_epoch = max(rec.host_epoch, recorded_epoch or 0)
         if rec.reason == "host_lost":
+            # F4/DI-2: Include all certificates up through pre_epoch plus any certificate issued up
+            # through released_at (and through released_at + skew after a restart when recorded_epoch
+            # is absent, C24), so concurrent pre-release renewals cannot bypass revocation while a
+            # post-release rejoin (> released_at) does not stall fast recovery.
+            cutoff = released_at if recorded_epoch is not None else released_at + skew
             base_old_certs = [
                 c for c in certs
-                if c.membership_epoch <= pre_epoch
-                or (recorded_epoch is None and c.membership_epoch > pre_epoch and c.issued_at <= released_at + skew)
+                if c.membership_epoch <= pre_epoch or c.issued_at <= cutoff
             ]
         else:
-            # Connected handovers persist pre_epoch in rec.host_epoch at release time (C19).
+            # Connected handovers persist pre_epoch in rec.host_epoch at release time (C19) and
+            # bump _release_pre_epochs after RELEASED is durable (F4/SEC-03).
             base_old_certs = [c for c in certs if c.membership_epoch <= pre_epoch]
         base_old_epochs = {c.membership_epoch for c in base_old_certs}
         base_old_keys = {c.nats_public_key for c in base_old_certs}
@@ -1036,17 +1094,22 @@ class PartitionService:
                 wait_until = min(wait_until, latest_cert_end)
             return now >= wait_until
 
-        renewed = next(
-            (
-                c for c in certs
-                if c.membership_epoch > pre_epoch
+        # F4/SEC-03: After a team-services restart (recorded_epoch is None), require issued_at strictly
+        # after released_at + skew so a pre-release renewal issued under clock skew cannot pose as step 3.
+        # Also never accept a certificate whose NATS key has been revoked.
+        min_step3_issued = released_at - skew if recorded_epoch is not None else released_at + skew
+        renewed: Optional[HostCertificate] = None
+        for c in certs:
+            if (
+                c.membership_epoch > pre_epoch
                 and c.nats_public_key not in base_old_keys
                 and c.nats_public_key not in old_nats_keys
-                and c.issued_at >= released_at - skew
+                and (c.issued_at >= min_step3_issued if recorded_epoch is not None else c.issued_at > min_step3_issued)
                 and not self.trust.store.revoked(c)
-            ),
-            None,
-        )
+                and not await self._is_key_revoked(c.nats_public_key)
+            ):
+                renewed = c
+                break
         if renewed is None:
             if now >= released_at + timedelta(seconds=self.handover_seconds):
                 # Connected host missed the step-2/3 deadline: escalate to host_lost so authority revokes its key.
@@ -1101,30 +1164,66 @@ class PartitionService:
             preferred_runtime=self._planned_targets.get(rec.partition),
             now=now,
         )
-        if target is None and rec.reason == "host_lost":
-            # Fall back to old_host only if it rejoined at a strictly newer epoch with an unrevoked
-            # certificate and (when credentials are enforced) an unrevoked NATS key (C22).
-            # After a team-services restart (recorded_epoch is None), also require issued_at >
-            # rec.assigned_at + skew so a pre-release renewal issued under authority clock skew
-            # cannot be mistaken for a post-release rejoin (C24).
+        # F6/SEC-01: After a CR-4 refusal handover completes revocation/lifetime wait with no fitting peer,
+        # delete the ownership record to leave the partition stably unowned.
+        is_cr4_refusal_release = (
+            rec.reason == "rebalanced"
+            and (
+                (old_host, rec.partition) in self._refused_release_partitions
+                or (old_host in live_hosts and rec.partition in live_hosts[old_host].refused_partitions)
+            )
+        )
+        if target is None and is_cr4_refusal_release:
+            if await self.records.delete(PARTITION_OWNER, rec.key, last_revision=rec.revision):
+                ownership.pop(rec.partition, None)
+                self._planned_targets.pop(rec.partition, None)
+                self._refused_release_partitions.discard((old_host, rec.partition))
+                self._clear_release_pre_epochs(rec.partition)
+                self.logger.warning(
+                    "Left a partition unowned after CR-4 handover completed and no other host could fit it. "
+                    "event=partition_left_unowned_credential_too_large team=%s partition=%s refused_host=%s",
+                    self.team,
+                    rec.partition,
+                    old_host,
+                )
+                return True
+            return False
+
+        if target is None and rec.reason in ("host_lost", "drained"):
+            # F2/GEN-2/FA-2/DI-3: When no peer can take a host_lost or drained partition and old_host
+            # returns healthy and accepting, allow reclaiming it once preconditions are satisfied:
+            # - Under shared NATS login (credentials_enforced=False), there is no NATS key isolation,
+            #   so any live accepting unrevoked old_host may reclaim immediately.
+            # - Under enforced credentials (credentials_enforced=True), _is_release_ready_locked has
+            #   already verified revocation or lifetime wait; require an unrevoked NATS key (and for
+            #   host_lost, a strictly newer epoch, plus post-restart clock-skew protection until the
+            #   credential lifetime window has elapsed).
             candidate = live_hosts.get(old_host)
             recorded_epoch = self._release_pre_epochs.get((rec.partition, old_host, rec.assigned_at))
             min_recovered_epoch = max(rec.host_epoch, recorded_epoch or 0)
             skew = timedelta(seconds=CLOCK_SKEW_SECONDS)
-            if (
-                candidate is not None
-                and candidate.certificate.membership_epoch > min_recovered_epoch
-                and (recorded_epoch is not None or candidate.certificate.issued_at > rec.assigned_at + skew)
-                and not self.trust.store.revoked(candidate.certificate)
-                and (
-                    not self.credentials_enforced
-                    or not await self._is_key_revoked(candidate.certificate.nats_public_key)
-                )
-                and await self._host_can_take_partition(
+            lifetime_elapsed = now >= rec.assigned_at + timedelta(
+                seconds=self.credential_lifetime_seconds + CLOCK_SKEW_SECONDS
+            )
+            if candidate is not None and not self.trust.store.revoked(candidate.certificate):
+                if not self.credentials_enforced:
+                    can_reclaim = True
+                elif rec.reason == "drained":
+                    can_reclaim = not await self._is_key_revoked(candidate.certificate.nats_public_key)
+                else:
+                    can_reclaim = (
+                        candidate.certificate.membership_epoch > min_recovered_epoch
+                        and (
+                            recorded_epoch is not None
+                            or candidate.certificate.issued_at > rec.assigned_at + skew
+                            or lifetime_elapsed
+                        )
+                        and not await self._is_key_revoked(candidate.certificate.nats_public_key)
+                    )
+                if can_reclaim and await self._host_can_take_partition(
                     candidate, rec.partition, ownership, placements, part_agents, now
-                )
-            ):
-                target = candidate
+                ):
+                    target = candidate
         if target is None:
             return False
         moved = await self._write_owned_and_move_agents_locked(
@@ -1138,6 +1237,7 @@ class PartitionService:
         )
         if moved:
             self._planned_targets.pop(rec.partition, None)
+            self._refused_release_partitions.discard((old_host, rec.partition))
             self._clear_release_pre_epochs(rec.partition)
         return moved
 
@@ -1170,6 +1270,7 @@ class PartitionService:
         except KeyWrongLastSequenceError:
             return False
         verified = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
+        self._record_held_owner(rec.key, verified)
         ownership[rec.partition] = PartitionRecord(rec.partition, rec.key, revision, verified)
         self._clear_release_pre_epochs(rec.partition)
 
@@ -1313,6 +1414,16 @@ class PartitionService:
             if rec.state == OWNED and rec.host == host.runtime
         }
         candidate = tuple(sorted(current | {partition}))
+        # F6/GEN-5/FA-4: Do not immediately reassign back to a host that refused credential_too_large
+        # at the same profile and partition count.
+        mem = self._refused_capacity.get(host.runtime)
+        if mem is not None:
+            refused_profile, refused_total = mem
+            if refused_profile == self._profile_fingerprint(cert):
+                if len(candidate) >= refused_total:
+                    return False
+            else:
+                self._refused_capacity.pop(host.runtime, None)
         teams = tuple(sorted(cert.teams))
         pools = {self.team: tuple(sorted(cert.agent_types))} if cert.agent_types else {}
         placement = HostPlacement(
@@ -1465,6 +1576,13 @@ class PartitionService:
                         self._last_verified_hosts.pop(key, None)
                 continue
             if stored is None or stored.record.signer is None:
+                cached = self._last_verified_hosts.get(key)
+                if cached is not None:
+                    prev_host, prev_expires = cached
+                    if now < prev_expires + skew and not self.trust.store.revoked(prev_host.certificate):
+                        hosts[key] = prev_host
+                    else:
+                        self._last_verified_hosts.pop(key, None)
                 continue
             cert = stored.record.signer
             if cert.runtime != key or self.team not in cert.teams or not (cert.roles & PARTITION_OWNING_ROLES):
@@ -1495,8 +1613,14 @@ class PartitionService:
             )
             hosts[key] = live_host
             self._last_verified_hosts[key] = (live_host, expires_at)
+        # F13/SEC-07: Under the shared NATS login another process can delete UA1_HOSTS.<runtime>;
+        # retain the last verified host record until its own expiry + clock skew passes (unless revoked).
         for stale in [k for k in self._last_verified_hosts if k not in seen_keys]:
-            self._last_verified_hosts.pop(stale, None)
+            prev_host, prev_expires = self._last_verified_hosts[stale]
+            if now < prev_expires + skew and not self.trust.store.revoked(prev_host.certificate):
+                hosts[stale] = prev_host
+            else:
+                self._last_verified_hosts.pop(stale, None)
         return hosts
 
     async def _read_ownership(self, now: datetime) -> tuple[dict[int, PartitionRecord], dict[int, int]]:
@@ -1510,8 +1634,9 @@ class PartitionService:
             partition = int(suffix)
             if not 0 <= partition < self.partition_count:
                 continue
+            held = self._held_partition_owners.get(key)
             try:
-                stored = await self.records.read_report(PARTITION_OWNER, key, now=now)
+                stored = await self.records.read_report(PARTITION_OWNER, key, now=now, held=held)
             except FrameRefused as refused:
                 self.logger.warning(
                     "A partition ownership record did not verify and counts as absent. "
@@ -1525,6 +1650,7 @@ class PartitionService:
             if stored is None:
                 raw_revisions[partition] = await self.records.revision(PARTITION_OWNER, key)
                 continue
+            self._record_held_owner(key, stored.record)
             raw_revisions[partition] = stored.revision
             ownership[partition] = PartitionRecord(partition, key, stored.revision, stored.record)
         return ownership, raw_revisions

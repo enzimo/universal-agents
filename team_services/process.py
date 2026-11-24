@@ -173,6 +173,7 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
         host.clock,
         host.logger,
         credential_lifetime_seconds=credential_lifetime_seconds,
+        held_partition_owners=getattr(sessions, "held_partition_owners", None),
     )
     sessions.ensure_partitions = partitions.ensure_unowned_assigned
     services = TeamServices(sessions, families)
@@ -198,6 +199,17 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
         await keeper
     except LockLost:
         lost = True  # another instance may serve now and write the record; this one writes no more
+        # Stop background writers immediately before unsubscribing/draining so a deposed instance
+        # cannot race the new lock holder during the up to 30s drain window (F9/FA-8/CR-7).
+        stop.set()
+        for task in (partition_task, maintenance, upkeep):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (partition_task, maintenance, upkeep) if task is not None),
+            return_exceptions=True,
+        )
+        partition_task = maintenance = upkeep = None
         raise
     finally:
         try:

@@ -307,6 +307,8 @@ class _HostedAgent:
     closing_sessions: set[str] = field(default_factory=set)
     closed_sessions: set[str] = field(default_factory=set)
     close_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Departure reason recorded by _close so late-opening sessions preserve "handed_over" (F8/CR-8).
+    close_reason: Optional[str] = None
 
     def placement_key(self, team: str) -> str:
         return f"{team}.{self.agent.id}"
@@ -458,6 +460,16 @@ class AgentProcessHost:
             tracker = self.partitions
             if tracker is None:
                 return frozenset()
+            # F12/CR-6: Wait for initial partition watch catch-up before returning usable partitions.
+            if not tracker.ready.is_set():
+                rem = max(0.0, deadline - self.loop.time())  # type: ignore[union-attr]
+                if rem > 0:
+                    try:
+                        await asyncio.wait_for(_first_of(tracker.ready, self._drain_started, self._stop), timeout=rem)
+                    except asyncio.TimeoutError:
+                        return tracker.usable_partitions
+                if self._stop.is_set() or self._drain_started.is_set():
+                    return frozenset()
             if tracker.usable_partitions:
                 return tracker.usable_partitions
             rem = max(0.0, deadline - self.loop.time())  # type: ignore[union-attr]
@@ -923,7 +935,7 @@ class AgentProcessHost:
         if not opened:
             return
         if self.agents.get(agent_id) is not hosted:  # the agent left while its session was opening
-            await self._close(agent_id, "exited", hosted=hosted)
+            await self._close(agent_id, hosted.close_reason or "exited", hosted=hosted)
             return
         assert self.host.live is not None
         if hosted.subscription is None:
@@ -933,7 +945,7 @@ class AgentProcessHost:
         if self.agents.get(agent_id) is not hosted:
             # Detach may have completed while serve was subscribing. Close that new
             # subscription too and never publish a record after the removal.
-            await self._close(agent_id, "exited", hosted=hosted)
+            await self._close(agent_id, hosted.close_reason or "exited", hosted=hosted)
             return
         hosted.written = None  # its record names the session it holds now
         await self._write_record(hosted)
@@ -1119,7 +1131,13 @@ class AgentProcessHost:
         if hosted is None or self.host is None or self.host.live is None:
             return
         self._pending_departures[agent_id] = (hosted, reason)
-        hosted.state, hosted.accepting_work, hosted.since = "exiting", False, self.host.clock()
+        hosted.close_reason = reason
+        if reason == "handed_over":
+            # F8/GEN-4/FA-7: Handing over an agent moves it to another host; do not mark state="exiting"
+            # in UA1_AGENTS, which would cause peer TeamAgents to flag the agent left_for_good.
+            hosted.accepting_work, hosted.since = False, self.host.clock()
+        else:
+            hosted.state, hosted.accepting_work, hosted.since = "exiting", False, self.host.clock()
         if hosted.write_due is not None:
             hosted.write_due.cancel()
             hosted.write_due = None
@@ -1176,7 +1194,8 @@ class AgentProcessHost:
         if session is None or session in hosted.closed_sessions:
             return True
         if session not in hosted.closing_sessions:
-            await self._write_record(hosted)
+            if reason != "handed_over":
+                await self._write_record(hosted)
             self._pending_closes[session] = (str(hosted.agent.id), reason)
             hosted.closing_sessions.add(session)
         await self._try_close(session)
@@ -1367,7 +1386,7 @@ class AgentProcessHost:
         """Repair a removed placement through the service that owns it, then refresh our report."""
 
         assert self.host is not None and self.host.records is not None
-        if hosted.session is None or hosted.state == "exiting":
+        if hosted.session is None or hosted.state == "exiting" or hosted.close_reason is not None:
             return
         try:
             placement = await self.host.records.read_report("placement", hosted.placement_key(self.team), now=self.host.clock())
@@ -1525,6 +1544,10 @@ class AgentProcessHost:
         """Drive step 2-3 partition handovers and credential-partition sync sequentially."""
 
         assert self._partition_wake is not None
+        if self.partitions is not None and not self.partitions.ready.is_set():
+            await _first_of(self.partitions.ready, stop)
+            if stop.is_set():
+                return
         while not stop.is_set():
             self._partition_wake.clear()
             needs_retry = False
@@ -1592,10 +1615,14 @@ class AgentProcessHost:
         ]
 
     def _handover_deadline(self, records: Iterable[OwnedPartition]) -> datetime:
-        """Latest time step 2 may finish: handover_seconds or earlier if credential/cert ends first."""
+        """Latest time step 2 may finish: handover_seconds minus a step-3 safety margin, or earlier if cert/conn ends first."""
 
         assert self.host is not None
-        deadlines = [rec.assigned_at + timedelta(seconds=self.handover_seconds) for rec in records]
+        # F12/FA-6: Reserve a step-3 completion buffer so closing sessions and sending host.renew finish
+        # before PartitionService escalates the host to host_lost at assigned_at + handover_seconds.
+        handover_margin = min(30.0, self.handover_seconds / 6.0)
+        effective_handover = max(0.0, self.handover_seconds - handover_margin)
+        deadlines = [rec.assigned_at + timedelta(seconds=effective_handover) for rec in records]
         cert = self.host.identity.certificate
         cert_exp = getattr(cert, "expires_at", None)
         if isinstance(cert_exp, datetime):
@@ -1675,8 +1702,11 @@ class AgentProcessHost:
                 holding = [hosted for hosted in in_part if await self._still_holds(hosted)]
                 if not holding or self.host.clock() >= deadline:
                     break
+                remaining = max(0.0, (deadline - self.host.clock()).total_seconds())
+                if remaining <= 0.0:
+                    break
                 try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=self.drain_poll_seconds)
+                    await asyncio.wait_for(self._stop.wait(), timeout=min(self.drain_poll_seconds, remaining))
                 except asyncio.TimeoutError:
                     pass
 

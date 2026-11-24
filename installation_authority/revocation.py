@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 CLAIMS_UPDATE_SUBJECT = "$SYS.REQ.CLAIMS.UPDATE"
 ACCOUNTZ_SUBJECT = "$SYS.REQ.SERVER.PING.ACCOUNTZ"
+CLAIMS_LOOKUP_SUBJECT_TEMPLATE = "$SYS.REQ.ACCOUNT.{account}.CLAIMS.LOOKUP"
 DEFAULT_CLAIMS_UPDATE_TIMEOUT_SECONDS = 5.0
 
 
@@ -180,7 +181,15 @@ class OperatorModeRevoker:
         async with self._lock:
             merged = dict(self._applied_revocations)
             for key, timestamp in all_revocations.items():
-                public_key_bytes(key)
+                try:
+                    public_key_bytes(key)
+                except ValueError:
+                    logger.warning(
+                        "Skipping a corrupt NATS user key entry in cumulative revocations. "
+                        "event=nats_revocation_corrupt_key_skipped key=%s",
+                        key,
+                    )
+                    continue
                 merged[key] = max(merged.get(key, 0), int(timestamp))
             merged[nats_public_key] = max(merged.get(nats_public_key, 0), target_ts)
             if cutoff is not None:
@@ -264,6 +273,25 @@ class OperatorModeRevoker:
                 nats_public_key=nats_public_key,
                 min_timestamp=merged[nats_public_key],
             )
+            if not confirmed and _is_unloaded_account_accountz(
+                accountz_reply.data,
+                expected_account=self._account.account_public_key,
+            ):
+                # When zero clients are connected to the installation account, nats-server reports
+                # ACCOUNTZ error 500 ("Account ... does not exist") because the account is not loaded
+                # in memory (FA-9). Verify the resolver stored our exact pushed JWT via CLAIMS.LOOKUP.
+                lookup_subject = CLAIMS_LOOKUP_SUBJECT_TEMPLATE.format(account=self._account.account_public_key)
+                try:
+                    lookup_reply = await self._nc.request(lookup_subject, b"", timeout=self._timeout)
+                except Exception as exc:
+                    confirm_detail = f"CLAIMS.LOOKUP confirmation failed: {type(exc).__name__}: {exc}"
+                else:
+                    stored_jwt = lookup_reply.data.decode("ascii", errors="replace").strip()
+                    if stored_jwt == account_jwt:
+                        confirmed = True
+                        confirm_detail = "confirmed via CLAIMS.LOOKUP (account unloaded)"
+                    else:
+                        confirm_detail = "resolver CLAIMS.LOOKUP JWT does not match pushed revocation JWT"
             if not confirmed:
                 logger.warning(
                     "NATS server did not activate the pushed revocation account JWT. "
@@ -380,3 +408,21 @@ def _parse_accountz_confirmation(
             f"is below requested {min_timestamp}"
         )
     return True, "confirmed via ACCOUNTZ"
+
+
+def _is_unloaded_account_accountz(payload: bytes, *, expected_account: str) -> bool:
+    """Whether an ACCOUNTZ reply reports an unloaded account (error 500: Account <id> does not exist)."""
+
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(document, dict):
+        return False
+    error = document.get("error")
+    if not isinstance(error, dict):
+        return False
+    if error.get("code") != 500:
+        return False
+    description = str(error.get("description", ""))
+    return expected_account in description and "does not exist" in description.lower()

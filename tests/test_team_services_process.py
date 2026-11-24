@@ -236,3 +236,100 @@ async def test_a_drain_that_takes_longer_than_its_limit_is_logged_and_stopping_g
         await asyncio.wait_for(process._drain(SimpleNamespace(drain=never.wait), logging.getLogger("test")),
                                timeout=5)
     assert "event=team_services_drain_timed_out" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_f9_lock_lost_stops_partition_maintenance_and_upkeep_before_drain(monkeypatch) -> None:
+    """F9/FA-8/CR-7: On LockLost, partition_task, maintenance, and upkeep are cancelled and stopped
+    immediately BEFORE unsubscribe and _drain run."""
+
+    serving = asyncio.Event()
+    trigger_loss = asyncio.Event()
+    allow_drain_finish = asyncio.Event()
+    observations: dict[str, Any] = {"events": []}
+
+    class _Lock:
+        instance = "inst-1"
+
+        async def acquire(self, _stop: asyncio.Event) -> bool:
+            return True
+
+        async def keep(self, _stop: asyncio.Event) -> None:
+            await trigger_loss.wait()
+            raise LockLost("another instance took the lock")
+
+        async def release(self) -> None:
+            observations["events"].append("lock_released")
+
+    class _Sub:
+        async def unsubscribe(self) -> None:
+            observations["events"].append("unsubscribed")
+
+    class _Live:
+        identity = SimpleNamespace(installation="install_one")
+        trust = SimpleNamespace()
+
+        async def serve(self, *_args: Any, **_kwargs: Any) -> _Sub:
+            return _Sub()
+
+        async def drain(self) -> None:
+            observations["stop_set_during_drain"] = stop.is_set()
+            observations["partition_stopped_during_drain"] = observations.get("partition_stopped", False)
+            observations["upkeep_stopped_during_drain"] = observations.get("upkeep_stopped", False)
+            observations["events"].append("draining")
+            await allow_drain_finish.wait()
+
+    async def keep_up(stop_event: asyncio.Event, *, drained: Any = None) -> None:
+        try:
+            await stop_event.wait()
+        finally:
+            observations["upkeep_stopped"] = True
+
+    class _FakePartitions:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def ensure_unowned_assigned(self) -> None:
+            return None
+
+        async def maintain(self) -> None:
+            return None
+
+        async def run(self, stop_event: asyncio.Event) -> None:
+            try:
+                await stop_event.wait()
+            finally:
+                observations["partition_stopped"] = True
+
+    live = _Live()
+    host = SimpleNamespace(
+        start=AsyncMock(return_value=live),
+        nc=SimpleNamespace(flush=AsyncMock()),
+        clock=lambda: NOW,
+        logger=logging.getLogger("test"),
+        take_newest_certificate=AsyncMock(),
+        refresh_trust=AsyncMock(),
+        records=object(),
+        publish_liveness=AsyncMock(),
+        layout=None,
+        keep_up=keep_up,
+    )
+    monkeypatch.setattr(process, "SingleInstanceLock", SimpleNamespace(on_connection=lambda *_args: _Lock()))
+    monkeypatch.setattr(process, "SessionService", lambda *_args: _sessions())
+    monkeypatch.setattr(process, "PartitionService", _FakePartitions)
+    monkeypatch.setattr(process, "mark_serving", lambda *_args: serving.set())
+
+    stop = asyncio.Event()
+    served = asyncio.create_task(process.serve_team(host, "team_one", stop, []))  # type: ignore[arg-type]
+    await asyncio.wait_for(serving.wait(), timeout=5)
+    trigger_loss.set()
+    for _ in range(100):
+        if "draining" in observations["events"] or served.done():
+            break
+        await asyncio.sleep(0.01)
+    assert observations.get("stop_set_during_drain") is True
+    assert observations.get("partition_stopped_during_drain") is True
+    assert observations.get("upkeep_stopped_during_drain") is True
+    allow_drain_finish.set()
+    with pytest.raises(LockLost):
+        await asyncio.wait_for(served, timeout=5)

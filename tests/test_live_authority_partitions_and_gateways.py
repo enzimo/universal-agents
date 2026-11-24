@@ -17,7 +17,7 @@ import pytest
 
 from assistant_gateway.message_host import GATEWAY_RUNTIME, gateway_profile
 from custom_messages.wire.encoding import format_timestamp
-from custom_messages.wire.kinds import CONTRACT_SHA256, PROTOCOL
+from custom_messages.wire.kinds import CLOCK_SKEW_SECONDS, CONTRACT_SHA256, PROTOCOL
 from custom_messages.wire.partitions import OWNED, RELEASED, partition_owner_key
 from custom_messages.wire.trust import sign_state
 from custom_messages.wire.values import parse_timestamp
@@ -1259,13 +1259,14 @@ async def test_c11_c12_c13_c16_live_recovery_pruning_default_retire_and_host_sta
                     team="_install",
                 )
                 assert w2_r2.raw["body"]["outcome"] == "ok"
-                w2_cert2_exp = parse_timestamp(w2_r2.raw["body"]["certificate"]["body"]["expires_at"])
                 w2_cert2_jwt = w2_r2.raw["body"]["connection"]["jwt"]
+                w2_cert2_jwt_exp = parse_timestamp(w2_r2.raw["body"]["connection"]["expires_at"])
 
-                # C13: retire_host(runtime) with DEFAULT reason='decommissioned' succeeds and revokes w2's key through cert2's expires_at.
+                # C13 + F15: retire_host(runtime) with DEFAULT reason='decommissioned' succeeds, sets key_expires_at
+                # to cert2's expires_at, and bounds NATS key revoke_until to w2's issued JWT expiry (not 30d cert end).
                 retire_outcomes = await authority.retire_host(w2_profile.runtime)
                 assert len(retire_outcomes) == 1 and retire_outcomes[0].revoked is True
-                assert retire_outcomes[0].revoked_at == int(w2_cert2_exp.timestamp())
+                assert retire_outcomes[0].revoked_at == int(w2_cert2_jwt_exp.timestamp())
                 w2_entries = [e for e in authority._revocations["body"]["entries"] if e["runtime"] == w2_profile.runtime]
                 assert len(w2_entries) == 2
                 assert all(e["reason"] == "decommissioned" for e in w2_entries)
@@ -1277,17 +1278,320 @@ async def test_c11_c12_c13_c16_live_recovery_pruning_default_retire_and_host_sta
                 with pytest.raises(Exception, match="Authorization Violation"):
                     await nats.connect(server.url, **long_boot_key.login_options(long_boot_jwt), allow_reconnect=False)
 
-                # Trigger another pruning revocation at cert1.expires_at + 120s (< cert2.expires_at):
-                # w2's shared NATS key must STILL remain in revoker.applied_revocations and blocked on nats-server!
+                # Before w2_cert2_jwt_exp passes, w2's key stays in applied_revocations and blocked on nats-server;
+                # once w2_cert2_jwt_exp + 2*CLOCK_SKEW passes, it prunes cleanly from the account JWT while remaining
+                # permanently banned in IssueLedger (F15).
                 dummy_key = NatsSigningKey.generate("user").public_key
-                prune_time = w2_cert1.expires_at + timedelta(seconds=120)
-                await authority._revoke_nats_key(dummy_key, revoke_until=int(prune_time.timestamp()) + 300, now=prune_time)
+                mid_time = clock.now + timedelta(seconds=120)
+                await authority._revoke_nats_key(dummy_key, revoke_until=int(mid_time.timestamp()) + 300, now=mid_time)
                 assert w2_keys.nats_public_key in revoker.applied_revocations
                 w2_user_key = NatsSigningKey.from_private_key(
                     "user", Ed25519PrivateKey.from_private_bytes(w2_keys.nats_seed)
                 )
                 with pytest.raises(Exception, match="Authorization Violation"):
                     await nats.connect(server.url, **w2_user_key.login_options(w2_cert2_jwt), allow_reconnect=False)
+                after_jwt_exp = w2_cert2_jwt_exp + timedelta(seconds=CLOCK_SKEW_SECONDS + 5)
+                dummy_key_2 = NatsSigningKey.generate("user").public_key
+                await authority._revoke_nats_key(
+                    dummy_key_2, revoke_until=int(after_jwt_exp.timestamp()) + 300, now=after_jwt_exp
+                )
+                assert w2_keys.nats_public_key not in revoker.applied_revocations
+                assert authority._ledger.is_nats_key_revoked(w2_keys.nats_public_key)
             finally:
                 stop_follow.set()
                 await asyncio.gather(follow_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_f1_f3_live_routine_renewal_during_step4_wait_unreleased_drop_and_stored_renewal_safety(
+    tmp_path: Path,
+) -> None:
+    """F1 & F3 live on nats-server 2.15.1:
+    - Routine and partition-add renewals succeed after step 3 while the released partition awaits step 4;
+    - Dropping a previously granted partition without a RELEASED record still requires a new NATS key;
+    - StoredRenewal retries refuse to mint fresh JWTs for released partitions or removed hosts and check revocation."""
+
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from installation_authority.revocation import LifetimeWaitRevoker
+
+    nats_dir = tmp_path / "nats"
+    nats_dir.mkdir()
+    with _operator_nats_server(nats_dir) as server:
+        layout = InstanceLayout.at(tmp_path / "inst-f1-f3")
+        auth_keys, _ = host_keys.ensure_authority_keys(layout, INSTALLATION)
+        auth_host_keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
+        ts_profile = team_services_profile(TEAM_A)
+        w1_profile = HostProfile("worker-f1", (TEAM_A,), ("worker_host",), ("researcher",), 4)
+        host_keys.ensure_host_keys(layout, ts_profile.runtime)
+        host_keys.ensure_host_keys(layout, w1_profile.runtime)
+        expected = {
+            ts_profile.runtime: message_hosts.expected_host(layout, ts_profile),
+            w1_profile.runtime: message_hosts.expected_host(layout, w1_profile),
+        }
+        write_expected_hosts(layout.trust_expected_hosts_path, expected)
+        write_bundle(
+            layout.trust_bootstrap_path,
+            BootstrapBundle(INSTALLATION, ((auth_keys.key_id, auth_keys.public_key_text),), partitions=PARTITIONS),
+        )
+        clock = _Clock(utc_now())
+        async with AsyncExitStack() as stack:
+            async def _connect_host(runtime: str) -> nats.NATS:
+                uk, uj = server.issue_host_user(runtime)
+                nc = await nats.connect(
+                    server.url,
+                    **uk.login_options(uj),
+                    inbox_prefix=f"_INBOX.{runtime}".encode(),
+                    allow_reconnect=False,
+                )
+                stack.push_async_callback(nc.close)
+                return nc
+
+            auth_nc = await _connect_host(AUTHORITY_RUNTIME)
+            ts_nc = await _connect_host(ts_profile.runtime)
+            w1_nc = await _connect_host(w1_profile.runtime)
+            authority = InstallationAuthority(
+                layout,
+                auth_keys,
+                auth_host_keys,
+                partitions=PARTITIONS,
+                queues=TEST_QUEUE_LIMITS,
+                clock=clock,
+                credential_lifetime_seconds=60,
+                nats_account_public_key=server.installation_account.public_key,
+                nats_account_signing_key=server.installation_signing,
+                revoker=LifetimeWaitRevoker(),
+            )
+            await authority.start(auth_nc, teams=[TEAM_A])
+            ts_host = MessageHost(layout=layout, profile=ts_profile, nc=ts_nc, clock=clock)
+            await ts_host.start(report=False)
+            w1_host = MessageHost(layout=layout, profile=w1_profile, nc=w1_nc, clock=clock)
+            await w1_host.start(report=False)
+
+            # Own partitions 0, 1, 2 and renew to hold [0, 1].
+            for p in (0, 1, 2):
+                await _write_partition_owner(
+                    ts_nc, ts_host.identity, team=TEAM_A, partition=p, state=OWNED,
+                    host=w1_profile.runtime, host_epoch=1, reason="initial", now=clock()
+                )
+            r_init = await w1_host.renew(partitions=[0, 1], rotate_nats_key=False)
+            assert r_init.ok is True and r_init.partitions == frozenset({0, 1})
+
+            # F1b (EVA-01/SEC-06): dropping partition 1 with NO RELEASED record must require a new NATS key!
+            assert w1_host.live is not None
+            cert_hold = w1_host.identity.certificate
+            with pytest.raises(RequestRefused) as drop_refused:
+                await w1_host.live.request(
+                    "host.renew",
+                    {
+                        "renew_id": "drop-unreleased-no-key",
+                        "certificate_id": cert_hold.certificate_id,
+                        "membership_epoch": cert_hold.membership_epoch,
+                        "profile_sha256": w1_profile.digest(),
+                        "contract_sha256": CONTRACT_SHA256,
+                        "partitions": [0],
+                    },
+                    AUTHORITY_AUDIENCE,
+                    team="_install",
+                )
+            assert drop_refused.value.code == "invalid_body" and drop_refused.value.at == "/body/new_nats_public_key"
+
+            # F1a (GEN-1/FA-1/EVA-01): Release partition 0, complete step 3 (rotating key), then run routine
+            # 2/3-lifetime renewal AND partition-add renewal while partition 0 is still RELEASED awaiting step 4.
+            clock.now = clock.now + timedelta(seconds=2)
+            await _write_partition_owner(
+                ts_nc, ts_host.identity, team=TEAM_A, partition=0, state=RELEASED,
+                host=w1_profile.runtime, host_epoch=cert_hold.membership_epoch, reason="operator", now=clock()
+            )
+            r_step3 = await w1_host.renew(partitions=[1], rotate_nats_key=True)
+            assert r_step3.ok is True and r_step3.rotated_nats_key is True
+
+            # Advance to 2/3 of 60s lifetime (42s): routine renew_if_due and adding partition 2 must both SUCCEED!
+            clock.now = clock.now + timedelta(seconds=42)
+            w1_host.renewal_partitions = lambda: (1,)
+            await w1_host.renew_if_due()
+            assert w1_host.credential_partitions == frozenset({1})
+            r_add = await w1_host.renew(partitions=[1, 2], rotate_nats_key=False)
+            assert r_add.ok is True and r_add.partitions == frozenset({1, 2})
+
+            # F3 (GEN-3/FA-3/DI-1/SEC-04): Capture a StoredRenewal for partition [1], then release partition 1
+            # and advance to near-expiry (45s into 60s JWT) -> retrying same renew_id must NOT mint a fresh JWT!
+            cert_before = w1_host.identity.certificate
+            w1_old_live = LiveHost(w1_nc, HostIdentity(w1_host.identity.keys, cert_before), w1_host.live.trust, clock=clock)
+            stored_body = {
+                "renew_id": "renew-stored-f3",
+                "certificate_id": cert_before.certificate_id,
+                "membership_epoch": cert_before.membership_epoch,
+                "profile_sha256": w1_profile.digest(),
+                "contract_sha256": CONTRACT_SHA256,
+                "partitions": [1, 2],
+            }
+            rep_first = await w1_old_live.request("host.renew", stored_body, AUTHORITY_AUDIENCE, team="_install")
+            assert rep_first.raw["body"]["outcome"] == "ok"
+
+            clock.now = clock.now + timedelta(seconds=10)
+            await _write_partition_owner(
+                ts_nc, ts_host.identity, team=TEAM_A, partition=1, state=RELEASED,
+                host=w1_profile.runtime, host_epoch=cert_before.membership_epoch, reason="operator", now=clock()
+            )
+            clock.now = clock.now + timedelta(seconds=35)
+            rep_retry_released = await w1_old_live.request("host.renew", stored_body, AUTHORITY_AUDIENCE, team="_install")
+            assert rep_retry_released.raw["body"]["outcome"] == "not_allowed"
+
+            # Revoke the stored certificate's NATS key -> non-refreshed retry must return outcome="revoked"!
+            stored_key = rep_first.raw["body"]["certificate"]["body"]["nats_public_key"]
+            await authority._revoke_nats_key(stored_key, revoke_until=int(clock().timestamp()) + 600, now=clock())
+            rep_retry_revoked = await w1_old_live.request("host.renew", stored_body, AUTHORITY_AUDIENCE, team="_install")
+            assert rep_retry_revoked.raw["body"]["outcome"] == "revoked"
+
+
+@pytest.mark.asyncio
+async def test_f6_live_end_to_end_cr4_credential_too_large_recovery(tmp_path: Path) -> None:
+    """F6/EVA-02: End-to-end CR-4 recovery wired through real InstallationAuthority, MessageHost,
+    AgentProcessHost/HostPartitionTracker, and PartitionService on live nats-server 2.15.1."""
+
+    from custom_agents.agent_host import AgentProcessHost
+    from custom_transport.protocol1.host_partitions import HostPartitionTracker
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.protocol1.nats_jwt import user_credential_bytes
+    from team_services.partitions import PartitionService
+    import installation_authority.service as auth_svc_mod
+
+    nats_dir = tmp_path / "nats"
+    nats_dir.mkdir()
+    with _operator_nats_server(nats_dir) as server:
+        layout = InstanceLayout.at(tmp_path / "inst-f6-e2e")
+        auth_keys, _ = host_keys.ensure_authority_keys(layout, INSTALLATION)
+        auth_host_keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
+        ts_profile = team_services_profile(TEAM_A)
+        w1_profile = HostProfile("worker-cr4", (TEAM_A,), ("worker_host",), ("researcher",), 4)
+        host_keys.ensure_host_keys(layout, ts_profile.runtime)
+        host_keys.ensure_host_keys(layout, w1_profile.runtime)
+        expected = {
+            ts_profile.runtime: message_hosts.expected_host(layout, ts_profile),
+            w1_profile.runtime: message_hosts.expected_host(layout, w1_profile),
+        }
+        write_expected_hosts(layout.trust_expected_hosts_path, expected)
+        write_bundle(
+            layout.trust_bootstrap_path,
+            BootstrapBundle(INSTALLATION, ((auth_keys.key_id, auth_keys.public_key_text),), partitions=PARTITIONS),
+        )
+        clock = _Clock(utc_now())
+        # Measure exact credential size for 1 partition so authority fits 1 partition and refuses 2!
+        one_part_size = user_credential_bytes(
+            ("worker_host",),
+            HostPlacement(
+                runtime="worker-cr4",
+                teams=(TEAM_A,),
+                partitions={TEAM_A: (0,)},
+                pools={TEAM_A: ("researcher",)},
+                installation=INSTALLATION,
+            ),
+            partition_count=PARTITIONS,
+        )
+        two_part_size = user_credential_bytes(
+            ("worker_host",),
+            HostPlacement(
+                runtime="worker-cr4",
+                teams=(TEAM_A,),
+                partitions={TEAM_A: (0, 1)},
+                pools={TEAM_A: ("researcher",)},
+                installation=INSTALLATION,
+            ),
+            partition_count=PARTITIONS,
+        )
+        tight_limit = (one_part_size + two_part_size) // 2
+        orig_max_bytes = auth_svc_mod.max_credential_bytes
+        try:
+            async with AsyncExitStack() as stack:
+                sys_key, sys_jwt = server.issue_system_user()
+                sys_nc = await nats.connect(server.url, **sys_key.login_options(sys_jwt), allow_reconnect=False)
+                stack.push_async_callback(sys_nc.close)
+
+                async def _connect_host(runtime: str) -> nats.NATS:
+                    uk, uj = server.issue_host_user(runtime)
+                    nc = await nats.connect(
+                        server.url,
+                        **uk.login_options(uj),
+                        inbox_prefix=f"_INBOX.{runtime}".encode(),
+                        allow_reconnect=False,
+                    )
+                    stack.push_async_callback(nc.close)
+                    return nc
+
+                auth_nc = await _connect_host(AUTHORITY_RUNTIME)
+                ts_nc = await _connect_host(ts_profile.runtime)
+                w1_nc = await _connect_host(w1_profile.runtime)
+                revoker = OperatorModeRevoker(server.operator_signing, server.base_claims, sys_nc)
+                authority = InstallationAuthority(
+                    layout,
+                    auth_keys,
+                    auth_host_keys,
+                    partitions=PARTITIONS,
+                    queues=TEST_QUEUE_LIMITS,
+                    clock=clock,
+                    credential_lifetime_seconds=300,
+                    nats_account_public_key=server.installation_account.public_key,
+                    nats_account_signing_key=server.installation_signing,
+                    revoker=revoker,
+                )
+                await authority.start(auth_nc, teams=[TEAM_A])
+                ts_host = MessageHost(layout=layout, profile=ts_profile, nc=ts_nc, clock=clock)
+                await ts_host.start(report=False)
+                w1_host = MessageHost(layout=layout, profile=w1_profile, nc=w1_nc, clock=clock)
+                await w1_host.start(report=True)
+                auth_svc_mod.max_credential_bytes = lambda: tight_limit  # type: ignore[assignment]
+                process = AgentProcessHost(layout, w1_profile, TEAM_A, host=w1_host, loop=asyncio.get_running_loop())
+                process._stop = asyncio.Event()
+                process._joined = asyncio.Event()
+                process._joined.set()
+                process._partition_wake = asyncio.Event()
+                process.partitions = HostPartitionTracker(w1_host, TEAM_A)
+                w1_host.components = process._components
+                w1_host.on_credential = process._on_credential_changed
+
+                # PartitionService has a higher limit (config skew) so it assigns all partitions to worker-cr4.
+                assert ts_host.records is not None and ts_host.live is not None
+                ps = PartitionService(
+                    ts_host.records,
+                    ts_host.live.trust,
+                    INSTALLATION,
+                    TEAM_A,
+                    asyncio.Lock(),
+                    clock,
+                    credentials_enforced=True,
+                    is_nats_key_revoked=authority.is_nats_key_revocation_confirmed,
+                    max_credential_bytes=two_part_size * PARTITIONS,
+                )
+                await ps.reconcile()
+                await process.partitions.refresh()
+                assert process.partitions.owned_by_host == frozenset(range(PARTITIONS))
+
+                # Real AgentProcessHost + MessageHost._renew hits authority max_credential_bytes, sets
+                # credential_too_large=True, rejects partitions PARTITIONS-1..1, and renews cleanly for partition 0!
+                assert await process._sync_partitions_once() is False
+                assert w1_host.credential_partitions == frozenset({0})
+                assert process.partitions.rejected_partitions == frozenset(range(1, PARTITIONS))
+                await w1_host.publish_liveness("accepting")
+
+                # PartitionService recovers each refused partition through RELEASED -> step 3 -> delete (unowned),
+                # and never ping-pongs them back to worker-cr4 on subsequent reconciles!
+                for _ in range(PARTITIONS + 2):
+                    await ps.reconcile()
+                    await process.partitions.refresh()
+                    assert await process._sync_partitions_once() is False
+                    await w1_host.publish_liveness("accepting")
+                    await ps.reconcile()
+                    own_now, _ = await ps._read_ownership(clock())
+                    if sorted(own_now) == [0] and own_now[0].state == OWNED:
+                        break
+                own_after, _ = await ps._read_ownership(clock())
+                assert sorted(own_after) == [0] and own_after[0].state == OWNED and own_after[0].host == "worker-cr4"
+
+                # Refresh tracker (which prunes rejected) and reconcile again: partitions 1..3 remain stably unowned!
+                await process.partitions.refresh()
+                await w1_host.publish_liveness("accepting")
+                await ps.reconcile()
+                own_stable, _ = await ps._read_ownership(clock())
+                assert sorted(own_stable) == [0]
+        finally:
+            auth_svc_mod.max_credential_bytes = orig_max_bytes
