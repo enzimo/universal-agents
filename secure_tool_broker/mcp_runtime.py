@@ -66,8 +66,13 @@ from mcp_control.registry import (
 )
 from access_catalog.catalog import mcp_tool_id
 from access_control.caller_tokens import BrokerCaller
-from custom_messages.contracts.access_v2 import AccountLinkV1, InjectionPlacement
-from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_MISSING, BrokerAccessGate
+from custom_messages.contracts.access_v2 import AccountLinkV1, InjectionPlacement, injections_match
+from secure_tool_broker.access_gate import (
+    REASON_ACCOUNT_LINK_MISSING,
+    REASON_ACCOUNT_LINK_OUTDATED,
+    BrokerAccessGate,
+    outdated_link_next_step,
+)
 from secure_tool_broker.mcp_client import BrokerMCPClient
 from secure_tool_broker.mcp_config import BrokerMCPConfig
 from secure_tool_broker.mcp_hosting_runtime import MCPHostedProcessSupervisor
@@ -259,13 +264,25 @@ class BrokerMCPRuntime:
 
         if not record.descriptor.credential_injections:
             return None
-        link = self._access_gate.account_link_for(
-            mcp_tool_id(record.descriptor.connection_name), record.descriptor.owner_canonical_user_id
-        )
+        tool_id = mcp_tool_id(record.descriptor.connection_name)
+        link = self._access_gate.account_link_for(tool_id, record.descriptor.owner_canonical_user_id)
         if link is None:
             raise PermissionError(
                 f"No account is linked for the MCP connection {record.descriptor.connection_name}. "
                 "Ask TeamLead to request an account link for it."
+            )
+        tool = self._access_gate.catalog.tools.get(tool_id)
+        if tool is not None and not injections_match(link.injections, tool.credential_injections):
+            LOGGER.warning(
+                "MCP discovery refused because the active account link no longer matches the connection's "
+                "credential definition. event=mcp_discovery_link_outdated connection_id=%s tool_id=%s link_id=%s",
+                record.connection_id,
+                tool_id,
+                link.link_id,
+            )
+            raise PermissionError(
+                f"The linked account for the MCP connection {record.descriptor.connection_name} was made for an "
+                f"earlier tool definition. {outdated_link_next_step(tool, link)}"
             )
         return link
 
@@ -538,8 +555,8 @@ class BrokerMCPRuntime:
         )
         if gate.allowed:
             return gate.account_link
-        if gate.reason_code == REASON_ACCOUNT_LINK_MISSING:
-            # The account was unlinked: close connections that still hold it.
+        if gate.reason_code in {REASON_ACCOUNT_LINK_MISSING, REASON_ACCOUNT_LINK_OUTDATED}:
+            # The account was unlinked or its injections changed: close connections that still hold it.
             await self._discard_connection_clients(record.connection_id)
         raise MCPAccessRefused(gate.as_error())
 

@@ -160,7 +160,22 @@ def save_credentials(scope: CredentialOwnerScope, **credentials: CatalogCredenti
     save_catalog(CredentialCatalog(credentials=credentials), scope=scope)
 
 
-def link(store: AccessRepository, owner_kind: LinkOwnerKind, owner_id: str, key: str, tool_id: str = "http:portainer"):
+def link(
+    store: AccessRepository,
+    owner_kind: LinkOwnerKind,
+    owner_id: str,
+    key: str,
+    tool_id: str = "http:portainer",
+    *,
+    injections: tuple[CredentialInjectionV1, ...] | None = None,
+):
+    resolved_injections = injections
+    if resolved_injections is None:
+        resolved_injections = (
+            (CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-API-Key", field="api_token"),)
+            if tool_id == "http:portainer"
+            else ()
+        )
     return store.create_link(
         AccountLinkV1(
             link_id=f"account_link_{owner_kind.value}_{key}",
@@ -169,7 +184,7 @@ def link(store: AccessRepository, owner_kind: LinkOwnerKind, owner_id: str, key:
             owner_kind=owner_kind,
             owner_id=owner_id,
             credential_key=key,
-            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-API-Key", field="api_token"),),
+            injections=resolved_injections,
             created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
             created_at_utc=NOW,
         )
@@ -439,7 +454,9 @@ async def test_an_administrator_adds_the_teams_credential_without_replacing_a_st
     older = credentials["http-portainer-team"].fields["api_token"].resolution_order[0]
     assert older.source == "env" and older.env_var == "PORTAINER_TOKEN", "the stored credential is untouched"
     assert set(credentials) == {"http-portainer-team", "http-portainer-team-2"}
-    link = store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT)
+    link = store.active_link(
+        TEST_TEAM, "http:portainer", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT
+    )
     assert link is not None and link.credential_key == "http-portainer-team-2"
     assert list(sealbox.values()) == ["fresh-team-secret"]
     assert "http-portainer-team-2" in result_page and "fresh-team-secret" not in result_page
@@ -585,6 +602,152 @@ async def test_web_requests_carry_the_linked_credential_only_in_the_linked_heade
     assert "portainer-secret" not in str(payload)
     assert payload["content"]["account_link_id"] == "account_link_team_team_portainer"
     assert placeholder_payload["content"]["error_code"] == "api_request_placeholders_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_gated_web_request_requires_gate_link_sends_both_credentials_when_private_and_redacts_both(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from access_catalog.catalog import CatalogSource
+    from access_control.account_sharing import TeamAccountSharing
+    from custom_messages.contracts.access_v2 import AccountSharing
+    from secure_tool_broker.access_gate import REASON_GATE_LINK_MISSING
+
+    instance_root = tmp_path / "instance"
+    tools_dir = instance_root / "control" / "access" / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "proposed-gitea.yaml").write_text(
+        """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - placement: header
+        name: Authorization
+        field: api_token
+        template: "token {value}"
+    gate_injections:
+      - placement: header
+        name: CF-Access-Client-Secret
+        field: client_secret
+    routes:
+      - name: repos.read
+        method: GET
+        path: /api/**
+        level: read
+""",
+        encoding="utf-8",
+    )
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    catalogs = CatalogSource(instance_root)
+    gate = BrokerAccessGate(
+        catalogs=catalogs,
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "catalog.db"))
+    monkeypatch.setenv("GITEA_USER_TOKEN", "alice-gitea-secret")
+    monkeypatch.setenv("GITEA_GATE_SECRET", "team-cf-gate-secret")
+    save_credentials(CredentialOwnerScope.user("user-1"), alice_gitea=token_credential("GITEA_USER_TOKEN"))
+    save_credentials(
+        CredentialOwnerScope.team(TEST_TEAM),
+        team_gitea_gate=token_credential("GITEA_GATE_SECRET", field="client_secret"),
+    )
+    tool = catalogs.current().tools["http:gitea"]
+    TeamAccountSharing(store, TEST_TEAM).choose_tool(tool, AccountSharing.PRIVATE, by="user-1")
+    store.create_link(
+        AccountLinkV1(
+            link_id="account_link_person_gitea",
+            team_id=TEST_TEAM,
+            tool_id="http:gitea",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="user-1",
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="alice_gitea",
+            injections=tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+            created_at_utc=NOW,
+        )
+    )
+
+    sent: list = []
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json"}
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"token": "alice-gitea-secret", "gate": "team-cf-gate-secret"}'
+
+    def fake_send(request, *, timeout):
+        sent.append(request)
+        return Response()
+
+    monkeypatch.setattr("secure_tool_broker.credential_catalog._send_api_request", fake_send)
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
+    body = {
+        "provider": "secure_requests",
+        "action": "get",
+        "params": {"url": "https://gitea.example.com/api/v1/repos"},
+        "reason": "list repos",
+        "context": agent_context(task_id="task-gate-1"),
+    }
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        # Without a gate link: refused before sending, naming /link http:gitea gate.
+        missing_resp = await client.post("/v1/tools/secure_requests", headers=caller_headers(), json=body)
+        missing_payload = json.loads(await missing_resp.text())
+        assert missing_resp.status == 403
+        assert missing_payload["reason_code"] == REASON_GATE_LINK_MISSING
+        assert "/link http:gitea gate" in missing_payload["next_step"]
+        assert sent == []
+
+        # Link the team gate credential: even with PRIVATE account sharing, both headers are sent and redacted.
+        store.create_link(
+            AccountLinkV1(
+                link_id="account_link_team_gitea_gate",
+                team_id=TEST_TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.TEAM,
+                owner_id=TEST_TEAM,
+                purpose=LinkPurpose.GATE,
+                credential_key="team_gitea_gate",
+                injections=tool.gate_injections,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+                created_at_utc=NOW,
+            )
+        )
+        ok_resp = await client.post("/v1/tools/secure_requests", headers=caller_headers(), json=body)
+        ok_payload = await ok_resp.json()
+        assert ok_resp.status == 200 and ok_payload["status"] == "success", ok_payload
+        assert len(sent) == 1
+        sent_headers = {key.lower(): value for key, value in sent[0].header_items()}
+        assert sent_headers["authorization"] == "token alice-gitea-secret"
+        assert sent_headers["cf-access-client-secret"] == "team-cf-gate-secret"
+        assert "alice-gitea-secret" not in str(ok_payload)
+        assert "team-cf-gate-secret" not in str(ok_payload)
+        assert ok_payload["content"]["account_link_id"] == "account_link_person_gitea"
+        assert ok_payload["content"]["gate_link_id"] == "account_link_team_gitea_gate"
+
+        # Agent-supplied gate header is refused without reaching the network.
+        spoof_resp = await client.post(
+            "/v1/tools/secure_requests",
+            headers=caller_headers(),
+            json={
+                **body,
+                "params": {**body["params"], "headers": {"CF-Access-Client-Secret": "agent-value"}},
+            },
+        )
+        spoof_payload = await spoof_resp.json()
+        assert spoof_payload["status"] == "error"
+        assert spoof_payload["content"]["error_code"] == "api_request_header_reserved"
+        assert len(sent) == 1
 
 
 def test_every_linked_account_tool_says_where_the_credential_goes() -> None:
@@ -757,3 +920,468 @@ def test_pre_purpose_access_store_upgrades_in_place_and_reads_existing_links_as_
     with caplog.at_level(logging.INFO, logger="storage.access_repository"):
         AccessRepository(settings)
     assert "access_account_links_purpose_added" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_gate_link_form_is_admin_only_ignores_sharing_and_works_with_auth_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from access_catalog.catalog import CatalogSource
+    from access_catalog.instance_tools import write_instance_tool
+    from access_control.account_sharing import TeamAccountSharing
+    from access_control.caller_tokens import CALLER_GATEWAY
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccountSharing,
+        HttpRouteV1,
+        ProposedHttpToolV1,
+    )
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.service import SecureToolBrokerService
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import BROKER_ROOT, caller_headers, context_verify_keys
+
+    instance_root = tmp_path / "instance"
+    write_instance_tool(
+        instance_root,
+        ProposedHttpToolV1(
+            tool_id="http:gitea",
+            display_name="Gitea",
+            description="Self-hosted Git behind a Cloudflare gate.",
+            hosts=("gitea.example.com",),
+            credential_injections=(
+                CredentialInjectionV1(
+                    placement=InjectionPlacement.HEADER,
+                    name="Authorization",
+                    field="api_token",
+                    template="token {value}",
+                ),
+            ),
+            gate_injections=(
+                CredentialInjectionV1(
+                    placement=InjectionPlacement.HEADER,
+                    name="CF-Access-Client-Secret",
+                    field="client_secret",
+                ),
+            ),
+            routes=(HttpRouteV1(name="api.read", method="GET", path="/api/v1/**", level=AccessLevel.READ),),
+        ),
+    )
+    write_instance_tool(
+        instance_root,
+        ProposedHttpToolV1(
+            tool_id="http:public_gated",
+            display_name="Public Gated Docs",
+            description="Public API behind a team gate with no user account.",
+            hosts=("docs.example.com",),
+            uses_credential=False,
+            gate_injections=(
+                CredentialInjectionV1(
+                    placement=InjectionPlacement.HEADER,
+                    name="X-Gate-Key",
+                    field="gate_key",
+                ),
+            ),
+            routes=(HttpRouteV1(name="docs.read", method="GET", path="/**", level=AccessLevel.READ),),
+        ),
+    )
+
+    storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    store = AccessRepository(storage)
+    catalogs = CatalogSource(instance_root)
+    # Authorization off (access=None) and private sharing: gate links still work and remain admin-only.
+    gate = BrokerAccessGate(
+        catalogs=catalogs,
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    gitea_tool = catalogs.current().tools["http:gitea"]
+    TeamAccountSharing(store, TEST_TEAM).choose_tool(gitea_tool, AccountSharing.PRIVATE, by="admin-1")
+
+    saved_env_values: dict[str, dict[str, str]] = {}
+
+    def fake_collect(spec, values, *, scope):
+        from secure_tool_broker.credential_catalog import (
+            CatalogCredential,
+            CatalogCredentialField,
+            CatalogSourceRef,
+            load_catalog,
+            save_catalog,
+        )
+        from secure_tools.providers import ToolResult
+
+        key = spec["credential_key"]
+        saved_env_values[key] = dict(values)
+        existing = load_catalog(scope=scope)
+        fields = {}
+        for field_spec in spec["fields"]:
+            fname = field_spec["name"]
+            env_var = f"TEST_{key.upper().replace('-', '_')}_{fname.upper()}"
+            monkeypatch.setenv(env_var, values[fname])
+            fields[fname] = CatalogCredentialField(
+                kind="secret",
+                visibility="secret",
+                resolution_order=[CatalogSourceRef(source="env", env_var=env_var)],
+            )
+        existing.credentials[key] = CatalogCredential(
+            display_name=spec["display_name"],
+            purpose=spec["purpose"],
+            fields=fields,
+        )
+        save_catalog(existing, scope=scope)
+        return ToolResult(status="success", content={"credential_key": key})
+
+    monkeypatch.setattr("secure_tool_broker.account_links.collect_credential", fake_collect)
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
+    gw_headers = caller_headers(CALLER_GATEWAY)
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        # Non-admin member is refused from opening a gate link form.
+        member_resp = await client.post(
+            "/v1/account-link/sessions",
+            headers=gw_headers,
+            json={
+                "request_id": "req_gate_member",
+                "team_id": TEST_TEAM,
+                "tool_id": "http:gitea",
+                "owner_kind": "team",
+                "purpose": "gate",
+                "person_id": "member-1",
+                "person_roles": ["member"],
+                "reason": "Link gate",
+            },
+        )
+        member_err = json.loads(await member_resp.text())
+        assert member_resp.status == 403
+        assert member_err["reason_code"] == "account_link_team_admin_required"
+
+        # Tool without gate_injections is refused.
+        no_gate_resp = await client.post(
+            "/v1/account-link/sessions",
+            headers=gw_headers,
+            json={
+                "request_id": "req_gate_none",
+                "team_id": TEST_TEAM,
+                "tool_id": "http:github",
+                "owner_kind": "team",
+                "purpose": "gate",
+                "person_id": "admin-1",
+                "person_roles": ["admin"],
+                "reason": "Link gate",
+            },
+        )
+        no_gate_err = json.loads(await no_gate_resp.text())
+        assert no_gate_resp.status == 403
+        assert no_gate_err["reason_code"] == "account_link_gate_not_needed"
+
+        # Administrator opens the gate form for private http:gitea, sees gate disclosure, and submits a new credential.
+        created = await client.post(
+            "/v1/account-link/sessions",
+            headers=gw_headers,
+            json={
+                "request_id": "req_gate_admin",
+                "team_id": TEST_TEAM,
+                "tool_id": "http:gitea",
+                "owner_kind": "team",
+                "purpose": "gate",
+                "person_id": "admin-1",
+                "person_roles": ["admin"],
+                "reason": "Cloudflare gate",
+            },
+        )
+        assert created.status == 200
+        created_data = await created.json()
+        session_id = created_data["session_id"]
+
+        form_resp = await client.get(f"/account-link/{session_id}")
+        form_html = await form_resp.text()
+        assert form_resp.status == 200
+        assert "Team gate credential" in form_html
+        assert "every request to Gitea" in form_html
+        assert "gitea.example.com" in form_html
+        assert "CF-Access-Client-Secret" in form_html
+        assert "field__client_secret" in form_html
+
+        submit_resp = await client.post(
+            f"/account-link/{session_id}",
+            data={
+                "credential_source": "new",
+                "field__client_secret": "CF-TOP-SECRET",
+                "confirm": "yes",
+            },
+        )
+        submit_html = await submit_resp.text()
+        assert submit_resp.status == 200
+        assert "http-gitea-gate" in submit_html
+        assert "CF-TOP-SECRET" not in submit_html
+
+        status_resp = await client.get(f"/v1/account-link/sessions/{session_id}", headers=gw_headers)
+        status_data = await status_resp.json()
+        assert status_data["status"] == "account_link_created"
+        assert status_data["result"]["purpose"] == "gate"
+        assert status_data["result"]["owner_kind"] == "team"
+        assert "CF-TOP-SECRET" not in json.dumps(status_data)
+
+        # Gate-only tool (account=none) also works through the same admin form.
+        public_created = await client.post(
+            "/v1/account-link/sessions",
+            headers=gw_headers,
+            json={
+                "request_id": "req_public_gate_admin",
+                "team_id": TEST_TEAM,
+                "tool_id": "http:public_gated",
+                "owner_kind": "team",
+                "purpose": "gate",
+                "person_id": "admin-1",
+                "person_roles": ["owner"],
+                "reason": "Public docs gate",
+            },
+        )
+        assert public_created.status == 200
+        public_session = (await public_created.json())["session_id"]
+        pub_submit = await client.post(
+            f"/account-link/{public_session}",
+            data={"credential_source": "new", "field__gate_key": "DOCS-GATE-VAL", "confirm": "yes"},
+        )
+        assert pub_submit.status == 200
+
+    stored_gitea_gate = store.active_link(TEST_TEAM, "http:gitea", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.GATE)
+    assert stored_gitea_gate is not None
+    assert stored_gitea_gate.credential_key == "http-gitea-gate"
+    assert stored_gitea_gate.injections == gitea_tool.gate_injections
+    assert store.active_link(TEST_TEAM, "http:gitea", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT) is None
+    stored_docs_gate = store.active_link(
+        TEST_TEAM, "http:public_gated", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.GATE
+    )
+    assert stored_docs_gate is not None
+    assert saved_env_values["http-gitea-gate"] == {"client_secret": "CF-TOP-SECRET"}
+
+
+@pytest.mark.asyncio
+async def test_link_form_pins_shown_definition_and_refuses_when_tool_changes_before_submit(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """F4 (R3): changing a tool's hosts or injections between GET and POST refuses linking for both account and gate forms."""
+
+    import os
+    import re
+    import time
+    from types import SimpleNamespace
+
+    from access_catalog.catalog import CatalogSource
+    from secure_tool_broker.account_links import DEFINITION_DIGEST_FIELD, REASON_DEFINITION_CHANGED
+
+    instance_root = tmp_path / "instance"
+    tools_dir = instance_root / "control" / "access" / "tools"
+    tools_dir.mkdir(parents=True)
+    tool_file = tools_dir / "proposed-http-gitea.yaml"
+
+    def write_def(yaml_text: str, *, bump_ns: int) -> None:
+        tool_file.write_text(yaml_text, encoding="utf-8")
+        stamp = time.time_ns() + bump_ns
+        os.utime(tool_file, ns=(stamp, stamp))
+
+    def_a = """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - {placement: header, name: Authorization, field: api_token, template: "token {value}"}
+    gate_injections:
+      - {placement: header, name: CF-Access-Client-Secret, field: client_secret}
+"""
+    def_b = """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com, mirror.example.net]
+    credential_injections:
+      - {placement: query, name: access_token, field: api_token}
+    gate_injections:
+      - {placement: query, name: cf_secret, field: client_secret}
+"""
+    def_a_reordered_description = """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    description: Updated description only.
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - {placement: header, name: authorization, field: api_token, template: "token {value}"}
+    gate_injections:
+      - {placement: header, name: cf-access-client-secret, field: client_secret}
+"""
+    write_def(def_a, bump_ns=0)
+
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    gate = BrokerAccessGate(
+        catalogs=CatalogSource(instance_root),
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    monkeypatch.setenv("GITEA_TOKEN", "personal-secret")
+    save_credentials(CredentialOwnerScope.user("user-1"), gitea_personal=token_credential("GITEA_TOKEN"))
+    stored_new: list[str] = []
+
+    def fake_collect(payload, values, *, scope):
+        stored_new.append(payload["credential_key"])
+        return SimpleNamespace(status="success", content={}, error=None)
+
+    monkeypatch.setattr("secure_tool_broker.account_links.collect_credential", fake_collect)
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
+    caplog.set_level(logging.WARNING)
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        # 1. Account link form: GET shows definition A, file changes to B before POST -> refused.
+        acct_created = await (
+            await client.post(
+                "/v1/account-link/sessions",
+                headers=gateway_headers(),
+                json={
+                    "request_id": "req-pin-account",
+                    "team_id": TEST_TEAM,
+                    "tool_id": "http:gitea",
+                    "owner_kind": "person",
+                    "purpose": "account",
+                    "person_id": "user-1",
+                    "person_roles": ["member"],
+                    "reason": "Link Gitea",
+                },
+            )
+        ).json()
+        acct_sid = acct_created["session_id"]
+        acct_form = await (await client.get(f"/account-link/{acct_sid}")).text()
+        assert "Authorization" in acct_form and "mirror.example.net" not in acct_form
+        digest_match = re.search(rf'name="{DEFINITION_DIGEST_FIELD}" value="([0-9a-f]{{64}})"', acct_form)
+        assert digest_match is not None
+
+        # Open a gate session at definition A too, then replace the file with definition B.
+        gate_created = await (
+            await client.post(
+                "/v1/account-link/sessions",
+                headers=gateway_headers(),
+                json={
+                    "request_id": "req-pin-gate",
+                    "team_id": TEST_TEAM,
+                    "tool_id": "http:gitea",
+                    "owner_kind": "team",
+                    "purpose": "gate",
+                    "person_id": "admin-1",
+                    "person_roles": ["admin"],
+                    "reason": "Link Gitea gate",
+                },
+            )
+        ).json()
+        gate_sid = gate_created["session_id"]
+        gate_form = await (await client.get(f"/account-link/{gate_sid}")).text()
+        assert "CF-Access-Client-Secret" in gate_form and "mirror.example.net" not in gate_form
+
+        write_def(def_b, bump_ns=2_000_000_000)
+
+        acct_submit = await client.post(
+            f"/account-link/{acct_sid}",
+            data={"credential_key": "gitea_personal", "confirm": "yes"},
+        )
+        assert acct_submit.status == 200
+        acct_status = await (await client.get(f"/v1/account-link/sessions/{acct_sid}", headers=gateway_headers())).json()
+        assert acct_status["status"] == "account_link_unavailable"
+        assert acct_status["result"]["reason_code"] == REASON_DEFINITION_CHANGED
+        assert "/link http:gitea" in acct_status["result"]["error"]
+
+        # Submitting a new gate credential after the change refuses BEFORE storing the credential.
+        gate_submit = await client.post(
+            f"/account-link/{gate_sid}",
+            data={"credential_source": "new", "field__client_secret": "gate-secret", "confirm": "yes"},
+        )
+        assert gate_submit.status == 200
+        gate_status = await (await client.get(f"/v1/account-link/sessions/{gate_sid}", headers=gateway_headers())).json()
+        assert gate_status["status"] == "account_link_unavailable"
+        assert gate_status["result"]["reason_code"] == REASON_DEFINITION_CHANGED
+        assert "/link http:gitea gate" in gate_status["result"]["error"]
+        assert stored_new == [], "nothing is stored in the credential store when the definition changed"
+        assert store.list_links(TEST_TEAM, purpose=None) == []
+
+        # 2. Stale rendered tab: GET 1 shows B, file changes back to A, GET 2 refreshes session to A,
+        #    submitting form with B's definition_digest is still refused.
+        tab_created = await (
+            await client.post(
+                "/v1/account-link/sessions",
+                headers=gateway_headers(),
+                json={
+                    "request_id": "req-pin-stale-tab",
+                    "team_id": TEST_TEAM,
+                    "tool_id": "http:gitea",
+                    "owner_kind": "person",
+                    "purpose": "account",
+                    "person_id": "user-1",
+                    "person_roles": ["member"],
+                    "reason": "Stale tab check",
+                },
+            )
+        ).json()
+        tab_sid = tab_created["session_id"]
+        tab_page_b = await (await client.get(f"/account-link/{tab_sid}")).text()
+        digest_b = re.search(rf'name="{DEFINITION_DIGEST_FIELD}" value="([0-9a-f]{{64}})"', tab_page_b)
+        assert digest_b is not None
+        write_def(def_a, bump_ns=4_000_000_000)
+        await client.get(f"/account-link/{tab_sid}")  # second tab refreshes session to A
+        await client.post(
+            f"/account-link/{tab_sid}",
+            data={
+                "credential_key": "gitea_personal",
+                DEFINITION_DIGEST_FIELD: digest_b.group(1),
+                "confirm": "yes",
+            },
+        )
+        tab_status = await (await client.get(f"/v1/account-link/sessions/{tab_sid}", headers=gateway_headers())).json()
+        assert tab_status["status"] == "account_link_unavailable"
+        assert tab_status["result"]["reason_code"] == REASON_DEFINITION_CHANGED
+
+        # 3. Unrelated change (description + header case only) still succeeds.
+        ok_created = await (
+            await client.post(
+                "/v1/account-link/sessions",
+                headers=gateway_headers(),
+                json={
+                    "request_id": "req-pin-unchanged",
+                    "team_id": TEST_TEAM,
+                    "tool_id": "http:gitea",
+                    "owner_kind": "person",
+                    "purpose": "account",
+                    "person_id": "user-1",
+                    "person_roles": ["member"],
+                    "reason": "Unchanged hosts and injections",
+                },
+            )
+        ).json()
+        ok_sid = ok_created["session_id"]
+        ok_page = await (await client.get(f"/account-link/{ok_sid}")).text()
+        ok_digest = re.search(rf'name="{DEFINITION_DIGEST_FIELD}" value="([0-9a-f]{{64}})"', ok_page)
+        assert ok_digest is not None
+        write_def(def_a_reordered_description, bump_ns=6_000_000_000)
+        await client.post(
+            f"/account-link/{ok_sid}",
+            data={
+                "credential_key": "gitea_personal",
+                DEFINITION_DIGEST_FIELD: ok_digest.group(1),
+                "confirm": "yes",
+            },
+        )
+        ok_status = await (await client.get(f"/v1/account-link/sessions/{ok_sid}", headers=gateway_headers())).json()
+        assert ok_status["status"] == "account_link_created"
+
+    assert "event=account_link_definition_changed" in caplog.text
