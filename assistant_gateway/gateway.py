@@ -764,12 +764,13 @@ def _person_references(config: GatewayInstanceConfig) -> AccessStorePersonRefere
     return AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id)
 
 
-def _knowledge_blobs(runtime: object) -> Any:
+def _knowledge_blobs(runtime: object, *, team: str) -> Any:
     """``UA1_BLOBS`` client over the gateway's protocol 1 host when available, else ``None``."""
 
     return gateway_blob_store(
         getattr(runtime, "message_host", None),
         timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
+        team=team,
     )
 
 
@@ -1565,7 +1566,7 @@ class UserGateway:
                 references=_person_references(config),
                 display_name=self.access_inbox.display_name,
                 enabled=config.agent.knowledge.enabled,
-                blobs=_knowledge_blobs(resolved_manager_runtime),
+                blobs=_knowledge_blobs(resolved_manager_runtime, team=config.manager.team_id),
             ),
             accounts=self.account_sharing,
             file_retention=self.stored_data.settings,

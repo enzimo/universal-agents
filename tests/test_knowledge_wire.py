@@ -12,9 +12,11 @@ import pytest
 
 from access_control.people_directory import PeopleDirectory
 from assistant_gateway.application.knowledge_pages import (
+    BLOB_CHANGE_REPLY_READ_FAILED_TEXT,
     BLOB_READ_FAILED_TEXT,
     BLOB_STORE_FULL_TEXT,
     BLOB_UNAVAILABLE_TEXT,
+    BLOB_WRITE_FAILED_TEXT,
     GatewayKnowledgePages,
     GatewayKnowledgeRefused,
 )
@@ -24,10 +26,19 @@ from assistant_gateway.application.knowledge_wire import (
     knowledge_view,
 )
 from assistant_gateway.application.route_context import GatewayRouteContextV1
-from assistant_gateway.application.team_commands import GatewayTeamCommandService
+from assistant_gateway.application.team_commands import (
+    GatewayTeamCommandService,
+    TeamCommandRefused,
+    TeamServicesNoAnswer,
+    TeamServicesUnavailable,
+)
+from assistant_gateway.message_host import GatewayHostUnavailable
+from assistant_gateway.team_services_client import gateway_blob_store
 from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from custom_messages.contracts.control_v1 import KnowledgeCommandAction, KnowledgeCommandPayload
+from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.sizes import INLINE_TEXT_MAX_CHARS, REPLY_BODY_MAX_BYTES, encoded_size
+from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, RequestRefused, ServiceUnavailable
 from custom_transport.protocol1.blobs import (
     BlobCorrupted,
     BlobOwner,
@@ -417,3 +428,179 @@ async def test_gateway_knowledge_pages_maps_blob_errors_to_plain_refusals() -> N
     with pytest.raises(GatewayKnowledgeRefused) as exc_bad:
         await pages_bad.run(ctx, KnowledgeCommandPayload(action=KnowledgeCommandAction.READ, page="guide"))
     assert exc_bad.value.code == "runtime_error" and exc_bad.value.message == BLOB_READ_FAILED_TEXT
+
+
+@pytest.mark.asyncio
+async def test_gateway_blob_store_translates_host_errors_and_change_reply_uses_refresh_text() -> None:
+    import nats.errors
+
+    class _FailingHost:
+        team = TEAM
+
+        def __init__(self, handle_err: Optional[Exception] = None, req_err: Optional[Exception] = None) -> None:
+            self.handle_err = handle_err
+            self.req_err = req_err
+
+        async def blob_store_handle(self, *, timeout: float) -> Any:
+            if self.handle_err is not None:
+                raise self.handle_err
+            return FakeJetStream()
+
+        async def request_team(self, kind: str, body: dict[str, Any], *, team: str, timeout: float) -> Any:
+            if self.req_err is not None:
+                raise self.req_err
+            raise AssertionError("unexpected call")
+
+    # gateway_blob_store translates GatewayHostUnavailable, ServiceUnavailable, RequestRefused, and FrameRefused.
+    store_joining = gateway_blob_store(_FailingHost(handle_err=GatewayHostUnavailable("joining")), timeout_seconds=5.0)
+    assert store_joining is not None
+    with pytest.raises(TeamServicesUnavailable, match="still connecting"):
+        await store_joining.get({"sha256": sha256_unpadded(b"a"), "size": 1})
+
+    store_down = gateway_blob_store(
+        _FailingHost(req_err=ServiceUnavailable("blobs.register", "ua.v1.team_example.gw.svc.team", "no_responders")),
+        timeout_seconds=5.0,
+    )
+    assert store_down is not None
+    with pytest.raises(TeamServicesUnavailable, match="not running"):
+        await store_down.put(b"hello", media_type=TEXT_PLAIN_MEDIA_TYPE, owner=OWNER)
+
+    store_timeout = gateway_blob_store(
+        _FailingHost(req_err=ServiceUnavailable("blobs.register", "ua.v1.team_example.gw.svc.team", NO_ANSWER_IN_TIME)),
+        timeout_seconds=5.0,
+    )
+    assert store_timeout is not None
+    with pytest.raises(TeamServicesNoAnswer):
+        await store_timeout.put(b"hello", media_type=TEXT_PLAIN_MEDIA_TYPE, owner=OWNER)
+
+    store_refused = gateway_blob_store(
+        _FailingHost(req_err=RequestRefused("blobs.register", "handler_failed", None)), timeout_seconds=5.0
+    )
+    assert store_refused is not None
+    with pytest.raises(TeamCommandRefused):
+        await store_refused.put(b"hello", media_type=TEXT_PLAIN_MEDIA_TYPE, owner=OWNER)
+
+    store_frame = gateway_blob_store(
+        _FailingHost(req_err=FrameRefused("bad_signature")), timeout_seconds=5.0
+    )
+    assert store_frame is not None
+    with pytest.raises(TeamServicesUnavailable, match="could not be checked"):
+        await store_frame.put(b"hello", media_type=TEXT_PLAIN_MEDIA_TYPE, owner=OWNER)
+
+    # GatewayKnowledgePages catches transport/NATS errors cleanly on both encode and decode,
+    # and uses a post-save refresh message when reply blob decoding fails after a change action.
+    class _Refs:
+        def person_ref(self, _pid: str) -> str:
+            return ALICE_REF
+
+        def person_id(self, _ref: str) -> str:
+            return "alice"
+
+    class _StubTeam:
+        def __init__(self, reply: dict[str, Any]) -> None:
+            self.reply = reply
+
+        async def command(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return self.reply
+
+    ctx = GatewayRouteContextV1(session_key="website:alice", canonical_user_id="alice")
+    long_write = KnowledgeCommandPayload(
+        action=KnowledgeCommandAction.WRITE, title="Big", body="x" * (INLINE_TEXT_MAX_CHARS + 10)
+    )
+    for err, expected_text in (
+        (nats.errors.TimeoutError(), BLOB_WRITE_FAILED_TEXT),
+        (TeamServicesNoAnswer("timeout"), BLOB_WRITE_FAILED_TEXT),
+        (TeamCommandRefused("blobs.register", "handler_failed"), BLOB_WRITE_FAILED_TEXT),
+        (TeamServicesUnavailable("The team services are not running right now."), "The team services are not running right now."),
+    ):
+        pages = GatewayKnowledgePages(
+            team_commands=GatewayTeamCommandService(team_services=_StubTeam({}), references=_Refs(), request_ids=lambda: "c"),
+            references=_Refs(), display_name=lambda pid: pid, enabled=True,
+            blobs=_MemBlobStore(fail_put=err),
+        )
+        with pytest.raises(GatewayKnowledgeRefused) as exc_info:
+            await pages.run(ctx, long_write)
+        assert exc_info.value.code == "runtime_error"
+        assert exc_info.value.message == expected_text
+
+    blob_reply = {
+        "outcome": "ok",
+        "page": {
+            **_inline_page(body="short"),
+            "content": {
+                "type": "blob",
+                "ref": {"sha256": sha256_unpadded(b"x"), "size": 1, "media_type": TEXT_PLAIN_MEDIA_TYPE},
+            },
+        },
+    }
+    pages_change_fail = GatewayKnowledgePages(
+        team_commands=GatewayTeamCommandService(
+            team_services=_StubTeam(blob_reply), references=_Refs(), request_ids=lambda: "c4"
+        ),
+        references=_Refs(), display_name=lambda pid: pid, enabled=True,
+        blobs=_MemBlobStore(fail_get=nats.errors.TimeoutError()),
+    )
+    with pytest.raises(GatewayKnowledgeRefused) as exc_change:
+        await pages_change_fail.run(
+            ctx, KnowledgeCommandPayload(action=KnowledgeCommandAction.WRITE, title="Short", body="short")
+        )
+    assert exc_change.value.code == "runtime_error"
+    assert exc_change.value.message == BLOB_CHANGE_REPLY_READ_FAILED_TEXT
+    assert "Try again" not in exc_change.value.message
+
+
+@pytest.mark.asyncio
+async def test_fit_reply_body_paginates_list_and_history_without_spilling_sublimit_inline_text() -> None:
+    blobs = _MemBlobStore()
+    wide_rows = [
+        {
+            "space": "team",
+            "page": f"page-{idx:02d}",
+            "title": f"Wide Page {idx}",
+            "page_type": "reference",
+            "summary": "s" * 2000,
+            "tags": [f"tag-{t}" for t in range(30)],
+            "status": "active",
+            "seen_version": "1",
+            "updated_at": "2026-11-24T12:00:00.000Z",
+            "snippet": {"type": "inline", "text": f"Match snippet {idx}: " + ("w" * 500)},
+        }
+        for idx in range(20)
+    ]
+    list_reply = {"outcome": "ok", "pages": wide_rows, "total": 20}
+    # Paginates without touching UA1_BLOBS at all (even when blobs=None).
+    fitted_list = await fit_reply_body(list_reply, None, OWNER, max_bytes=12_000, list_key="pages", offset=0)
+    assert 0 < len(fitted_list["pages"]) < 20
+    assert fitted_list["next_offset"] == len(fitted_list["pages"])
+    assert all(row["snippet"]["type"] == "inline" for row in fitted_list["pages"])
+
+    # If the very first row alone exceeds max_bytes because of a sub-limit snippet, only row 0's snippet spills.
+    huge_first_row = [
+        {**wide_rows[0], "snippet": {"type": "inline", "text": "x" * 10_000}},
+        wide_rows[1],
+    ]
+    fitted_first = await fit_reply_body(
+        {"outcome": "ok", "pages": huge_first_row, "total": 2}, blobs, OWNER, max_bytes=6_000, list_key="pages", offset=0
+    )
+    assert len(fitted_first["pages"]) == 2
+    assert fitted_first["pages"][0]["snippet"]["type"] == "blob"
+    assert fitted_first["pages"][1]["snippet"]["type"] == "inline"
+    assert blobs.put_calls == 1
+
+    # History with many revisions and a sub-limit inline page that fits revs[:1] paginates with 0 blob puts.
+    revs = [
+        {
+            "revision": rev,
+            "updated_at": "2026-11-24T12:00:00.000Z",
+            "updated_by": {"kind": "person", "person": ALICE_REF},
+            "title": f"Revision title {rev} " + ("r" * 400),
+            "status": "active",
+            "change_kind": "edit",
+        }
+        for rev in range(25, 0, -1)
+    ]
+    hist_reply = {"outcome": "ok", "page": _inline_page(body="b" * 1_500), "revisions": revs, "total": 25}
+    fitted_hist = await fit_reply_body(hist_reply, None, OWNER, max_bytes=6_000, list_key="revisions", offset=0)
+    assert 0 < len(fitted_hist["revisions"]) < 25
+    assert fitted_hist["page"]["type"] == "inline"
+    assert fitted_hist["page"]["content"]["type"] == "inline"

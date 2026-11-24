@@ -5063,9 +5063,7 @@ each read from the launcher's list of environment overrides (names only,
 configured endpoints, every agent's own findings carried in its status
 heartbeat (`AgentStatus.status_findings`, `custom_agents/status_findings.py`:
 MCP servers that do not load, degraded memory search, skill refresh errors,
-schedules for administrators, receive loops that stopped, and knowledge too long
-to open in Web Chat, which only the team lead counts, at most every ten minutes and
-in a thread of its own, `custom_agents/long_knowledge.py`), whether TeamLead
+schedules for administrators, and receive loops that stopped), whether TeamLead
 reports, its own configuration and receive loops, storage filling up
 (`assistant_gateway/storage_capacity.py`), and the team's message streams
 filling up (`assistant_gateway/queue_capacity.py`). A source that does not answer is listed and shown as a
@@ -5125,7 +5123,8 @@ The percentage
 counts bytes stored, not the space streams set aside, and the finding says
 so: every stream sets its whole byte limit aside when it is created, each
 team's protocol 1 work and dead-letter streams about 2.1 GiB at the default
-`transport.queues.max_bytes` and the 0.9 dead-letter stream 64 MB, and the
+`transport.queues.max_bytes`, the installation's `OBJ_UA1_BLOBS` blob store
+stream 512 MiB (`transport.queues.max_bytes.blobs`), and the 0.9 dead-letter stream 64 MB, and the
 server refuses a new or changed stream in an account allowed less (the
 authority checks before it creates any, `installation_authority/queues.py`). People's
 stored-data totals that the manager stopped measuring are a warning on the
@@ -5191,13 +5190,14 @@ setting: the line is NATS's rule, and a setting would need a change to the
 team transfer's settings section.
 
 Queue stream findings (`assistant_gateway/queue_capacity.py`) exist because a
-full work or dead-letter stream refuses new messages (`discard: new`):
-senders keep refused work and send it again until it expires, and receivers
-hold what they would set aside. On each check the gateway lists its team's
-streams in one stream list request filtered to `ua.v1.<team>.>`
-(`$JS.API.STREAM.LIST`, `NatsTransportAdapter.jetstream_streams`, metadata
-only) and measures each work and dead-letter stream the contract names for
-the team against its own limit. At `transport.queues.warn_at_percent` (80 by
+full work, dead-letter, or blob store stream refuses new messages (`discard: new`):
+senders keep refused work and send it again until it expires, receivers
+hold what they would set aside, and long blob writes wait until space is freed.
+On each check the gateway lists its team's streams (`ua.v1.<team>.>`) and the
+installation's blob store stream (`$O.UA1_BLOBS.>`) via filtered
+`$JS.API.STREAM.LIST` calls (`NatsTransportAdapter.jetstream_streams`, metadata
+only) and measures each work, dead-letter, and object-store stream the contract
+names against its own limit. At `transport.queues.warn_at_percent` (80 by
 default) a stream is a problem whose id names the stream and when it entered
 the level (`queue_filling:UA1_PART_team_a~7:20261118T120000Z`). When it
 entered is kept with the storage levels, through the storage check's own
@@ -6776,37 +6776,54 @@ They serve the team's address (`svc.team`) and answer, so far:
   (`event=gateway_unmatched_manager_control_response_dropped`), rather than set aside. The
   retired classes are one list in the contract; a family that moves to the team services
   later adds its old class name there.
-- the Web Chat Knowledge page's commands, `knowledge.list`, `.read`, `.history`, `.write`,
-  `.add_note`, `.archive`, `.revert`, `.list_contributions`, `.count_contributions`,
-  `.read_contribution`, `.publish_contribution` and `.withdraw_contribution`
-  (`team_services.knowledge`), the durable `ManagerKnowledgeCommand` until phase 2, on the
-  same knowledge service (`knowledge_base.service.knowledge_service_for`, shared with the
-  agents' tools), with the team's knowledge settings (`agent.knowledge`; agent types
-  cannot override them), which also decide whether the gateway shows the Knowledge page. Replies name a person editor by reference, and an agent by its type; a
-  type longer than the contract's 24 characters (the runtime allows 64 until phase 3,
-  plan decision 56) is shown as "Agent" and logged once. Page text travels inline, at
-  most 32,768 characters (`knowledge_base.records.INLINE_TEXT_MAX`), until the contract's
-  object store exists, while agents' tools read and write whole pages up to
-  `agent.knowledge.limits.max_body_chars` (24,000 by default, at most 500,000). No
-  knowledge may be lost or cut because of the limit: reading longer text (a page, an
-  earlier revision, an open note, a proposal or the page it changes) is answered
-  `runtime_error` with a plain message saying nothing was changed or cut, and a change
-  that would replace, hide, revert or decide text the person could not open is refused
-  the same way before anything is stored. A reply is also limited in bytes, one frame of
-  262,144 (`custom_messages.wire.sizes`): a list returns the rows that fit with
-  `next_offset`, and the gateway asks again until it has the browser's page of 20; a page
-  too large to show with its open notes, links and backlinks is refused plainly; and a
-  change measures its reply inside its own transaction, on the page as it leaves it, and
-  is rolled back and refused when it would not fit. Review flags are capped at the
-  contract's 100, and the message says how many there are. The gateway refuses longer
-  typed text and empty notes before sending, normalizes tags as the service stores them,
-  and keeps the browser's values within the contract's bounds. The team lead counts the
-  stored pages, earlier revisions, pending proposals and open notes over the limit, and
-  the pages probably too large for one reply, and reports them as a note on the Status
-  page (`custom_agents.long_knowledge`).
+- the Web Chat Knowledge page's commands and agent merge command, `knowledge.list`,
+  `.read`, `.history`, `.write`, `.add_note`, `.archive`, `.revert`, `.merge`,
+  `.list_contributions`, `.count_contributions`, `.read_contribution`,
+  `.publish_contribution` and `.withdraw_contribution` (`team_services.knowledge`),
+  the durable `ManagerKnowledgeCommand` until phase 2, on the same knowledge service
+  (`knowledge_base.service.knowledge_service_for`, shared with the agents' tools),
+  with the team's knowledge settings (`agent.knowledge`; agent types cannot override
+  them), which also decide whether the gateway shows the Knowledge page. Replies name
+  a person editor by reference, and an agent by its type (from `verified.session.agent_type`
+  on `knowledge.merge`); a type longer than the contract's 24 characters (the runtime
+  allows 64 until phase 3, plan decision 56) is shown as "Agent" and logged once.
+  Text up to 32,768 characters (`custom_messages.wire.sizes.INLINE_TEXT_MAX_CHARS`)
+  travels inline when it fits within one frame (262,144 bytes); longer text (up to
+  `agent.knowledge.limits.max_body_chars`, 24,000 by default and at most 500,000, and
+  `max_note_chars`, up to 50,000) or inline text that would push a request or reply
+  over the frame budget travels transparently as `text/plain` blob references in
+  `UA1_BLOBS` (`custom_transport.protocol1.knowledge_blobs`), and an oversized detailed
+  `page` (or `contribution.current`) travels as a validated `application/json` blob.
+  List replies (`pages`, `contributions`, `revisions`) paginate with `next_offset`
+  without spilling sub-limit inline snippets or page text when pagination alone fits,
+  and the gateway fetches continuations until it has the browser's page of 20. Review
+  flags are capped at the contract's 100, and the message says how many there are. The
+  gateway refuses empty notes before sending, normalizes tags as the service stores
+  them, and keeps the browser's values within the contract's bounds.
   A Knowledge page command a 0.9 gateway queued before the upgrade
   (`ManagerKnowledgeCommand`) is a retired command like the memory one above: the lead
   tells the person it was not carried out;
+- the team's `UA1_BLOBS` object-store ownership index and lifecycle commands,
+  `blobs.register` and `blobs.delete_person` (`team_services.blobs`,
+  `storage.blob_index_repository`, SQLite and PostgreSQL): writers register ownership
+  of `{team}~{sha256}` objects in `OBJ_UA1_BLOBS` (written and verified directly via
+  `custom_transport.protocol1.blobs` using ADR-20 subjects/metadata, 131,072-byte
+  chunks, `Nats-Expected-Last-Subject-Sequence` CAS, no rollup headers, and direct
+  `$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS` chunk reads without reader consumer-create
+  grants). Ownership registration, retention expiration (`agent.blob_retention_days`,
+  default 7, operator-only, exported in team transfer settings schema v16), and
+  immediate person-departure deletion (called from both
+  `assistant_gateway.application.person_lifecycle` and
+  `custom_agents.person_departure_runtime` on disable/remove) are serialized under one
+  lock in the single lock-holding `team_services` instance so reusing an existing blob
+  cannot race last-owner deletion. Unowned blobs are queued durably in
+  `protocol1_blob_pending_deletes` in the same transaction that removes the last owner,
+  retried on startup before serving `svc.team`, deleted via a `deleted: true` marker
+  keeping owner headers plus chunk and earlier-metadata purge (reclaiming the blob's
+  own chunks first if `OBJ_UA1_BLOBS` is at `transport.queues.max_bytes.blobs`), and
+  backed by an orphan-chunk sweep that removes unreferenced chunks and chunks
+  referenced only by `deleted: true` markers after `orphan_chunk_grace_seconds` plus
+  clock tolerance;
 - the chat's topic commands, `topics.list_tags`, `.find_threads` and `.tag_thread`
   (`team_services.topics`), on the same conversation store. All requested tags and
   the reply commit in one transaction, with the retry key checked under the store's

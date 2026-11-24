@@ -1186,17 +1186,19 @@ requests or events, and stream subjects never overlap, which NATS would refuse. 
 named with `{team}` exists once per team and stores only that team's subjects. The
 generator refuses settings that break these rules.
 
-**Stream sizes.** Every work and dead-letter stream has a byte limit besides its age
-limit, so a growing backlog cannot fill the server's disk. The installation authority
+**Stream sizes.** Every work stream, dead-letter stream, and the installation's blob store
+stream (`OBJ_UA1_BLOBS`) has a byte limit besides its age or retention rules, so growing
+backlogs or large temporary blobs cannot fill the server's disk. The installation authority
 reads the limits from the instance's settings when it creates or updates a stream:
 `transport.queues.max_bytes` holds one limit per size kind, and each stream names its kind
-(`size_kind` in `transport.yaml`: `partition`, `pool`, `edge`, `team_services` or
-`dead_letter`). A kind's limit applies to each stream of that kind: each of every team's
-`UA1_PART_{team}~{partition}` streams, and every team's `UA1_POOL_WORK_{team}`,
-`UA1_EDGE_WORK_{team}`, `UA1_TEAM_WORK_{team}` and `UA1_DLQ_{team}`, has the limit of its kind
+(`size_kind` in `transport.yaml`: `partition`, `pool`, `edge`, `team_services`,
+`dead_letter`, or `blobs`). A kind's limit applies to each stream of that kind: each of every
+team's `UA1_PART_{team}~{partition}` streams, every team's `UA1_POOL_WORK_{team}`,
+`UA1_EDGE_WORK_{team}`, `UA1_TEAM_WORK_{team}` and `UA1_DLQ_{team}`, and the installation's
+`OBJ_UA1_BLOBS` stream (`blobs`) have the limit of their kind
 (so a team's partitions together hold the partition count times the `partition` limit). No
-stream holds two teams' work, so one team whose hosts, edges or team services stop reading
-fills only its own streams and never refuses another team's messages.
+work stream holds two teams' work, so one team whose hosts, edges or team services stop reading
+fills only its own work streams and never refuses another team's queued work.
 
 Inside a team, the team services' inbox has a stream of its own. Every copied kind (a task,
 its result, progress, hold account, claim and handback: registry `copy_to`) is stored there
@@ -1229,7 +1231,7 @@ room: see "Control messages share their stream's room" below. These settings are
   `transport.replicas` when there are tiers, otherwise what is reported times the copies,
   exact for the installation's own account, where every stream has that many copies): the
   streams it would add against the stream limit (a team needs 100 streams and 2 buckets at
-  the default count, and the installation 5 buckets), and the new and enlarged limits
+  the default count, and the installation 5 buckets and 1 blob store stream), and the new and enlarged limits
   against the storage limit. It stops, changing nothing, with the totals and the setting to
   change when they do not fit, and when the account has no tier for the replica count. An
   account without a storage limit of its own reports none to check against, so there the
@@ -1899,18 +1901,26 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
   - `UA-Blob-Person` (`person_ref`) when a person's work stored it, by reference only.
 
   The headers name the owner that stored the copy, the first one. Two requests of a team can
-  carry the same bytes, and the second writer finds the object and does not store it again,
-  so the headers alone do not know every owner. The team services keep every owner of an
-  object and delete it only when no owner remains: when the last owner's retention ends, or
-  at once when the last owner departs (a departing person's ownership ends at once). How the
-  team services learn of later owners is for the step that builds blob storage. No one
-  decides who may read a blob from the headers.
+  carry the same bytes, and the second writer reuses the object without storing it again,
+  so the headers alone do not know every owner. The team services keep a persistent SQLite
+  or PostgreSQL blob ownership index (`storage.blob_index_repository`, `team_services.blobs`)
+  recording every owner of each `{team}~{sha256}` object and delete an object only when no
+  owner remains: when the last owner's retention (`agent.blob_retention_days`, default 7)
+  ends, or at once when the last owner departs (via `blobs.delete_person` on `svc.team`,
+  called by the gateway and manager on person disable/remove and checked on upkeep). Writers
+  register ownership with `blobs.register` on `svc.team`: the team services serialize
+  ownership registration against expiration and departure deletion under one lock, verify
+  that live metadata and chunks are intact in `OBJ_UA1_BLOBS`, and answer `present: true`
+  only when the copy is live and registered; otherwise they answer `present: false` so the
+  writer uploads chunks and metadata and registers again. No one decides who may read a blob
+  from the headers.
 - **Writing, reading and deleting.** The bucket's stream allows no rollup headers ("Stream
   settings"), so the NATS object store client's `put` and `delete`, which send
   `Nats-Rollup: sub`, are refused, and its `get`, which asks the server which stream holds
   the chunks (`$JS.API.STREAM.NAMES`, a list of every team's streams), has no grant. The
-  product does these steps itself, keeping the NATS object store's own subjects and
-  metadata ([ADR-20](https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-20.md)),
+  product does these steps itself (`custom_transport.protocol1.blobs`), keeping the NATS
+  object store's own subjects and metadata
+  ([ADR-20](https://github.com/nats-io/nats-architecture-and-design/blob/main/adr/ADR-20.md)),
   so the `nats object` tools still list and inspect objects:
   - the metadata subject is `$O.UA1_BLOBS.M.<name>` with the name encoded as padded
     base64url, as NATS's clients spell it (`team_example~KZJ…` becomes
@@ -1922,24 +1932,34 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
     `headers` (the owner headers) and `options.max_chunk_size`. A writer writes no other
     field, and a reader ignores fields it does not use (NATS's `mtime`, `description`);
   - a writer cuts the content into chunks of exactly `chunk_bytes` (131,072, NATS's own
-    default), the last one shorter. A reader assumes no chunk size: it checks the chunk
-    count and the bytes it read against `chunks`, `size` and the name;
+    default), the last one shorter (0 chunks for empty bytes). A reader assumes no chunk
+    size: it checks the chunk count, absence of trailing chunks, total byte length, and
+    SHA-256 against `chunks`, `size` and the name;
   - a writer looks the name up (the last message on its metadata subject, through
-    `$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`) and stops when a live object is there;
-    otherwise it publishes the chunks under a new `nuid`, then one metadata message with no
-    rollup header. It purges nothing, even when it stops partway. A writer that would
-    publish its metadata later than half of `orphan_chunk_grace_seconds` after it began
-    gives the write up and publishes no metadata (it may start again under a new `nuid`),
-    so no metadata ever names chunks old enough to be swept;
+    `$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`) and verifies chunk presence via O(1)
+    `$JS.API.STREAM.INFO.OBJ_UA1_BLOBS` (`subjects_filter`). When a live, intact object is
+    there it stops; otherwise (missing, deleted, corrupt metadata, or missing chunks) it
+    publishes the chunks under a new `nuid`, then one metadata message with no rollup header
+    and `Nats-Expected-Last-Subject-Sequence` compare-and-set. It purges nothing, even when
+    it stops partway. A writer that would publish its metadata later than half of
+    `orphan_chunk_grace_seconds` after it began gives the write up and publishes no metadata
+    (it may start again under a new `nuid`), so no metadata ever names chunks old enough to
+    be swept;
   - a reader takes the last metadata message for the name, treats one with `deleted: true`
-    as no object, and reads the chunks through an ordered consumer it opens naming the
-    stream (`OBJ_UA1_BLOBS`), as the key-value watches do;
-  - a deleter (the team services) writes a deleted marker with no rollup header: the last
+    as no object, enforces size limits before and during download, and reads chunks directly
+    through `$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS` (`next_by_subj`, advancing sequence) with
+    no consumer created on `OBJ_UA1_BLOBS`;
+  - a deleter (the team services) records a durable pending-delete entry in the same
+    database transaction that removes the last owner, writes a deleted marker with
+    `Nats-Expected-Last-Subject-Sequence` compare-and-set and no rollup header (the last
     metadata with `deleted: true`, `size` and `chunks` 0 and `digest` empty, every other
-    field kept, the owner headers among them (as NATS's own delete does), so the headers
-    marked always are on every metadata message. It then purges the object's chunks by their
-    subject and the name's earlier metadata messages (a purge of the metadata subject that
-    keeps the last one);
+    field kept, the owner headers among them), purges the object's chunks by their subject
+    and earlier metadata messages keeping the last one, and then clears the pending-delete
+    entry. If `OBJ_UA1_BLOBS` is at its byte limit (`discard: new`) and refuses the deleted
+    marker with error 10077, the deleter purges that blob's own chunks and earlier metadata
+    (`keep=1`) first and retries the compare-and-set marker publish so expiry and departure
+    deletion still reclaim space out of a full store. Unfinished pending deletes are retried
+    on startup before serving `svc.team` and on every upkeep cycle;
   - the team services also purge chunks that no live metadata names, which a writer leaves
     when it gives up or stops partway, when two writers put the same blob at once, or when a
     delete stopped after its deleted marker and before its purge. A deleted marker keeps the
@@ -1947,9 +1967,9 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
     person's content among them; a new write of the same bytes always uses a new `nuid`. A sweep
     purges a chunk subject only when its newest message is older than
     `orphan_chunk_grace_seconds` (one day) plus the clock tolerance, and reads the
-    metadata after it checked that age. A write in progress has a chunk newer than that, and
-    a finished write's metadata was published within half of it, so the sweep never purges
-    chunks a live object names.
+    metadata strictly after it checked that age. A write in progress has a chunk newer than
+    that, and a finished write's metadata was published within half of it, so the sweep never
+    purges chunks a live object names.
 
   A metadata message for 300,000 bytes stored by a person's request, on
   `$O.UA1_BLOBS.M.dGVhbV9leGFtcGxlfktaSi1KenJNeG9LR0FGQVg5X3B1VHllOTIwMnpDRF80dU5URFpua0Z0X28=`:
@@ -1967,10 +1987,10 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
   buckets ("Key-value grants"):
   - readers are exactly the roles that receive a kind, a copy or a reply whose schema can
     carry a blob reference: the gateway, the lead and worker hosts, the team services and
-    the edge adapter. A reader gets the bucket's stream information, the message get that
-    finds an object's last metadata (`$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`), and what
-    reading the chunks needs: an unnamed ordered consumer on its own inbox, its information
-    and its flow control. It gets no stream-name lookup;
+    the edge adapter. A reader gets only the bucket's stream information
+    (`$JS.API.STREAM.INFO.OBJ_UA1_BLOBS`) and message get
+    (`$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`) to read metadata and chunks directly; it gets
+    no consumer-create grant, no flow-control grant, and no stream-name lookup;
   - writers are the gateway, the lead and worker hosts and the team services: they publish
     chunks (`$O.UA1_BLOBS.C.>`) and metadata (`$O.UA1_BLOBS.M.>`), and read, to look an
     object up before putting it;
@@ -1993,7 +2013,10 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
   `$O.UA1_BLOBS.C.>` and `$O.UA1_BLOBS.M.>`, has the settings of `object_store_stream`: no
   rollup headers (NATS checks a publish against its subject, not its headers, so with
   rollups allowed one writer's `Nats-Rollup: all` would erase every object), no message
-  deletes through the stream API, and purges allowed (only deleters hold the grant).
+  deletes through the stream API, purges allowed (only deleters hold the grant),
+  `max_consumers: 64`, `discard: new` (refusing new writes with error 10077 rather than
+  silently evicting live blobs), and `max_bytes` from `transport.queues.max_bytes.blobs`
+  (default 512 MiB).
 
 The generator checks that the readers are exactly the roles that receive something that can
 carry a blob reference (none lacks the grant and none has it without need), that writers
@@ -2282,8 +2305,10 @@ proposal, is `text_content`, so it has a blob form; every other text field of a
 Knowledge request or reply is bounded at or below 32,768 characters, by its `maxLength` or,
 without one, by the longest value its pattern can match, each repetition's upper bound
 counted (so `{0,40000}`, or `{0,200}` inside a group repeated `{0,200}`, is over the limit).
-The generator checks both (`check_knowledge_text`). Web Chat's own limit on what a person types is
-lifted in the step that moves Web Chat to protocol 1, not by the contract.
+The generator checks both (`check_knowledge_text`). Web Chat and the team services send
+longer Knowledge text (pages up to `max_body_chars`, 500,000 max, and notes up to
+`max_note_chars`, 50,000 max) and oversized complete `page` objects (`application/json`)
+transparently through `UA1_BLOBS` (`custom_transport.protocol1.knowledge_blobs`).
 Each returned note has its server-assigned id, content, creation time and editor.
 Resolving a note needs only its `note_id` and `merged`, true after incorporating
 it or false to dismiss it; page and space are optional context. Reading again
@@ -2308,8 +2333,8 @@ is disabled.
 Contract verification pairs schema/model round trips with real SQLite knowledge
 workflows, including stale source and destination versions, pending proposals,
 note discovery and resolution, archive and revert reasons, and freeze duration.
-The protocol adapters are not live yet; these checks do not prove NATS delivery
-or object-store integration.
+Live gateway-to-team-services tests on `nats-server` 2.15.1 verify end-to-end Knowledge
+operations up to 500,000-character pages and 50,000-character notes over `UA1_BLOBS`.
 
 ### Memory and staged changes
 

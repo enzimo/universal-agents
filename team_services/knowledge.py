@@ -47,9 +47,10 @@ from access_control.people_directory import PeopleDirectory
 from custom_messages.contracts.control_v1 import KnowledgeCommandAction, KnowledgeCommandPayload
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame
+from custom_messages.wire.ids import AGENT_ID
 from custom_messages.wire.kinds import KINDS
 from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES
-from custom_transport.protocol1.blobs import BlobError, BlobOwner, BlobStoreFull, BlobTooLarge
+from custom_transport.protocol1.blobs import BlobOwner, BlobStoreFull, BlobTooLarge
 from custom_transport.protocol1.knowledge_blobs import (
     BlobStore,
     KnowledgeBlobUnavailable,
@@ -283,11 +284,11 @@ class KnowledgeOperations:
                 self._store_final_refusal, verified, action, raw_body, resolved, refusal
             )
             return raw_body, stored_refusal
-        except BlobError as exc:
+        except Exception as exc:  # noqa: BLE001 - pre-execution blob/NATS errors must not become handler_failed
             self._logger.error(
                 "Could not read a Knowledge request blob; nothing was changed. "
                 "event=team_knowledge_request_blob_failed action=%s error_type=%s detail=%s",
-                action, type(exc).__name__, exc,
+                action, type(exc).__name__, exc, exc_info=exc,
             )
             return raw_body, _message_reply("runtime_error", _blob_failure_message(exc))
 
@@ -353,9 +354,15 @@ class KnowledgeOperations:
         if authority is None or authority.token.bound_to.type != "root_task":
             return _ResolvedActor(refusal=_message_reply("not_allowed", "knowledge.merge requires a root_task token."))
         bound = authority.token.bound_to
-        raw_agent = verified.frame.issuer.agent
-        agent_id = raw_agent if isinstance(raw_agent, str) and raw_agent else str(verified.frame.issuer.runtime)
-        agent_type = agent_id if _CONTRACT_AGENT_TYPE.fullmatch(agent_id) else AGENT_FALLBACK_TYPE
+        session = verified.session
+        raw_agent = session.agent if session is not None else verified.frame.issuer.agent
+        if not isinstance(raw_agent, str) or not AGENT_ID.fits(raw_agent):
+            return _ResolvedActor(
+                refusal=_message_reply("not_allowed", "knowledge.merge requires a valid agent identity.")
+            )
+        agent_id = raw_agent
+        raw_type = session.agent_type if session is not None else agent_id
+        agent_type = raw_type if _CONTRACT_AGENT_TYPE.fullmatch(raw_type) else AGENT_FALLBACK_TYPE
         person_ref = authority.token.person
         if not isinstance(person_ref, str):
             actor = KnowledgeActor(

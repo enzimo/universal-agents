@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 
 import pytest
 
-from assistant_gateway.application.knowledge_pages import GatewayKnowledgeRefused
 from assistant_gateway.application.route_context import GatewayRouteContextV1
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.gateway import UserGateway
@@ -30,7 +29,7 @@ from custom_transport.protocol1.host_runtime import MessageHost
 from knowledge_base.service import DraftInput, KnowledgeService
 from runtime_settings.knowledge import KnowledgeSettings, KnowledgeWriteLimits
 from storage.access_repository import AccessRepository
-from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES, create_knowledge_repository
+from storage.knowledge_repository import create_knowledge_repository
 from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_operations, team_services_profile
 from tests.knowledge_support import agent as worker_actor
 from tests.test_live_team_services import TEAM, broker, connect, installation  # noqa: F401 - broker is a fixture
@@ -55,19 +54,25 @@ async def test_gateway_reviews_notes_and_restores_archives_over_nats(
     )
     config.transport.nats_url = broker
     config.transport.nats_servers = [broker]
+    config.agent.knowledge.limits.max_body_chars = 500_000
+    config.agent.knowledge.limits.max_note_chars = 50_000
     person = config.user.canonical_user_id
     AccessRepository(config.manager_storage_settings).record_person(TeamPersonV1(
         team_id=TEAM, person_id=person, person_ref="p-OwnerOwnerOwnerOwnerOw", standing=PersonStanding.ACTIVE,
         roles=("owner",), changed_at_utc=datetime.now(timezone.utc)))
     repository = create_knowledge_repository(config.manager_storage_settings)
-    service = KnowledgeService(repository, settings=KnowledgeSettings())
+    service = KnowledgeService(
+        repository, settings=KnowledgeSettings(limits=KnowledgeWriteLimits(max_body_chars=500_000, max_note_chars=50_000))
+    )
     worker = replace(worker_actor("review_worker", person=person), team_id=TEAM)
     stop = asyncio.Event()
 
     async with AsyncExitStack() as stack:
         await installation(stack, broker, config.layout, team_services_profile(TEAM), gateway_profile(TEAM))
         host = MessageHost(config.layout, team_services_profile(TEAM), await connect(stack, broker, TEAM_SERVICES_RUNTIME))
-        serving = asyncio.create_task(serve_team(host, TEAM, stop, team_operations(config, host.clock)))
+        serving = asyncio.create_task(
+            serve_team(host, TEAM, stop, team_operations(config, host.clock, js=host.nc.jetstream()))
+        )
         # The gateway service's runtime: the one process that runs the gateway's protocol 1 host.
         gateway = UserGateway(config, output_sink=None, state_store=GatewayStateStore(str(gateway_db)),
                               manager_runtime=NatsGatewayManagerRuntime.for_gateway_service(config))
@@ -118,24 +123,48 @@ async def test_gateway_reviews_notes_and_restores_archives_over_nats(
             counted = await request(KnowledgeCommandAction.COUNT_CONTRIBUTIONS)
             assert counted.total == 101 and counted.contributions == []
 
-            # Text longer than Web Chat carries (agents may write it) is refused plainly over the
-            # wire too, and nothing changes (team_services.knowledge).
-            writer = replace(worker_actor("long_writer"), team_id=TEAM)
-            long_pages = KnowledgeService(
-                repository, settings=KnowledgeSettings(limits=KnowledgeWriteLimits(max_body_chars=500_000))
+            # Decision 77 / A5: Knowledge pages up to 500,000 characters and notes up to 50,000 characters
+            # travel transparently via UA1_BLOBS end-to-end across Web Chat gateway, NATS, and team services.
+            body_500k = ("Handbook section — ✓ line.\n" * 25_000)[:499_999] + "."
+            assert len(body_500k) == 500_000
+            saved_500k = await request(KnowledgeCommandAction.WRITE, title="Handbook", body=body_500k)
+            assert saved_500k.page.revision == 1
+            assert saved_500k.page.body == body_500k
+
+            read_500k = await request(KnowledgeCommandAction.READ, page="handbook")
+            assert read_500k.page.body == body_500k
+
+            note_50k = ("Detailed operational note — ✓.\n" * 2_000)[:49_999] + "."
+            assert len(note_50k) == 50_000
+            noted_50k = await request(KnowledgeCommandAction.ADD_NOTE, page="handbook", note=note_50k)
+            assert [note.body for note in noted_50k.page.open_notes] == [note_50k]
+            assert noted_50k.page.body == body_500k
+
+            # Edit to short text, then read and revert back to the 500,000-character revision 1.
+            shortened = await request(KnowledgeCommandAction.WRITE, page="handbook", base_revision=1, body="Short now.")
+            assert shortened.page.revision == 2 and shortened.page.body == "Short now."
+            rev1 = await request(KnowledgeCommandAction.READ, page="handbook", revision=1)
+            assert rev1.page.body == body_500k
+            reverted = await request(KnowledgeCommandAction.REVERT, page="handbook", revision=1, base_revision=2)
+            assert reverted.page.revision == 3 and reverted.page.body == body_500k
+
+            # Long worker proposal (> 32,768 chars) is read and published cleanly through UA1_BLOBS.
+            long_proposal_body = ("Proposed runbook update line.\n" * 2_000)[:44_999] + "."
+            proposed_long = service.write(
+                worker, "team/handbook", DraftInput(title="Handbook", body=long_proposal_body), base_revision=3
+            ).contribution
+            assert proposed_long is not None
+            shown_proposal = await request(
+                KnowledgeCommandAction.READ_CONTRIBUTION, contribution_id=proposed_long.contribution_id
             )
-            long_pages.write(writer, "team/handbook", DraftInput(title="Handbook", body="Long handbook line. " * 2_500))
-            long_pages.write(writer, "team/handbook", DraftInput(body="Short now."), base_revision=1)
-            before = [repository.export_rows(table) for table in KNOWLEDGE_TRANSFER_TABLES]
-            for action, fields in (
-                (KnowledgeCommandAction.READ, {"revision": 1}),
-                (KnowledgeCommandAction.REVERT, {"revision": 1, "base_revision": 2}),
-            ):
-                with pytest.raises(GatewayKnowledgeRefused) as refused:
-                    await request(action, page="handbook", **fields)
-                assert refused.value.code == "runtime_error"
-                assert refused.value.message.startswith("The text of revision 1 of this page has 49,999 characters")
-            assert [repository.export_rows(table) for table in KNOWLEDGE_TRANSFER_TABLES] == before
+            assert shown_proposal.contribution.body == long_proposal_body
+            published_long = await request(
+                KnowledgeCommandAction.PUBLISH_CONTRIBUTION,
+                contribution_id=proposed_long.contribution_id,
+                edited=False,
+                base_revision=3,
+            )
+            assert published_long.page.body == long_proposal_body
         finally:
             await gateway.close()
             stop.set()

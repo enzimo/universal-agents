@@ -44,13 +44,16 @@ def _root_task_frame(
     body: dict[str, Any],
     *,
     role: str = "worker_host",
-    agent_id: str = "KnowledgeCuratorAgent",
+    agent_id: Any = "KnowledgeCuratorAgent",
+    runtime: Optional[str] = None,
+    session: Any = None,
     person_ref: Optional[str] = None,
     task_id: str = "task_merge_1",
     request_id: str = "req_merge_1",
     schedule_id: Optional[str] = None,
 ) -> VerifiedFrame:
-    cert = SimpleNamespace(installation="install_test", runtime=f"{role}-1", teams=(TEAM,), roles=(role,))
+    host_runtime = runtime or f"{role}-1"
+    cert = SimpleNamespace(installation="install_test", runtime=host_runtime, teams=(TEAM,), roles=(role,))
     token = SimpleNamespace(
         person=person_ref,
         schedule_id=schedule_id,
@@ -59,7 +62,7 @@ def _root_task_frame(
     authority = VerifiedAuthority(token=token, certificate=cert)  # type: ignore[arg-type]
     frame = SimpleNamespace(
         kind=kind,
-        issuer=SimpleNamespace(installation="install_test", team=TEAM, runtime=f"{role}-1", agent=agent_id),
+        issuer=SimpleNamespace(installation="install_test", team=TEAM, runtime=host_runtime, agent=agent_id),
     )
     raw = {
         "kind": kind,
@@ -73,7 +76,7 @@ def _root_task_frame(
         raw=raw,
         certificate=cert,
         authority=authority,
-        session=None,
+        session=session,
         replay_key=None,
         frame_digest="",
     )  # type: ignore[return-value]
@@ -423,3 +426,103 @@ def test_team_operations_wires_blob_service_into_knowledge_operations(tmp_path: 
     knowledge_ops = knowledge_family.handlers["knowledge.read"].__self__  # type: ignore[attr-defined]
     assert isinstance(knowledge_ops, KnowledgeOperations)
     assert knowledge_ops._blobs is not None
+
+
+@pytest.mark.asyncio
+async def test_request_blob_nats_timeout_returns_runtime_error_without_changing_data(tmp_path: Path) -> None:
+    import nats.errors
+
+    env = _setup(tmp_path)
+
+    class _TimeoutGetStore:
+        async def put(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return await env.blob_store.put(*args, **kwargs)
+
+        async def get(self, *_args: Any, **_kwargs: Any) -> bytes:
+            raise nats.errors.TimeoutError()
+
+    env.ops._blobs = _TimeoutGetStore()
+    ref = {"sha256": sha256_unpadded(b"long body"), "size": 9, "media_type": TEXT_PLAIN_MEDIA_TYPE}
+    frame = stand_in_frame(
+        TEAM,
+        "knowledge.write",
+        {
+            "request_id": "req_write_nats_timeout",
+            "space": "team",
+            "title": "Should Not Save",
+            "content": {"type": "blob", "ref": ref},
+            "confirm_review": False,
+        },
+        person_ref=ALICE_REF,
+        request_id="req_write_nats_timeout",
+    )
+    reply = checked_reply("knowledge.write", await env.ops.handle(frame))
+    assert reply["outcome"] == "runtime_error"
+    assert "Nothing was changed" in reply["message"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_merge_uses_session_agent_type_and_refuses_missing_or_oversized_agent_id(
+    tmp_path: Path,
+) -> None:
+    env = _setup(tmp_path)
+    for title in ("MergeSrc", "MergeDst"):
+        frame = stand_in_frame(
+            TEAM,
+            "knowledge.write",
+            {
+                "request_id": f"seed_{title.lower()}",
+                "space": "team",
+                "title": title,
+                "content": {"type": "inline", "text": f"Body {title}"},
+                "confirm_review": False,
+            },
+            person_ref=ALICE_REF,
+            request_id=f"seed_{title.lower()}",
+        )
+        assert (await env.ops.handle(frame))["outcome"] == "ok"
+
+    # Missing issuer.agent with a >32-char runtime id returns not_allowed instead of failing BlobOwner validation.
+    no_agent_frame = _root_task_frame(
+        "knowledge.merge",
+        {
+            "request_id": "req_merge_no_agent",
+            "space": "team",
+            "page": "mergesrc",
+            "seen_version": "1",
+            "into": "mergedst",
+            "target_seen_version": "1",
+            "content": {"type": "inline", "text": "Merged."},
+            "confirm_review": False,
+        },
+        agent_id=None,
+        runtime="worker-host-with-a-very-long-runtime-identifier-exceeding-32-chars",
+        session=None,
+        person_ref=None,
+        schedule_id="sched_curator_team",
+    )
+    refused = checked_reply("knowledge.merge", await env.ops.handle(no_agent_frame))
+    assert refused["outcome"] == "not_allowed"
+
+    # When verified.session is present, updated_by records session.agent_type (not issuer.agent instance id).
+    session = SimpleNamespace(agent="curator-inst-0001", agent_type="KnowledgeCuratorAgent")
+    session_frame = _root_task_frame(
+        "knowledge.merge",
+        {
+            "request_id": "req_merge_with_session",
+            "space": "team",
+            "page": "mergesrc",
+            "seen_version": "1",
+            "into": "mergedst",
+            "target_seen_version": "1",
+            "content": {"type": "inline", "text": "Merged via session."},
+            "confirm_review": False,
+        },
+        agent_id="curator-inst-0001",
+        session=session,
+        person_ref=None,
+        schedule_id="sched_curator_team",
+    )
+    ok_reply = checked_reply("knowledge.merge", await env.ops.handle(session_frame))
+    assert ok_reply["outcome"] == "ok"
+    assert ok_reply["page"]["updated_by"] == {"kind": "agent", "agent_type": "KnowledgeCuratorAgent"}

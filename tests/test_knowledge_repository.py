@@ -23,7 +23,7 @@ from storage.knowledge_repository import (
     KNOWLEDGE_TABLE_COLUMNS,
     create_knowledge_repository,
 )
-from tests.knowledge_support import BACKENDS, NOW, TEAM, agent, knowledge_storage, person
+from tests.knowledge_support import BACKENDS, NOW, agent, knowledge_storage, person
 
 
 class Clock:

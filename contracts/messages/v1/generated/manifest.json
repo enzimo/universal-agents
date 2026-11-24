@@ -1,6 +1,6 @@
 {
   "files": {
-    "contracts/messages/v1/README.md": "e4424a3b6befda5720e09f8e496e93715f9a7cf28f14aeab6ac39c41ef52680b",
+    "contracts/messages/v1/README.md": "be3866434092351ddd5f2a97498bab323085e23acbf387d7f970e919befc6fc8",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-on-a-denial.json": "dc6d661b86a9e4c4d76d2ea8b71f48eafb6a2fffec7bcbb6730602ea55d32e1e",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-over-seven-days.json": "02a4594fdf7f45a7d7a136c0b1026db1564a191f461ba9d22b518d445bffebab",
     "contracts/messages/v1/examples/invalid/access-decision-access-list-tool-twice.json": "9bdcc6353af021a8cd650ad7aae483282b79cdb2eac3e67346364038f4ce4734",
@@ -1720,7 +1720,7 @@
     "contracts/messages/v1/examples/valid/wait.ended/record-removed.json": "7f039bbb58df8e24840d026a36b1dec0c73b1ada3fa33ff3a9e1c0f590293097",
     "contracts/messages/v1/examples/valid/wait.ended/request-ended.json": "cba05f66ef085d11e1c660b63d143848fa61edb4eeed44a93ec6885ed499bf86",
     "contracts/messages/v1/generated/asyncapi.json": "bffecb93b0dd1764397d62180950c9d6b17ac232fcbcc19f7a33ebf93b806346",
-    "contracts/messages/v1/generated/compatibility.json": "bd3d451383f0cf6f7e64dad22f93bd1006e3265c1e2bc1545b910fe593fb0658",
+    "contracts/messages/v1/generated/compatibility.json": "a72154ad26ac3e0373e7133f0dd6b1679790fab3538505de539bb4e37a36a9b9",
     "contracts/messages/v1/generated/permissions/edge_adapter.json": "fa76539b1afd854b14c96be865828c3c9392a51239693be22fd8c6a471018019",
     "contracts/messages/v1/generated/permissions/gateway.json": "6917a7bd2b8428dc3da099331334a4c02c4f4458feddfdc9249c362408718c00",
     "contracts/messages/v1/generated/permissions/installation_authority.json": "f99f33808af9a8b614510761d7b62541031da2559c271bb303234333a8b011cc",
@@ -1990,7 +1990,7 @@
     "contracts/messages/v1/signing-vectors/vectors.json": "246891a0db4b3bc6bcbb57c5e81518a68aae0110c324356c0d9e6d72e6335396",
     "contracts/messages/v1/team-topologies.yaml": "912a29719c2e75421a3b5172fa941f2d7d21122f603439de7f4465a196d174f1",
     "contracts/messages/v1/transport.yaml": "df963d46e62ec237caea336e31448ee7a69510e730bea6314d84c0164bc1493e",
-    "custom_messages/wire/kinds.py": "e60bc6ecb76b4268cf0e05cd821c0c2eeeb62e44ebe3abfc90dcf1955246112b",
+    "custom_messages/wire/kinds.py": "555a4c4e757128b580a297bccfcee7557524a19a7db6f587eb677411e6225f9a",
     "custom_messages/wire/models.py": "fe804b87a8f67de54a6af62610d072579131190d3263946acf3de5f35c641f9b"
   },
   "protocol": "1.0-pre"

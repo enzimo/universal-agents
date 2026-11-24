@@ -36,6 +36,46 @@ def new_request_id() -> str:
     return new_message_id()
 
 
+def _translate_host_error(
+    error: Exception,
+    *,
+    kind: str,
+    request_id: str,
+    logger: logging.Logger,
+    not_sent_event: str,
+    reply_refused_event: str,
+) -> Exception:
+    from assistant_gateway.message_host import GatewayHostUnavailable
+    from custom_messages.wire.refusals import FrameRefused
+    from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, RequestRefused, ServiceUnavailable
+
+    if isinstance(error, RequestRefused):
+        return TeamCommandRefused(kind, error.code)
+    if isinstance(error, ServiceUnavailable):
+        if error.reason == NO_ANSWER_IN_TIME:
+            return TeamServicesNoAnswer("The team services did not answer in time.")
+        return TeamServicesUnavailable(
+            "The team services are not running right now. Try again in a moment; "
+            "if it keeps happening, an administrator can check them."
+        )
+    if isinstance(error, GatewayHostUnavailable):
+        logger.warning(
+            "A team services request could not be sent. event=%s kind=%s request_id=%s reason=%s",
+            not_sent_event, kind, request_id, error,
+        )
+        return TeamServicesUnavailable("The gateway is still connecting to the team services. Try again in a moment.")
+    if isinstance(error, FrameRefused):
+        logger.error(
+            "The team services' reply was refused. event=%s kind=%s request_id=%s reason=%s",
+            reply_refused_event, kind, request_id, error,
+        )
+        return TeamServicesUnavailable(
+            "The team services' answer could not be checked, so it is not shown. An "
+            "administrator can find the reason in the gateway log."
+        )
+    return error
+
+
 class MessageHostTeamServices:
     def __init__(self, host: Optional["GatewayMessageHost"], *, timeout_seconds: float,
                  logger: logging.Logger = _LOGGER) -> None:
@@ -53,28 +93,20 @@ class MessageHostTeamServices:
         # which import this module too, should not load the protocol code (about half a second).
         from assistant_gateway.message_host import GatewayHostUnavailable
         from custom_messages.wire.refusals import FrameRefused
-        from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, RequestRefused, ServiceUnavailable
+        from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
 
         try:
             # The host binds the command token to the body's request id (command_binding_id).
             verified = await self._host.command(kind, body, person_ref=person_ref, timeout=self._timeout)
-        except RequestRefused as error:
-            raise TeamCommandRefused(kind, error.code) from error
-        except ServiceUnavailable as error:
-            if error.reason == NO_ANSWER_IN_TIME:
-                raise TeamServicesNoAnswer("The team services did not answer in time.") from error
-            raise TeamServicesUnavailable("The team services are not running right now. Try again in a moment; "
-                                          "if it keeps happening, an administrator can check them.") from error
-        except GatewayHostUnavailable as error:
-            self._logger.warning("A person's command could not be sent. event=gateway_team_command_not_sent kind=%s "
-                                 "request_id=%s reason=%s", kind, request_id, error)
-            raise TeamServicesUnavailable("The gateway is still connecting to the team services. Try again in a "
-                                          "moment.") from error
-        except FrameRefused as error:
-            self._logger.error("The team services' reply was refused. event=gateway_team_reply_refused kind=%s "
-                               "request_id=%s reason=%s", kind, request_id, error)
-            raise TeamServicesUnavailable("The team services' answer could not be checked, so it is not shown. An "
-                                          "administrator can find the reason in the gateway log.") from error
+        except (RequestRefused, ServiceUnavailable, GatewayHostUnavailable, FrameRefused) as error:
+            raise _translate_host_error(
+                error,
+                kind=kind,
+                request_id=request_id,
+                logger=self._logger,
+                not_sent_event="gateway_team_command_not_sent",
+                reply_refused_event="gateway_team_reply_refused",
+            ) from error
         return dict(verified.raw["body"])
 
 
@@ -120,10 +152,37 @@ def gateway_blob_store(
     target_team = host.team if team is None else team
 
     async def _get_js() -> Any:
-        return await host.blob_store_handle(timeout=timeout_seconds)
+        from assistant_gateway.message_host import GatewayHostUnavailable
+
+        try:
+            return await host.blob_store_handle(timeout=timeout_seconds)
+        except GatewayHostUnavailable as error:
+            raise _translate_host_error(
+                error,
+                kind="blobs.handle",
+                request_id="",
+                logger=_LOGGER,
+                not_sent_event="gateway_blob_store_unavailable",
+                reply_refused_event="gateway_blob_store_unavailable",
+            ) from error
 
     async def _register(body: dict[str, Any]) -> dict[str, Any]:
-        verified = await host.request_team("blobs.register", body, team=target_team, timeout=timeout_seconds)
+        from assistant_gateway.message_host import GatewayHostUnavailable
+        from custom_messages.wire.refusals import FrameRefused
+        from custom_transport.protocol1.live import RequestRefused, ServiceUnavailable
+
+        request_id = str(body.get("request_id") or "")
+        try:
+            verified = await host.request_team("blobs.register", body, team=target_team, timeout=timeout_seconds)
+        except (RequestRefused, ServiceUnavailable, GatewayHostUnavailable, FrameRefused) as error:
+            raise _translate_host_error(
+                error,
+                kind="blobs.register",
+                request_id=request_id,
+                logger=_LOGGER,
+                not_sent_event="gateway_blob_register_not_sent",
+                reply_refused_event="gateway_blob_register_reply_refused",
+            ) from error
         return dict(verified.raw["body"])
 
     return ClientBlobStore(

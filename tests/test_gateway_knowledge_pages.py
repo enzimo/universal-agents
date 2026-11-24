@@ -416,3 +416,50 @@ def test_every_knowledge_action_becomes_a_contract_body() -> None:
     from custom_messages.contracts.control_v1 import KnowledgeCommandAction
 
     assert set(knowledge_wire._BODIES) == set(KnowledgeCommandAction)
+
+
+@pytest.mark.asyncio
+async def test_blob_transport_timeout_returns_503_and_refresh_guidance_after_save(site) -> None:
+    import nats.errors
+    from assistant_gateway.application.knowledge_pages import (
+        BLOB_CHANGE_REPLY_READ_FAILED_TEXT,
+        BLOB_WRITE_FAILED_TEXT,
+    )
+
+    long_body = "x" * (INLINE_TEXT_MAX_CHARS + 100)
+
+    async def _timeout_put(*_args, **_kwargs):
+        raise nats.errors.TimeoutError()
+
+    site.blobs.put = _timeout_put  # type: ignore[method-assign]
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        headers = await _signed_in(client)
+        write_resp = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/save",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "base_revision": 2, "body": long_body},
+        )
+        write_payload = await write_resp.json()
+
+        # Post-save reply blob fetch timeout returns 503 telling the user the change was saved and to refresh.
+        blob_ref = {"sha256": sha256_unpadded(b"saved"), "size": 5, "media_type": "text/plain"}
+        site.team.reply = {
+            "outcome": "ok",
+            "page": {**_page({"kind": "person", "person": REFERENCES["user_alpha"]}), "content": {"type": "blob", "ref": blob_ref}},
+        }
+
+        async def _timeout_get(*_args, **_kwargs):
+            raise nats.errors.TimeoutError()
+
+        site.blobs.get = _timeout_get  # type: ignore[method-assign]
+        note_resp = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/notes",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "note": "Short note"},
+        )
+        note_payload = await note_resp.json()
+
+    assert write_resp.status == 503
+    assert write_payload["error"] == {"code": "runtime_error", "message": BLOB_WRITE_FAILED_TEXT}
+    assert note_resp.status == 503
+    assert note_payload["error"] == {"code": "runtime_error", "message": BLOB_CHANGE_REPLY_READ_FAILED_TEXT}

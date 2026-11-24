@@ -461,6 +461,7 @@ async def _spill_largest_inline_texts(
     max_bytes: int,
     inline_limit: int,
     cache: dict[tuple[str, bytes], dict[str, Any]],
+    measure: Callable[[dict[str, Any]], int] = encoded_size,
 ) -> None:
     slots = _collect_inline_text_slots(reply)
     ranked = sorted(
@@ -469,7 +470,7 @@ async def _spill_largest_inline_texts(
         reverse=True,
     )
     for container, key in ranked:
-        if encoded_size(reply) <= max_bytes:
+        if measure(reply) <= max_bytes:
             return
         text = container[key]["text"]
         # Spilling very tiny strings cannot save bytes over a ~150-byte blob_ref.
@@ -553,6 +554,60 @@ def fit_list_rows(
     return _paged_reply(fitted, key, offset, int(reply["total"]))
 
 
+async def _fit_pages_leading_snippet(
+    fitted: dict[str, Any],
+    blobs: Optional[BlobStore],
+    owner: BlobOwner,
+    *,
+    offset: int,
+    max_bytes: int,
+    inline_limit: int,
+    cache: dict[tuple[str, bytes], dict[str, Any]],
+) -> None:
+    pages = fitted.get("pages") or []
+    if not pages or not isinstance(pages[0], dict):
+        return
+    probe = {**fitted, "pages": pages[:1], "next_offset": offset + len(pages)}
+    if encoded_size(probe) <= max_bytes:
+        return
+    snippet = pages[0].get("snippet")
+    if _is_inline_text(snippet) and len(snippet["text"].encode("utf-8")) > 160:
+        pages[0]["snippet"] = await encode_text_content(
+            snippet["text"], blobs, owner, inline_limit=inline_limit, force_blob=True, cache=cache
+        )
+
+
+async def _fit_revisions_page(
+    fitted: dict[str, Any],
+    blobs: Optional[BlobStore],
+    owner: BlobOwner,
+    *,
+    offset: int,
+    max_bytes: int,
+    inline_limit: int,
+    cache: dict[tuple[str, bytes], dict[str, Any]],
+) -> None:
+    revs = fitted.get("revisions") or []
+    next_offset = offset + len(revs)
+
+    def _rev_probe_size(doc: dict[str, Any]) -> int:
+        return encoded_size({**doc, "revisions": revs[:1], "next_offset": next_offset})
+
+    if _rev_probe_size(fitted) > max_bytes:
+        await _spill_largest_inline_texts(
+            fitted,
+            blobs,
+            owner,
+            max_bytes=max_bytes,
+            inline_limit=inline_limit,
+            cache=cache,
+            measure=_rev_probe_size,
+        )
+    page = fitted.get("page")
+    if isinstance(page, dict) and page.get("type") == "inline" and _rev_probe_size(fitted) > max_bytes:
+        fitted["page"] = await _encode_page_blob(page, blobs, owner, cache=cache)
+
+
 async def fit_reply_body(
     reply: Mapping[str, Any],
     blobs: Optional[BlobStore],
@@ -573,22 +628,23 @@ async def fit_reply_body(
 
     await _spill_over_inline_limit(fitted, blobs, owner, inline_limit=inline_limit, cache=cache)
 
-    if encoded_size(fitted) > max_bytes:
-        await _spill_largest_inline_texts(
-            fitted, blobs, owner, max_bytes=max_bytes, inline_limit=inline_limit, cache=cache
-        )
-
     if list_key is None:
+        if encoded_size(fitted) > max_bytes:
+            await _spill_largest_inline_texts(
+                fitted, blobs, owner, max_bytes=max_bytes, inline_limit=inline_limit, cache=cache
+            )
         if encoded_size(fitted) > max_bytes:
             await _spill_oversized_pages(fitted, blobs, owner, max_bytes=max_bytes, cache=cache)
         return fitted
 
-    if list_key == "revisions":
-        revs = fitted.get("revisions") or []
-        probe = {**fitted, "revisions": revs[:1], "next_offset": offset + len(revs)}
-        page = fitted.get("page")
-        if isinstance(page, dict) and page.get("type") == "inline" and encoded_size(probe) > max_bytes:
-            fitted["page"] = await _encode_page_blob(page, blobs, owner, cache=cache)
+    if list_key == "pages":
+        await _fit_pages_leading_snippet(
+            fitted, blobs, owner, offset=offset, max_bytes=max_bytes, inline_limit=inline_limit, cache=cache
+        )
+    elif list_key == "revisions":
+        await _fit_revisions_page(
+            fitted, blobs, owner, offset=offset, max_bytes=max_bytes, inline_limit=inline_limit, cache=cache
+        )
 
     return fit_list_rows(fitted, list_key, offset=offset, max_bytes=max_bytes)
 

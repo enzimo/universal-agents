@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from pydantic import ValidationError
 
@@ -33,22 +33,23 @@ from assistant_gateway.application.knowledge_wire import (
     review_flags,
 )
 from assistant_gateway.application.route_context import GatewayRouteContextV1
-from assistant_gateway.application.team_commands import GatewayTeamCommandService
+from assistant_gateway.application.team_commands import (
+    GatewayTeamCommandService,
+    TeamCommandRefused,
+    TeamServicesNoAnswer,
+    TeamServicesUnavailable,
+)
 from custom_messages.contracts.control_v1 import (
+    KNOWLEDGE_READ_ACTIONS,
     KnowledgeCommandAction,
     KnowledgeCommandPayload,
     KnowledgeCommandResultPayload,
     KnowledgeReviewFlagPayload,
 )
-from custom_transport.protocol1.blobs import BlobError, BlobOwner, BlobStoreFull
-from custom_transport.protocol1.knowledge_blobs import (
-    BlobStore,
-    KnowledgeBlobUnavailable,
-    fit_request_body,
-    reply_has_blobs,
-    request_needs_blobs,
-    resolve_reply_body,
-)
+
+if TYPE_CHECKING:
+    from custom_transport.protocol1.blobs import BlobOwner
+    from custom_transport.protocol1.knowledge_blobs import BlobStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,6 +72,10 @@ BLOB_UNAVAILABLE_TEXT = (
 BLOB_READ_FAILED_TEXT = (
     "The full text of this Knowledge page could not be loaded from temporary storage. "
     "Try again; if it keeps failing, an administrator can check the gateway log."
+)
+BLOB_CHANGE_REPLY_READ_FAILED_TEXT = (
+    "Your change was saved, but the updated Knowledge text could not be loaded from temporary storage. "
+    "Refresh the page to see it; if it keeps failing, an administrator can check the gateway log."
 )
 BLOB_WRITE_FAILED_TEXT = (
     "This long Knowledge text could not be stored for sending, so nothing was changed. "
@@ -168,6 +173,10 @@ class GatewayKnowledgePages:
 
     async def _request(self, kind: str, body: dict[str, Any], person_id: str,
                        action: KnowledgeCommandAction) -> dict[str, Any]:
+        # Imported lazily so command-line gateways never load protocol 1 wire models at import time.
+        from custom_transport.protocol1.blobs import BlobOwner
+        from custom_transport.protocol1.knowledge_blobs import reply_has_blobs, request_needs_blobs
+
         wire_body = body
         request_id: str | None = None
         person_ref: str | None = None
@@ -191,8 +200,11 @@ class GatewayKnowledgePages:
         return reply
 
     async def _encode_request_blobs(
-        self, body: dict[str, Any], owner: BlobOwner, action: KnowledgeCommandAction
+        self, body: dict[str, Any], owner: "BlobOwner", action: KnowledgeCommandAction
     ) -> dict[str, Any]:
+        from custom_transport.protocol1.blobs import BlobError, BlobStoreFull
+        from custom_transport.protocol1.knowledge_blobs import KnowledgeBlobUnavailable, fit_request_body
+
         try:
             return await fit_request_body(body, self._blobs, owner)
         except PermissionError as error:
@@ -203,22 +215,41 @@ class GatewayKnowledgePages:
             raise GatewayKnowledgeRefused("runtime_error", BLOB_STORE_FULL_TEXT) from error
         except KnowledgeBlobUnavailable as error:
             raise GatewayKnowledgeRefused("runtime_error", BLOB_UNAVAILABLE_TEXT) from error
-        except BlobError as error:
+        except TeamServicesNoAnswer as error:
+            LOGGER.warning("Blob registration timed out before sending a Knowledge request. "
+                           "event=web_knowledge_blob_register_unanswered action=%s detail=%s", action.value, error)
+            raise GatewayKnowledgeRefused("runtime_error", BLOB_WRITE_FAILED_TEXT) from error
+        except TeamServicesUnavailable as error:
+            LOGGER.warning("Blob store or team services unavailable before sending a Knowledge request. "
+                           "event=web_knowledge_blob_unavailable action=%s detail=%s", action.value, error)
+            raise GatewayKnowledgeRefused("runtime_error", str(error)) from error
+        except (TeamCommandRefused, BlobError) as error:
             LOGGER.error("Could not store a Knowledge request blob. event=web_knowledge_blob_write_failed "
                          "action=%s error_type=%s detail=%s", action.value, type(error).__name__, error)
+            raise GatewayKnowledgeRefused("runtime_error", BLOB_WRITE_FAILED_TEXT) from error
+        except Exception as error:  # noqa: BLE001 - NATS/JetStream transport errors must not leak HTTP 500
+            LOGGER.error("Unexpected transport error while storing a Knowledge request blob. "
+                         "event=web_knowledge_blob_write_failed action=%s error_type=%s detail=%s",
+                         action.value, type(error).__name__, error, exc_info=error)
             raise GatewayKnowledgeRefused("runtime_error", BLOB_WRITE_FAILED_TEXT) from error
 
     async def _decode_reply_blobs(
         self, reply: dict[str, Any], action: KnowledgeCommandAction
     ) -> dict[str, Any]:
+        from custom_transport.protocol1.knowledge_blobs import KnowledgeBlobUnavailable, resolve_reply_body
+
+        is_read = action in KNOWLEDGE_READ_ACTIONS
         try:
             return await resolve_reply_body(reply, self._blobs)
         except KnowledgeBlobUnavailable as error:
-            raise GatewayKnowledgeRefused("runtime_error", BLOB_UNAVAILABLE_TEXT) from error
-        except BlobError as error:
+            text = BLOB_UNAVAILABLE_TEXT if is_read else BLOB_CHANGE_REPLY_READ_FAILED_TEXT
+            raise GatewayKnowledgeRefused("runtime_error", text) from error
+        except Exception as error:  # noqa: BLE001 - blob and NATS/transport errors must not leak HTTP 500
             LOGGER.error("Could not load a Knowledge reply blob. event=web_knowledge_blob_read_failed "
-                         "action=%s error_type=%s detail=%s", action.value, type(error).__name__, error)
-            raise GatewayKnowledgeRefused("runtime_error", BLOB_READ_FAILED_TEXT) from error
+                         "action=%s change=%s error_type=%s detail=%s",
+                         action.value, not is_read, type(error).__name__, error, exc_info=error)
+            text = BLOB_READ_FAILED_TEXT if is_read else BLOB_CHANGE_REPLY_READ_FAILED_TEXT
+            raise GatewayKnowledgeRefused("runtime_error", text) from error
 
     async def _whole_page(self, kind: str, body: dict[str, Any], person_id: str, action: KnowledgeCommandAction,
                           reply: dict[str, Any], rows: str) -> dict[str, Any]:
