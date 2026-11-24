@@ -137,6 +137,26 @@ class GatewayPersonRecords(Protocol):
         """Move the held folder back and mark the hold restored."""
 
 
+@dataclass(frozen=True)
+class PersonBlobDeletionResult:
+    """Outcome of removing a departed person's blob ownership and deleting unowned blobs."""
+
+    owners_removed: int = 0
+    blobs_deleted: int = 0
+    blobs_kept: int = 0
+    problem: str | None = None
+
+
+@runtime_checkable
+class GatewayPersonBlobs(Protocol):
+    """Tell the team services to remove a departed person's blob ownership and delete unowned blobs."""
+
+    async def delete_person_blobs(
+        self, person_id: str, *, actor_person_id: str
+    ) -> PersonBlobDeletionResult:
+        """Send ``blobs.delete_person`` for ``person_id``, authorized for ``actor_person_id``."""
+
+
 @runtime_checkable
 class GatewayPersonWork(Protocol):
     """Tell the manager a person's standing changed (``GatewayManagerCommandService``)."""
@@ -179,9 +199,11 @@ class GatewayPersonLifecycle:
         person_schedules: GatewayPersonSchedules | None,
         clock: GatewayClock,
         setup: GatewayPersonSetup | None = None,
+        blobs: GatewayPersonBlobs | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._setup = setup
+        self._blobs = blobs
         self._settings = settings
         self._identity = identity
         self._records = records
@@ -316,6 +338,7 @@ class GatewayPersonLifecycle:
         person_id = str(change.person_id)
         reply = _Reply([change.text])
         withdrawn = self._withdraw(person_id, reply)
+        await self._delete_blobs(actor, person_id, reply)
         outcome = await self._tell_manager(actor, person_id, PersonStanding.DISABLED, reply)
         reply.lines += _work_lines(outcome, removed=False, withdrawn=withdrawn)
         reply.lines.append(
@@ -331,6 +354,7 @@ class GatewayPersonLifecycle:
         held = self._hold(person_id, until, reply)
         withdrawn = self._withdraw(person_id, reply)
         forgotten = self._forget(actor, person_id, reply)
+        await self._delete_blobs(actor, person_id, reply)
         credentials = await self._delete_credentials(person_id, forgotten, reply)
         outcome = await self._tell_manager(actor, person_id, PersonStanding.REMOVED, reply)
         reply.lines += _work_lines(outcome, removed=True, withdrawn=withdrawn)
@@ -412,6 +436,29 @@ class GatewayPersonLifecycle:
             return ForgottenRecords()
         reply.problems.extend(forgotten.problems)
         return forgotten
+
+    async def _delete_blobs(
+        self, actor: ResolvedGatewayUser, person_id: str, reply: _Reply
+    ) -> PersonBlobDeletionResult | None:
+        if self._blobs is None:
+            return None
+        try:
+            result = await self._blobs.delete_person_blobs(
+                person_id, actor_person_id=actor.user.canonical_user_id
+            )
+        except Exception:  # noqa: BLE001 - reported in the reply; team_services upkeep retries
+            self._logger.exception(
+                "Could not ask the team services to delete a departed person's blobs. "
+                "event=person_blobs_delete_failed person_id=%s",
+                person_id,
+            )
+            reply.problems.append(
+                "Their temporary blob storage could not be cleared yet; the team services will retry automatically."
+            )
+            return None
+        if result.problem:
+            reply.problems.append(result.problem)
+        return result
 
     async def _delete_credentials(
         self, person_id: str, forgotten: ForgottenRecords, reply: _Reply
@@ -576,9 +623,11 @@ def _nothing_to_restore(name: str, person_id: str, held: HeldPersonData | None) 
 
 __all__ = [
     "ForgottenRecords",
+    "GatewayPersonBlobs",
     "GatewayPersonLifecycle",
     "GatewayPersonLifecycleSettings",
     "GatewayPersonRecords",
     "GatewayPersonWork",
     "HeldPersonData",
+    "PersonBlobDeletionResult",
 ]

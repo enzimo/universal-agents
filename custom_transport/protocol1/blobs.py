@@ -968,10 +968,23 @@ async def get_blob(
     return content
 
 
+def blob_store_handle(nc: Any) -> Any:
+    """Return the JetStream context used by ``UA1_BLOBS`` helpers on a connected NATS client."""
+
+    return nc.jetstream()
+
+
 async def purge_blob_chunks(js: Any, nuid: str) -> bool:
     """Purge ``$O.UA1_BLOBS.C.<nuid>`` directly without touching any metadata subject."""
 
     return bool(await js.purge_stream(STREAM_NAME, subject=blob_chunk_subject(nuid)))
+
+
+async def purge_blob_metadata_keep_last(js: Any, team: str, sha256: str) -> bool:
+    """Purge earlier metadata messages for ``{team}~{sha256}``, keeping the latest message."""
+
+    subject = blob_metadata_subject(blob_object_name(team, sha256))
+    return bool(await js.purge_stream(STREAM_NAME, subject=subject, keep=1))
 
 
 async def _publish_delete_marker(
@@ -1220,6 +1233,7 @@ __all__ = [
     "blob_chunk_subject",
     "blob_metadata_subject",
     "blob_object_name",
+    "blob_store_handle",
     "check_chunks_present",
     "decode_metadata_subject",
     "default_chunk_bytes",
@@ -1230,6 +1244,7 @@ __all__ = [
     "list_stream_subjects",
     "parse_blob_metadata",
     "purge_blob_chunks",
+    "purge_blob_metadata_keep_last",
     "put_blob",
     "sha256_padded_digest",
     "sha256_unpadded",

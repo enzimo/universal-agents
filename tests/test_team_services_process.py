@@ -77,8 +77,8 @@ async def test_losing_the_lock_ends_the_process_with_exit_code_1(monkeypatch, ca
         raise lost
 
     monkeypatch.setattr(process, "NatsTransportAdapter", _Adapter)
-    monkeypatch.setattr(process, "MessageHost", lambda *_args, **_kwargs: SimpleNamespace(clock=None))
-    monkeypatch.setattr(process, "team_operations", lambda _config, _clock: [])
+    monkeypatch.setattr(process, "MessageHost", lambda *_args, **_kwargs: SimpleNamespace(clock=None, nc=None))
+    monkeypatch.setattr(process, "team_operations", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(process, "serve_team", serve_team)
     transport = SimpleNamespace(nats_servers=["nats://127.0.0.1:4222"], nats_url=None, subject_prefix="ua",
                                 nats_user=None, nats_password=None, credentials_file=None,
@@ -333,3 +333,134 @@ async def test_f9_lock_lost_stops_partition_maintenance_and_upkeep_before_drain(
     allow_drain_finish.set()
     with pytest.raises(LockLost):
         await asyncio.wait_for(served, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_c01_family_prepare_runs_before_serving_svc_team(monkeypatch) -> None:
+    """C01: OperationFamily.prepare (e.g. retrying pending blob deletes) finishes before live.serve subscribes."""
+
+    events: list[str] = []
+    serving = asyncio.Event()
+
+    async def prepare_step() -> None:
+        events.append("prepare")
+
+    class _OrderedLive(_Live):
+        async def serve(self, subject: str, _receiver: Any, _handler: Any, *, side_by_side_kinds: frozenset[str]) -> Any:
+            events.append(f"serve:{subject}")
+            return await super().serve(subject, _receiver, _handler, side_by_side_kinds=side_by_side_kinds)
+
+    answered = asyncio.Event()
+    answered.set()
+    live = _OrderedLive(events, answered)
+
+    async def keep_up(stop_event: asyncio.Event, *, drained: Any = None) -> None:
+        await stop_event.wait()
+
+    host = SimpleNamespace(
+        start=AsyncMock(return_value=live),
+        nc=SimpleNamespace(flush=AsyncMock()),
+        clock=lambda: NOW,
+        logger=logging.getLogger("test"),
+        take_newest_certificate=AsyncMock(),
+        refresh_trust=AsyncMock(),
+        records=object(),
+        publish_liveness=AsyncMock(),
+        layout=None,
+        keep_up=keep_up,
+    )
+
+    class _FakePartitions:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def ensure_unowned_assigned(self) -> None:
+            return None
+
+        async def maintain(self) -> None:
+            return None
+
+        async def run(self, stop_event: asyncio.Event) -> None:
+            await stop_event.wait()
+
+    monkeypatch.setattr(process, "SingleInstanceLock", SimpleNamespace(on_connection=lambda *_args: _Lock(events)))
+    monkeypatch.setattr(process, "SessionService", lambda *_args: _sessions())
+    monkeypatch.setattr(process, "PartitionService", _FakePartitions)
+    monkeypatch.setattr(process, "mark_serving", lambda *_args: serving.set())
+
+    stop = asyncio.Event()
+    family = OperationFamily({"blobs.register": _answer}, prepare=prepare_step)
+    served = asyncio.create_task(process.serve_team(host, "team_one", stop, [family]))  # type: ignore[arg-type]
+    await asyncio.wait_for(serving.wait(), timeout=5)
+    stop.set()
+    await asyncio.wait_for(served, timeout=5)
+    assert events.index("prepare") < events.index("serve:svc.team")
+
+
+@pytest.mark.asyncio
+async def test_c01_lock_lost_during_family_prepare_never_subscribes(monkeypatch) -> None:
+    """C01: Losing the single-instance lock during family prepare cancels prepare and never subscribes svc.team."""
+
+    events: list[str] = []
+    prepare_started = asyncio.Event()
+    trigger_loss = asyncio.Event()
+
+    async def slow_prepare() -> None:
+        events.append("prepare_started")
+        prepare_started.set()
+        await asyncio.sleep(60)
+
+    class _LosingLock:
+        instance = "inst-1"
+
+        async def acquire(self, _stop: asyncio.Event) -> bool:
+            return True
+
+        async def keep(self, _stop: asyncio.Event) -> None:
+            await trigger_loss.wait()
+            raise LockLost("lost during prepare")
+
+        async def release(self) -> None:
+            events.append("lock_released")
+
+    class _NeverServeLive:
+        identity = SimpleNamespace(installation="install_one")
+        trust = SimpleNamespace()
+
+        async def serve(self, *_args: Any, **_kwargs: Any) -> Any:
+            events.append("served_unexpectedly")
+            raise AssertionError("live.serve must not be called after lock loss during prepare")
+
+    host = SimpleNamespace(
+        start=AsyncMock(return_value=_NeverServeLive()),
+        nc=SimpleNamespace(flush=AsyncMock()),
+        clock=lambda: NOW,
+        logger=logging.getLogger("test"),
+        take_newest_certificate=AsyncMock(),
+        refresh_trust=AsyncMock(),
+        records=object(),
+        publish_liveness=AsyncMock(),
+        layout=None,
+        keep_up=AsyncMock(),
+    )
+
+    class _FakePartitions:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def ensure_unowned_assigned(self) -> None:
+            return None
+
+    monkeypatch.setattr(process, "SingleInstanceLock", SimpleNamespace(on_connection=lambda *_args: _LosingLock()))
+    monkeypatch.setattr(process, "SessionService", lambda *_args: _sessions())
+    monkeypatch.setattr(process, "PartitionService", _FakePartitions)
+
+    stop = asyncio.Event()
+    family = OperationFamily({"blobs.register": _answer}, prepare=slow_prepare)
+    task = asyncio.create_task(process.serve_team(host, "team_one", stop, [family]))  # type: ignore[arg-type]
+    await asyncio.wait_for(prepare_started.wait(), timeout=5)
+    trigger_loss.set()
+    with pytest.raises(LockLost):
+        await asyncio.wait_for(task, timeout=5)
+    assert "served_unexpectedly" not in events
+    assert events == ["prepare_started", "lock_released"]

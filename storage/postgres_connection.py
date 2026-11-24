@@ -26,6 +26,9 @@ PINNED_MEMORY_WRITE_LOCK_KEY = 7_302_211_554
 # (storage.delegated_task_repository). 7_302_211_553 stays unused: the change
 # ledger's schema setup once used it.
 DELEGATED_TASKS_WRITE_LOCK_KEY = 7_302_211_555
+# Protocol 1 UA1_BLOBS ownership index and pending-delete queue
+# (storage.blob_index_repository).
+BLOB_INDEX_WRITE_LOCK_KEY = 7_302_211_556
 
 
 def ensure_storage_parent_dir(path: Optional[str]) -> None:
