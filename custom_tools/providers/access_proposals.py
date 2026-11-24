@@ -1,21 +1,23 @@
 """``propose_access_change`` and ``get_proposal_status``: TeamLead's access proposals (Phase 6).
 
-When a service is missing from the tool catalog, or access is needed that
-nobody may hand on, TeamLead proposes the whole change at once: new web API
-tools, MCP servers to install, access for agent types, restrictions, data
-folders to register, account links to set up and grants to remove. Trusted
-code checks it and writes the review card (``access_control.proposals``); an
-administrator approves it once in the Inbox or in chat, and the gateway
-applies everything together. The task pauses while it waits, like
-``request_access``, and this tool then returns what was applied. When the
-proposal asks for account links, the approver chooses the credentials in
-forms right after approving, and the task stays paused until those forms end
+When a service is missing from the tool catalog, a proposal-written web API or
+installed CLI tool needs changing or removing, or access is needed that nobody
+may hand on, TeamLead proposes the whole change at once: new web API or
+command-line tools, changes to proposal-written web API tools
+(``tool_changes``), removals of proposal-written web API or command-line tools
+(``tool_removals``), MCP servers to install, access for agent types,
+restrictions, data folders to register, account or gate links to set up and
+grants to remove. Trusted code checks it and writes the review card
+(``access_control.proposals``); an administrator approves it once in the Inbox
+or in chat, and the gateway applies everything together. The task pauses while
+it waits, like ``request_access``, and this tool then returns what was applied.
+When the proposal asks for account links, the approver chooses the credentials
+in forms right after approving, and the task stays paused until those forms end
 (``assistant_gateway.access_inbox``); the result then says which links exist.
-With
-authorization off there are no grants: the person agrees in conversation
-(``confirmed=true``) and the new tools, MCP servers and data folders are added
-directly; an installed MCP server's tools load on the next model call of each
-agent it is meant for (``custom_agents.tool_sync``).
+With authorization off there are no grants: the person agrees in conversation
+(``confirmed=true``) and the new tools, tool changes, tool removals, MCP servers
+and data folders are applied directly; an installed MCP server's tools load on
+the next model call of each agent it is meant for (``custom_agents.tool_sync``).
 
 ``submit_and_wait`` and ``apply_by_agreement`` are shared with
 ``mcp_connections(action="propose")`` (``custom_tools.providers.capabilities``), which

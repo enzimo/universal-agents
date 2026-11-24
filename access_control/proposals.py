@@ -50,6 +50,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from access_catalog.catalog import (
@@ -116,7 +117,9 @@ from custom_messages.contracts.access_v2 import (
     LinkPurpose,
     OwnerScope,
     ProposedAccountLinkV1,
+    ProposedCliToolV1,
     ProposedGrantV1,
+    ProposedHttpToolV1,
     ReviewItemV1,
     SubjectKind,
     SubjectRefV1,
@@ -412,7 +415,7 @@ def _target_name(catalog: ToolCatalog, target: TargetRefV1) -> str:
     return f"{name} ({operation})" if operation else name
 
 
-def _tool_words(tool) -> str:
+def _tool_words(tool: ProposedHttpToolV1) -> str:
     routes = "; ".join(
         f"{route.name} ({route.method} {route.path}) needs {LEVEL_WORDS[route.level]}" for route in tool.routes
     )
@@ -428,7 +431,7 @@ def _tool_words(tool) -> str:
     return words
 
 
-def _setup_step_rows(index: int | str, tool) -> list[ReviewItemV1]:
+def _setup_step_rows(index: int | str, tool: ProposedHttpToolV1 | ProposedCliToolV1) -> list[ReviewItemV1]:
     """One row per proposed setup step, in the exact words people will be shown."""
 
     prefix = index if isinstance(index, str) else f"tool-{index}"
@@ -932,7 +935,7 @@ class ProposalApplier:
     # The MCP registry, for proposals that install MCP servers (none: refused).
     mcp_store: Callable[[], MCPConnectionStore] | None = None
     # Account links to open for the approver after the decision, by request id.
-    account_links: dict[str, list] = field(default_factory=dict)
+    account_links: dict[str, list[ProposedAccountLinkV1]] = field(default_factory=dict)
     # How a proposed CLI's program is downloaded (https only; tests stand in).
     download: Downloader = fetch_https
 
@@ -1005,7 +1008,7 @@ class ProposalApplier:
             "tool_removals=%s mcp_servers=%s grants=%s folders=%s revoked=%s",
             request.request_id,
             reviewer.person_id,
-            ",".join(tool.tool_id for tool in (*proposal.tools, *proposal.clis)),
+            ",".join([*(tool.tool_id for tool in proposal.tools), *(cli.tool_id for cli in proposal.clis)]),
             ",".join(changed.tool_id for changed in proposal.tool_changes),
             ",".join(removed.tool_id for removed in proposal.tool_removals),
             ",".join(item.connection_id for item in proposal.mcp_servers),
@@ -1125,7 +1128,11 @@ class ProposalApplier:
                     before_remove=prepare_removal,
                     publish=publish_effect,
                 )
-            for tool in (*compiled.proposal.tools, *compiled.proposal.clis):
+            new_tools: tuple[ProposedHttpToolV1 | ProposedCliToolV1, ...] = (
+                *compiled.proposal.tools,
+                *compiled.proposal.clis,
+            )
+            for tool in new_tools:
                 write_instance_tool(self.instance_root, tool, before_write=prepare_tool)
             for changed in compiled.proposal.tool_changes:
                 assert changed.previous_definition_digest is not None
@@ -1409,7 +1416,7 @@ class ProposalApplier:
         reviewer: PersonPrincipal,
         finished: AccessRequestV1,
         compiled: CompiledProposal,
-        now,
+        now: datetime,
     ) -> list[GrantV1]:
         """Agent grants (kept rows as proposed, the rest for the task), the person's own, and blocks."""
 
@@ -1426,7 +1433,9 @@ class ProposalApplier:
         return grants
 
     @staticmethod
-    def _lifetime(item: ProposedGrantV1, keep: bool, finished: AccessRequestV1, now):
+    def _lifetime(
+        item: ProposedGrantV1, keep: bool, finished: AccessRequestV1, now: datetime
+    ) -> tuple[GrantLifetime, datetime | None]:
         if item.lifetime != "until_revoked" or not keep:
             return GrantLifetime.TASK, None
         if finished.keep_hours:
@@ -1441,7 +1450,9 @@ class ProposalApplier:
             return f"You cannot restrict {grant.target.id}: it is beyond your own authority."
         return requests.service.grant_refusal(reviewer, grant)
 
-    def _base(self, request: AccessRequestV1, reviewer: PersonPrincipal, now, **fields) -> GrantV1:
+    def _base(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, now: datetime, **fields: Any
+    ) -> GrantV1:
         title = request.change.title if request.change else "access proposal"
         task_bound = fields.get("lifetime") is GrantLifetime.TASK
         return GrantV1(
@@ -1456,7 +1467,15 @@ class ProposalApplier:
             **fields,
         )
 
-    def _grant(self, request, reviewer, now, item: ProposedGrantV1, lifetime: GrantLifetime, expires=None) -> GrantV1:
+    def _grant(
+        self,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        now: datetime,
+        item: ProposedGrantV1,
+        lifetime: GrantLifetime,
+        expires: datetime | None = None,
+    ) -> GrantV1:
         return self._base(
             request,
             reviewer,
@@ -1470,7 +1489,14 @@ class ProposalApplier:
             for_person_id=request.person_id,
         )
 
-    def _person_grant(self, request, reviewer, now, target: TargetRefV1, level: AccessLevel) -> GrantV1:
+    def _person_grant(
+        self,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        now: datetime,
+        target: TargetRefV1,
+        level: AccessLevel,
+    ) -> GrantV1:
         return self._base(
             request,
             reviewer,
@@ -1481,7 +1507,15 @@ class ProposalApplier:
             lifetime=GrantLifetime.UNTIL_REVOKED,
         )
 
-    def _block(self, request, reviewer, now, agent_type: str, target: TargetRefV1, reason: str) -> GrantV1:
+    def _block(
+        self,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        now: datetime,
+        agent_type: str,
+        target: TargetRefV1,
+        reason: str,
+    ) -> GrantV1:
         return self._base(
             request,
             reviewer,
@@ -1493,7 +1527,9 @@ class ProposalApplier:
             lifetime=GrantLifetime.UNTIL_REVOKED,
         ).model_copy(update={"reason": reason[:2000]})
 
-    def _folders(self, reviewer: PersonPrincipal, now, proposal: AccessProposalV1) -> list[DataFolderRecordV1]:
+    def _folders(
+        self, reviewer: PersonPrincipal, now: datetime, proposal: AccessProposalV1
+    ) -> list[DataFolderRecordV1]:
         registry = self.data_folders()
         records = []
         for folder in proposal.data_folders:

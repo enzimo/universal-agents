@@ -2052,7 +2052,7 @@ class AccessRepository:
                 (notice.notice_id, notice.team_id, notice.model_dump_json(), _utc(notice.created_at_utc)),
             )
             conn.commit()
-        return cursor.rowcount > 0
+        return bool(cursor.rowcount > 0)
 
     def _visible_notices(
         self, conn: Any, team_id: str, *, person_id: str, roles: tuple[str, ...]

@@ -425,6 +425,19 @@ once. A proposal can contain:
   or path moves an active restriction off the endpoint it was written to stop
   (**Blocked route changes**), and name any existing account or gate links
   that must be linked again with `/link`;
+- removals of existing proposal-written web API (`http:*`) or command-line
+  (`cli:*`) tools (`tool_removals`, files at
+  `control/access/tools/proposed-*.yaml`). Built-in tools, operator
+  hand-written catalog files, and MCP servers (`mcp:*`, managed through
+  `mcp_connections`) are refused, and a proposal cannot combine removing a tool
+  with adding, changing, granting, blocking, or linking that same tool. On the
+  review card, these rows appear under their own **Tool removals** section
+  (separate from **New tools** and **Tool changes**), naming each tool in
+  Universal Agents' own words (hosts for web API tools, commands summary for
+  command-line tools, and noting explicitly that workspace files under
+  `team/tools/<name>/` are not deleted for a command-line tool) along with
+  every active grant, active whole-tool or single-operation block, and active
+  account or gate link that approval will revoke;
 - access for TeamLead to tools, tool sets or folders (a level on a whole tool,
   never one operation), optionally with the right to hand it on to workers'
   tasks; a worker type may get access only for this task, since workers keep
@@ -436,9 +449,10 @@ once. A proposal can contain:
 - grants to remove.
 
 Before anyone sees it, Universal Agents checks every item against the tool
-catalog as it would be with the new and changed tools, and writes each row of
-the review card in its own words (grouping tool-change rows under **Tool
-changes**); the agent's description is never used for the effect. Items that
+catalog as it would be with the new, changed, and removed tools, and writes
+each row of the review card in its own words (grouping tool-change rows under
+**Tool changes** and tool-removal rows under **Tool removals**); the agent's
+description is never used for the effect. Items that
 widen access or affect existing restrictions carry a warning: **New host**,
 **Credentials to new host**, **Private address** (a host on a local or private
 network), **Block widens to whole tool** (`block_widened`), **Blocked route
@@ -453,11 +467,14 @@ where each row that gives access has its own **Keep for later tasks** box
 (unticked rows last for the task), or with **Approve all as proposed** in chat,
 which keeps every access row as proposed. The gateway applies an approved
 proposal at that moment, all together. It checks that the stored proposal is
-exactly the one reviewed, that any tool file being changed still matches what
-was reviewed, and that the administrator may give each item, adds or replaces
-the tool files, and stores the access, blocks, data folders and removals in one
-step. If any part fails, new files are removed, replaced files are restored,
-nothing is applied, and the reason is shown. TeamLead's waiting task then
+exactly the one reviewed, that any tool file being changed or removed still
+matches what was reviewed, and that the administrator may give or revoke each
+item, adds, replaces or removes the tool files, and stores the access, blocks,
+data folders and revocations (including revoking every active grant,
+whole-tool or single-operation block, and account or gate link for removed
+tools, and clearing their saved setup state) in one step. If any part fails,
+new files are removed, replaced and removed files are restored, nothing is
+applied, and the reason is shown. TeamLead's waiting task then
 continues and learns what was applied.
 
 When the proposal asked for an account link or a team gate link, the
@@ -489,7 +506,8 @@ credential); TeamLead can then offer the form in the requester's chat, or
 Proposals are decided in the gateway (the Inbox or chat), not with
 `assistant_cli access decide`, because the gateway applies them. With
 authorization off there are no grants: TeamLead explains the new tools, tool
-changes (with Universal Agents' list of differences) and data folders, and
+changes (with Universal Agents' list of differences), tool removals (with
+Universal Agents' list of affected account or gate links) and data folders, and
 applies them after you agree in the conversation.
 
 ## Internet access
@@ -1187,9 +1205,10 @@ from returned content and error text. When a web API request sets no
 reduced Linux User-Agent used by Helium); a `User-Agent` header set on the
 request keeps winning. Requests carry no credentials and no `${...}`
 placeholders. Redirects are returned to the agent, not followed, and the next
-request is checked again. TeamLead can propose changes to a proposal-written
-file (`proposed-*.yaml`) through `propose_access_change` (`tool_changes`),
-while operator-written files stay operator-edited. The broker reads these files
+request is checked again. TeamLead can propose changes to (`tool_changes`) or
+removal of (`tool_removals`) a proposal-written file (`proposed-*.yaml`)
+through `propose_access_change`, while operator-written files stay
+operator-edited. The broker reads these files
 again when they change. If a changed file is invalid, it keeps the previous
 definitions and logs `tool_catalog_reload_failed`; an invalid file at startup
 stops the broker.
@@ -1210,7 +1229,11 @@ item), and nothing about it is code:
   pins that digest; it can also name the https download and version, which the
   gateway fetches into that path when the proposal is approved (a download
   that does not match the digest applies nothing). Updating the CLI is a new
-  proposal with the new digest.
+  proposal with the new digest. TeamLead can also propose removing a
+  proposal-written CLI catalog entry (`control/access/tools/proposed-*.yaml`)
+  through `propose_access_change` (`tool_removals`), which revokes its active
+  grants, blocks, and account links while leaving workspace files under
+  `team/tools/<name>/` untouched.
 - **Every run** copies the program into a private folder without following
   links, checks the copy's SHA-256 against the approved one, and runs only
   that copy. A program changed after approval is refused ("the program at

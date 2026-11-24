@@ -97,11 +97,17 @@ operator).
   tools (`max_tools_per_request` per model, 128 by default). Loading never
   gives access.
 - `propose_access_change` is for what nobody can hand on: a new web API tool,
-  a new command-line tool (CLI), a new MCP server, a data folder, several
-  grants and blocks together, or an account link. An administrator reviews one
-  card listing every item; it is applied all together, then any credential
-  forms open for the approver, and the proposal's task resumes once those forms
-  end, told which links exist.
+  a new command-line tool (CLI), a change to a proposal-written web API tool
+  (`tool_changes`), removing a proposal-written web API or CLI tool
+  (`tool_removals`), a new MCP server, a data folder, several grants and blocks
+  together, or an account link. An administrator reviews one card listing every
+  item; for `tool_removals`, the card shows every active grant, active block,
+  and active account or gate link that approval will revoke (and notes that
+  `team/tools/<name>/` workspace files for a CLI are not deleted; built-in
+  tools, operator hand-written files, and MCP servers cannot be removed here).
+  The proposal is applied all together, then any credential forms open for the
+  approver, and the proposal's task resumes once those forms end, told which
+  links exist.
 - **Adding a service**: prefer, in order, an existing catalog tool, a CLI the
   broker runs (one compact `secure_cli` provider, a level per command, the
   token hidden), a web API tool for simple REST with a key or token, and an MCP
