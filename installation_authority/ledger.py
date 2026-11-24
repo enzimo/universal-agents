@@ -54,10 +54,12 @@ class StoredRenewal:
     certificate: Mapping[str, Any]
     body_sha256: str
     stored_at: datetime
+    partitions: tuple[int, ...] = ()
+    connection: Optional[Mapping[str, Any]] = None
 
 
 class IssueLedger:
-    """One installation authority's record of the epochs, renewal answers and revocations it signed."""
+    """One installation authority's record of the epochs, renewal answers, NATS key revocations, and revocations it signed."""
 
     def __init__(self, path: Path, installation: str, *, logger: logging.Logger = _LOGGER) -> None:
         self.path = path
@@ -66,6 +68,12 @@ class IssueLedger:
         self._epochs: dict[str, int] = {}
         self._renewals: dict[str, StoredRenewal] = {}
         self._revocations: Optional[dict[str, Any]] = None
+        # Permanent ban of revoked NATS user keys (CR-1/S1/C09): nats_public_key -> revoke_until (unix seconds).
+        self._revoked_nats_keys: dict[str, int] = {}
+        # NATS user keys whose revocation was confirmed on the server (C01/C08): nats_public_key -> revoke_until.
+        self._confirmed_nats_revocations: dict[str, int] = {}
+        # Permanent record of bootstrap bundle NATS user keys (S1): never accepted as a host's own key.
+        self._bootstrap_nats_keys: set[str] = set()
 
     @classmethod
     def open(cls, folder: Path, installation: str, *, logger: logging.Logger = _LOGGER) -> "IssueLedger":
@@ -90,13 +98,25 @@ class IssueLedger:
                 return ledger
             ledger._epochs = {str(runtime): int(epoch) for runtime, epoch in document["epochs"].items()}
             ledger._renewals = {
-                str(key): StoredRenewal(dict(held["certificate"]), str(held["body_sha256"]),
-                                        parse_timestamp(str(held["stored_at"])))
+                str(key): StoredRenewal(
+                    dict(held["certificate"]),
+                    str(held["body_sha256"]),
+                    parse_timestamp(str(held["stored_at"])),
+                    partitions=tuple(int(p) for p in held.get("partitions", ())),
+                    connection=dict(held["connection"]) if isinstance(held.get("connection"), dict) else None,
+                )
                 for key, held in document["renewals"].items()}
             revocations = document.get("revocations")
             ledger._revocations = dict(revocations) if isinstance(revocations, dict) else None
+            raw_revoked_nats = document.get("revoked_nats_keys") or {}
+            ledger._revoked_nats_keys = {str(k): int(v) for k, v in raw_revoked_nats.items()}
+            raw_confirmed = document.get("confirmed_nats_revocations") or {}
+            ledger._confirmed_nats_revocations = {str(k): int(v) for k, v in raw_confirmed.items()}
+            raw_bootstrap = document.get("bootstrap_nats_keys") or []
+            ledger._bootstrap_nats_keys = {str(k) for k in raw_bootstrap}
         except (KeyError, TypeError, ValueError, AttributeError) as error:
             ledger._epochs, ledger._renewals, ledger._revocations = {}, {}, None
+            ledger._revoked_nats_keys, ledger._confirmed_nats_revocations, ledger._bootstrap_nats_keys = {}, {}, set()
             ledger._set_aside(error)
         return ledger
 
@@ -131,8 +151,23 @@ class IssueLedger:
         held = self._renewals.get(retry_key)
         return held if held is not None and now - held.stored_at < OUTCOME_RETENTION else None
 
-    def store_renewal(self, retry_key: str, certificate: Mapping[str, Any], body_sha256: str, now: datetime) -> None:
-        self._renewals[retry_key] = StoredRenewal(dict(certificate), body_sha256, now)
+    def store_renewal(
+        self,
+        retry_key: str,
+        certificate: Mapping[str, Any],
+        body_sha256: str,
+        now: datetime,
+        *,
+        partitions: tuple[int, ...] = (),
+        connection: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        self._renewals[retry_key] = StoredRenewal(
+            dict(certificate),
+            body_sha256,
+            now,
+            partitions=tuple(sorted(set(partitions))),
+            connection=dict(connection) if connection is not None else None,
+        )
 
     # -- revocations ------------------------------------------------------------------------------
 
@@ -145,19 +180,71 @@ class IssueLedger:
     def keep_revocations(self, record: Mapping[str, Any]) -> None:
         self._revocations = dict(record)
 
+    # -- NATS key lifecycle (CR-1, S1, C01, C09) --------------------------------------------------
+
+    @property
+    def revoked_nats_keys(self) -> dict[str, int]:
+        """All revoked NATS user keys mapped to their ``revoke_until`` unix timestamp (permanent ban)."""
+
+        return dict(self._revoked_nats_keys)
+
+    def is_nats_key_revoked(self, nats_public_key: str) -> bool:
+        return nats_public_key in self._revoked_nats_keys
+
+    def record_revoked_nats_key(self, nats_public_key: str, revoke_until: int) -> None:
+        self._revoked_nats_keys[nats_public_key] = max(
+            self._revoked_nats_keys.get(nats_public_key, 0), int(revoke_until)
+        )
+
+    def is_nats_revocation_confirmed(self, nats_public_key: str) -> bool:
+        return nats_public_key in self._confirmed_nats_revocations
+
+    def record_confirmed_nats_revocation(self, nats_public_key: str, revoke_until: int) -> None:
+        ts = int(revoke_until)
+        self._revoked_nats_keys[nats_public_key] = max(self._revoked_nats_keys.get(nats_public_key, 0), ts)
+        self._confirmed_nats_revocations[nats_public_key] = max(
+            self._confirmed_nats_revocations.get(nats_public_key, 0), ts
+        )
+
+    @property
+    def bootstrap_nats_keys(self) -> frozenset[str]:
+        return frozenset(self._bootstrap_nats_keys)
+
+    def is_bootstrap_nats_key(self, nats_public_key: str) -> bool:
+        return nats_public_key in self._bootstrap_nats_keys
+
+    def record_bootstrap_nats_key(self, nats_public_key: str) -> None:
+        self._bootstrap_nats_keys.add(nats_public_key)
+
     # -- saving -----------------------------------------------------------------------------------
 
     def save(self, now: datetime) -> None:
         """Write the ledger atomically and durably, dropping renewal answers older than the retention."""
 
         self._renewals = {key: held for key, held in self._renewals.items() if now - held.stored_at < OUTCOME_RETENTION}
-        document = {
+        renewals_doc: dict[str, dict[str, Any]] = {}
+        for key, held in sorted(self._renewals.items()):
+            entry: dict[str, Any] = {
+                "certificate": held.certificate,
+                "body_sha256": held.body_sha256,
+                "stored_at": format_timestamp(held.stored_at),
+            }
+            if held.partitions:
+                entry["partitions"] = list(held.partitions)
+            if held.connection is not None:
+                entry["connection"] = dict(held.connection)
+            renewals_doc[key] = entry
+        document: dict[str, Any] = {
             "version": _VERSION,
             "installation": self.installation,
             "epochs": dict(sorted(self._epochs.items())),
-            "renewals": {key: {"certificate": held.certificate, "body_sha256": held.body_sha256,
-                               "stored_at": format_timestamp(held.stored_at)}
-                         for key, held in sorted(self._renewals.items())},
+            "renewals": renewals_doc,
             "revocations": self._revocations,
         }
+        if self._revoked_nats_keys:
+            document["revoked_nats_keys"] = dict(sorted(self._revoked_nats_keys.items()))
+        if self._confirmed_nats_revocations:
+            document["confirmed_nats_revocations"] = dict(sorted(self._confirmed_nats_revocations.items()))
+        if self._bootstrap_nats_keys:
+            document["bootstrap_nats_keys"] = sorted(self._bootstrap_nats_keys)
         write_private_file(self.path, json.dumps(document, sort_keys=True).encode())

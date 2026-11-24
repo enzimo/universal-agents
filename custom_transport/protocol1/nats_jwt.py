@@ -187,8 +187,11 @@ def user_claims(
         claims["issuer_account"] = issuer_account
     if permissions is None:
         return claims
-    claims["pub"] = {"allow": list(permissions["publish"])}
-    claims["sub"] = {"allow": list(permissions["subscribe"])}
+    # NATS interprets an empty allow list as unrestricted access; emit an explicit deny-all instead.
+    pub_allow = list(permissions["publish"])
+    sub_allow = list(permissions["subscribe"])
+    claims["pub"] = {"allow": pub_allow} if pub_allow else {"deny": [">"]}
+    claims["sub"] = {"allow": sub_allow} if sub_allow else {"deny": [">"]}
     responses = permissions.get("allow_responses")
     if responses is not None:
         match = _SECONDS.fullmatch(str(responses["expires"]))

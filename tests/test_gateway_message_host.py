@@ -350,6 +350,38 @@ def _config(tmp_path: Path, *, prepared: bool) -> GatewayInstanceConfig:
     return config
 
 
+def test_gateway_profile_and_host_support_several_gateways_with_team_subsets(tmp_path: Path) -> None:
+    """Decision 102 / A6 / C07: distinct gateway runtimes serve subsets of teams and routes."""
+
+    default_profile = gateway_profile("team_one")
+    assert default_profile.runtime == GATEWAY_RUNTIME and default_profile.teams == ("team_one",)
+
+    east = gateway_profile(["team_b", "team_a"], runtime="gateway-east")
+    assert east.runtime == "gateway-east" and east.teams == ("team_a", "team_b")
+
+    host = GatewayMessageHost(
+        InstanceLayout.at(tmp_path),
+        "team_a",
+        runtime_id="gateway-east",
+        teams=("team_a", "team_b"),
+        edges={"team_a": ("web_a",), "team_b": ("web_b",)},
+    )
+    assert host.runtime == "gateway-east"
+    assert host.teams == ("team_a", "team_b")
+    assert host.edges == {"team_a": ("web_a",), "team_b": ("web_b",)}
+
+    with pytest.raises(ValueError, match="does not serve team"):
+        asyncio.run(host.command("memory.list", LIST_BODY, person_ref=REFERENCE, team="team_other"))
+    with pytest.raises(ValueError, match="outside this gateway's teams"):
+        GatewayMessageHost(
+            InstanceLayout.at(tmp_path),
+            "team_a",
+            runtime_id="gateway-east",
+            teams=("team_a",),
+            edges={"team_other": ("web",)},
+        )
+
+
 def test_only_the_gateway_service_runs_the_gateway_host_and_takes_replies_on_its_inbox(tmp_path: Path) -> None:
     config = _config(tmp_path, prepared=True)
     service = NatsGatewayManagerRuntime.for_gateway_service(config)

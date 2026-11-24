@@ -389,6 +389,15 @@ class TrustStore:
         return [self._with_replacement(certificate) for certificate in self._certificates.values()
                 if certificate.installation == installation and certificate.key_id == key_id]
 
+    def certificates_of_runtime(self, installation: str, runtime: str) -> list[HostCertificate]:
+        """Every held certificate of ``runtime`` in ``installation``, ordered by membership epoch."""
+
+        return sorted(
+            (self._with_replacement(certificate) for certificate in self._certificates.values()
+             if certificate.installation == installation and certificate.runtime == runtime),
+            key=lambda certificate: certificate.membership_epoch,
+        )
+
     def names_authority_key(self, installation: str, key_id: str) -> bool:
         """Whether ``key_id`` is one of the installation's authority keys: this one's own, or a peer's from its agreement."""
 

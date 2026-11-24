@@ -66,8 +66,13 @@ from custom_messages.wire.models import HostStateComponentsItem
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import HostCertificate
 from custom_transport.protocol1.bootstrap import read_bundle
-from custom_transport.protocol1.host_keys import load_host_keys
+from custom_transport.protocol1.host_keys import (
+    load_host_keys,
+    promote_pending_nats_key,
+    stage_pending_nats_key,
+)
 from custom_transport.protocol1.identity import HostIdentity
+from custom_transport.protocol1.nats_jwt import NatsSigningKey
 from custom_transport.protocol1.joining import (
     AUTHORITY_SERVICE_ID,
     HostProfile,
@@ -154,6 +159,8 @@ class MessageHost:
     _components_left_out: tuple[str, ...] = ()
     # Held while the certificate changes (a renewal, a new join), so one never overwrites the other's.
     _certificate_change: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Ephemeral staged NATS key used only when layout is None in unit tests without keys.json.
+    _ephemeral_pending_nats_key: Optional[NatsSigningKey] = None
 
     @property
     def identity(self) -> HostIdentity:
@@ -417,15 +424,61 @@ class MessageHost:
 
         return self.profile.giving_up() if self.state == "drained" else self.profile
 
-    async def _renew(self) -> None:
+    def _stage_new_nats_public_key(self, runtime: str) -> str:
+        """Stage and persist a new NATS user key before a key-rotating renewal (C03)."""
+
+        if self.layout is not None:
+            staged = stage_pending_nats_key(self.layout, runtime)
+            assert staged.pending_nats_public_key is not None
+            return staged.pending_nats_public_key
+        if self._ephemeral_pending_nats_key is None:
+            self._ephemeral_pending_nats_key = NatsSigningKey.generate("user")
+        return self._ephemeral_pending_nats_key.public_key
+
+    def _promote_nats_key_if_needed(self, runtime: str, expected_public_key: Optional[str]) -> None:
+        if expected_public_key is None or self.live is None:
+            return
+        if self.layout is not None:
+            promoted = promote_pending_nats_key(self.layout, runtime, expected_public_key=expected_public_key)
+            if hasattr(self.live.identity, "with_keys"):
+                self.live.identity = self.live.identity.with_keys(promoted)
+            return
+        self._ephemeral_pending_nats_key = None
+
+    async def _renew(
+        self,
+        *,
+        partitions: Optional[Sequence[int]] = None,
+        rotate_nats_key: bool = False,
+    ) -> None:
         certificate = self.identity.certificate
         assert self.live is not None
-        reply = await self.live.request("host.renew", {
-            "renew_id": self.renewal_id(certificate),
-            "certificate_id": certificate.certificate_id, "membership_epoch": certificate.membership_epoch,
-            "profile_sha256": self.renewal_profile().digest(), "contract_sha256": self.contract_sha256},
+        giving_up_agents = self.state == "drained" and bool(getattr(certificate, "agent_types", ()))
+        needs_new_nats_key = rotate_nats_key or giving_up_agents
+        new_nats_public_key = self._stage_new_nats_public_key(certificate.runtime) if needs_new_nats_key else None
+        requested_partitions = () if self.state == "drained" else tuple(sorted(set(partitions or ())))
+        body_payload: dict[str, Any] = {
+            "renew_id": self.renewal_id(
+                certificate,
+                partitions=requested_partitions,
+                new_nats_public_key=new_nats_public_key,
+            ),
+            "certificate_id": certificate.certificate_id,
+            "membership_epoch": certificate.membership_epoch,
+            "profile_sha256": self.renewal_profile().digest(),
+            "contract_sha256": self.contract_sha256,
+        }
+        if requested_partitions:
+            body_payload["partitions"] = list(requested_partitions)
+        if new_nats_public_key is not None:
+            body_payload["new_nats_public_key"] = new_nats_public_key
+        reply = await self.live.request(
+            "host.renew",
+            body_payload,
             {"installation": certificate.installation, "team": INSTALLATION_SCOPE, "target": "installation_service",
-             "id": AUTHORITY_SERVICE_ID}, team=INSTALLATION_SCOPE)
+             "id": AUTHORITY_SERVICE_ID},
+            team=INSTALLATION_SCOPE,
+        )
         body = reply.raw["body"]
         if self.state == "drained":
             self._give_up_answered = True
@@ -440,6 +493,11 @@ class MessageHost:
         renewed = self.live.trust.store.host_certificate(certificate.installation, certificate.runtime,
                                                          int(body["certificate"]["body"]["membership_epoch"]))
         assert renewed is not None
+        if new_nats_public_key is not None:
+            self._promote_nats_key_if_needed(
+                certificate.runtime,
+                getattr(renewed, "nats_public_key", new_nats_public_key),
+            )
         self.live.identity = self.live.identity.with_certificate(renewed)
         self.logger.info("Renewed the host certificate. event=protocol1_renewed runtime=%s membership_epoch=%s "
                          "agent_types=%s session_limit=%s", certificate.runtime, renewed.membership_epoch,
@@ -492,18 +550,28 @@ class MessageHost:
         return Rejoined(certificate, certifiable & certificate.agent_types, refused=certifiable - certificate.agent_types,
                         not_certifiable=not_certifiable)
 
-    def renewal_id(self, certificate: HostCertificate) -> str:
+    def renewal_id(
+        self,
+        certificate: HostCertificate,
+        *,
+        partitions: Sequence[int] = (),
+        new_nats_public_key: Optional[str] = None,
+    ) -> str:
         """The id of this host's renewal of ``certificate``: kept on every retry, new after an upgrade in place.
 
         A repeated renewal id gets its stored outcome back (README "Contract digest",
         "Stored outcomes"), so the id names what renews as well as what is renewed: the
-        certificate, the profile asked for, the software release and the contract digest.
+        certificate, the profile asked for, the software release, the contract digest, and
+        any requested partitions or rotated NATS key (C03).
         A digest of them keeps every id whole within the contract's 128 characters, where
         cutting a long one could repeat another's.
         """
 
-        renewing: list[str | int] = [certificate.runtime, certificate.certificate_id, certificate.membership_epoch,
-                                     self.renewal_profile().digest(), release_version(), self.contract_sha256]
+        renewing: list[Any] = [certificate.runtime, certificate.certificate_id, certificate.membership_epoch,
+                               self.renewal_profile().digest(), release_version(), self.contract_sha256]
+        sorted_partitions = sorted(set(partitions))
+        if sorted_partitions or new_nats_public_key is not None:
+            renewing.extend([sorted_partitions, new_nats_public_key or ""])
         return f"renew-{certificate.membership_epoch}-{b64url(hashlib.sha256(rfc8785.dumps(renewing)).digest())}"
 
     # -- another contract (module docstring) ------------------------------------------------------

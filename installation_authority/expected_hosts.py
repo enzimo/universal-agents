@@ -11,9 +11,9 @@ types remain allowed too: removing a specialist leaves its running workers runni
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Optional
 
 from custom_transport.protocol1.private_files import write_private_file
 
@@ -33,6 +33,18 @@ class ExpectedHost:
     # Processes the launcher starts stay connected and run on this machine.
     connection_class: str = "connected"
     deployment: str = "local"
+    # Per-team gateway routes/edges this host serves (decision 102, several gateways).
+    edges: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # Optional bootstrap NATS user public key issued for this host's join (S1).
+    bootstrap_nats_public_key: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.edges:
+            normalized = {str(team): tuple(sorted(set(str(route) for route in routes)))
+                          for team, routes in sorted(self.edges.items())}
+            object.__setattr__(self, "edges", normalized)
+        elif not isinstance(self.edges, dict):
+            object.__setattr__(self, "edges", {})
 
 
 def read_expected_hosts(path: Path) -> dict[str, ExpectedHost]:
@@ -44,22 +56,49 @@ def read_expected_hosts(path: Path) -> dict[str, ExpectedHost]:
         return {}
     if document.get("version") != _VERSION:
         raise ValueError(f"{path} has an unknown format")
-    return {runtime: ExpectedHost(runtime, str(entry["key_id"]), str(entry["public_key"]), frozenset(entry["roles"]),
-                                  frozenset(entry["teams"]), frozenset(entry.get("agent_types", ())),
-                                  int(entry.get("session_limit", 0)),
-                                  connection_class=str(entry.get("connection_class", "connected")),
-                                  deployment=str(entry.get("deployment", "local")),
-                                  agent_types_from_catalog=bool(entry.get("agent_types_from_catalog", False)))
-            for runtime, entry in document["hosts"].items()}
+    result: dict[str, ExpectedHost] = {}
+    for runtime, entry in document["hosts"].items():
+        raw_edges = entry.get("edges") or {}
+        edges = {str(team): tuple(sorted(set(str(route) for route in routes)))
+                 for team, routes in raw_edges.items()}
+        bootstrap_key = entry.get("bootstrap_nats_public_key")
+        result[runtime] = ExpectedHost(
+            runtime,
+            str(entry["key_id"]),
+            str(entry["public_key"]),
+            frozenset(entry["roles"]),
+            frozenset(entry["teams"]),
+            frozenset(entry.get("agent_types", ())),
+            int(entry.get("session_limit", 0)),
+            connection_class=str(entry.get("connection_class", "connected")),
+            deployment=str(entry.get("deployment", "local")),
+            agent_types_from_catalog=bool(entry.get("agent_types_from_catalog", False)),
+            edges=edges,
+            bootstrap_nats_public_key=str(bootstrap_key) if bootstrap_key else None,
+        )
+    return result
 
 
 def write_expected_hosts(path: Path, hosts: Mapping[str, ExpectedHost]) -> None:
     """Replace the list atomically; the authority reads it at each join."""
 
-    document = {"version": _VERSION, "hosts": {
-        host.runtime: {"key_id": host.key_id, "public_key": host.public_key, "roles": sorted(host.roles),
-                       "teams": sorted(host.teams), "agent_types": sorted(host.agent_types),
-                       "session_limit": host.session_limit, "connection_class": host.connection_class,
-                       "deployment": host.deployment, "agent_types_from_catalog": host.agent_types_from_catalog}
-        for host in hosts.values()}}
+    serialized: dict[str, dict[str, object]] = {}
+    for host in hosts.values():
+        entry: dict[str, object] = {
+            "key_id": host.key_id,
+            "public_key": host.public_key,
+            "roles": sorted(host.roles),
+            "teams": sorted(host.teams),
+            "agent_types": sorted(host.agent_types),
+            "session_limit": host.session_limit,
+            "connection_class": host.connection_class,
+            "deployment": host.deployment,
+            "agent_types_from_catalog": host.agent_types_from_catalog,
+        }
+        if host.edges:
+            entry["edges"] = {team: list(routes) for team, routes in sorted(host.edges.items())}
+        if host.bootstrap_nats_public_key:
+            entry["bootstrap_nats_public_key"] = host.bootstrap_nats_public_key
+        serialized[host.runtime] = entry
+    document = {"version": _VERSION, "hosts": serialized}
     write_private_file(path, (json.dumps(document, indent=2, sort_keys=True) + "\n").encode())

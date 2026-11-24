@@ -145,18 +145,34 @@ def prepare_message_host_trust(layout: InstanceLayout, hosts: Mapping[str, Expec
     return installation
 
 
-def expected_host(layout: InstanceLayout, profile: HostProfile, *,
-                  agent_types_from_catalog: bool = False) -> ExpectedHost:
+def expected_host(
+    layout: InstanceLayout,
+    profile: HostProfile,
+    *,
+    agent_types_from_catalog: bool = False,
+    edges: Optional[Mapping[str, tuple[str, ...]]] = None,
+    bootstrap_nats_public_key: Optional[str] = None,
+) -> ExpectedHost:
     """The approval entry of a host the launcher starts, with its key made when missing.
 
     ``agent_types_from_catalog``: the host may also ask for every agent type in the instance's
     catalog as the authority reads it at the join (the team lead's process).
+    ``edges``: per-team gateway routes/edges for a gateway host (decision 102).
     """
 
     keys, _ = ensure_host_keys(layout, profile.runtime)
-    return ExpectedHost(profile.runtime, keys.key_id, keys.public_key_text, frozenset(profile.roles),
-                        frozenset(profile.teams), frozenset(profile.agent_types), profile.session_limit,
-                        agent_types_from_catalog=agent_types_from_catalog)
+    return ExpectedHost(
+        profile.runtime,
+        keys.key_id,
+        keys.public_key_text,
+        frozenset(profile.roles),
+        frozenset(profile.teams),
+        frozenset(profile.agent_types),
+        profile.session_limit,
+        agent_types_from_catalog=agent_types_from_catalog,
+        edges=edges or {},
+        bootstrap_nats_public_key=bootstrap_nats_public_key,
+    )
 
 
 def build_team_services_command(config_path: Path, *, repo_root: Path, python_executable: str | None = None) -> list[str]:

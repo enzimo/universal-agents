@@ -24,7 +24,7 @@ import json
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
@@ -64,12 +64,13 @@ def key_id_for(owner: str, public_key: Ed25519PublicKey) -> str:
 
 @dataclass(frozen=True)
 class HostKeys:
-    """One host's keys: its application key and NATS user key."""
+    """One host's keys: its application key, current NATS user key, and any staged next NATS user key."""
 
     runtime: str
     key_id: str
     application_key: Ed25519PrivateKey = field(repr=False)
     nats_seed: bytes = field(repr=False)
+    pending_nats_seed: Optional[bytes] = field(default=None, repr=False)
 
     @property
     def public_key(self) -> Ed25519PublicKey:
@@ -83,9 +84,30 @@ class HostKeys:
 
     @property
     def nats_public_key(self) -> str:
-        """The NATS user public key (``U...``) a join presents."""
+        """The NATS user public key (``U...``) a join or renewal presents."""
 
         return nkeys.user_public_key(_public_bytes(Ed25519PrivateKey.from_private_bytes(self.nats_seed).public_key()))
+
+    @property
+    def pending_nats_public_key(self) -> Optional[str]:
+        """The staged next NATS user public key (``U...``) waiting for a step-3 renewal reply, if any."""
+
+        if self.pending_nats_seed is None:
+            return None
+        return nkeys.user_public_key(
+            _public_bytes(Ed25519PrivateKey.from_private_bytes(self.pending_nats_seed).public_key())
+        )
+
+    def with_nats_seed(self, nats_seed: bytes, *, pending_nats_seed: Optional[bytes] = None) -> "HostKeys":
+        """Copy of these keys with an updated NATS seed and optional pending seed."""
+
+        return HostKeys(
+            runtime=self.runtime,
+            key_id=self.key_id,
+            application_key=self.application_key,
+            nats_seed=nats_seed,
+            pending_nats_seed=pending_nats_seed,
+        )
 
 
 @dataclass(frozen=True)
@@ -167,9 +189,86 @@ def load_host_keys(layout: InstanceLayout, runtime: str) -> HostKeys:
         if key_id != key_id_for(runtime, application.public_key()):
             raise KeyFileError(f"Key file {path} names another key id than its key gives.")
         nats_seed = nkeys.seed_bytes(str(document["nats_key"]["seed"]))
+        pending_raw = document.get("pending_nats_key")
+        pending_nats_seed = nkeys.seed_bytes(str(pending_raw["seed"])) if isinstance(pending_raw, dict) else None
     except (KeyError, TypeError, ValueError) as error:
         raise KeyFileError(f"Key file {path} is damaged: {error}") from error
-    return HostKeys(runtime=runtime, key_id=key_id, application_key=application, nats_seed=nats_seed)
+    return HostKeys(
+        runtime=runtime,
+        key_id=key_id,
+        application_key=application,
+        nats_seed=nats_seed,
+        pending_nats_seed=pending_nats_seed,
+    )
+
+
+def _write_key_document(path: Path, document: dict[str, Any]) -> None:
+    content = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    write_private_file(path, content)
+    path.parent.chmod(0o700)
+
+
+def stage_pending_nats_key(layout: InstanceLayout, runtime: str) -> HostKeys:
+    """Persist a staged next NATS user seed in ``keys.json`` before sending a key-rotating renewal (C03).
+
+    If a pending NATS seed is already staged on disk, it is reused unchanged so a retry after a
+    lost reply presents the exact same ``new_nats_public_key`` and ``renew_id``.
+    """
+
+    path = _host_keys_path(layout, runtime)
+    document = _read_private(path)
+    if document.get("runtime") != runtime:
+        raise KeyFileError(f"Key file {path} belongs to {document.get('runtime')!r}, not {runtime!r}.")
+    if isinstance(document.get("pending_nats_key"), dict) and "seed" in document["pending_nats_key"]:
+        # Verify the staged seed is valid before reusing it.
+        nkeys.seed_bytes(str(document["pending_nats_key"]["seed"]))
+        return load_host_keys(layout, runtime)
+    document["pending_nats_key"] = {"seed": nkeys.user_seed(secrets.token_bytes(32))}
+    _write_key_document(path, document)
+    return load_host_keys(layout, runtime)
+
+
+def promote_pending_nats_key(
+    layout: InstanceLayout,
+    runtime: str,
+    *,
+    expected_public_key: Optional[str] = None,
+) -> HostKeys:
+    """Atomically promote the staged ``pending_nats_key`` into ``nats_key`` in ``keys.json`` (C03).
+
+    Idempotent when ``nats_key`` already matches ``expected_public_key``. Raises ``KeyFileError``
+    if ``expected_public_key`` matches neither the staged key nor the current key.
+    """
+
+    path = _host_keys_path(layout, runtime)
+    document = _read_private(path)
+    keys = load_host_keys(layout, runtime)
+    if keys.pending_nats_seed is not None:
+        if expected_public_key is None or keys.pending_nats_public_key == expected_public_key:
+            document["nats_key"] = {"seed": nkeys.user_seed(keys.pending_nats_seed)}
+            document.pop("pending_nats_key", None)
+            _write_key_document(path, document)
+            return load_host_keys(layout, runtime)
+    if expected_public_key is not None and keys.nats_public_key == expected_public_key:
+        if "pending_nats_key" in document:
+            document.pop("pending_nats_key", None)
+            _write_key_document(path, document)
+            return load_host_keys(layout, runtime)
+        return keys
+    raise KeyFileError(
+        f"Key file {path} holds no staged or current NATS key matching {expected_public_key or 'pending key'}."
+    )
+
+
+def discard_pending_nats_key(layout: InstanceLayout, runtime: str) -> HostKeys:
+    """Remove any staged ``pending_nats_key`` from ``keys.json``."""
+
+    path = _host_keys_path(layout, runtime)
+    document = _read_private(path)
+    if "pending_nats_key" in document:
+        document.pop("pending_nats_key", None)
+        _write_key_document(path, document)
+    return load_host_keys(layout, runtime)
 
 
 def ensure_authority_keys(layout: InstanceLayout, installation: str) -> tuple[AuthorityKeys, bool]:

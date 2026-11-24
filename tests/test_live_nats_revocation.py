@@ -364,3 +364,84 @@ async def test_user_jwt_expiration_disconnects_open_connection_and_refuses_recon
         await asyncio.sleep(1.1)
         with pytest.raises(Exception, match="Authorization Violation"):
             await nats.connect(server.url, **key.login_options(token), allow_reconnect=False)
+
+
+@pytest.mark.asyncio
+async def test_operator_mode_revoker_rejects_mismatched_operator_signing_key_via_accountz(tmp_path: Path) -> None:
+    """C08: when OperatorModeRevoker signs with an operator-role key not trusted by operator.jwt,
+    DirResolver still returns code=200 while nats-server rejects the account JWT; ACCOUNTZ must
+    catch it so revoke() returns revoked=False and leaves applied_revocations unchanged."""
+
+    with _operator_nats_server(tmp_path) as server:
+        sys_key, sys_jwt = server.issue_system_user()
+        sys_nc = await nats.connect(server.url, **sys_key.login_options(sys_jwt), allow_reconnect=False)
+        user_key, user_jwt = server.issue_host_user("worker-mismatch")
+        user_nc = await nats.connect(server.url, **user_key.login_options(user_jwt), allow_reconnect=False)
+        try:
+            await flush_fully(user_nc)
+            untrusted_operator = NatsSigningKey.generate("operator")
+            bad_revoker = OperatorModeRevoker(untrusted_operator, server.base_claims, sys_nc)
+            outcome = await bad_revoker.revoke(user_key.public_key, revoke_until=int(time.time()) + 3600)
+            assert outcome.revoked is False
+            assert bad_revoker.applied_revocations == {}
+            await flush_fully(user_nc)
+            assert user_nc.is_connected is True
+        finally:
+            await user_nc.close()
+            await sys_nc.close()
+
+
+@pytest.mark.asyncio
+async def test_operator_mode_revoker_prunes_expired_entries_and_empty_permissions_deny_all(tmp_path: Path) -> None:
+    """C09 & C10 live checks on nats-server 2.15.1:
+    - prune_before removes expired revocations from the live account JWT while revoking active keys;
+    - empty publish/subscribe permissions emit deny:['>'] and cannot publish or subscribe."""
+
+    with _operator_nats_server(tmp_path) as server:
+        sys_key, sys_jwt = server.issue_system_user()
+        sys_nc = await nats.connect(server.url, **sys_key.login_options(sys_jwt), allow_reconnect=False)
+        # Keep one active installation-account connection so the account stays loaded in ACCOUNTZ.
+        keepalive_key, keepalive_jwt = server.issue_host_user("keepalive")
+        keepalive_nc = await nats.connect(
+            server.url, **keepalive_key.login_options(keepalive_jwt), allow_reconnect=False
+        )
+        try:
+            await flush_fully(keepalive_nc)
+            revoker = OperatorModeRevoker(server.operator_signing, server.base_claims, sys_nc)
+            now = int(time.time())
+            expired_key = NatsSigningKey.generate("user")
+            active_key, active_jwt = server.issue_host_user("worker-active")
+            active_nc = await nats.connect(server.url, **active_key.login_options(active_jwt), allow_reconnect=False)
+            await flush_fully(active_nc)
+
+            out1 = await revoker.revoke(expired_key.public_key, revoke_until=now - 120)
+            assert out1.revoked is True
+            out2 = await revoker.revoke(active_key.public_key, revoke_until=now + 3600, prune_before=now - 60)
+            assert out2.revoked is True
+            assert expired_key.public_key not in revoker.applied_revocations
+            assert active_key.public_key in revoker.applied_revocations
+
+            # C10: a user JWT with empty publish/subscribe lists must be denied on arbitrary subjects.
+            denied_key, denied_jwt = server.issue_host_user("denied-user", {"publish": [], "subscribe": []})
+            errors: list[Exception] = []
+
+            async def on_error(exc: Exception) -> None:
+                errors.append(exc)
+
+            denied_nc = await nats.connect(
+                server.url,
+                **denied_key.login_options(denied_jwt),
+                allow_reconnect=False,
+                error_cb=on_error,
+            )
+            try:
+                await denied_nc.publish("foo.bar", b"nope")
+                await denied_nc.subscribe("foo.bar")
+                await flush_fully(denied_nc)
+                await asyncio.sleep(0.1)
+                assert any("permissions violation" in str(err).lower() for err in errors), errors
+            finally:
+                await denied_nc.close()
+        finally:
+            await keepalive_nc.close()
+            await sys_nc.close()

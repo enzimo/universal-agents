@@ -46,6 +46,11 @@ class HostIdentity:
 
         return HostIdentity(self.keys, certificate, dict(self.sessions))
 
+    def with_keys(self, keys: HostKeys) -> "HostIdentity":
+        """The same host after promoting a rotated NATS key, keeping its certificate and sessions."""
+
+        return HostIdentity(keys, self.certificate, dict(self.sessions))
+
     def with_session(self, agent: str, session: str) -> "HostIdentity":
         return HostIdentity(self.keys, self.certificate, {**self.sessions, agent: session})
 

@@ -71,9 +71,22 @@ def queue_limits(config: GatewayInstanceConfig) -> QueueLimits:
 
 async def run_installation_authority(config: GatewayInstanceConfig) -> None:
     layout = config.layout
+    nats_settings = getattr(config.transport, "nats", None)
+    credential_lifetime_seconds = (
+        nats_settings.credential_lifetime_seconds
+        if nats_settings is not None
+        else None
+    )
+    authority_kwargs: dict[str, Any] = {
+        "partitions": config.transport.queues.partitions,
+        "queues": queue_limits(config),
+        "logger": _LOGGER,
+        "catalog_agent_types": lambda: catalog_agent_types(config),
+    }
+    if credential_lifetime_seconds is not None:
+        authority_kwargs["credential_lifetime_seconds"] = credential_lifetime_seconds
     authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),
-                                      partitions=config.transport.queues.partitions, queues=queue_limits(config),
-                                      logger=_LOGGER, catalog_agent_types=lambda: catalog_agent_types(config))
+                                      **authority_kwargs)
     adapter = NatsTransportAdapter(config=transport_config(config),
                                    mapper=NatsSubjectMapper(team_id=config.manager.team_id), logger=_LOGGER)
     stop = asyncio.Event()

@@ -27,6 +27,7 @@ from custom_transport.protocol1.nats_jwt import (
     encode_operator_jwt,
     encode_user_jwt,
     fits_credential_limit,
+    user_claims,
     user_credential_bytes,
 )
 from default_values import (
@@ -35,6 +36,7 @@ from default_values import (
     TRANSPORT_DEFAULTS,
 )
 from installation_authority.revocation import (
+    ACCOUNTZ_SUBJECT,
     CLAIMS_UPDATE_SUBJECT,
     AccountBaseClaims,
     LifetimeWaitRevoker,
@@ -272,6 +274,22 @@ async def test_lifetime_wait_revoker_reports_unconfirmed_revocation() -> None:
         await revoker.revoke(NatsSigningKey.generate("account").public_key, revoke_until=1_800_000_000)
 
 
+def test_user_claims_denies_all_instead_of_emitting_empty_allow_lists() -> None:
+    """C10: NATS treats empty allow lists as unrestricted; user_claims must emit deny:['>']."""
+
+    empty = user_claims({"publish": [], "subscribe": []})
+    assert empty["pub"] == {"deny": [">"]}
+    assert empty["sub"] == {"deny": [">"]}
+
+    pub_only = user_claims({"publish": ["ua.v1.team_a.h.svc"], "subscribe": []})
+    assert pub_only["pub"] == {"allow": ["ua.v1.team_a.h.svc"]}
+    assert pub_only["sub"] == {"deny": [">"]}
+
+    sub_only = user_claims({"publish": [], "subscribe": ["_INBOX.h.>"]})
+    assert sub_only["pub"] == {"deny": [">"]}
+    assert sub_only["sub"] == {"allow": ["_INBOX.h.>"]}
+
+
 @pytest.mark.asyncio
 async def test_operator_mode_revoker_preserves_base_claims_and_cumulative_revocations() -> None:
     op_signing = NatsSigningKey.generate("operator")
@@ -281,11 +299,33 @@ async def test_operator_mode_revoker_preserves_base_claims_and_cumulative_revoca
     u2 = NatsSigningKey.generate("user")
     u3 = NatsSigningKey.generate("user")
     mappings = account_mappings(16)
+    active_jwt = ""
+    active_revocations: dict[str, int] = {}
 
     async def ok_reply(subject: str, payload: bytes) -> Any:
-        assert subject == CLAIMS_UPDATE_SUBJECT
+        nonlocal active_jwt, active_revocations
+        if subject == CLAIMS_UPDATE_SUBJECT:
+            active_jwt = payload.decode("ascii")
+            decoded = decode_jwt_payload(active_jwt)
+            active_revocations = dict(decoded["nats"].get("revocations", {}))
+            return SimpleNamespace(
+                data=json.dumps({"data": {"account": inst_acc.public_key, "code": 200, "message": "jwt updated"}}).encode()
+            )
+        assert subject == ACCOUNTZ_SUBJECT
+        req = json.loads(payload.decode("utf-8"))
+        assert req == {"account": inst_acc.public_key}
         return SimpleNamespace(
-            data=json.dumps({"data": {"account": inst_acc.public_key, "code": 200, "message": "jwt updated"}}).encode()
+            data=json.dumps(
+                {
+                    "data": {
+                        "account_detail": {
+                            "account_name": inst_acc.public_key,
+                            "jwt": active_jwt,
+                            "revoked_user": active_revocations,
+                        }
+                    }
+                }
+            ).encode()
         )
 
     fake_nc = _FakeSystemConnection(ok_reply)
@@ -305,7 +345,8 @@ async def test_operator_mode_revoker_preserves_base_claims_and_cumulative_revoca
     # Second revocation for u3 preserves u1 and u2, plus mappings and signing_keys.
     out2 = await revoker.revoke(u3.public_key, revoke_until=3000)
     assert out2.revoked is True
-    payload = decode_jwt_payload(fake_nc.requests[-1][1].decode("ascii"))
+    claims_updates = [req for req in fake_nc.requests if req[0] == CLAIMS_UPDATE_SUBJECT]
+    payload = decode_jwt_payload(claims_updates[-1][1].decode("ascii"))
     assert payload["iss"] == op_signing.public_key
     assert payload["sub"] == inst_acc.public_key
     assert payload["nats"]["signing_keys"] == [inst_signing.public_key]
@@ -315,6 +356,50 @@ async def test_operator_mode_revoker_preserves_base_claims_and_cumulative_revoca
         u2.public_key: 2000,
         u3.public_key: 3000,
     }
+
+    # C09: prune_before drops expired revocations from both the pushed JWT and applied_revocations.
+    u4 = NatsSigningKey.generate("user")
+    out3 = await revoker.revoke(u4.public_key, revoke_until=4000, prune_before=2500)
+    assert out3.revoked is True
+    assert revoker.applied_revocations == {u3.public_key: 3000, u4.public_key: 4000}
+    claims_updates = [req for req in fake_nc.requests if req[0] == CLAIMS_UPDATE_SUBJECT]
+    pruned_payload = decode_jwt_payload(claims_updates[-1][1].decode("ascii"))
+    assert pruned_payload["nats"]["revocations"] == {u3.public_key: 3000, u4.public_key: 4000}
+
+
+@pytest.mark.asyncio
+async def test_operator_mode_revoker_fails_closed_when_accountz_does_not_confirm_pushed_jwt() -> None:
+    """C08: DirResolver returns code=200 even when nats-server rejects the JWT; ACCOUNTZ must confirm."""
+
+    op_signing = NatsSigningKey.generate("operator")
+    inst_acc = NatsSigningKey.generate("account")
+    u1 = NatsSigningKey.generate("user")
+    base = AccountBaseClaims(account_public_key=inst_acc.public_key)
+
+    async def stale_accountz(subject: str, _payload: bytes) -> Any:
+        if subject == CLAIMS_UPDATE_SUBJECT:
+            return SimpleNamespace(
+                data=json.dumps({"data": {"account": inst_acc.public_key, "code": 200, "message": "jwt updated"}}).encode()
+            )
+        return SimpleNamespace(
+            data=json.dumps(
+                {
+                    "data": {
+                        "account_detail": {
+                            "account_name": inst_acc.public_key,
+                            "jwt": "stale.old.jwt",
+                            "revoked_user": None,
+                        }
+                    }
+                }
+            ).encode()
+        )
+
+    revoker = OperatorModeRevoker(op_signing, base, _FakeSystemConnection(stale_accountz))
+    outcome = await revoker.revoke(u1.public_key, revoke_until=2000)
+    assert outcome.revoked is False
+    assert "does not match" in outcome.detail
+    assert revoker.applied_revocations == {}
 
 
 @pytest.mark.asyncio

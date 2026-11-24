@@ -565,3 +565,134 @@ def test_held_agent_types_require_the_same_live_certificate_key(changed) -> None
     else:
         stored = None
     assert not _held_agent_types(stored, key, now)
+
+
+def test_expected_hosts_persists_gateway_edges_and_bootstrap_key(tmp_path: Path) -> None:
+    from custom_transport.protocol1.nats_jwt import NatsSigningKey
+
+    path = tmp_path / "expected-hosts.json"
+    boot = NatsSigningKey.generate("user").public_key
+    gw = ExpectedHost(
+        "gateway-east",
+        "gw.key1",
+        "PUBLIC1",
+        frozenset({"gateway"}),
+        frozenset({"team_a", "team_b"}),
+        edges={"team_a": ("web_a", "tg_a"), "team_b": ("web_b",)},
+        bootstrap_nats_public_key=boot,
+    )
+    write_expected_hosts(path, {gw.runtime: gw})
+    loaded = read_expected_hosts(path)[gw.runtime]
+    assert loaded.edges == {"team_a": ("tg_a", "web_a"), "team_b": ("web_b",)}
+    assert loaded.bootstrap_nats_public_key == boot
+
+
+def test_denial_and_renewal_refusal_enforce_known_teams_and_gateway_edges() -> None:
+    """FA-6 and C07: refuse teams without streams and misconfigured edges outside expected teams."""
+
+    gw = ExpectedHost(
+        "gateway-1",
+        "worker.key1",
+        "PUBLIC1",
+        frozenset({"gateway"}),
+        frozenset({"team_one", "team_two"}),
+        edges={"team_one": ("web",)},
+    )
+    body = join_body(runtime="gateway-1", roles=["gateway"], teams=["team_one", "team_two"], agent_types=[], session_limit=0)
+    assert _denial(gw, body, frozenset(), known_teams=frozenset({"team_one"})) == "team_not_allowed"
+    assert _denial(gw, body, frozenset(), known_teams=frozenset({"team_one", "team_two"})) is None
+
+    gw_cert = certificate(
+        runtime="gateway-1",
+        roles=frozenset({"gateway"}),
+        teams=frozenset({"team_one", "team_two"}),
+        agent_types=frozenset(),
+        session_limit=0,
+    )
+    assert "team_not_allowed" in str(
+        _renewal_refusal(gw, gw_cert, KEPT_KEY, frozenset(), known_teams=frozenset({"team_one"}))
+    )
+    assert _renewal_refusal(gw, gw_cert, KEPT_KEY, frozenset(), known_teams=frozenset({"team_one", "team_two"})) is None
+
+    bad_edges = ExpectedHost(
+        "gateway-1",
+        "worker.key1",
+        "PUBLIC1",
+        frozenset({"gateway"}),
+        frozenset({"team_one"}),
+        edges={"team_other": ("web",)},
+    )
+    body_one = join_body(runtime="gateway-1", roles=["gateway"], teams=["team_one"], agent_types=[], session_limit=0)
+    assert _denial(bad_edges, body_one, frozenset()) == "team_not_allowed"
+    assert "gateway routes" in str(
+        _renewal_refusal(
+            bad_edges,
+            certificate(runtime="gateway-1", roles=frozenset({"gateway"}), agent_types=frozenset(), session_limit=0),
+            KEPT_KEY,
+            frozenset(),
+        )
+    )
+
+
+def test_ledger_persists_nats_revocations_bootstrap_keys_and_renewal_connection(tmp_path: Path) -> None:
+    from custom_transport.protocol1.nats_jwt import NatsSigningKey
+
+    now = utc_now()
+    k1 = NatsSigningKey.generate("user").public_key
+    k2 = NatsSigningKey.generate("user").public_key
+    boot = NatsSigningKey.generate("user").public_key
+    ledger = IssueLedger.open(tmp_path, "install_one")
+    ledger.record_revoked_nats_key(k1, 1000)
+    ledger.record_confirmed_nats_revocation(k2, 2000)
+    ledger.record_bootstrap_nats_key(boot)
+    ledger.store_renewal(
+        "host-1|renew-1",
+        {"key": "host.install_one.host-1.2"},
+        "digest",
+        now,
+        partitions=(3, 1),
+        connection={"type": "nats_user_jwt", "jwt": "a.b.c", "expires_at": format_timestamp(now)},
+    )
+    ledger.save(now)
+
+    reopened = IssueLedger.open(tmp_path, "install_one")
+    assert reopened.is_nats_key_revoked(k1) and not reopened.is_nats_revocation_confirmed(k1)
+    assert reopened.is_nats_key_revoked(k2) and reopened.is_nats_revocation_confirmed(k2)
+    assert reopened.is_bootstrap_nats_key(boot)
+    stored = reopened.renewal("host-1|renew-1", now)
+    assert stored is not None
+    assert stored.partitions == (1, 3)
+    assert stored.connection == {"type": "nats_user_jwt", "jwt": "a.b.c", "expires_at": format_timestamp(now)}
+
+
+def test_host_keys_stage_promote_and_discard_pending_nats_key(tmp_path: Path) -> None:
+    """C03: atomic staging reuses the same pending NATS key across retries and promotes cleanly."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    original, _ = host_keys.ensure_host_keys(layout, "worker-1")
+    staged1 = host_keys.stage_pending_nats_key(layout, "worker-1")
+    assert staged1.nats_public_key == original.nats_public_key
+    assert staged1.pending_nats_public_key is not None
+    assert staged1.pending_nats_public_key != original.nats_public_key
+
+    # Retrying staging before promotion returns the exact same pending key.
+    staged2 = host_keys.stage_pending_nats_key(layout, "worker-1")
+    assert staged2.pending_nats_public_key == staged1.pending_nats_public_key
+
+    promoted = host_keys.promote_pending_nats_key(
+        layout, "worker-1", expected_public_key=staged1.pending_nats_public_key
+    )
+    assert promoted.nats_public_key == staged1.pending_nats_public_key
+    assert promoted.pending_nats_public_key is None
+    assert host_keys.load_host_keys(layout, "worker-1").nats_public_key == promoted.nats_public_key
+
+    # Idempotent re-promotion after already promoted.
+    again = host_keys.promote_pending_nats_key(layout, "worker-1", expected_public_key=promoted.nats_public_key)
+    assert again.nats_public_key == promoted.nats_public_key
+
+    # Discard clears a staged key.
+    staged3 = host_keys.stage_pending_nats_key(layout, "worker-1")
+    assert staged3.pending_nats_public_key is not None
+    cleared = host_keys.discard_pending_nats_key(layout, "worker-1")
+    assert cleared.pending_nats_public_key is None
+    assert cleared.nats_public_key == promoted.nats_public_key
