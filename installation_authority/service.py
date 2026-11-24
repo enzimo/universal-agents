@@ -791,73 +791,76 @@ class InstallationAuthority:
         reason: str = "decommissioned",
         now: Optional[datetime] = None,
     ) -> list[RevocationOutcome]:
-        """Revoke a host's active certificate(s) in ``UA1_CERTS`` and revoke its NATS user key(s) (decision 100, C12, C13)."""
+        """Revoke a host's active certificate(s) in ``UA1_CERTS`` and revoke its NATS user key(s) (decision 100, C12, C13, C31)."""
 
         if reason not in _REVOCATION_REASONS:
             raise ValueError(f"revocation reason must be one of {sorted(_REVOCATION_REASONS)}, got {reason!r}")
         assert self._trust is not None, "start() first"
         ts = self.clock() if now is None else now
-        certs = await self._host_certificates_for_revocation(runtime, ts, min_epoch=1)
-        if certs:
-            # revocations.schema.json: key_expires_at is the latest expires_at across every
-            # certificate of this runtime with this key_id, or of the installation with this public key.
-            max_key_expires: dict[str, datetime] = {}
-            for cert in certs:
-                cert_pub_raw = cert.public_key.public_bytes_raw()
-                matching = [
-                    *self._trust.store.certificates_of_runtime(self.installation, cert.runtime),
-                    *self._trust.store.certificates_with_key(self.installation, cert.key_id),
-                    *self._trust.store.certificates_with_public_key(self.installation, cert.public_key),
-                ]
-                latest_exp = cert.expires_at
-                for other in matching:
-                    if (
-                        (other.runtime == cert.runtime and other.key_id == cert.key_id)
-                        or other.public_key.public_bytes_raw() == cert_pub_raw
-                    ):
-                        if other.expires_at > latest_exp:
-                            latest_exp = other.expires_at
-                max_key_expires[cert.certificate_id] = latest_exp
-
-            async with self._lock:
-                held = self._newest_revocations(await self._stored_data(revocations_key(self.installation)), ts)
-                entries = list(held["body"]["entries"]) if held else []
-                existing_ids = {str(e.get("certificate_id")) for e in entries}
-                added = False
-                for cert in certs:
-                    if cert.certificate_id in existing_ids:
-                        continue
-                    entries.append(
-                        {
-                            "certificate_id": cert.certificate_id,
-                            "runtime": cert.runtime,
-                            "key_id": cert.key_id,
-                            "key_expires_at": format_timestamp(max_key_expires[cert.certificate_id]),
-                            "membership_epoch": cert.membership_epoch,
-                            "revoked_at": format_timestamp(ts),
-                            "reason": reason,
-                        }
-                    )
-                    existing_ids.add(cert.certificate_id)
-                    added = True
-                if added:
-                    epoch = (int(held["body"]["revocation_epoch"]) if held else 1) + 1
-                    sequence = max(int(held["sequence"]) + 1 if held else 1, int(ts.timestamp() * 1000))
-                    record = self.revocations_record(
-                        sequence=sequence,
-                        revocation_epoch=epoch,
-                        entries=entries,
-                        issued=ts,
-                    )
-                    self._trust.add(_encoded(record), now=ts)
-                    self._ledger.keep_revocations(record)
-                    self._ledger.save(ts)
-                    await (await self._records()).put(revocations_key(self.installation), _encoded(record))
-                    self._revocations = record
-                    if self._own:
-                        self._publish_bundle()
         to_revoke: list[tuple[str, int]] = []
+        # Serialize certificate discovery, revocations publishing, and ledger updates against
+        # answer_join / _renew under _issue_lock (lock order: _issue_lock -> _lock, C31/F4).
         async with self._issue_lock:
+            certs = await self._host_certificates_for_revocation(runtime, ts, min_epoch=1)
+            if certs:
+                # revocations.schema.json: key_expires_at is the latest expires_at across every
+                # certificate of this runtime with this key_id, or of the installation with this public key.
+                max_key_expires: dict[str, datetime] = {}
+                for cert in certs:
+                    cert_pub_raw = cert.public_key.public_bytes_raw()
+                    matching = [
+                        *self._trust.store.certificates_of_runtime(self.installation, cert.runtime),
+                        *self._trust.store.certificates_with_key(self.installation, cert.key_id),
+                        *self._trust.store.certificates_with_public_key(self.installation, cert.public_key),
+                    ]
+                    latest_exp = cert.expires_at
+                    for other in matching:
+                        if (
+                            (other.runtime == cert.runtime and other.key_id == cert.key_id)
+                            or other.public_key.public_bytes_raw() == cert_pub_raw
+                        ):
+                            if other.expires_at > latest_exp:
+                                latest_exp = other.expires_at
+                    max_key_expires[cert.certificate_id] = latest_exp
+
+                async with self._lock:
+                    held = self._newest_revocations(await self._stored_data(revocations_key(self.installation)), ts)
+                    entries = list(held["body"]["entries"]) if held else []
+                    existing_ids = {str(e.get("certificate_id")) for e in entries}
+                    added = False
+                    for cert in certs:
+                        if cert.certificate_id in existing_ids:
+                            continue
+                        entries.append(
+                            {
+                                "certificate_id": cert.certificate_id,
+                                "runtime": cert.runtime,
+                                "key_id": cert.key_id,
+                                "key_expires_at": format_timestamp(max_key_expires[cert.certificate_id]),
+                                "membership_epoch": cert.membership_epoch,
+                                "revoked_at": format_timestamp(ts),
+                                "reason": reason,
+                            }
+                        )
+                        existing_ids.add(cert.certificate_id)
+                        added = True
+                    if added:
+                        epoch = (int(held["body"]["revocation_epoch"]) if held else 1) + 1
+                        sequence = max(int(held["sequence"]) + 1 if held else 1, int(ts.timestamp() * 1000))
+                        record = self.revocations_record(
+                            sequence=sequence,
+                            revocation_epoch=epoch,
+                            entries=entries,
+                            issued=ts,
+                        )
+                        self._trust.add(_encoded(record), now=ts)
+                        self._ledger.keep_revocations(record)
+                        self._ledger.save(ts)
+                        await (await self._records()).put(revocations_key(self.installation), _encoded(record))
+                        self._revocations = record
+                        if self._own:
+                            self._publish_bundle()
+
             revoke_until_by_key = self._max_revoke_until_by_nats_key(certs, now=ts)
             recorded_any = False
             for nats_key, revoke_until in sorted(revoke_until_by_key.items()):
@@ -2255,8 +2258,11 @@ class InstallationAuthority:
             connection=connection,
         )
 
-        # F4 post-write Dekker check (SEC-03): if PartitionService wrote RELEASED concurrently with
-        # UA1_CERTS.put(record), revoke target_nats_key immediately and refuse to hand out the live JWT.
+        # F4 + C32 post-write Dekker check (SEC-03): if PartitionService changed ownership concurrently
+        # with UA1_CERTS.put(record), drop the aborted StoredRenewal so retries cannot receive the
+        # unreturned JWT, revoke any freshly minted replacement key K2 immediately, and preserve the
+        # host's live key K1 across connected handover releases (only defer-revoking K1 post-flush
+        # when a partition was released as host_lost or moved/deleted outside a connected handover).
         if granted_partitions:
             post_owned, post_released = await self._read_host_partition_ownership(
                 certificate.runtime, certificate.teams, now
@@ -2264,30 +2270,41 @@ class InstallationAuthority:
             team = next(iter(certificate.teams))
             post_team_owned = post_owned.get(team, {})
             post_team_released = post_released.get(team, {})
-            if any(p not in post_team_owned or p in post_team_released for p in granted_partitions):
-                target_exp = self._max_nats_key_revoke_until(
-                    certificate.runtime,
-                    target_nats_key,
-                    fallback_expires_at=now + CERTIFICATE_LIFETIME,
-                    now=now,
+            changed_partitions = [
+                p for p in granted_partitions
+                if p not in post_team_owned or p in post_team_released
+            ]
+            if changed_partitions:
+                self._ledger.forget_renewal(retry_key)
+                non_connected_change = any(
+                    p not in post_team_released or post_team_released[p][1] == "host_lost"
+                    for p in changed_partitions
                 )
-                self._ledger.record_revoked_nats_key(target_nats_key, target_exp)
-                self._ledger.save(now)
-                immediate.append((target_nats_key, target_exp))
                 if target_nats_key != certificate.nats_public_key:
+                    target_exp = self._max_nats_key_revoke_until(
+                        certificate.runtime,
+                        target_nats_key,
+                        fallback_expires_at=now + CERTIFICATE_LIFETIME,
+                        now=now,
+                    )
+                    self._ledger.record_revoked_nats_key(target_nats_key, target_exp)
+                    immediate.append((target_nats_key, target_exp))
+                if non_connected_change:
+                    old_key = certificate.nats_public_key
                     old_exp = self._max_nats_key_revoke_until(
                         certificate.runtime,
-                        certificate.nats_public_key,
+                        old_key,
                         fallback_expires_at=certificate.expires_at,
                         now=now,
                     )
                     self._defer_nats_key_revocation(
-                        certificate.nats_public_key,
+                        old_key,
                         revoke_until=old_exp,
                         now=now,
                         deferred=deferred,
                         immediate=immediate,
                     )
+                self._ledger.save(now)
                 return {
                     "outcome": "not_allowed",
                     "message": "Partition ownership changed concurrently during renewal; retry with current partitions.",
@@ -2325,7 +2342,8 @@ class InstallationAuthority:
         assert self._trust is not None
         for other in self._trust.store.certificates_with_key(certificate.installation, str(key.get("key_id"))):
             if (other.runtime, other.replaces) != (certificate.runtime, certificate.certificate_id) \
-                    or _public_text(other) != key.get("public_key"):
+                    or _public_text(other) != key.get("public_key") \
+                    or self._ledger.is_nats_key_revoked(other.nats_public_key):
                 continue
             stored = await self._stored(CERTIFICATE, certificate_key(self.installation, other.runtime,
                                                                      other.membership_epoch), now)

@@ -358,7 +358,7 @@ class AgentProcessHost:
     partition_retry_seconds: float = PARTITION_RETRY_SECONDS
     _partition_wake: Optional[asyncio.Event] = None
     _handover_active: bool = False
-    _completed_handovers: dict[int, datetime] = field(default_factory=dict)
+    _completed_handovers: dict[int, tuple[datetime, int]] = field(default_factory=dict)
     _last_reported_rejected: frozenset[int] = frozenset()
     _draws_lock: threading.Lock = field(default_factory=threading.Lock)
     _recent_draws: dict[str, int] = field(default_factory=dict)
@@ -1510,7 +1510,7 @@ class AgentProcessHost:
         if self.partitions is None:
             return False
         return any(
-            self._completed_handovers.get(p) != rec.assigned_at
+            self._completed_handovers.get(p) != (rec.assigned_at, rec.host_epoch)
             for p, rec in self.partitions.released_by_host.items()
         )
 
@@ -1582,11 +1582,16 @@ class AgentProcessHost:
         released = tracker.released_by_host
         for partition in list(self._completed_handovers):
             current_rec = released.get(partition)
-            if current_rec is None or current_rec.assigned_at != self._completed_handovers[partition]:
+            if (
+                current_rec is None
+                or (current_rec.assigned_at, current_rec.host_epoch) != self._completed_handovers[partition]
+            ):
                 self._completed_handovers.pop(partition, None)
 
         pending_releases = {
-            p: rec for p, rec in released.items() if self._completed_handovers.get(p) != rec.assigned_at
+            p: rec
+            for p, rec in released.items()
+            if self._completed_handovers.get(p) != (rec.assigned_at, rec.host_epoch)
         }
         if pending_releases:
             completed = await self._execute_handover(pending_releases)
@@ -1650,7 +1655,8 @@ class AgentProcessHost:
         return {
             p: rec
             for p, rec in pending_releases.items()
-            if (current := current_released.get(p)) is not None and current.assigned_at == rec.assigned_at
+            if (current := current_released.get(p)) is not None
+            and (current.assigned_at, current.host_epoch) == (rec.assigned_at, rec.host_epoch)
         }
 
     async def _execute_handover(self, pending_releases: Mapping[int, OwnedPartition]) -> bool:
@@ -1750,7 +1756,7 @@ class AgentProcessHost:
 
             completed_now = self._still_pending_releases(still_pending)
             for p, rec in completed_now.items():
-                self._completed_handovers[p] = rec.assigned_at
+                self._completed_handovers[p] = (rec.assigned_at, rec.host_epoch)
             self.logger.info(
                 "Finished partition handover steps 2-3. event=agent_host_partition_handover_done "
                 "runtime=%s partitions=%s credentials_issued=%s",

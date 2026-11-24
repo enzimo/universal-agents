@@ -1750,3 +1750,239 @@ async def test_f13_partition_owner_replay_rejected_and_ua1_hosts_delete_retained
     cluster.advance(30 + CLOCK_SKEW_SECONDS)
     live_after_expiry = await partitions._read_live_hosts(cluster.now)
     assert "worker-2" not in live_after_expiry
+
+
+@pytest.mark.asyncio
+async def test_c33_post_restart_fast_step3_not_escalated_and_dekker_swept_epoch_persisted(tmp_path: Path) -> None:
+    """C33/F4:
+    1. _start_connected_handover_locked CAS-persists post_release_epoch into RELEASED.host_epoch across restarts;
+    2. After a team_services restart, a fast step-3 renewal (issued_at <= released_at + skew) is NOT rejected
+       or escalated to host_lost; it safely falls back to the credential lifetime + skew wait (both under
+       LifetimeWaitRevoker and OperatorModeRevoker), while issued_at > released_at + skew still completes instantly."""
+
+    # --- Part 1: Dekker sweep persists swept host_epoch across team_services restart ---
+    cluster1 = _ClusterFixture(tmp_path / "sweep", partitions=2)
+    cluster1.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster1.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster1.write_liveness("worker-1")
+    cluster1.write_liveness("worker-2")
+    revoked1: set[str] = set()
+    _s1, parts1 = cluster1.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=300,
+        handover_seconds=60,
+        is_nats_key_revoked=lambda k: k in revoked1,
+    )
+    await parts1.reconcile()
+    p0 = next(p for p, (_s, h) in (await cluster1.owners()).items() if h == "worker-1")
+    k1 = cluster1.host_keys["worker-1"].nats_public_key
+
+    # Simulate a pre-release rotating renewal landing right as RELEASED(host_epoch=1) is written!
+    injected = False
+
+    async def inject_concurrent_cert(record: str, _key: str, document: Mapping[str, Any]) -> None:
+        nonlocal injected
+        if record == PARTITION_OWNER and document["body"]["state"] == RELEASED and not injected:
+            injected = True
+            cluster1.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+
+    cluster1.records.before_put_hook = inject_concurrent_cert
+    assert await parts1.release_partition(p0, reason="operator", target_host="worker-2") is True
+    cluster1.records.before_put_hook = None
+    assert injected is True
+
+    # The RELEASED record's durable host_epoch was CAS-updated to 2!
+    rec_after = await cluster1.records.read_report(
+        PARTITION_OWNER, partition_owner_key(TEAM, p0, 2), now=cluster1.now
+    )
+    assert rec_after is not None and int(rec_after.record.body.host_epoch) == 2
+
+    # Even after team_services restarts, epoch 2 is durable in rec.host_epoch so epoch 2 cannot pose as step 3.
+    k2 = cluster1.host_keys["worker-1"].nats_public_key
+    revoked1.add(k1)
+    _s1b, restarted1 = cluster1.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=300,
+        handover_seconds=60,
+        is_nats_key_revoked=lambda k: k in revoked1,
+    )
+    cluster1.advance(10)
+    cluster1.write_liveness("worker-1")
+    cluster1.write_liveness("worker-2")
+    await restarted1.reconcile()
+    assert (await cluster1.owners())[p0] == (RELEASED, "worker-1")
+
+    # Genuine step-3 renewal to epoch 3 (> released_at + skew) + K2 revoked completes immediately after restart.
+    cluster1.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+    revoked1.add(k2)
+    cluster1.write_liveness("worker-1")
+    cluster1.write_liveness("worker-2")
+    await restarted1.reconcile()
+    assert (await cluster1.owners())[p0] == (OWNED, "worker-2")
+
+    # --- Part 2: Fast step-3 renewal (50ms) + team_services restart must NOT escalate to host_lost ---
+    cluster2 = _ClusterFixture(tmp_path / "fast-step3", partitions=4)
+    cluster2.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster2.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster2.write_liveness("worker-1")
+    cluster2.write_liveness("worker-2")
+    revoked2: set[str] = set()
+    lifetime = 300
+    _s2, parts2 = cluster2.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=lifetime,
+        handover_seconds=60,
+        is_nats_key_revoked=lambda k: k in revoked2,
+    )
+    await parts2.reconcile()
+    w1_parts = sorted(p for p, (_s, h) in (await cluster2.owners()).items() if h == "worker-1")
+    p_move, p_keep = w1_parts[0], w1_parts[1]
+    k1_2 = cluster2.host_keys["worker-1"].nats_public_key
+
+    assert await parts2.release_partition(p_move, reason="operator", target_host="worker-2") is True
+    # Fast step-3 renewal within 1 second (<= CLOCK_SKEW_SECONDS) and old key revoked.
+    cluster2.advance(1)
+    cluster2.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+    revoked2.add(k1_2)
+
+    # Team services restarts 70s later (> handover_seconds=60s!) under OperatorModeRevoker.
+    cluster2.advance(70)
+    cluster2.write_liveness("worker-1")
+    cluster2.write_liveness("worker-2")
+    _s2b, restarted2 = cluster2.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=lifetime,
+        handover_seconds=60,
+        is_nats_key_revoked=lambda k: k in revoked2,
+    )
+    await restarted2.reconcile()
+    # Must NOT take instant fast path (because recorded_epoch is None and issued_at <= released_at + skew),
+    # AND must NOT escalate worker-1 to host_lost (p_keep stays OWNED and p_move stays reason="operator")!
+    owners_mid = await cluster2.owners()
+    assert owners_mid[p_move] == (RELEASED, "worker-1")
+    assert owners_mid[p_keep] == (OWNED, "worker-1")
+    rec_mid = await cluster2.records.read_report(
+        PARTITION_OWNER, partition_owner_key(TEAM, p_move, 4), now=cluster2.now
+    )
+    assert rec_mid is not None and rec_mid.record.body.reason == "operator"
+
+    # Once lifetime + CLOCK_SKEW_SECONDS elapses from step-3 issued_at, step 4 completes cleanly.
+    cluster2.advance(lifetime + CLOCK_SKEW_SECONDS - 70)
+    cluster2.write_liveness("worker-1")
+    cluster2.write_liveness("worker-2")
+    await restarted2.reconcile()
+    owners_done = await cluster2.owners()
+    assert owners_done[p_move] == (OWNED, "worker-2")
+    assert owners_done[p_keep] == (OWNED, "worker-1")
+
+
+@pytest.mark.asyncio
+async def test_c34_cr4_refusal_release_recovers_after_team_services_restart(tmp_path: Path) -> None:
+    """C34/F6: A CR-4 refusal release does not wedge in state=released when team_services restarts
+    before step 4 (losing _refused_release_partitions while HostPartitionTracker._prune_rejected cleared
+    refused_partitions), and unassignable rebalanced releases clear raw_revisions cleanly."""
+
+    from custom_messages.wire.permissions import HostPlacement
+    from custom_transport.protocol1.nats_jwt import user_credential_bytes
+
+    # Case 1: CR-4 refusal under credentials_enforced=True where old_host genuinely cannot fit 2 partitions;
+    # team_services restarts before step 4 -> partition is deleted (unowned, NOT wedged in RELEASED).
+    cluster = _ClusterFixture(tmp_path / "cr4-restart", partitions=2)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    one_part_bytes = user_credential_bytes(
+        ("worker_host",),
+        HostPlacement(
+            runtime="worker-1",
+            teams=(TEAM,),
+            partitions={TEAM: (0,)},
+            pools={TEAM: ("researcher",)},
+            installation=INSTALLATION,
+        ),
+        partition_count=2,
+        user_public_key=cluster.host_keys["worker-1"].nats_public_key,
+    )
+    two_part_bytes = user_credential_bytes(
+        ("worker_host",),
+        HostPlacement(
+            runtime="worker-1",
+            teams=(TEAM,),
+            partitions={TEAM: (0, 1)},
+            pools={TEAM: ("researcher",)},
+            installation=INSTALLATION,
+        ),
+        partition_count=2,
+        user_public_key=cluster.host_keys["worker-1"].nats_public_key,
+    )
+    tight_limit = (one_part_bytes + two_part_bytes) // 2
+    assert one_part_bytes <= tight_limit < two_part_bytes
+
+    revoked: set[str] = set()
+    # Initially assign both partitions under a larger limit, then simulate tight limit & CR-4 refusal.
+    _s1, parts = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=300,
+        is_nats_key_revoked=lambda k: k in revoked,
+    )
+    await parts.reconcile()
+    assert (await cluster.owners()) == {0: (OWNED, "worker-1"), 1: (OWNED, "worker-1")}
+    k1 = cluster.host_keys["worker-1"].nats_public_key
+
+    cluster.advance(1)
+    cluster.write_liveness(
+        "worker-1",
+        components=[{"component": "partition-1", "state": "unhealthy", "code": PARTITION_CREDENTIAL_TOO_LARGE_CODE}],
+    )
+    await parts.reconcile()
+    assert (await cluster.owners())[1] == (RELEASED, "worker-1")
+
+    # worker-1 clears refused_partitions on seeing RELEASED (_prune_rejected) and finishes step 3 past skew.
+    cluster.advance(CLOCK_SKEW_SECONDS + 2)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+    revoked.add(k1)
+    cluster.write_liveness("worker-1")  # No refused components!
+
+    # Team services restarts before step 4 (losing _refused_release_partitions and _refused_capacity).
+    _s2, restarted = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=300,
+        is_nats_key_revoked=lambda k: k in revoked,
+        max_credential_bytes=tight_limit,
+    )
+    await restarted.reconcile()
+    owners_after = await cluster.owners()
+    assert owners_after == {0: (OWNED, "worker-1")}  # Partition 1 deleted (unowned), NOT wedged in RELEASED!
+
+    # Case 2: Rebalanced release where target vanished before step 4 and old_host DOES fit -> deleted with
+    # raw_revisions[p] = 0 and immediately reassigned to old_host in the same reconcile() pass!
+    cluster2 = _ClusterFixture(tmp_path / "rebal-restart", partitions=2)
+    cluster2.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster2.write_liveness("worker-1")
+    revoked2: set[str] = set()
+    _s3, parts3 = cluster2.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=300,
+        is_nats_key_revoked=lambda k: k in revoked2,
+    )
+    await parts3.reconcile()
+    k1_2 = cluster2.host_keys["worker-1"].nats_public_key
+    cluster2.advance(1)
+    cluster2.write_liveness(
+        "worker-1",
+        components=[{"component": "partition-1", "state": "unhealthy", "code": PARTITION_CREDENTIAL_TOO_LARGE_CODE}],
+    )
+    await parts3.reconcile()
+    assert (await cluster2.owners())[1] == (RELEASED, "worker-1")
+
+    cluster2.advance(CLOCK_SKEW_SECONDS + 2)
+    cluster2.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+    revoked2.add(k1_2)
+    cluster2.write_liveness("worker-1")
+    _s4, restarted2 = cluster2.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=300,
+        is_nats_key_revoked=lambda k: k in revoked2,
+    )
+    await restarted2.reconcile()
+    # Deleted RELEASED with raw_revisions[1] = 0 and immediately assigned cleanly in the same reconcile!
+    assert (await cluster2.owners()) == {0: (OWNED, "worker-1"), 1: (OWNED, "worker-1")}

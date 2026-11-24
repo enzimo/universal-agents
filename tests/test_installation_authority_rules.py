@@ -1466,3 +1466,375 @@ async def test_f4_authority_dekker_revokes_and_refuses_when_partition_released_d
     assert isinstance(reply, dict) and reply["outcome"] == "not_allowed"
     assert k2 in revoked_keys
     assert authority._ledger.is_nats_key_revoked(k2)
+
+
+@pytest.mark.asyncio
+async def test_c31_retire_host_serializes_with_concurrent_key_rotating_renew(tmp_path: Path) -> None:
+    """C31/F4: retire_host holds _issue_lock across cert discovery, revocations publish, and ledger updates
+    so a concurrent key-rotating renew cannot slip an unrevoked NATS key past retirement."""
+
+    from custom_messages.wire.frame import VerifiedFrame
+    from custom_transport.protocol1.host_keys import ensure_authority_keys, ensure_host_keys
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from installation_authority.service import CertificateRequest
+
+    def _make_authority(sub: str) -> tuple[InstallationAuthority, Any, Any, datetime, str]:
+        layout = InstanceLayout.at(tmp_path / sub)
+        auth_keys, _ = ensure_authority_keys(layout, f"install-{sub}")
+        auth_host_keys, _ = ensure_host_keys(layout, AUTHORITY_RUNTIME)
+        w_keys, _ = ensure_host_keys(layout, "worker-1")
+        now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+        k1 = NatsSigningKey.generate("user").public_key
+        write_expected_hosts(
+            layout.trust_expected_hosts_path,
+            {
+                "worker-1": ExpectedHost(
+                    "worker-1",
+                    w_keys.key_id,
+                    w_keys.public_key_text,
+                    frozenset({"worker_host"}),
+                    frozenset({"team_a"}),
+                    agent_types=frozenset({"researcher"}),
+                    session_limit=4,
+                )
+            },
+        )
+        bundle = BootstrapBundle(f"install-{sub}", ((auth_keys.key_id, auth_keys.public_key_text),), partitions=8)
+        write_bundle(layout.trust_bootstrap_path, bundle)
+        authority = InstallationAuthority(
+            layout,
+            auth_keys,
+            auth_host_keys,
+            partitions=8,
+            queues=TEST_QUEUE_LIMITS,
+            clock=lambda: now,
+            credential_lifetime_seconds=300,
+        )
+        authority._trust = PersistentTrustStore.open(bundle, layout.host_trust_dir(AUTHORITY_RUNTIME), now)
+        rev0 = authority.revocations_record(sequence=1, revocation_epoch=1, entries=[], issued=now)
+        authority._trust.add(json.dumps(rev0).encode(), now=now)
+        authority._revocations = rev0
+        authority._teams = ("team_a",)
+        authority._started = True
+        authority.live = SimpleNamespace()  # type: ignore[assignment]
+        bucket = _Bucket()
+        authority._records = AsyncMock(return_value=bucket)  # type: ignore[method-assign]
+
+        req = CertificateRequest(
+            runtime="worker-1",
+            teams=("team_a",),
+            roles=("worker_host",),
+            agent_types=("researcher",),
+            session_limit=4,
+            connection_class="connected",
+            key_id=w_keys.key_id,
+            public_key=w_keys.public_key_text,
+            nats_public_key=k1,
+        )
+        rec = authority.certificate_record(req, epoch=1, revocation_epoch=1, issued=now)
+        authority._trust.add(json.dumps(rec).encode(), now=now)
+        authority._ledger.take_epoch("worker-1", 1)
+        cert = authority._trust.store.host_certificate(f"install-{sub}", "worker-1", 1)
+        assert cert is not None
+        authority._latest_certificate = AsyncMock(return_value=rec)  # type: ignore[method-assign]
+        return authority, cert, rec, now, k1
+
+    # Interleaving 1: retire_host enters _issue_lock first and pauses during cert discovery;
+    # concurrent key-rotating renew must wait for _issue_lock and then see outcome == "revoked".
+    auth1, cert1, rec1, now1, k1_a = _make_authority("c31-retire-first")
+    k2_a = NatsSigningKey.generate("user").public_key
+    retire_in_discovery = asyncio.Event()
+    release_retire = asyncio.Event()
+    orig_discover = auth1._host_certificates_for_revocation
+
+    async def slow_discover(runtime: str, now: datetime, *, min_epoch: int = 1, include_epoch: int | None = None) -> Any:
+        retire_in_discovery.set()
+        await release_retire.wait()
+        return await orig_discover(runtime, now, min_epoch=min_epoch, include_epoch=include_epoch)
+
+    auth1._host_certificates_for_revocation = slow_discover  # type: ignore[method-assign]
+    revoked_a: list[str] = []
+
+    async def track_a(key: str, *, revoke_until: int, now: datetime) -> Any:
+        del revoke_until, now
+        revoked_a.append(key)
+        return SimpleNamespace(revoked=True, revoked_at=0, confirmed_revocations={})
+
+    auth1._revoke_nats_key = track_a  # type: ignore[method-assign]
+    body_a = {"profile_sha256": str(rec1["body"]["profile_sha256"]), "new_nats_public_key": k2_a}
+    verified_a = VerifiedFrame(
+        frame=SimpleNamespace(idempotency_key="worker-1|renew-c31-a", kind="host.renew"),  # type: ignore[arg-type]
+        body=body_a,
+        raw={"body": body_a},
+        certificate=cert1,
+        session=None,
+        authority=None,
+        replay_key="rk-a",
+        frame_digest="fd-a",
+    )
+
+    retire_task = asyncio.create_task(auth1.retire_host("worker-1", now=now1))
+    await retire_in_discovery.wait()
+    renew_task = asyncio.create_task(auth1._renew(verified_a, give_up=False))
+    await asyncio.sleep(0.02)
+    assert not renew_task.done()  # Blocked on _issue_lock held by retire_host!
+    release_retire.set()
+    await retire_task
+    renew_reply_a = await renew_task
+    assert renew_reply_a["outcome"] == "revoked"
+    assert revoked_a == [k1_a]
+    assert auth1._ledger.highest_epoch("worker-1") == 1
+    assert not auth1._ledger.is_nats_key_revoked(k2_a)
+
+    # Interleaving 2: key-rotating renew enters _issue_lock first and pauses before issuing cert2;
+    # concurrent retire_host waits for _issue_lock and then revokes BOTH cert1/K1 AND cert2/K2.
+    auth2, cert2, rec2, now2, k1_b = _make_authority("c31-renew-first")
+    k2_b = NatsSigningKey.generate("user").public_key
+    renew_in_flight = asyncio.Event()
+    release_renew = asyncio.Event()
+
+    async def slow_latest(runtime: str, now: datetime) -> Any:
+        del runtime, now
+        renew_in_flight.set()
+        await release_renew.wait()
+        return rec2
+
+    auth2._latest_certificate = slow_latest  # type: ignore[method-assign]
+    revoked_b: list[str] = []
+
+    async def track_b(key: str, *, revoke_until: int, now: datetime) -> Any:
+        del revoke_until, now
+        revoked_b.append(key)
+        return SimpleNamespace(revoked=True, revoked_at=0, confirmed_revocations={})
+
+    auth2._revoke_nats_key = track_b  # type: ignore[method-assign]
+    body_b = {"profile_sha256": str(rec2["body"]["profile_sha256"]), "new_nats_public_key": k2_b}
+    verified_b = VerifiedFrame(
+        frame=SimpleNamespace(idempotency_key="worker-1|renew-c31-b", kind="host.renew"),  # type: ignore[arg-type]
+        body=body_b,
+        raw={"body": body_b},
+        certificate=cert2,
+        session=None,
+        authority=None,
+        replay_key="rk-b",
+        frame_digest="fd-b",
+    )
+
+    renew_task_b = asyncio.create_task(auth2._renew(verified_b, give_up=False))
+    await renew_in_flight.wait()
+    retire_task_b = asyncio.create_task(auth2.retire_host("worker-1", now=now2))
+    await asyncio.sleep(0.02)
+    assert not retire_task_b.done()  # Blocked on _issue_lock held by _renew!
+    release_renew.set()
+    renew_reply_b = await renew_task_b
+    assert renew_reply_b["outcome"] == "ok"
+    await retire_task_b
+    assert set(revoked_b) == {k1_b, k2_b}
+    assert auth2._ledger.is_nats_key_revoked(k1_b) and auth2._ledger.is_nats_key_revoked(k2_b)
+    revoked_epochs = {
+        e["membership_epoch"] for e in auth2._revocations["body"]["entries"] if e["runtime"] == "worker-1"
+    }
+    assert revoked_epochs == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_c32_dekker_abort_preserves_live_key_for_connected_handover_and_drops_stored_renewal(
+    tmp_path: Path,
+) -> None:
+    """C32/F4/F5: Post-issue Dekker abort in _renew_new_locked:
+    - Same-key renew racing with connected handover (operator/rebalanced/drained) returns not_allowed,
+      keeps K1 alive, and drops StoredRenewal so retries cannot leak the unreturned JWT;
+    - Key-rotating renew racing with connected handover revokes ONLY K2 immediately and keeps K1 alive;
+    - Same-key renew racing with host_lost or partition move defers K1 post-flush instead of immediate revoke."""
+
+    from custom_messages.wire.frame import VerifiedFrame
+    from custom_transport.protocol1.host_keys import ensure_authority_keys, ensure_host_keys
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from installation_authority.service import CertificateRequest
+
+    def _setup(sub: str) -> tuple[InstallationAuthority, InstanceLayout, Any, Any, datetime, str]:
+        layout = InstanceLayout.at(tmp_path / sub)
+        auth_keys, _ = ensure_authority_keys(layout, f"install-{sub}")
+        auth_host_keys, _ = ensure_host_keys(layout, AUTHORITY_RUNTIME)
+        w_keys, _ = ensure_host_keys(layout, "worker-1")
+        acct = NatsSigningKey.generate("account")
+        now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+        k1 = NatsSigningKey.generate("user").public_key
+        write_expected_hosts(
+            layout.trust_expected_hosts_path,
+            {
+                "worker-1": ExpectedHost(
+                    "worker-1",
+                    w_keys.key_id,
+                    w_keys.public_key_text,
+                    frozenset({"worker_host"}),
+                    frozenset({"team_a"}),
+                    agent_types=frozenset({"researcher"}),
+                    session_limit=4,
+                )
+            },
+        )
+        bundle = BootstrapBundle(f"install-{sub}", ((auth_keys.key_id, auth_keys.public_key_text),), partitions=8)
+        write_bundle(layout.trust_bootstrap_path, bundle)
+        authority = InstallationAuthority(
+            layout,
+            auth_keys,
+            auth_host_keys,
+            partitions=8,
+            queues=TEST_QUEUE_LIMITS,
+            clock=lambda: now,
+            credential_lifetime_seconds=300,
+            nats_account_public_key=acct.public_key,
+            nats_account_signing_key=acct,
+        )
+        authority._trust = PersistentTrustStore.open(bundle, layout.host_trust_dir(AUTHORITY_RUNTIME), now)
+        authority._revocations = {"body": {"revocation_epoch": 1, "entries": []}}
+        authority._teams = ("team_a",)
+        authority._started = True
+        authority.live = SimpleNamespace()  # type: ignore[assignment]
+        authority._records = AsyncMock(return_value=_Bucket())  # type: ignore[method-assign]
+        req = CertificateRequest(
+            runtime="worker-1",
+            teams=("team_a",),
+            roles=("worker_host",),
+            agent_types=("researcher",),
+            session_limit=4,
+            connection_class="connected",
+            key_id=w_keys.key_id,
+            public_key=w_keys.public_key_text,
+            nats_public_key=k1,
+        )
+        rec = authority.certificate_record(req, epoch=1, revocation_epoch=1, issued=now)
+        authority._trust.add(json.dumps(rec).encode(), now=now)
+        authority._ledger.take_epoch("worker-1", 1)
+        cert = authority._trust.store.host_certificate(f"install-{sub}", "worker-1", 1)
+        assert cert is not None
+        authority._latest_certificate = AsyncMock(return_value=rec)  # type: ignore[method-assign]
+        return authority, layout, cert, rec, now, k1
+
+    # Case 1: Same-key renew (K1 -> K1) racing with connected handover (reason="operator").
+    auth1, layout1, cert1, rec1, now1, k1_1 = _setup("c32-same-key-connected")
+    reads1 = 0
+
+    async def own_then_connected_release(_rt: str, _teams: Any, _now: datetime) -> Any:
+        nonlocal reads1
+        reads1 += 1
+        if reads1 <= 2:
+            return {"team_a": {0: 100}}, {}
+        return {}, {"team_a": {0: (1, "operator")}}
+
+    auth1._read_host_partition_ownership = own_then_connected_release  # type: ignore[method-assign]
+    revoked1: list[str] = []
+
+    async def track1(key: str, *, revoke_until: int, now: datetime) -> Any:
+        del revoke_until, now
+        revoked1.append(key)
+        return SimpleNamespace(revoked=True)
+
+    auth1._revoke_nats_key = track1  # type: ignore[method-assign]
+    body1 = {"profile_sha256": str(rec1["body"]["profile_sha256"]), "partitions": [0]}
+    vf1 = VerifiedFrame(
+        frame=SimpleNamespace(idempotency_key="worker-1|renew-c32-1", kind="host.renew"),  # type: ignore[arg-type]
+        body=body1,
+        raw={"body": body1},
+        certificate=cert1,
+        session=None,
+        authority=None,
+        replay_key="rk1",
+        frame_digest="fd1",
+    )
+    deferred1: list[Any] = []
+    reply1 = await auth1._renew(vf1, give_up=False, deferred=deferred1)
+    assert reply1["outcome"] == "not_allowed"
+    assert revoked1 == []
+    assert deferred1 == []
+    assert not auth1._ledger.is_nats_key_revoked(k1_1)
+    # Aborted StoredRenewal must be dropped both in memory and on disk so retries cannot receive the unreturned JWT.
+    assert auth1._ledger.renewal("worker-1|renew-c32-1", now1) is None
+    reopened1 = IssueLedger.open(layout1.host_trust_dir(AUTHORITY_RUNTIME), "install-c32-same-key-connected")
+    assert reopened1.renewal("worker-1|renew-c32-1", now1) is None
+    with pytest.raises(FrameRefused) as retry_refused:
+        await auth1._renew(vf1, give_up=False, deferred=[])
+    assert retry_refused.value.code == "invalid_body" and retry_refused.value.at == "/body/partitions"
+
+    # Case 2: Key-rotating renew (K1 -> K2) racing with connected handover (reason="rebalanced").
+    auth2, _layout2, cert2, rec2, now2, k1_2 = _setup("c32-rotating-connected")
+    k2_2 = NatsSigningKey.generate("user").public_key
+    reads2 = 0
+
+    async def own_then_rebalanced(_rt: str, _teams: Any, _now: datetime) -> Any:
+        nonlocal reads2
+        reads2 += 1
+        if reads2 <= 2:
+            return {"team_a": {0: 100}}, {}
+        return {}, {"team_a": {0: (1, "rebalanced")}}
+
+    auth2._read_host_partition_ownership = own_then_rebalanced  # type: ignore[method-assign]
+    revoked2: list[str] = []
+
+    async def track2(key: str, *, revoke_until: int, now: datetime) -> Any:
+        del revoke_until, now
+        revoked2.append(key)
+        return SimpleNamespace(revoked=True)
+
+    auth2._revoke_nats_key = track2  # type: ignore[method-assign]
+    body2 = {"profile_sha256": str(rec2["body"]["profile_sha256"]), "partitions": [0], "new_nats_public_key": k2_2}
+    vf2 = VerifiedFrame(
+        frame=SimpleNamespace(idempotency_key="worker-1|renew-c32-2", kind="host.renew"),  # type: ignore[arg-type]
+        body=body2,
+        raw={"body": body2},
+        certificate=cert2,
+        session=None,
+        authority=None,
+        replay_key="rk2",
+        frame_digest="fd2",
+    )
+    deferred2: list[Any] = []
+    reply2 = await auth2._renew(vf2, give_up=False, deferred=deferred2)
+    assert reply2["outcome"] == "not_allowed"
+    assert revoked2 == [k2_2]
+    assert deferred2 == []
+    assert auth2._ledger.is_nats_key_revoked(k2_2)
+    assert not auth2._ledger.is_nats_key_revoked(k1_2)
+    assert auth2._ledger.renewal("worker-1|renew-c32-2", now2) is None
+
+    # Case 3: Same-key renew (K1 -> K1) racing with partition moved/lost -> defer K1 post-flush (never immediate).
+    auth3, _layout3, cert3, rec3, now3, k1_3 = _setup("c32-same-key-moved")
+    reads3 = 0
+
+    async def own_then_moved(_rt: str, _teams: Any, _now: datetime) -> Any:
+        nonlocal reads3
+        reads3 += 1
+        if reads3 <= 2:
+            return {"team_a": {0: 100}}, {}
+        return {}, {}  # Partition moved to another host!
+
+    auth3._read_host_partition_ownership = own_then_moved  # type: ignore[method-assign]
+    revoked3: list[str] = []
+
+    async def track3(key: str, *, revoke_until: int, now: datetime) -> Any:
+        del revoke_until, now
+        revoked3.append(key)
+        return SimpleNamespace(revoked=True)
+
+    auth3._revoke_nats_key = track3  # type: ignore[method-assign]
+    body3 = {"profile_sha256": str(rec3["body"]["profile_sha256"]), "partitions": [0]}
+    vf3 = VerifiedFrame(
+        frame=SimpleNamespace(idempotency_key="worker-1|renew-c32-3", kind="host.renew"),  # type: ignore[arg-type]
+        body=body3,
+        raw={"body": body3},
+        certificate=cert3,
+        session=None,
+        authority=None,
+        replay_key="rk3",
+        frame_digest="fd3",
+    )
+    deferred3: list[Any] = []
+    reply3 = await auth3._renew(vf3, give_up=False, deferred=deferred3)
+    assert reply3["outcome"] == "not_allowed"
+    assert revoked3 == []  # Not pushed before reply flush!
+    assert len(deferred3) == 1
+    assert auth3._ledger.is_nats_key_revoked(k1_3)
+    assert auth3._ledger.renewal("worker-1|renew-c32-3", now3) is None
+    await deferred3[0]()
+    assert revoked3 == [k1_3]

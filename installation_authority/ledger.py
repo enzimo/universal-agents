@@ -184,6 +184,11 @@ class IssueLedger:
             connection=dict(connection) if connection is not None else None,
         )
 
+    def forget_renewal(self, retry_key: str) -> None:
+        """Drop a stored renewal answer (e.g. after a post-issue Dekker abort, C32)."""
+
+        self._renewals.pop(retry_key, None)
+
     # -- revocations ------------------------------------------------------------------------------
 
     @property
