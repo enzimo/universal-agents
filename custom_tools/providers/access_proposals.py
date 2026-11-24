@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from access_control.cli_binaries import fetch_https
 from access_control.proposal_clis import install_programs
-from access_control.decision_effects import OwnedFile, ReplacedFile
+from access_control.decision_effects import OwnedFile, RemovedFile, ReplacedFile
 
 import asyncio
 import json
@@ -44,14 +44,16 @@ from strands.types.tools import ToolContext
 from access_catalog.catalog import CatalogError, load_catalog
 from access_catalog.instance_tools import (
     remove_instance_tool,
+    remove_proposed_tool_file,
     replace_instance_tool,
     restore_instance_tool,
+    restore_removed_instance_tool,
     tool_definition,
     with_proposed_tools,
     write_instance_tool,
 )
 from access_control.account_sharing import TeamAccountSharing
-from access_control.data_folders import DataFolderRefused, DataFolderRegistry
+from access_control.data_folders import DataFolderRefused, DataFolderRegistry, registration_problem
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal
 from access_control.identity import IdentityRejected
@@ -63,9 +65,15 @@ from access_control.proposals import (
     proposal_summary,
     with_mcp_defaults,
     with_tool_change_baselines,
+    with_tool_removal_baselines,
 )
 from access_control.stale_blocks import active_operation_blocks_for_tool
 from access_control.tool_change_diffs import tool_change_rows
+from access_control.tool_removals import (
+    active_grants_for_tool_in_store,
+    load_removable_tool_file,
+    tool_removal_rows,
+)
 from custom_messages.contracts.access_v2 import (
     AccessProposalV1,
     AccessRequestStatus,
@@ -75,6 +83,8 @@ from custom_messages.contracts.access_v2 import (
     ChangeProposalV1,
     LinkOwnerKind,
     LinkPurpose,
+    SubjectKind,
+    SubjectRefV1,
 )
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.task_v1 import ACCESS_REQUEST_INTERRUPT_KIND
@@ -109,6 +119,7 @@ def _proposal(
     revoke_grant_ids: list[str] | None,
     clis: list[dict[str, Any]] | None = None,
     tool_changes: list[dict[str, Any]] | None = None,
+    tool_removals: list[dict[str, Any]] | None = None,
 ) -> AccessProposalV1:
     return AccessProposalV1.model_validate(
         {
@@ -116,6 +127,7 @@ def _proposal(
             "reason": reason,
             "tools": tuple(tools or ()),
             "tool_changes": tuple(tool_changes or ()),
+            "tool_removals": tuple(tool_removals or ()),
             "clis": tuple(clis or ()),
             "mcp_servers": tuple(mcp_servers or ()),
             "grants": tuple(grants or ()),
@@ -168,7 +180,7 @@ def _result(request: AccessRequestV1, store: AccessRepository | None = None) -> 
             "kept_for_later_tasks": list(request.kept_item_ids),
             "note": request.decision_note or None,
             "message": (
-                "Applied. Tool catalog additions and changes are active now; an installed MCP server's tools appear "
+                "Applied. Tool catalog additions, changes, and removals are active now; an installed MCP server's tools appear "
                 "on the next model call of each agent that may use it, for the work of the person it serves."
             ),
         }
@@ -200,9 +212,26 @@ def _mcp_store(agent: Any) -> Any:
     return MCPConnectionStore(resolve_agent_mcp_connection_paths(agent))
 
 
-def _agreement_rows(agent: Any, proposal: AccessProposalV1, change_rows: list[str]) -> list[str]:
+def _optional_access_store(agent: Any) -> AccessRepository | None:
+    """Return the access store when configured on ``agent``, or ``None`` if unavailable in auth-off mode."""
+
+    task_manager = getattr(agent, "task_manager", None)
+    storage = getattr(task_manager, "storage_settings", None) if task_manager is not None else None
+    if storage is None:
+        return None
+    return AccessRepository(storage)
+
+
+def _agreement_rows(
+    agent: Any, proposal: AccessProposalV1, change_rows: list[str], removal_rows: list[str]
+) -> list[str]:
     rows = [f"Add {tool.display_name} ({tool.tool_id}) for {', '.join(tool.hosts)}" for tool in proposal.tools]
+    rows += [
+        f"Add {cli.display_name} ({cli.tool_id}) ({cli.installed_cli.binary_path})"
+        for cli in proposal.clis
+    ]
     rows += change_rows
+    rows += removal_rows
     if proposal.mcp_servers:
         store = _mcp_store(agent)
         for item in proposal.mcp_servers:
@@ -214,23 +243,33 @@ def _agreement_rows(agent: Any, proposal: AccessProposalV1, change_rows: list[st
     return rows
 
 
-def _prepare_agreement_tool_changes(
+def _prepare_agreement_proposal(
     agent: Any, instance_root: Path, proposal: AccessProposalV1
-) -> tuple[AccessProposalV1, list[str]]:
-    """Validate proposed tool additions and replacements against the live catalog before agreement or apply."""
+) -> tuple[AccessProposalV1, list[str], list[str], AccessRepository | None]:
+    """Validate proposed tool additions, replacements, and removals before agreement or apply."""
 
     catalog = load_catalog(instance_root)
+    proposal = with_tool_removal_baselines(proposal, instance_root=instance_root, catalog=catalog)
     proposal = with_tool_change_baselines(proposal, instance_root=instance_root, catalog=catalog)
-    if proposal.tools or proposal.clis or proposal.tool_changes:
+    if proposal.tools or proposal.clis or proposal.tool_changes or proposal.tool_removals:
         try:
-            with_proposed_tools(catalog, proposal.tools, proposal.clis, proposal.tool_changes)
+            with_proposed_tools(
+                catalog,
+                proposal.tools,
+                proposal.clis,
+                proposal.tool_changes,
+                proposal.tool_removals,
+            )
         except (CatalogError, ValueError) as exc:
+            if proposal.tool_removals and not (proposal.tools or proposal.clis or proposal.tool_changes):
+                raise ProposalRefused(f"A proposed tool cannot be removed: {exc}") from exc
+            if proposal.tool_removals:
+                raise ProposalRefused(f"The proposed tool changes cannot be applied: {exc}") from exc
             raise ProposalRefused(f"A proposed tool cannot be added: {exc}") from exc
-    if not proposal.tool_changes:
-        return proposal, []
-    store = AccessRepository(agent.task_manager.storage_settings)
-    team_id = str(agent.team_id)
-    all_links = store.list_links(team_id, purpose=None)
+    store = _optional_access_store(agent) if (proposal.tool_changes or proposal.tool_removals or proposal.data_folders) else None
+    team_id = str(getattr(agent, "team_id", "") or "")
+    all_links = store.list_links(team_id, purpose=None) if store is not None and team_id else []
+    now = datetime.now(timezone.utc)
     change_rows: list[str] = []
     for index, item in enumerate(proposal.tool_changes):
         tool_file = load_changeable_tool_file(instance_root, catalog, item.tool_id)
@@ -243,8 +282,10 @@ def _prepare_agreement_tool_changes(
             current=tool_file.definition,
             proposed=tool_definition(item),
             active_links=[link for link in all_links if link.tool_id == item.tool_id],
-            active_blocks=active_operation_blocks_for_tool(
-                store, team_id, item.tool_id, now=datetime.now(timezone.utc)
+            active_blocks=(
+                active_operation_blocks_for_tool(store, team_id, item.tool_id, now=now)
+                if store is not None and team_id
+                else []
             ),
         )
         if not diff.has_changes:
@@ -255,7 +296,33 @@ def _prepare_agreement_tool_changes(
             )
             raise ProposalRefused(f"The proposed change to {item.tool_id} makes no changes to its current definition.")
         change_rows += [row.text for row in rows]
-    return proposal, change_rows
+    removal_rows: list[str] = []
+    for index, removal in enumerate(proposal.tool_removals):
+        tool_file = load_removable_tool_file(instance_root, catalog, removal.tool_id)
+        if removal.expected_sha256 != tool_file.sha256:
+            raise ProposalRefused(
+                f"The catalog file for {removal.tool_id} changed after the proposal was prepared; propose it again."
+            )
+        try:
+            rows = tool_removal_rows(
+                index,
+                tool_file.definition,
+                active_grants=(),
+                active_blocks=(),
+                active_links=[link for link in all_links if link.tool_id == removal.tool_id],
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Refused a proposed tool removal whose impact could not fit without truncation. "
+                "event=proposal_tool_removal_refused reason=review_row_too_long tool_id=%s error=%s",
+                removal.tool_id,
+                exc,
+            )
+            raise ProposalRefused(
+                f"The proposed removal of {removal.tool_id} cannot be shown without hiding part of its impact: {exc}"
+            ) from exc
+        removal_rows += [row.text for row in rows]
+    return proposal, change_rows, removal_rows, store
 
 
 def _install_by_agreement(agent: Any, proposal: AccessProposalV1) -> list[Any]:
@@ -300,19 +367,19 @@ def apply_by_agreement(
     proposal: AccessProposalV1,
     confirmed: bool,
 ) -> dict[str, Any]:
-    """Single-person mode (D8): add or change tools, MCP servers and data folders after the person's agreement.
+    """Single-person mode (D8): add, change, or remove tools, MCP servers and data folders after the person's agreement.
 
-    Tool changes apply on ``confirmed=true`` like new tools (owner decision): the
-    ``confirmed=false`` preview lists trusted code's diff rows for the person, and
-    the replacement still refuses if the file changed between reading its
-    baseline and writing (``expected_previous_sha256``).
+    Tool changes and removals apply on ``confirmed=true`` like new tools: the
+    ``confirmed=false`` preview lists trusted code's diff or removal impact rows
+    for the person, and the file write/unlink still refuses if the file changed
+    between reading its baseline and applying.
     """
 
     from custom_tools.workspace_scope import _protected, runtime_layout
 
     layout = runtime_layout(agent)
-    proposal, change_rows = _prepare_agreement_tool_changes(agent, layout.root, proposal)
-    rows = _agreement_rows(agent, proposal, change_rows)
+    proposal, change_rows, removal_rows, store = _prepare_agreement_proposal(agent, layout.root, proposal)
+    rows = _agreement_rows(agent, proposal, change_rows, removal_rows)
     if not confirmed:
         return {
             "status": "agreement_needed",
@@ -320,9 +387,22 @@ def apply_by_agreement(
             "message": "Authorization is off. Explain these changes to the person, get their agreement in the "
             "conversation, and call again with confirmed=true. Grants and restrictions are not needed.",
         }
+    protected_paths = _protected(agent)
+    if proposal.data_folders:
+        if store is None:
+            raise ProposalRefused("Data folders cannot be registered without an access store.")
+        registry = DataFolderRegistry(store, str(agent.team_id))
+        existing_folders = registry.records()
+        for folder in proposal.data_folders:
+            problem = registration_problem(
+                folder.name, folder.path, protected=protected_paths, existing=existing_folders
+            )
+            if problem:
+                raise DataFolderRefused(problem)
     programs: list[tuple[Path, OwnedFile]] = []
     written_tools: list[Path] = []
     replaced_tools: list[ReplacedFile] = []
+    removed_tools: list[RemovedFile] = []
 
     def prepare_program(root: Path, parts: tuple[str, ...], descriptor: int, data: bytes) -> None:
         programs.append((root, OwnedFile.prepared(parts, descriptor, data)))
@@ -336,9 +416,20 @@ def apply_by_agreement(
             )
         )
 
+    def capture_removed(path: Path, previous_bytes: bytes) -> None:
+        removed_tools.append(RemovedFile.prepared((path.name,), previous_bytes))
+
     try:
         installed = _install_by_agreement(agent, proposal)
         install_programs(layout.root, proposal.clis, fetch_https, before_write=prepare_program)
+        for removed in proposal.tool_removals:
+            assert removed.expected_sha256 is not None
+            remove_proposed_tool_file(
+                layout.root,
+                removed.tool_id,
+                expected_sha256=removed.expected_sha256,
+                before_remove=capture_removed,
+            )
         for proposed_http in proposal.tools:
             written_tools.append(write_instance_tool(layout.root, proposed_http))
         for proposed_cli in proposal.clis:
@@ -351,44 +442,61 @@ def apply_by_agreement(
                 expected_previous_sha256=changed.previous_definition_digest,
                 before_replace=capture_previous,
             )
-        storage = agent.task_manager.storage_settings
-        registry = DataFolderRegistry(AccessRepository(storage), str(agent.team_id))
-        owner = PersonPrincipal(AGREEMENT_APPROVER, str(agent.team_id), ("owner",))
-        for folder in proposal.data_folders:
-            registry.register(
-                owner,
-                name=folder.name,
-                path=folder.path,
-                writable=folder.writable,
-                reason=proposal.reason,
-                protected=_protected(agent),
-                now=datetime.now(timezone.utc),
+        if proposal.data_folders:
+            assert store is not None
+            registry = DataFolderRegistry(store, str(agent.team_id))
+            owner = PersonPrincipal(AGREEMENT_APPROVER, str(agent.team_id), ("owner",))
+            for folder in proposal.data_folders:
+                registry.register(
+                    owner,
+                    name=folder.name,
+                    path=folder.path,
+                    writable=folder.writable,
+                    reason=proposal.reason,
+                    protected=protected_paths,
+                    now=datetime.now(timezone.utc),
+                )
+        if proposal.tool_removals and store is not None and getattr(agent, "team_id", None):
+            store.revoke_links_for_tools(
+                str(agent.team_id),
+                (item.tool_id for item in proposal.tool_removals),
+                actor=SubjectRefV1(kind=SubjectKind.USER, id=AGREEMENT_APPROVER),
+                at=datetime.now(timezone.utc),
             )
     except BaseException:
         tools_dir = layout.instance_tools_dir
+        for path in reversed(written_tools):
+            remove_instance_tool(path)
         for replaced in reversed(replaced_tools):
             target_path = tools_dir.joinpath(*replaced.parts)
 
-            def _restore(previous: bytes, target: Path = target_path) -> None:
+            def _restore_replaced(previous: bytes, target: Path = target_path) -> None:
                 restore_instance_tool(target, previous)
 
-            replaced.restore(tools_dir, _restore)
-        for path in reversed(written_tools):
-            remove_instance_tool(path)
+            replaced.restore(tools_dir, _restore_replaced)
+        for removed_file in reversed(removed_tools):
+            target_path = tools_dir.joinpath(*removed_file.parts)
+
+            def _restore_removed(previous: bytes, target: Path = target_path) -> None:
+                restore_removed_instance_tool(target, previous)
+
+            removed_file.restore(tools_dir, _restore_removed)
         for root, owned in reversed(programs):
             owned.remove(root)
         logger.warning(
             "Applying an access proposal by agreement failed; file changes were rolled back. "
-            "event=proposal_agreement_apply_failed tools=%s tool_changes=%s",
+            "event=proposal_agreement_apply_failed tools=%s tool_changes=%s tool_removals=%s",
             ",".join([*(t.tool_id for t in proposal.tools), *(c.tool_id for c in proposal.clis)]),
             ",".join(changed.tool_id for changed in proposal.tool_changes),
+            ",".join(item.tool_id for item in proposal.tool_removals),
         )
         raise
     logger.warning(
         "An access proposal was applied on the person's agreement (authorization off). "
-        "event=proposal_applied_by_agreement tools=%s tool_changes=%s mcp_servers=%s folders=%s",
+        "event=proposal_applied_by_agreement tools=%s tool_changes=%s tool_removals=%s mcp_servers=%s folders=%s",
         ",".join([*(t.tool_id for t in proposal.tools), *(c.tool_id for c in proposal.clis)]),
         ",".join(changed.tool_id for changed in proposal.tool_changes),
+        ",".join(item.tool_id for item in proposal.tool_removals),
         ",".join(record.connection_id for record in installed),
         ",".join(folder.name for folder in proposal.data_folders),
     )
@@ -427,10 +535,11 @@ def _submit(agent: Any, proposal: AccessProposalV1, tool_context: ToolContext) -
     layout = runtime_layout(agent)
     catalog = access.catalog
     mcp_records = _mcp_store(agent).get if proposal.mcp_servers else (lambda _connection_id: None)
-    # Default rows for MCP servers and pinned baselines for tool changes are
-    # added before the proposal is compiled and stored, so the card and the
-    # approved digest cover them exactly (access_control.proposals).
+    # Default rows for MCP servers and pinned baselines for tool removals and
+    # tool changes are added before the proposal is compiled and stored, so the
+    # card and the approved digest cover them exactly (access_control.proposals).
     proposal = with_mcp_defaults(proposal, mcp_records, lead_agent_type=TEAM_ARCHITECT_AGENT_TYPE)
+    proposal = with_tool_removal_baselines(proposal, instance_root=layout.root, catalog=catalog)
     proposal = with_tool_change_baselines(proposal, instance_root=layout.root, catalog=catalog)
     compiled = ProposalCompiler(
         catalog=catalog,
@@ -447,6 +556,9 @@ def _submit(agent: Any, proposal: AccessProposalV1, tool_context: ToolContext) -
             link for link in service.store.list_links(service.team_id, purpose=None) if link.tool_id == tool_id
         ],
         blocks_for_tool=lambda tool_id: active_operation_blocks_for_tool(
+            service.store, service.team_id, tool_id, now=service.clock()
+        ),
+        grants_for_tool=lambda tool_id: active_grants_for_tool_in_store(
             service.store, service.team_id, tool_id, now=service.clock()
         ),
     ).compile(proposal, person=person, task_id=principal.work_id)
@@ -513,12 +625,12 @@ def _propose(
     tool_context: ToolContext,
     confirmed: bool,
 ) -> dict[str, Any]:
-    from custom_agents.access_runtime import runtime_access
+    from custom_agents.access_runtime import authorization_enabled
 
     agent = get_agent_ref()
     if agent is None:
         raise RuntimeError("No agent is running this tool.")
-    if not runtime_access(agent).enabled:
+    if not authorization_enabled(getattr(agent, "authorization_config", None)):
         return apply_by_agreement(agent, proposal, confirmed)
     return submit_and_wait(agent, lambda: proposal, tool_context)
 
@@ -530,6 +642,7 @@ async def propose_access_change(
     tool_context: ToolContext,
     tools: list[dict[str, Any]] | None = None,
     tool_changes: list[dict[str, Any]] | None = None,
+    tool_removals: list[dict[str, Any]] | None = None,
     mcp_servers: list[dict[str, Any]] | None = None,
     clis: list[dict[str, Any]] | None = None,
     grants: list[dict[str, Any]] | None = None,
@@ -544,7 +657,8 @@ async def propose_access_change(
     Use it when a service is not in the tool catalog (find_tools finds nothing,
     or a call is refused as an unlisted host), when an existing proposal-written
     web API tool needs new hosts, routes, credential injections, or a team gate
-    credential, or when you need access nobody can hand on. Items:
+    credential, when a proposal-written web API or installed CLI tool is no
+    longer needed, or when you need access nobody can hand on. Items:
     - tools: new web API tools, each {"tool_id": "http:<name>", "display_name",
       "description", "hosts": [exact host names], "routes": [{"name",
       "method", "path", "level"}], "uses_credential": true,
@@ -568,6 +682,14 @@ async def propose_access_change(
       against your replacement, lists every difference on the review card, and
       names any existing account or gate links that will have to be linked
       again with /link.
+    - tool_removals: proposal-written web API (`http:*`) or installed CLI
+      (`cli:*`) tools to remove from the catalog, each {"tool_id": "http:<name>"
+      | "cli:<name>"}. Built-in tools, operator hand-written catalog files, and
+      MCP servers (`mcp:*`, managed through `mcp_connections`) cannot be
+      removed here. Trusted code lists the tool and every active grant, active
+      block, and active account or gate link that approval will revoke. For
+      `cli:*` tools, workspace files under `team/tools/<name>/` are not
+      deleted.
     - clis: command-line tools, each {"tool_id": "cli:<name>", "display_name",
       "description", "installed_cli": {"binary_path": "team/tools/<name>/<file>",
       "sha256", "version", "source_url" (https, optional), "archive_member"
@@ -602,7 +724,8 @@ async def propose_access_change(
     Say plainly why in `reason`; the card shows trusted code's own summary of
     each item. With authorization off, get the person's agreement in the
     conversation and call with confirmed=true (confirmed=false returns the
-    summary to explain, including the diff rows for `tool_changes`).
+    summary to explain, including the diff rows for `tool_changes` and impact
+    rows for `tool_removals`).
     """
 
     from custom_agents.access_runtime import AuthorizationOff
@@ -620,6 +743,7 @@ async def propose_access_change(
             revoke_grant_ids,
             clis,
             tool_changes,
+            tool_removals,
         )
         outcome = await asyncio.to_thread(_propose, proposal, tool_context, confirmed)
     except InterruptException:

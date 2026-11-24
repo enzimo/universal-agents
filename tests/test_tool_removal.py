@@ -1284,3 +1284,912 @@ def test_tool_removal_rows_compiler_summary_bounded_text_and_80_row_cap(
     assert "event=proposal_tool_removal_refused" in caplog.text
     assert "reason=review_row_too_long" in caplog.text
     assert callable(tool_removal_rows)
+
+
+def test_http_tool_removal_with_eight_long_hosts_packs_continuation_rows_without_overflow(tmp_path: Path) -> None:
+    """C11: valid multi-host HTTP tools with 7-8 max-length hosts stay removable with packed continuation rows."""
+
+    root = tmp_path / "instance"
+    store = _access_store(tmp_path)
+    long_hosts = tuple(
+        f"h{i}." + ".".join([f"seg{j:02d}" + ("a" * 45) for j in range(4)]) + ".example.com"
+        for i in range(8)
+    )
+    assert all(len(host) <= 253 for host in long_hosts)
+    assert len(", ".join(long_hosts)) > 1600
+    write_instance_tool(
+        root,
+        ProposedHttpToolV1(
+            tool_id="http:manyhosts",
+            display_name="Many Hosts API",
+            hosts=long_hosts,
+            uses_credential=False,
+        ),
+    )
+    compiler = _compiler(root, store)
+    proposal = with_tool_removal_baselines(
+        AccessProposalV1(
+            title="Remove Many Hosts API",
+            reason="Retired.",
+            tool_removals=(ProposedToolRemovalV1(tool_id="http:manyhosts"),),
+        ),
+        instance_root=root,
+        catalog=compiler.catalog,
+    )
+    compiled = compiler.compile(proposal, person=PersonPrincipal("owner-1", TEAM, ("owner",)), task_id="task-1")
+    assert all(row.section == "tool_removal" for row in compiled.rows)
+    assert all(len(row.text) <= 1600 for row in compiled.rows)
+    assert compiled.rows[0].item_id == "remove-0"
+    assert "8 hosts (listed below)" in compiled.rows[0].text
+    host_rows = [row for row in compiled.rows if row.item_id.startswith("remove-0-hosts-")]
+    assert len(host_rows) >= 2
+    combined_hosts = " ".join(row.text for row in host_rows)
+    for host in long_hosts:
+        assert host in combined_hosts
+    # Continuation rows have item_id.count('-') > 1 so proposal_summary counts 1 tool.
+    assert proposal_summary(compiled.rows) == "Access proposal: remove 1 tool. Takes effect when approved."
+
+
+def test_compiler_keeps_all_new_tool_rows_contiguous_before_changes_and_removals(tmp_path: Path) -> None:
+    """C12: combining tools, clis, tool_changes, and tool_removals preserves REVIEW_SECTIONS order."""
+
+    root = tmp_path / "instance"
+    store = _access_store(tmp_path)
+    write_instance_tool(root, _http_tool("http:old", "old.example.com"))
+    write_instance_tool(root, _http_tool("http:editable", "editable.example.com"))
+    compiler = _compiler(root, store)
+
+    from access_control.proposals import with_tool_change_baselines
+
+    proposal = AccessProposalV1(
+        title="Add, change, and remove tools together",
+        reason="Consolidating catalog.",
+        tools=(_http_tool("http:added", "added.example.com"),),
+        clis=(_cli_tool("fresh"),),
+        tool_changes=(
+            ProposedHttpToolChangeV1(
+                tool_id="http:editable",
+                display_name="Editable Updated",
+                hosts=("editable.example.com", "editable2.example.com"),
+                uses_credential=False,
+            ),
+        ),
+        tool_removals=(ProposedToolRemovalV1(tool_id="http:old"),),
+    )
+    proposal = with_tool_removal_baselines(proposal, instance_root=root, catalog=compiler.catalog)
+    proposal = with_tool_change_baselines(proposal, instance_root=root, catalog=compiler.catalog)
+    compiled = compiler.compile(proposal, person=PersonPrincipal("owner-1", TEAM, ("owner",)), task_id="task-1")
+    sections = [row.section for row in compiled.rows]
+    # Compress consecutive identical sections: must be strictly ["tool", "tool_change", "tool_removal"].
+    deduped = [sec for i, sec in enumerate(sections) if i == 0 or sections[i - 1] != sec]
+    assert deduped == ["tool", "tool_change", "tool_removal"]
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint 3: ProposalApplier (auth-on), recovery (A4/C01/C02), auth-off (A5/C03)
+# ---------------------------------------------------------------------------
+
+
+def _build_real_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Build a real Cedar + SQLite + ProposalApplier + BrokerAccessGate world."""
+
+    from access_catalog.catalog import CatalogSource
+    from access_control.cedar import CedarAccessClient
+    from access_control.data_folders import DataFolderRegistry
+    from access_control.decisions import AccessService
+    from access_control.entities import agent_role_resolver
+    from access_control.identity import ContextVerifier
+    from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalApplier
+    from access_control.requests import AccessRequests
+    from custom_agents import access_runtime
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from tests.broker_access_support import context_verify_keys
+    from tests.task_work_support import set_agent_ref
+    from tests.test_access_request_tools import BINARY, OWNER as REQ_OWNER, TEAM as REQ_TEAM, make_agent
+
+    if not BINARY.is_file():
+        pytest.skip("build ua-cedar-authorizer first (cargo build)")
+
+    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    access_runtime._runtime_access.cache_clear()
+    instance = tmp_path / "instance"
+    (instance / "control").mkdir(parents=True)
+    lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
+    lead.instance_root = str(instance)
+    storage = lead.task_manager.storage_settings
+    catalogs = CatalogSource(instance)
+    service = AccessService(
+        store=AccessRepository(storage),
+        catalog=catalogs.current(),
+        cedar=CedarAccessClient(binary=str(BINARY)),
+        team_id=REQ_TEAM,
+        agent_role_of=agent_role_resolver("TeamArchitect"),
+    )
+    second_admin = PersonPrincipal("admin-2", REQ_TEAM, ("admin",))
+    member = PersonPrincipal("member-1", REQ_TEAM, ("member",))
+    people = {REQ_OWNER.person_id: REQ_OWNER, second_admin.person_id: second_admin, member.person_id: member}
+    holder: dict = {}
+
+    def requests() -> AccessRequests:
+        service.catalog = catalogs.current()
+        return AccessRequests(
+            service=service,
+            inbox=access_runtime.StoredAccessInbox(service.store),
+            lead_agent_type="TeamArchitect",
+            appliers={ACCESS_PROPOSAL_KIND: holder["applier"]},
+        )
+
+    holder["applier"] = ProposalApplier(
+        requests=requests,
+        instance_root=instance,
+        catalogs=catalogs,
+        data_folders=lambda: DataFolderRegistry(service.store, REQ_TEAM),
+        protected=(instance,),
+        person=people.get,
+    )
+    gate = BrokerAccessGate(
+        catalogs=catalogs,
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=REQ_TEAM,
+        access=service,
+        links=service.store,
+    )
+    set_agent_ref(lead)
+    return {
+        "lead": lead,
+        "requests": requests,
+        "applier": holder["applier"],
+        "gate": gate,
+        "instance": instance,
+        "service": service,
+        "owner": REQ_OWNER,
+        "second_admin": second_admin,
+        "member": member,
+        "team": REQ_TEAM,
+        "cleanup": lambda: (service.cedar.close(), access_runtime._runtime_access.cache_clear(), set_agent_ref(None)),
+    }
+
+
+def _seed_http_tool_with_impacts(world: dict, tool_id: str = "http:portainer", host: str = "portainer.example.test") -> Path:
+    service = world["service"]
+    team = world["team"]
+    owner = world["owner"]
+    now = service.clock()
+    path = write_instance_tool(
+        world["instance"],
+        ProposedHttpToolV1(
+            tool_id=tool_id,
+            display_name="Portainer",
+            hosts=(host,),
+            routes=(
+                HttpRouteV1(name="stacks.restart", method="POST", path="/api/stacks/{id}/restart", level=AccessLevel.WRITE),
+                HttpRouteV1(name="stacks.delete", method="DELETE", path="/api/stacks/{id}", level=AccessLevel.FULL),
+            ),
+            credential_injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-API-Key", field="token"),
+            ),
+            gate_injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="gate"),
+            ),
+        ),
+    )
+    # Active lead grant, handed-down worker grant, tool block, operation block, links, and setup state.
+    lead_grant = GrantV1(
+        grant_id="grant_lead_portainer",
+        team_id=team,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/TeamArchitect"),
+        target=TargetRefV1(kind=TargetKind.TOOL, id=tool_id),
+        level=AccessLevel.WRITE,
+        delegation_depth=1,
+        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id),
+        for_person_id="member-1",
+        created_at_utc=now,
+    )
+    worker_grant = GrantV1(
+        grant_id="grant_worker_portainer",
+        team_id=team,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/BackgroundOperationsAgent"),
+        target=TargetRefV1(kind=TargetKind.TOOL, id=tool_id),
+        level=AccessLevel.WRITE,
+        lifetime=GrantLifetime.TASK,
+        task_id="task-live",
+        parent_grant_id=lead_grant.grant_id,
+        granted_by=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/TeamArchitect"),
+        for_person_id="member-1",
+        created_at_utc=now,
+    )
+    tool_block = GrantV1(
+        grant_id="blk_tool_portainer",
+        team_id=team,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/BackgroundOperationsAgent"),
+        target=TargetRefV1(kind=TargetKind.TOOL, id=tool_id),
+        level=AccessLevel.FULL,
+        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id),
+        created_at_utc=now,
+    )
+    op_block = GrantV1(
+        grant_id="blk_op_portainer",
+        team_id=team,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/BackgroundOperationsAgent"),
+        target=TargetRefV1(kind=TargetKind.OPERATION, id=f"{tool_id}#route:stacks.delete"),
+        level=AccessLevel.FULL,
+        granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id),
+        created_at_utc=now,
+    )
+    for g in (lead_grant, worker_grant, tool_block, op_block):
+        service.store.create(g)
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_team_acct",
+            team_id=team,
+            tool_id=tool_id,
+            purpose=LinkPurpose.ACCOUNT,
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=team,
+            credential_key="cred-team",
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id),
+            created_at_utc=now,
+        )
+    )
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_person_acct",
+            team_id=team,
+            tool_id=tool_id,
+            purpose=LinkPurpose.ACCOUNT,
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="member-1",
+            credential_key="cred-person",
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="member-1"),
+            created_at_utc=now,
+        )
+    )
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_team_gate",
+            team_id=team,
+            tool_id=tool_id,
+            purpose=LinkPurpose.GATE,
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=team,
+            credential_key="cred-gate",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="gate"),),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id),
+            created_at_utc=now,
+        )
+    )
+    service.store.put_tool_setup_state(
+        ToolSetupStateV1(
+            team_id=team,
+            person_id="member-1",
+            tool_id=tool_id,
+            state=ToolSetupState.READY,
+            how="team_link",
+            source="gateway",
+            checked_at_utc=now,
+            changed_at_utc=now,
+        )
+    )
+    return path
+
+
+def test_end_to_end_http_and_cli_tool_removal_through_propose_access_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A3 + C02: second admin approves HTTP + CLI removal, revoking grants/blocks/links/setup while keeping CLI binary."""
+
+    import asyncio
+    import json
+
+    from strands.interrupt import InterruptException
+
+    from access_control.caller_tokens import CALLER_MANAGER, BrokerCaller
+    from access_control.decisions import HandDownRefused
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+    from custom_tools.providers.access_proposals import propose_access_change
+    from secure_tool_broker.access_gate import REASON_UNLISTED_HOST
+    from tests.broker_access_support import agent_context
+    from tests.test_access_request_tools import Context
+
+    world = _build_real_world(tmp_path, monkeypatch)
+    try:
+        instance = world["instance"]
+        service = world["service"]
+        requests = world["requests"]
+        gate = world["gate"]
+        team = world["team"]
+        owner = world["owner"]
+        second_admin = world["second_admin"]
+        member = world["member"]
+
+        http_file = _seed_http_tool_with_impacts(world)
+
+        # Also seed a proposal-written CLI tool and its workspace binary under workspaces/team/tools/demo/demo.
+        cli_binary = instance / "workspaces" / "team" / "tools" / "demo" / "demo"
+        cli_binary.parent.mkdir(parents=True, exist_ok=True)
+        cli_binary.write_bytes(b"#!/bin/sh\necho demo\n")
+        cli_file = write_instance_tool(instance, _cli_tool("demo"))
+        cli_grant = GrantV1(
+            grant_id="grant_cli_demo",
+            team_id=team,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="cli:demo"),
+            level=AccessLevel.READ,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id),
+            for_person_id="member-1",
+            created_at_utc=service.clock(),
+        )
+        service.store.create(cli_grant)
+
+        # Refresh lead's runtime catalog cache so _submit sees the seeded tools.
+        from custom_agents import access_runtime
+
+        access_runtime._runtime_access.cache_clear()
+
+        ctx = Context("tooluse-remove-http-cli")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove retired Portainer and Demo CLI",
+                    reason="Both tools have been decommissioned.",
+                    tool_context=ctx,
+                    tool_removals=[{"tool_id": "http:portainer"}, {"tool_id": "cli:demo"}],
+                    # Also test C02 overlap: revoke_grant_ids naming a grant on a removed tool.
+                    revoke_grant_ids=["grant_lead_portainer"],
+                )
+            )
+        request_id = ctx.raised[0]["access_request_id"]
+        waiting = service.store.get_request(request_id)
+        assert waiting is not None and waiting.change is not None
+        assert any(item.section == "tool_removal" and "http:portainer" in item.text for item in waiting.change.items)
+        assert any(item.section == "tool_removal" and "cli:demo" in item.text for item in waiting.change.items)
+
+        # Non-administrator cannot approve a tool removal.
+        with pytest.raises(HandDownRefused, match="administrator"):
+            requests().decide(request_id, member, AccessReviewChoice.APPROVE)
+        assert http_file.exists() and cli_file.exists()
+
+        # Second administrator (neither granted_by nor for_person_id) approves cleanly (C02).
+        decided = requests().decide(request_id, second_admin, AccessReviewChoice.APPROVE)
+        assert decided.status is AccessRequestStatus.GRANTED
+        assert not http_file.exists()
+        assert not cli_file.exists()
+        # CLI workspace binary must remain untouched!
+        assert cli_binary.exists() and cli_binary.read_bytes() == b"#!/bin/sh\necho demo\n"
+
+        # Every grant, tool block, operation block, account/gate link, and setup state is gone/revoked.
+        for gid in ("grant_lead_portainer", "grant_worker_portainer", "blk_tool_portainer", "blk_op_portainer", "grant_cli_demo"):
+            stored_grant = service.store.get(gid)
+            assert stored_grant is not None and stored_grant.status is GrantStatus.REVOKED
+        assert [link for link in service.store.list_links(team, purpose=None) if link.tool_id == "http:portainer"] == []
+        assert service.store.tool_setup_state(team, "member-1", "http:portainer") is None
+
+        # Broker access gate now refuses the removed host as unlisted_host.
+        decision = gate.check_broker_action(
+            BrokerCaller(CALLER_MANAGER),
+            "secure_requests",
+            "POST",
+            {"url": "https://portainer.example.test/api/stacks/1/restart"},
+            agent_context(
+                owner.person_id,
+                agent_id="agent-boa",
+                named_agent_type="BackgroundOperationsAgent",
+                roles=("owner",),
+                task_id="task-after-remove",
+            ),
+        )
+        assert not decision.allowed and decision.reason_code == REASON_UNLISTED_HOST
+
+        # Resuming the paused propose_access_change call returns applied.
+        resumed = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Remove retired Portainer and Demo CLI",
+                    reason="Both tools have been decommissioned.",
+                    tool_context=ctx,
+                    tool_removals=[{"tool_id": "http:portainer"}, {"tool_id": "cli:demo"}],
+                    revoke_grant_ids=["grant_lead_portainer"],
+                )
+            )
+        )
+        assert resumed["status"] == "applied"
+    finally:
+        world["cleanup"]()
+
+
+def test_tool_removal_refuses_file_changed_or_symlinked_after_review_and_rolls_back_on_authority_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A3: file modified or symlinked after review is refused; authority failure inside apply_together restores the file."""
+
+    import asyncio
+
+    from strands.interrupt import InterruptException
+
+    from access_control.decisions import AccessService, HandDownRefused
+    from custom_agents import access_runtime
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+    from custom_tools.providers.access_proposals import propose_access_change
+    from tests.test_access_request_tools import Context
+
+    world = _build_real_world(tmp_path, monkeypatch)
+    try:
+        service = world["service"]
+        requests = world["requests"]
+        owner = world["owner"]
+        second_admin = world["second_admin"]
+
+        http_file = _seed_http_tool_with_impacts(world)
+        original_bytes = http_file.read_bytes()
+        access_runtime._runtime_access.cache_clear()
+
+        # 1. Propose removal, then modify file on disk before approval -> refused, file untouched.
+        c1 = Context("tooluse-remove-modified")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Portainer",
+                    reason="Retired.",
+                    tool_context=c1,
+                    tool_removals=[{"tool_id": "http:portainer"}],
+                )
+            )
+        req1 = c1.raised[0]["access_request_id"]
+        modified_bytes = original_bytes + b"\n# edited after review\n"
+        http_file.write_bytes(modified_bytes)
+        with pytest.raises(HandDownRefused, match="changed after the proposal was prepared"):
+            requests().decide(req1, owner, AccessReviewChoice.APPROVE)
+        assert http_file.read_bytes() == modified_bytes
+        assert service.store.get("grant_lead_portainer").status is GrantStatus.ACTIVE
+
+        # 2. Replace file with a symlink after review -> refused without following or unlinking symlink.
+        target_outside = tmp_path / "outside.yaml"
+        target_outside.write_bytes(original_bytes)
+        http_file.unlink()
+        http_file.symlink_to(target_outside)
+        with pytest.raises(HandDownRefused, match="cannot be removed|no longer applies"):
+            requests().decide(req1, owner, AccessReviewChoice.APPROVE)
+        assert http_file.is_symlink()
+        assert target_outside.read_bytes() == original_bytes
+
+        # Restore original file and prepare a fresh proposal to test mid-apply authority failure rollback.
+        http_file.unlink()
+        http_file.write_bytes(original_bytes)
+        access_runtime._runtime_access.cache_clear()
+
+        c2 = Context("tooluse-remove-auth-fail")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Portainer",
+                    reason="Retired.",
+                    tool_context=c2,
+                    tool_removals=[{"tool_id": "http:portainer"}],
+                )
+            )
+        req2 = c2.raised[0]["access_request_id"]
+
+        # Simulate a concurrent grant appearing right after the fast pre-check that reviewer cannot revoke:
+        # fail may_revoke only on the second call (inside apply_together's write transaction) after file unlink!
+        original_may_revoke = AccessService.may_revoke
+        calls = {"count": 0}
+
+        def fail_inside_tx(self_svc, person, grant, **kwargs):
+            calls["count"] += 1
+            if grant.grant_id == "grant_lead_portainer" and calls["count"] >= 2:
+                return False
+            return original_may_revoke(self_svc, person, grant, **kwargs)
+
+        monkeypatch.setattr(AccessService, "may_revoke", fail_inside_tx)
+        with pytest.raises(HandDownRefused, match="You cannot remove grant grant_lead_portainer"):
+            requests().decide(req2, second_admin, AccessReviewChoice.APPROVE)
+        # File was unlinked before apply_together and must now be restored with exact bytes, and DB rolled back!
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert service.store.get("grant_lead_portainer").status is GrantStatus.ACTIVE
+        assert service.store.get_request(req2).status is AccessRequestStatus.WAITING
+    finally:
+        world["cleanup"]()
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_tool_removal_crash_recovery_after_reopening_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, committed: bool
+) -> None:
+    """A4: unconfirmed tool removal is reconciled after store reopen (restored if uncommitted, kept gone if committed)."""
+
+    import asyncio
+
+    from strands.interrupt import InterruptException
+
+    from access_control.requests import DecisionOutcomeUnknown
+    from custom_agents import access_runtime
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+    from custom_tools.providers.access_proposals import propose_access_change
+    from tests.access_decision_support import uncertain_store
+    from tests.test_access_request_tools import Context
+
+    world = _build_real_world(tmp_path, monkeypatch)
+    try:
+        service = world["service"]
+        requests = world["requests"]
+        owner = world["owner"]
+        team = world["team"]
+
+        http_file = _seed_http_tool_with_impacts(world)
+        original_bytes = http_file.read_bytes()
+        access_runtime._runtime_access.cache_clear()
+
+        ctx = Context(f"tooluse-remove-crash-{committed}")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Portainer",
+                    reason="Retired.",
+                    tool_context=ctx,
+                    tool_removals=[{"tool_id": "http:portainer"}],
+                )
+            )
+        req_id = ctx.raised[0]["access_request_id"]
+
+        with uncertain_store(monkeypatch, service.store, "apply_together", committed=committed):
+            with pytest.raises(DecisionOutcomeUnknown, match="could not yet confirm"):
+                requests().decide(req_id, owner, AccessReviewChoice.APPROVE)
+
+        # File was unlinked before apply_together raised uncertain error.
+        assert not http_file.exists()
+        service.store = AccessRepository(service.store.settings)
+        later = service.clock() + timedelta(minutes=11)
+        assert len(service.store.decision_recoveries(team, now=later)) == 1
+        monkeypatch.setattr(service, "clock", lambda: later)
+        requests().recover_decisions()
+        assert service.store.decision_recoveries(team, now=later) == []
+
+        if committed:
+            assert not http_file.exists()
+            assert service.store.get_request(req_id).status is AccessRequestStatus.GRANTED
+            assert service.store.get("grant_lead_portainer").status is GrantStatus.REVOKED
+        else:
+            assert http_file.exists() and http_file.read_bytes() == original_bytes
+            assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING
+            assert service.store.get("grant_lead_portainer").status is GrantStatus.ACTIVE
+            # Re-approving after recovery succeeds cleanly.
+            assert requests().decide(req_id, owner, AccessReviewChoice.APPROVE).status is AccessRequestStatus.GRANTED
+            assert not http_file.exists()
+    finally:
+        world["cleanup"]()
+
+
+def test_tool_removal_recovery_refuses_to_overwrite_external_file_and_respects_granted_or_claimed_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A4 + C01: recover keeps externally recreated file, skips restore on non-matching GRANTED or WAITING+claimed_elsewhere, and retries PermissionError."""
+
+    import asyncio
+
+    from strands.interrupt import InterruptException
+
+    from access_control.requests import DecisionOutcomeUnknown
+    from custom_agents import access_runtime
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+    from custom_tools.providers.access_proposals import propose_access_change
+    from tests.access_decision_support import uncertain_store
+    from tests.test_access_request_tools import Context
+
+    world = _build_real_world(tmp_path, monkeypatch)
+    try:
+        service = world["service"]
+        requests = world["requests"]
+        applier = world["applier"]
+        owner = world["owner"]
+        second_admin = world["second_admin"]
+        team = world["team"]
+
+        http_file = _seed_http_tool_with_impacts(world)
+        original_bytes = http_file.read_bytes()
+        access_runtime._runtime_access.cache_clear()
+
+        # Part 1: externally recreated file after crash is NOT overwritten; logs access_decision_artifact_changed.
+        c1 = Context("tooluse-remove-external-recreate")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Portainer",
+                    reason="Retired.",
+                    tool_context=c1,
+                    tool_removals=[{"tool_id": "http:portainer"}],
+                )
+            )
+        req1 = c1.raised[0]["access_request_id"]
+        with uncertain_store(monkeypatch, service.store, "apply_together", committed=False):
+            with pytest.raises(DecisionOutcomeUnknown):
+                requests().decide(req1, owner, AccessReviewChoice.APPROVE)
+        assert not http_file.exists()
+
+        external_bytes = b"tools: []\n# manually recreated\n"
+        http_file.write_bytes(external_bytes)
+        later = service.clock() + timedelta(minutes=11)
+        monkeypatch.setattr(service, "clock", lambda: later)
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        requests().recover_decisions()
+        assert http_file.read_bytes() == external_bytes
+        assert "event=access_decision_artifact_changed" in caplog.text
+        assert service.store.decision_recoveries(team, now=later) == []
+
+        # Part 2 (C01): ProposalApplier.recover must NOT restore removed_tool_files when
+        # (a) current is GRANTED by another decision (recovery.matches(current) is False), or
+        # (b) current is WAITING and claimed_elsewhere is True.
+        http_file.unlink()
+        removed_entry = RemovedFile.prepared((http_file.name,), original_bytes)
+        base_req = service.store.get_request(req1)
+        assert base_req is not None
+        recovery = DecisionRecovery(
+            DecisionClaim(req1, "claim-stale"),
+            base_req.model_copy(
+                update={
+                    "status": AccessRequestStatus.GRANTED,
+                    "decided_by": SubjectRefV1(kind=SubjectKind.USER, id=owner.person_id),
+                    "decided_at_utc": later,
+                }
+            ),
+            {
+                "tool_files": [],
+                "replaced_tool_files": [],
+                "removed_tool_files": [removed_entry.model_dump(mode="json")],
+                "programs": [],
+                "servers": [],
+            },
+            later,
+        )
+        other_granted = base_req.model_copy(
+            update={
+                "status": AccessRequestStatus.GRANTED,
+                "decided_by": SubjectRefV1(kind=SubjectKind.USER, id=second_admin.person_id),
+                "decided_at_utc": later + timedelta(seconds=5),
+            }
+        )
+        assert not recovery.matches(other_granted)
+        caplog.clear()
+        applier.recover(requests(), recovery, other_granted, False)
+        assert not http_file.exists()
+        assert "event=proposal_removals_kept" in caplog.text
+
+        waiting_other_claim = base_req.model_copy(update={"status": AccessRequestStatus.WAITING})
+        caplog.clear()
+        applier.recover(requests(), recovery, waiting_other_claim, True)
+        assert not http_file.exists()
+        assert "event=proposal_removals_kept" in caplog.text
+
+        # Part 3: failed restore (PermissionError) keeps recovery record and succeeds on retry.
+        http_file.write_bytes(original_bytes)
+        access_runtime._runtime_access.cache_clear()
+        c2 = Context("tooluse-remove-retry-restore")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Portainer Retry",
+                    reason="Retired.",
+                    tool_context=c2,
+                    tool_removals=[{"tool_id": "http:portainer"}],
+                )
+            )
+        req2 = c2.raised[0]["access_request_id"]
+        with uncertain_store(monkeypatch, service.store, "apply_together", committed=False):
+            with pytest.raises(DecisionOutcomeUnknown):
+                requests().decide(req2, owner, AccessReviewChoice.APPROVE)
+        assert not http_file.exists()
+
+        retry_time = later + timedelta(minutes=11)
+        monkeypatch.setattr(service, "clock", lambda: retry_time)
+        with monkeypatch.context() as fail_ctx:
+            fail_ctx.setattr(
+                "access_control.proposals.restore_removed_instance_tool",
+                lambda _path, _data: (_ for _ in ()).throw(PermissionError("read-only")),
+            )
+            requests().recover_decisions()
+        assert not http_file.exists()
+        assert len(service.store.decision_recoveries(team, now=retry_time)) == 1
+        requests().recover_decisions()
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert service.store.decision_recoveries(team, now=retry_time) == []
+    finally:
+        world["cleanup"]()
+
+
+def test_tool_removal_with_authorization_off_previews_applies_revokes_links_and_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A5 + C03: auth-off preview returns trusted impact rows, confirmed=true removes + revokes links, rollback restores file & links, and missing store works."""
+
+    import asyncio
+    import json
+
+    from custom_agents import access_runtime
+    from custom_tools.providers.access_proposals import propose_access_change
+    from tests.broker_access_support import context_verify_keys
+    from tests.task_work_support import set_agent_ref
+    from tests.test_access_request_tools import TEAM as REQ_TEAM, Context, make_agent
+
+    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    access_runtime._runtime_access.cache_clear()
+    instance = tmp_path / "instance"
+    (instance / "control").mkdir(parents=True)
+    lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
+    lead.instance_root = str(instance)
+    lead.authorization_config = {"enabled": False}
+    set_agent_ref(lead)
+
+    try:
+        # 1. Seed HTTP tool + active team account link, gate link, and setup state.
+        tool_file = write_instance_tool(instance, _http_tool("http:gitea", "gitea.example.com"))
+        original_bytes = tool_file.read_bytes()
+        store = AccessRepository(lead.task_manager.storage_settings)
+        now = datetime.now(timezone.utc)
+        store.create_link(
+            AccountLinkV1(
+                link_id="link_off_team",
+                team_id=REQ_TEAM,
+                tool_id="http:gitea",
+                purpose=LinkPurpose.ACCOUNT,
+                owner_kind=LinkOwnerKind.TEAM,
+                owner_id=REQ_TEAM,
+                credential_key="cred-team",
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="owner-1"),
+                created_at_utc=now,
+            )
+        )
+        store.create_link(
+            AccountLinkV1(
+                link_id="link_off_gate",
+                team_id=REQ_TEAM,
+                tool_id="http:gitea",
+                purpose=LinkPurpose.GATE,
+                owner_kind=LinkOwnerKind.TEAM,
+                owner_id=REQ_TEAM,
+                credential_key="cred-gate",
+                injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="gate"),),
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="owner-1"),
+                created_at_utc=now,
+            )
+        )
+        store.put_tool_setup_state(
+            ToolSetupStateV1(
+                team_id=REQ_TEAM,
+                person_id="owner-1",
+                tool_id="http:gitea",
+                state=ToolSetupState.READY,
+                how="team_link",
+                source="gateway",
+                checked_at_utc=now,
+                changed_at_utc=now,
+            )
+        )
+
+        # 2. confirmed=False returns trusted overview + active link impact rows without deleting or revoking.
+        preview = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Gitea",
+                    reason="Retired.",
+                    tool_context=Context("tooluse-off-preview"),
+                    tool_removals=[{"tool_id": "http:gitea"}],
+                    confirmed=False,
+                )
+            )
+        )
+        assert preview["status"] == "agreement_needed"
+        assert any("Remove web API tool Gitea (http:gitea)" in line for line in preview["changes"])
+        assert any("link_off_team" in line for line in preview["changes"])
+        assert any("link_off_gate" in line for line in preview["changes"])
+        assert tool_file.exists() and tool_file.read_bytes() == original_bytes
+        assert len(store.list_links(REQ_TEAM, purpose=None)) == 2
+
+        # 3. Built-in tool is still refused with authorization off.
+        builtin_refused = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Remove GitHub",
+                    reason="No.",
+                    tool_context=Context("tooluse-off-builtin"),
+                    tool_removals=[{"tool_id": "http:github"}],
+                    confirmed=True,
+                )
+            )
+        )
+        assert builtin_refused["status"] == "refused" and "built-in tool" in builtin_refused["reason"]
+
+        # 4. C03: combining tool_removals with a protected data_folders entry refuses cleanly:
+        # BOTH the tool file AND its active links survive!
+        bad_folder = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Gitea with bad folder",
+                    reason="Should fail.",
+                    tool_context=Context("tooluse-off-bad-folder"),
+                    tool_removals=[{"tool_id": "http:gitea"}],
+                    data_folders=[{"name": "bad", "path": str(instance), "writable": False}],
+                    confirmed=True,
+                )
+            )
+        )
+        assert bad_folder["status"] == "refused"
+        assert tool_file.exists() and tool_file.read_bytes() == original_bytes
+        assert len(store.list_links(REQ_TEAM, purpose=None)) == 2
+
+        # 5. Rollback after file removal: if link revocation raises, the removed tool file is restored atomically!
+        with monkeypatch.context() as fail_ctx:
+            fail_ctx.setattr(
+                AccessRepository,
+                "revoke_links_for_tools",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db down")),
+            )
+            failed = json.loads(
+                asyncio.run(
+                    propose_access_change(
+                        title="Remove Gitea DB fail",
+                        reason="Retired.",
+                        tool_context=Context("tooluse-off-db-fail"),
+                        tool_removals=[{"tool_id": "http:gitea"}],
+                        confirmed=True,
+                    )
+                )
+            )
+        assert failed["status"] == "refused" and "db down" in failed["reason"]
+        assert tool_file.exists() and tool_file.read_bytes() == original_bytes
+        assert len(store.list_links(REQ_TEAM, purpose=None)) == 2
+
+        # 6. confirmed=True removes the file, revokes active links, clears setup states, and bumps version.
+        version_before = store.version(REQ_TEAM)
+        applied = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Remove Gitea",
+                    reason="Retired.",
+                    tool_context=Context("tooluse-off-apply"),
+                    tool_removals=[{"tool_id": "http:gitea"}],
+                    confirmed=True,
+                )
+            )
+        )
+        assert applied["status"] == "applied"
+        assert not tool_file.exists()
+        assert store.list_links(REQ_TEAM, purpose=None) == []
+        assert store.tool_setup_state(REQ_TEAM, "owner-1", "http:gitea") is None
+        assert store.version(REQ_TEAM) > version_before
+
+        # 7. C03: when storage_settings is absent in auth-off mode, removal still previews and applies cleanly.
+        from types import SimpleNamespace
+
+        cli_file = write_instance_tool(instance, _cli_tool("nostore"))
+        lead.task_manager = SimpleNamespace(storage_settings=None)
+        no_store_preview = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Remove CLI without store",
+                    reason="Retired.",
+                    tool_context=Context("tooluse-off-nostore-preview"),
+                    tool_removals=[{"tool_id": "cli:nostore"}],
+                    confirmed=False,
+                )
+            )
+        )
+        assert no_store_preview["status"] == "agreement_needed"
+        assert cli_file.exists()
+        no_store_applied = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Remove CLI without store",
+                    reason="Retired.",
+                    tool_context=Context("tooluse-off-nostore-apply"),
+                    tool_removals=[{"tool_id": "cli:nostore"}],
+                    confirmed=True,
+                )
+            )
+        )
+        assert no_store_applied["status"] == "applied"
+        assert not cli_file.exists()
+    finally:
+        access_runtime._runtime_access.cache_clear()
+        set_agent_ref(None)

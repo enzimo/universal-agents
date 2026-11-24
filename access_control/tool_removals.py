@@ -339,22 +339,59 @@ def _impact_summary(grant_count: int, block_count: int, link_count: int) -> str:
     return f"Revokes {listed}."
 
 
-def _overview_row(
+def _pack_text_rows(
+    item_id_prefix: str,
+    header: str,
+    entries: list[str],
+    *,
+    separator: str = ", ",
+    suffix: str = ".",
+) -> list[ReviewItemV1]:
+    """Pack complete ``entries`` across as many rows as needed so no entry is ever cut."""
+
+    rows: list[ReviewItemV1] = []
+    chunk: list[str] = []
+    for entry in entries:
+        candidate = f"{header}{separator.join([*chunk, entry])}{suffix}"
+        if chunk and len(candidate) > _ROW_TEXT_LIMIT:
+            rows.append(_review_row(f"{item_id_prefix}-{len(rows)}", f"{header}{separator.join(chunk)}{suffix}"))
+            chunk = [entry]
+        else:
+            chunk.append(entry)
+    if chunk:
+        rows.append(_review_row(f"{item_id_prefix}-{len(rows)}", f"{header}{separator.join(chunk)}{suffix}"))
+    return rows
+
+
+def _overview_rows(
     index: int,
     definition: ToolDefinitionV1,
     *,
     grant_count: int,
     block_count: int,
     link_count: int,
-) -> ReviewItemV1:
+) -> list[ReviewItemV1]:
     impact = _impact_summary(grant_count, block_count, link_count)
     if definition.kind is ToolKind.CLI and definition.installed_cli is not None:
         detail = _cli_commands_summary(definition)
         text = f"Remove installed CLI tool {definition.display_name} ({definition.tool_id}); {detail} {impact}"
-    else:
-        hosts = ", ".join(definition.hosts) if definition.hosts else "no hosts"
-        text = f"Remove web API tool {definition.display_name} ({definition.tool_id}); hosts: {hosts}. {impact}"
-    return _review_row(f"remove-{index}", text)
+        return [_review_row(f"remove-{index}", text)]
+    hosts = ", ".join(definition.hosts) if definition.hosts else "no hosts"
+    inline = f"Remove web API tool {definition.display_name} ({definition.tool_id}); hosts: {hosts}. {impact}"
+    if len(inline) <= _ROW_TEXT_LIMIT or not definition.hosts:
+        return [_review_row(f"remove-{index}", inline)]
+    compact = (
+        f"Remove web API tool {definition.display_name} ({definition.tool_id}); "
+        f"{_plural(len(definition.hosts), 'host', 'hosts')} (listed below). {impact}"
+    )
+    return [
+        _review_row(f"remove-{index}", compact),
+        *_pack_text_rows(
+            f"remove-{index}-hosts",
+            f"Hosts removed with {definition.display_name} ({definition.tool_id}): ",
+            list(definition.hosts),
+        ),
+    ]
 
 
 def _grant_scope_words(grant: GrantV1) -> str:
@@ -451,7 +488,7 @@ def tool_removal_rows(
         key=lambda link: (link.purpose.value, link.owner_kind.value, link.owner_id, link.link_id),
     )
     return [
-        _overview_row(
+        *_overview_rows(
             index,
             definition,
             grant_count=len(grants),
