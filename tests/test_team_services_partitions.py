@@ -1369,6 +1369,122 @@ async def test_forged_host_liveness_record_cannot_immediately_evict_live_host_pa
 
 
 @pytest.mark.asyncio
+async def test_forged_expired_host_record_from_another_host_cannot_bypass_liveness_cache(tmp_path: Path) -> None:
+    """Under shared NATS login, another host writing an expired host record signed with its own
+    certificate under UA1_HOSTS/<victim> triggers FrameRefused('expired') before key ownership is
+    checked; PartitionService must still preserve <victim>'s cached liveness strictly while
+    now < prev_expires + CLOCK_SKEW_SECONDS and drop it once now == prev_expires + CLOCK_SKEW_SECONDS
+    or the cached certificate is revoked."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=4)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host(
+        "worker-2",
+        roles=("worker_host",),
+        agent_types=("researcher",),
+        issued_at_offset_seconds=-(CLOCK_SKEW_SECONDS + 60),
+    )
+    cluster.write_liveness("worker-1", ttl_seconds=30)
+    cluster.write_liveness("worker-2", ttl_seconds=30)
+    _sessions, partitions = cluster.make_services(credentials_enforced=False)
+    await partitions.reconcile()
+    w1_parts = {p for p, (state, h) in (await cluster.owners()).items() if state == OWNED and h == "worker-1"}
+    assert len(w1_parts) == 2
+
+    # worker-2 signs a host record for key "worker-1" with a past expires_at so TrustStore raises
+    # FrameRefused("expired") before checking document.key == signer.runtime.
+    w2_epoch = cluster.host_epochs["worker-2"]
+    w2_cert = cluster.trust.store.host_certificate(INSTALLATION, "worker-2", w2_epoch)
+    assert w2_cert is not None
+    w2_held = cluster.trust.store.held_record("certificate", f"host.{INSTALLATION}.worker-2.{w2_epoch}")
+    assert w2_held is not None
+    w2_keys = cluster.host_keys["worker-2"]
+    past_issued = cluster.now - timedelta(seconds=CLOCK_SKEW_SECONDS + 40)
+    past_expires = cluster.now - timedelta(seconds=CLOCK_SKEW_SECONDS + 10)
+    forged_expired = sign_state(
+        {
+            "record": "host",
+            "protocol": PROTOCOL,
+            "key": "worker-1",
+            "writer": {
+                "type": "host",
+                "installation": INSTALLATION,
+                "runtime": "worker-2",
+                "membership_epoch": w2_cert.membership_epoch,
+                "key_id": w2_keys.key_id,
+            },
+            "sequence": 99,
+            "issued_at": format_timestamp(past_issued),
+            "expires_at": format_timestamp(past_expires),
+            "body": {
+                "runtime": "worker-1",
+                "certificate": {
+                    "certificate_id": w2_cert.certificate_id,
+                    "membership_epoch": w2_cert.membership_epoch,
+                    "sha256": w2_held[1],
+                },
+                "session_limit": w2_cert.session_limit,
+                "sessions_active": 0,
+                "protocol": PROTOCOL,
+                "contract_sha256": CONTRACT_SHA256,
+                "state": "accepting",
+                "health": "healthy",
+                "components": [],
+                "placement_labels": [],
+                "outbox_depth": 0,
+                "revocation_epoch_seen": w2_cert.revocation_epoch,
+                "started_at": format_timestamp(past_issued),
+                "heartbeat_at": format_timestamp(past_issued),
+            },
+        },
+        w2_keys.application_key,
+    )
+    cluster.records._rev += 1
+    cluster.records._bucket("host")["worker-1"] = _Entry(cluster.records._rev, json.dumps(forged_expired).encode())
+
+    # Confirm the forged record indeed fails verification with code="expired".
+    with pytest.raises(FrameRefused) as exc_info:
+        await cluster.records.read_report("host", "worker-1", now=cluster.now)
+    assert exc_info.value.code == "expired"
+
+    # Before worker-1's real expiry + clock skew, worker-1 keeps its partitions.
+    await partitions.reconcile()
+    owners_after_forgery = await cluster.owners()
+    for p in w1_parts:
+        assert owners_after_forgery[p] == (OWNED, "worker-1")
+
+    # At the exact TrustStore expiry boundary (now == prev_expires + CLOCK_SKEW_SECONDS),
+    # worker-1's cached liveness expires without delay and its partitions move to worker-2.
+    cluster.advance(30 + CLOCK_SKEW_SECONDS)
+    cluster.write_liveness("worker-2", ttl_seconds=30)
+    await partitions.reconcile()
+    owners_at_boundary = await cluster.owners()
+    assert all(state == OWNED and h == "worker-2" for state, h in owners_at_boundary.values())
+    assert "worker-1" not in partitions._last_verified_hosts
+
+
+@pytest.mark.asyncio
+async def test_revoked_host_is_not_retained_in_liveness_cache_on_refused_record(tmp_path: Path) -> None:
+    """If a host's cached certificate is revoked while a refused/expired record sits under its key,
+    PartitionService drops the cached liveness entry immediately."""
+
+    cluster = _ClusterFixture(tmp_path, partitions=4)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1", ttl_seconds=30)
+    cluster.write_liveness("worker-2", ttl_seconds=30)
+    _sessions, partitions = cluster.make_services(credentials_enforced=False)
+    await partitions.reconcile()
+
+    cluster.revoke_host("worker-1")
+    cluster.records._rev += 1
+    cluster.records._bucket("host")["worker-1"] = _Entry(cluster.records._rev, b'{"record": "host", "bad": true}')
+    await partitions.reconcile()
+    assert "worker-1" not in partitions._last_verified_hosts
+    assert all(state == OWNED and h == "worker-2" for state, h in (await cluster.owners()).values())
+
+
+@pytest.mark.asyncio
 async def test_other_contract_host_releases_empty_partitions_but_keeps_occupied_until_agents_close(
     tmp_path: Path,
 ) -> None:

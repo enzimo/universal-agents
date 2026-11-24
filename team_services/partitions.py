@@ -1451,15 +1451,18 @@ class PartitionService:
                         refused.code,
                         refused.at,
                     )
-                    # Under the shared NATS login another process can overwrite a host's key with a
-                    # forged record; keep the host's last verified liveness until its own expiry passes.
-                    cached = self._last_verified_hosts.get(key)
-                    if cached is not None:
-                        prev_host, prev_expires = cached
-                        if now <= prev_expires + skew and not self.trust.store.revoked(prev_host.certificate):
-                            hosts[key] = prev_host
-                else:
-                    self._last_verified_hosts.pop(key, None)
+                # Under the shared NATS login another process can overwrite a host's key with a
+                # forged record, including one signed by another host with a past expires_at
+                # (which TrustStore refuses as "expired" before checking document.key == signer.runtime).
+                # Keep the host's last verified liveness until its own expiry + clock skew passes;
+                # when its own record genuinely expires, now >= prev_expires + skew is already true.
+                cached = self._last_verified_hosts.get(key)
+                if cached is not None:
+                    prev_host, prev_expires = cached
+                    if now < prev_expires + skew and not self.trust.store.revoked(prev_host.certificate):
+                        hosts[key] = prev_host
+                    else:
+                        self._last_verified_hosts.pop(key, None)
                 continue
             if stored is None or stored.record.signer is None:
                 continue
