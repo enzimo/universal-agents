@@ -78,6 +78,11 @@ QUEUE_SENDERS_AT_CAP = 4
 MIN_NATS_CREDENTIAL_LIFETIME_SECONDS = 60
 MAX_NATS_CREDENTIAL_LIFETIME_SECONDS = 86_400
 
+# Bounds for agent.blob_retention_days: whole days team services keep each owner's claim
+# on a protocol 1 blob in OBJ_UA1_BLOBS before deleting unowned blobs (1 day to 10 years).
+MIN_BLOB_RETENTION_DAYS = 1
+MAX_BLOB_RETENTION_DAYS = 3650
+
 
 @dataclass(frozen=True)
 class DefaultValue(Generic[T]):
@@ -217,10 +222,16 @@ class TransportDefaultValues:
         "and notices.",
         onboarding_overridable=False,
     )
+    queues_max_bytes_blobs: DefaultValue[int] = default_value(
+        512 * MIB,
+        "Byte limit of the installation-wide protocol 1 object store stream (OBJ_UA1_BLOBS), which "
+        "holds files and long text across every team.",
+        onboarding_overridable=False,
+    )
     queues_warn_at_percent: DefaultValue[int] = default_value(
         80,
         "Administrators get an Inbox notice and the Status page shows a problem when a team's work "
-        "or dead-letter stream holds this percent of its byte limit.",
+        "or dead-letter stream, or the installation's blob store stream, holds this percent of its byte limit.",
         onboarding_overridable=False,
     )
     queues_partitions: DefaultValue[int] = default_value(
@@ -783,6 +794,12 @@ class AgentDefaultValues:
     request_conflict_checks: DefaultValue[bool] = default_value(
         True,
         "Whether a person's request is refused a change to a record another of their requests changed while it ran.",
+        onboarding_overridable=False,
+    )
+    blob_retention_days: DefaultValue[int] = default_value(
+        7,
+        "Days to keep protocol 1 blobs (files and long text in OBJ_UA1_BLOBS) per owner before team services "
+        "delete unowned blobs; departed people's blobs are deleted immediately (1 to 3650).",
         onboarding_overridable=False,
     )
     max_tool_calls_per_task: DefaultValue[Optional[int]] = default_value(

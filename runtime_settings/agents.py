@@ -12,12 +12,13 @@ from runtime_settings.worker_pools import WorkerPoolsConfig
 from runtime_settings.review_cleanup import ReviewCleanupSettings
 from runtime_settings.stale_schedules import StaleScheduleSettings
 from runtime_settings.stuck_tasks import StuckTaskSettings
-from default_values import AGENT_DEFAULTS
+from default_values import AGENT_DEFAULTS, MAX_BLOB_RETENTION_DAYS, MIN_BLOB_RETENTION_DAYS
 from runtime_settings.common import (
     _default_conversation_compactor_config,
     _merge_missing_defaults,
     _normalize_external_mcp_server_list,
 )
+from runtime_settings.values import whole_number
 
 
 TOOL_LIST_FIELDS = ("tool_allowlist", "tool_blocklist")
@@ -92,6 +93,11 @@ class AgentRuntimeDefaultsSettings(BaseModel):
     # (storage.change_ledger). Not in the per-type overrides: one value for
     # every agent, and agents cannot stage it (OPERATOR_ONLY_RUNTIME_SETTINGS).
     request_conflict_checks: bool = AGENT_DEFAULTS.request_conflict_checks.value
+    # How many days team services keep each owner's claim on a protocol 1 blob
+    # in OBJ_UA1_BLOBS (departed people's blobs are deleted immediately). Not in
+    # the per-type overrides: one value for the team, and agents cannot stage it
+    # (OPERATOR_ONLY_RUNTIME_SETTINGS).
+    blob_retention_days: int = AGENT_DEFAULTS.blob_retention_days.value
     same_role_runtime_takeover_enabled: bool = (
         AGENT_DEFAULTS.same_role_runtime_takeover_enabled.value
     )
@@ -146,6 +152,16 @@ class AgentRuntimeDefaultsSettings(BaseModel):
         ge=1,
     )
     result_transformer: Optional[str] = None
+
+    @field_validator("blob_retention_days", mode="before")
+    @classmethod
+    def _validate_blob_retention_days(cls, value: Any) -> int:
+        return whole_number(
+            value,
+            name="agent.blob_retention_days",
+            least=MIN_BLOB_RETENTION_DAYS,
+            most=MAX_BLOB_RETENTION_DAYS,
+        )
 
     @field_validator(*TOOL_LIST_FIELDS)
     @classmethod

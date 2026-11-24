@@ -605,6 +605,86 @@ async def test_delete_blob_writes_marker_keeps_headers_purges_chunks_and_respect
 
 
 @pytest.mark.asyncio
+async def test_delete_blob_reclaims_space_when_store_is_at_max_bytes(caplog: pytest.LogCaptureFixture) -> None:
+    """C09: delete_blob succeeds and frees bytes when OBJ_UA1_BLOBS is full (10077)."""
+
+    js = FakeJetStream()
+    data = b"p" * 2000
+    sha = sha256_unpadded(data)
+    await put_blob(js, TEAM, data, REQUEST_OWNER, nuid_factory=lambda: "nuid_full_del")
+
+    # Fill the store budget so a ~350-byte deleted:true marker cannot fit before reclaiming chunks.
+    bytes_before = js._current_bytes()
+    js.max_bytes = bytes_before + 50
+    recorded: list[str] = []
+
+    async def on_marker(nuid: str) -> None:
+        recorded.append(nuid)
+
+    with caplog.at_level("WARNING"):
+        result = await delete_blob(js, TEAM, sha, on_marker_written=on_marker)
+
+    assert result.deleted is True
+    assert result.already_deleted is False
+    assert result.nuid == "nuid_full_del"
+    assert recorded == ["nuid_full_del"]
+    assert "event=blob_delete_store_full_reclaim" in caplog.text
+    assert not any(m.subject == blob_chunk_subject("nuid_full_del") for m in js.messages)
+    meta_msgs = [m for m in js.messages if m.subject == blob_metadata_subject(blob_object_name(TEAM, sha))]
+    assert len(meta_msgs) == 1
+    marker = parse_blob_metadata(meta_msgs[0].data, expected_team=TEAM, expected_sha256=sha, seq=meta_msgs[0].seq)
+    assert marker.deleted is True
+    assert marker.headers == REQUEST_OWNER.to_headers(TEAM, sha)
+    assert js._current_bytes() < bytes_before - 1500
+    with pytest.raises(BlobDeleted):
+        await get_blob(js, TEAM, sha)
+
+    # Space is freed so a fresh blob fits again.
+    fresh = await put_blob(js, TEAM, b"q" * 1000, AGENT_OWNER, nuid_factory=lambda: "nuid_after_free")
+    assert await get_blob(js, TEAM, fresh.sha256) == b"q" * 1000
+
+    # A 0-byte blob in a stream full of other live blobs cannot free enough room -> re-raises BlobStoreFull.
+    js_zero = FakeJetStream()
+    await put_blob(js_zero, TEAM, b"z" * 1000, AGENT_OWNER, nuid_factory=lambda: "nuid_other_live")
+    empty_put = await put_blob(js_zero, TEAM, b"", REQUEST_OWNER, nuid_factory=lambda: "nuid_empty_full")
+    js_zero.max_bytes = js_zero._current_bytes() + 10
+    with pytest.raises(BlobStoreFull):
+        await delete_blob(js_zero, TEAM, empty_put.sha256)
+
+    # Concurrent metadata write after chunk reclaim still triggers CAS failure (BlobConcurrentWrite).
+    js_race = FakeJetStream()
+    race_put = await put_blob(js_race, TEAM, b"r" * 2000, REQUEST_OWNER, nuid_factory=lambda: "nuid_race_del")
+    js_race.max_bytes = js_race._current_bytes() + 50
+    meta_subj = blob_metadata_subject(blob_object_name(TEAM, race_put.sha256))
+    attempts = 0
+
+    def inject_after_reclaim(subject: str, payload: bytes, headers: dict[str, str]) -> None:
+        nonlocal attempts
+        if subject == meta_subj:
+            attempts += 1
+            if attempts == 2:
+                # Simulate a concurrent writer publishing newer metadata right before our retry CAS.
+                new_meta = {
+                    "name": blob_object_name(TEAM, race_put.sha256),
+                    "bucket": BUCKET_NAME,
+                    "nuid": "nuid_race_winner",
+                    "size": 2000,
+                    "chunks": 1,
+                    "digest": f"SHA-256={race_put.sha256}=",
+                    "headers": AGENT_OWNER.to_headers(TEAM, race_put.sha256),
+                    "options": {"max_chunk_size": 131_072},
+                }
+                js_race.messages.append(_StoredMessage(999, meta_subj, json.dumps(new_meta).encode(), js_race.now, {}))
+                js_race._next_seq = 1000
+
+    js_race.on_publish = inject_after_reclaim
+    with pytest.raises(BlobConcurrentWrite):
+        await delete_blob(js_race, TEAM, race_put.sha256)
+    latest = await stat_blob(js_race, TEAM, race_put.sha256)
+    assert latest is not None and latest.nuid == "nuid_race_winner" and latest.deleted is False
+
+
+@pytest.mark.asyncio
 async def test_sweep_orphan_chunks_fa6_deleted_marker_and_grace_boundary() -> None:
     t0 = datetime(2026, 11, 20, 0, 0, 0, tzinfo=timezone.utc)
     js = FakeJetStream(now=t0, page_size=2)  # force multi-page STREAM.INFO pagination

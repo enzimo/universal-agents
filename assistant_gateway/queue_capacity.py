@@ -111,15 +111,18 @@ class QueueCapacity:
         self._now = now
 
     def team_streams(self) -> dict[str, QueueStream]:
-        """The team's work and dead-letter streams by name (``wire.queues.team_queue_streams``); raises for a bad id."""
+        """The team's work/dead-letter streams plus installation-wide object stores by name; raises for a bad id."""
 
         if self._streams is None:
             # Imported here: the stream names come from the contract's generated models, which
             # cost about half a second to import, and the gateway module that imports this one
             # also serves command-line runs that never check streams.
-            from custom_messages.wire.queues import team_queue_streams
+            from custom_messages.wire.queues import object_store_streams, team_queue_streams
 
-            streams = team_queue_streams(self._transport, self.team, self._partitions)
+            streams = (
+                *team_queue_streams(self._transport, self.team, self._partitions),
+                *object_store_streams(self._transport),
+            )
             self._streams = {stream.name: stream for stream in streams}
         return self._streams
 
@@ -155,28 +158,46 @@ def stream_finding(item: FillingStream, *, since: datetime, warn_at_percent: int
 
     stream, usage = item.stream, item.usage
     limit = usage.max_bytes or 0
-    holds = _KIND_WORDS.get(stream.kind, "messages of kind " + stream.kind).format(partition=stream.partition)
-    effect = _DEAD_LETTER_EFFECT if stream.kind == "dead_letter" else _WORK_EFFECT
-    if stream.kind == "dead_letter":
-        cause = "Set-aside messages wait here until someone deals with them; find out why so many were set aside."
+    if stream.team is None or stream.kind == "blobs":
+        title = f"The installation's blob store stream ({stream.name}) is {item.percent:.0f}% full"
+        summary = (
+            f"Stream {stream.name} holds {readable_bytes(usage.stored_bytes)} of its "
+            f"{readable_bytes(limit)} limit. When it is full, NATS refuses new files and long text "
+            "(such as large Knowledge pages and attachments) across every team until space is freed."
+        )
+        action = (
+            "Check on this page that team services are running and clearing expired blobs. "
+            f"To keep more data in the blob store, raise {stream.setting} in {INSTANCE_CONFIG_FILENAME} "
+            "and restart the instance (NATS sets the whole limit aside when it creates the stream, so "
+            "the disk needs room for the larger limit), or lower agent.blob_retention_days so older blobs "
+            "expire sooner."
+        )
     else:
-        cause = (
-            "Check on this page that the team's hosts are running and taking their work: a stopped reader "
-            "leaves its queue to fill."
+        holds = _KIND_WORDS.get(stream.kind, "messages of kind " + stream.kind).format(partition=stream.partition)
+        effect = _DEAD_LETTER_EFFECT if stream.kind == "dead_letter" else _WORK_EFFECT
+        if stream.kind == "dead_letter":
+            cause = "Set-aside messages wait here until someone deals with them; find out why so many were set aside."
+        else:
+            cause = (
+                "Check on this page that the team's hosts are running and taking their work: a stopped reader "
+                "leaves its queue to fill."
+            )
+        title = f"Team {stream.team}'s message stream for {holds} is {item.percent:.0f}% full"
+        summary = (
+            f"Stream {stream.name} holds {readable_bytes(usage.stored_bytes)} of its "
+            f"{readable_bytes(limit)} limit. {effect}"
+        )
+        action = (
+            f"{cause} If the team has more waiting than fits, raise {stream.setting} in {INSTANCE_CONFIG_FILENAME} "
+            "and restart the instance. NATS sets a stream's whole limit aside when it creates it, for every "
+            "stream of that kind, so the disk needs room for the larger limits."
         )
     return StatusFindingV1(
         finding_id=f"{FINDING_PREFIX}{stream.name}:{since.astimezone(timezone.utc):%Y%m%dT%H%M%SZ}",
         severity=StatusSeverity.PROBLEM,
-        title=f"Team {stream.team}'s message stream for {holds} is {item.percent:.0f}% full"[:200],
-        summary=(
-            f"Stream {stream.name} holds {readable_bytes(usage.stored_bytes)} of its "
-            f"{readable_bytes(limit)} limit. {effect}"
-        )[:2000],
-        action=(
-            f"{cause} If the team has more waiting than fits, raise {stream.setting} in {INSTANCE_CONFIG_FILENAME} "
-            "and restart the instance. NATS sets a stream's whole limit aside when it creates it, for every "
-            "stream of that kind, so the disk needs room for the larger limits."
-        )[:1000],
+        title=title[:200],
+        summary=summary[:2000],
+        action=action[:1000],
         source=SOURCE,
         since=since,
         details=(

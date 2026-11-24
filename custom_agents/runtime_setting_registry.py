@@ -1016,4 +1016,8 @@ OPERATOR_ONLY_RUNTIME_SETTINGS: dict[str, str] = {
         "Checks between a person's separate requests protect their records from one request overwriting "
         "another's change; only the operator turns them off."
     ),
+    "agent.blob_retention_days": (
+        "Blob retention controls when team services delete expired files and long text from OBJ_UA1_BLOBS; "
+        "only the operator changes it."
+    ),
 }

@@ -21,6 +21,8 @@ from custom_messages.wire.queues import (
     QueueLimits,
     agent_consumers,
     consumer_agent,
+    object_store_stream_config,
+    object_store_streams,
     queue_stream_config,
     streams_set_aside,
     team_consumers,
@@ -32,7 +34,7 @@ TRANSPORT = json.loads((Path(__file__).resolve().parents[1]
 MIB = 1024 * 1024
 LIMITS = QueueLimits(
     max_bytes={"partition": 16 * MIB, "pool": 128 * MIB, "edge": 64 * MIB, "team_services": 256 * MIB,
-               "dead_letter": 32 * MIB},
+               "dead_letter": 32 * MIB, "blobs": 512 * MIB},
     max_messages_per_subject=8,
     replicas=3,
 )
@@ -236,3 +238,37 @@ def test_an_agent_consumers_name_gives_its_agent_and_any_other_name_none(name: s
 def test_every_agent_consumer_name_reads_back_to_its_agent() -> None:
     for consumer in agent_consumers(TRANSPORT, "team_a", "writer-9", 96):
         assert consumer_agent(TRANSPORT, consumer.name) == "writer-9"
+
+
+def test_object_store_streams_and_config_carry_contract_bounds_and_refuse_unknown_fields() -> None:
+    [blobs_stream] = object_store_streams(TRANSPORT)
+    assert (blobs_stream.name, blobs_stream.template, blobs_stream.team, blobs_stream.kind, blobs_stream.setting) == (
+        "OBJ_UA1_BLOBS",
+        "UA1_BLOBS",
+        None,
+        "blobs",
+        "transport.queues.max_bytes.blobs",
+    )
+    config = object_store_stream_config(TRANSPORT, blobs_stream, LIMITS)
+    assert config == {
+        "name": "OBJ_UA1_BLOBS",
+        "subjects": ["$O.UA1_BLOBS.C.>", "$O.UA1_BLOBS.M.>"],
+        "allow_rollup_hdrs": False,
+        "deny_delete": True,
+        "deny_purge": False,
+        "storage": "file",
+        "max_consumers": 64,
+        "discard": "new",
+        "max_bytes": 512 * MIB,
+        "num_replicas": 3,
+    }
+    StreamConfig(**config).as_dict()
+
+    missing_limit = QueueLimits(max_bytes={"partition": 16 * MIB}, max_messages_per_subject=8)
+    with pytest.raises(ValueError, match="OBJ_UA1_BLOBS: transport.queues.max_bytes.blobs is missing"):
+        object_store_stream_config(TRANSPORT, blobs_stream, missing_limit)
+
+    mutated = copy.deepcopy(TRANSPORT)
+    mutated["object_store_stream"]["max_msgs"] = 500
+    with pytest.raises(ValueError, match=r"object_store_stream has contract fields .*\['max_msgs'\]"):
+        object_store_stream_config(mutated, blobs_stream, LIMITS)

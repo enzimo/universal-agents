@@ -283,6 +283,9 @@ def _project_agent(
         "request_conflict_checks": bool(
             agent_cfg.get("request_conflict_checks", AGENT_DEFAULTS.request_conflict_checks.value)
         ),
+        "blob_retention_days": agent_cfg.get(
+            "blob_retention_days", AGENT_DEFAULTS.blob_retention_days.value
+        ),
         "max_tool_calls_per_task": agent_cfg.get(
             "max_tool_calls_per_task", AGENT_DEFAULTS.max_tool_calls_per_task.value
         ),

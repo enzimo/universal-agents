@@ -974,6 +974,30 @@ async def purge_blob_chunks(js: Any, nuid: str) -> bool:
     return bool(await js.purge_stream(STREAM_NAME, subject=blob_chunk_subject(nuid)))
 
 
+async def _publish_delete_marker(
+    js: Any,
+    meta_subject: str,
+    name: str,
+    metadata: BlobMetadata,
+) -> Any:
+    """Publish a ``deleted: true`` metadata marker guarded by CAS on ``metadata.seq``."""
+
+    marker_bytes = json.dumps(metadata.as_deleted_payload(), separators=(",", ":")).encode("utf-8")
+    try:
+        return await _publish_checked(
+            js,
+            meta_subject,
+            marker_bytes,
+            headers={Header.EXPECTED_LAST_SUBJECT_SEQUENCE: str(metadata.seq)},
+        )
+    except APIError as exc:
+        if exc.err_code == JS_ERR_WRONG_LAST_SEQUENCE:
+            raise BlobConcurrentWrite(
+                f"Blob {name} metadata changed concurrently while writing deleted marker."
+            ) from exc
+        raise
+
+
 async def delete_blob(
     js: Any,
     team: str,
@@ -990,6 +1014,12 @@ async def delete_blob(
     ``on_marker_written``, if supplied, is awaited with the deleted ``nuid`` right after
     the deleted marker is published and before chunks are purged so callers can record
     the ``nuid`` durably for crash recovery.
+
+    When ``OBJ_UA1_BLOBS`` is at ``max_bytes`` (``discard: new``) and rejects the
+    ``deleted: true`` marker with ``BlobStoreFull`` (10077), this frees this blob's own
+    chunks and earlier metadata (``keep=1``) first and retries the CAS marker publish on
+    ``metadata.seq`` so retention expiry and immediate departure deletion can reclaim
+    space out of a full store (C09).
     """
 
     validated_team = validate_team_id(team)
@@ -1012,26 +1042,32 @@ async def delete_blob(
 
     already_deleted = metadata.deleted
     marker_seq = metadata.seq
+    chunks_purged = False
     if not already_deleted:
-        marker_bytes = json.dumps(metadata.as_deleted_payload(), separators=(",", ":")).encode("utf-8")
         try:
-            ack = await _publish_checked(
-                js,
-                meta_subject,
-                marker_bytes,
-                headers={Header.EXPECTED_LAST_SUBJECT_SEQUENCE: str(metadata.seq)},
+            ack = await _publish_delete_marker(js, meta_subject, name, metadata)
+        except BlobStoreFull:
+            _LOGGER.warning(
+                "Blob store %s is full while writing deleted marker for %s; purging blob chunks and earlier "
+                "metadata to reclaim space before retrying marker publish. "
+                "event=blob_delete_store_full_reclaim stream=%s blob=%s nuid=%s seq=%d",
+                STREAM_NAME,
+                name,
+                STREAM_NAME,
+                name,
+                metadata.nuid,
+                metadata.seq,
             )
-        except APIError as exc:
-            if exc.err_code == JS_ERR_WRONG_LAST_SEQUENCE:
-                raise BlobConcurrentWrite(
-                    f"Blob {name} metadata changed concurrently while writing deleted marker."
-                ) from exc
-            raise
+            await purge_blob_chunks(js, metadata.nuid)
+            await js.purge_stream(STREAM_NAME, subject=meta_subject, keep=1)
+            chunks_purged = True
+            ack = await _publish_delete_marker(js, meta_subject, name, metadata)
         marker_seq = int(getattr(ack, "seq", 0) or 0)
         if on_marker_written is not None:
             await on_marker_written(metadata.nuid)
 
-    await purge_blob_chunks(js, metadata.nuid)
+    if not chunks_purged:
+        await purge_blob_chunks(js, metadata.nuid)
     await js.purge_stream(STREAM_NAME, subject=meta_subject, keep=1)
     return BlobDeleteResult(
         deleted=True,

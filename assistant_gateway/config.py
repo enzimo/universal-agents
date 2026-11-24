@@ -402,13 +402,14 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "transport.process_consumer_inactive_threshold_seconds": "Expiry delay for unbound process-scoped JetStream consumers.",
     "transport.nats": "NATS operator-mode account and user credential settings.",
     "transport.nats.credential_lifetime_seconds": "Lifetime in seconds of every issued NATS user JWT, including bootstrap users (60 to 86400). Hosts renew before expiry; on external servers without operator revocation, handovers and retired hosts wait out this lifetime plus clock skew.",
-    "transport.queues": "Every team's protocol 1 work and dead-letter streams. NATS sets each stream's whole byte limit aside when it creates the stream, so a team reserves partitions x partition plus the other four limits.",
+    "transport.queues": "Every team's protocol 1 work and dead-letter streams and the installation-wide blob store stream. NATS sets each stream's whole byte limit aside when it creates the stream, so a team reserves partitions x partition plus the other four team limits, plus max_bytes.blobs once for the installation.",
     "transport.queues.max_bytes": "Byte limit of each stream, by kind (1 MiB = 1,048,576 bytes; at least 1 MiB). Lowering one drops nothing: a stream above it refuses new messages until it drains.",
     "transport.queues.max_bytes.partition": "Each of a team's partition streams, which hold the inboxes and control queues of the partition's agents. Must be at least 5 x max_messages_per_subject x 263,168 bytes (10,526,720 at a cap of 8), so lower the cap with it.",
     "transport.queues.max_bytes.pool": "A team's worker pool stream.",
     "transport.queues.max_bytes.edge": "A team's edge stream: work for people's chat routes and outside agents.",
     "transport.queues.max_bytes.team_services": "A team's team-services stream: the copies of every task, result and handback the team services record.",
     "transport.queues.max_bytes.dead_letter": "A team's dead-letter stream: set-aside copies and notices.",
+    "transport.queues.max_bytes.blobs": "The installation-wide protocol 1 blob store stream (OBJ_UA1_BLOBS): files and long text across every team.",
     "transport.queues.warn_at_percent": "Administrators get an Inbox notice and the Status page shows a problem when a stream holds this percent of its limit (10 to 99).",
     "transport.queues.partitions": "Partition streams per team (1 to 128). Fixed when the instance is created: the instance refuses to start with another count.",
     "transport.queues.max_messages_per_subject": "Most messages one sender may have waiting in one agent's inbox or control queue; more are refused, so one busy agent leaves room for the others. max_bytes.partition must be at least 5 x this x 263,168 bytes, so raise it with the cap.",
@@ -639,6 +640,10 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
         "Refuse a request's change to a record another of the person's requests changed while it ran, and any "
         "change from a stopped or ended request; false keeps only \"changed since you read it\" checks. Agents "
         "cannot change it."
+    ),
+    "agent.blob_retention_days": (
+        "Days to keep protocol 1 blobs (files and long text in OBJ_UA1_BLOBS) per owner before team services "
+        "delete unowned blobs; departed people's blobs are deleted immediately (1 to 3650). Agents cannot change it."
     ),
     "agent.max_tool_calls_per_task": "Cumulative tool calls across one ordinary local task-processing invocation, not per model turn. Accepted Objective work profiles use their own session total. Set null or <=0 to disable.",
     "agent.max_tool_result_tokens_per_call": "Per-tool-result token safety cap. Oversized results are offloaded to artifacts.",

@@ -48,6 +48,14 @@ _STREAM_FIELDS = {
     "max_msgs_per_subject": "max_msgs_per_subject",
 }
 _FILLED_STREAM_FIELDS = {"subjects", "size_kind", "max_msgs_per_subject_setting"}
+_OBJECT_STORE_STREAM_FIELDS = {
+    "allow_rollup_hdrs": "allow_rollup_hdrs",
+    "deny_delete": "deny_delete",
+    "deny_purge": "deny_purge",
+    "storage": "storage",
+    "max_consumers": "max_consumers",
+    "discard": "discard",
+}
 _CONSUMER_FIELDS = {"ack_wait_seconds": "ack_wait", "max_deliveries": "max_deliver", "ack": "ack_policy"}
 _FILLED_CONSUMER_FIELDS = {"stream", "name", "filter", "mode"}
 
@@ -82,18 +90,20 @@ class QueueLimits:
 
 @dataclass(frozen=True)
 class QueueStream:
-    """One of a team's work or dead-letter streams: ``UA1_PART_team_a~7`` from ``UA1_PART_{team}~{partition}``.
+    """One protocol 1 bounded stream: a team's work/dead-letter stream or an installation-wide object store.
 
-    ``partitions`` is the installation's partition count the team's streams were listed
-    with; a partition stream's ``partition`` is one of its numbers, and the stream records
-    that count (``PARTITION_COUNT_METADATA``).
+    For per-team streams (e.g. ``UA1_PART_team_a~7`` from ``UA1_PART_{team}~{partition}``),
+    ``team`` is the team id and ``partitions`` is the installation's partition count the team's
+    streams were listed with (partition streams also set ``partition`` and record ``partitions``
+    in ``PARTITION_COUNT_METADATA``). For installation-wide object store streams
+    (``OBJ_UA1_BLOBS``), ``team``, ``partitions``, and ``partition`` are ``None``.
     """
 
     name: str
     template: str
-    team: str
+    team: Optional[str]
     kind: str
-    partitions: int
+    partitions: Optional[int] = None
     partition: Optional[int] = None
 
     @property
@@ -180,6 +190,51 @@ def queue_stream_config(transport: Mapping[str, Any], stream: QueueStream, limit
     if stream.partition is not None:
         config["metadata"] = {PARTITION_COUNT_METADATA: str(stream.partitions)}
     return config
+
+
+def object_store_streams(transport: Mapping[str, Any]) -> tuple[QueueStream, ...]:
+    """Every installation-wide protocol 1 object store stream (``OBJ_<bucket>``) named in ``transport.yaml``."""
+
+    return tuple(
+        QueueStream(
+            name=f"OBJ_{bucket}",
+            template=bucket,
+            team=None,
+            kind=spec["size_kind"],
+        )
+        for bucket, spec in transport["object_store"].items()
+    )
+
+
+def object_store_stream_config(
+    transport: Mapping[str, Any], stream: QueueStream, limits: QueueLimits
+) -> dict[str, Any]:
+    """The NATS stream configuration for an installation-wide object store stream (``OBJ_<bucket>``).
+
+    Carries every contract field from ``object_store_stream`` (refusing unknown fields so
+    contract additions are never silently skipped), binds ADR-20 chunk and metadata subjects
+    ``$O.<bucket>.C.>`` and ``$O.<bucket>.M.>``, and applies the stream's ``size_kind`` byte
+    limit and ``replicas`` from ``limits``.
+    """
+
+    spec = transport["object_store_stream"]
+    unknown = set(spec) - set(_OBJECT_STORE_STREAM_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"object_store_stream has contract fields this version cannot apply: {sorted(unknown)}"
+        )
+    if stream.template not in transport["object_store"]:
+        raise ValueError(f"object store {stream.template!r} is not in the contract")
+    if stream.kind not in limits.max_bytes:
+        raise ValueError(f"no byte limit for {stream.name}: {stream.setting} is missing")
+    bucket = stream.template
+    return {
+        "name": stream.name,
+        "subjects": [f"$O.{bucket}.C.>", f"$O.{bucket}.M.>"],
+        **{_OBJECT_STORE_STREAM_FIELDS[field]: value for field, value in spec.items()},
+        "max_bytes": limits.max_bytes[stream.kind],
+        "num_replicas": limits.replicas,
+    }
 
 
 def team_consumers(transport: Mapping[str, Any], team: str) -> tuple[QueueConsumer, ...]:

@@ -248,7 +248,7 @@ class NatsGatewayManagerRuntime:
         return await self._adapter.jetstream_account_usage()
 
     async def team_streams(self, team: str) -> JetStreamStreamList | None:
-        """The streams of ``team``'s protocol 1 subjects with their limits and sizes (the size warning).
+        """The streams of ``team``'s protocol 1 subjects and the installation's blob store with their limits and sizes.
 
         Streams the server could not measure are named in the list's ``missing``. None while not
         connected or without JetStream.
@@ -259,8 +259,24 @@ class NatsGatewayManagerRuntime:
         # Imported here: the protocol 1 subject root comes from the contract's generated code,
         # which command-line runs that import this module never need (about half a second).
         from custom_messages.wire.frame import SUBJECT_ROOT
+        from custom_transport.protocol1.contract_files import transport as contract_transport
 
-        return await self._adapter.jetstream_streams(subject=f"{SUBJECT_ROOT}{team}.>")
+        filters = [f"{SUBJECT_ROOT}{team}.>"]
+        filters.extend(f"$O.{bucket}.>" for bucket in contract_transport()["object_store"])
+        streams_by_name: dict[str, Any] = {}
+        missing_names: list[str] = []
+        seen_missing: set[str] = set()
+        for subject_filter in filters:
+            listed = await self._adapter.jetstream_streams(subject=subject_filter)
+            if listed is None:
+                return None
+            for item in listed.streams:
+                streams_by_name.setdefault(item.name, item)
+            for name in listed.missing:
+                if name not in seen_missing:
+                    seen_missing.add(name)
+                    missing_names.append(name)
+        return JetStreamStreamList(streams=list(streams_by_name.values()), missing=tuple(missing_names))
 
     @staticmethod
     def _delivery_handler(
