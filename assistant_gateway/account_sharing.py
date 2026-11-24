@@ -50,6 +50,7 @@ from custom_messages.contracts.access_v2 import (
     AccountMode,
     AccountSharing,
     LinkOwnerKind,
+    LinkPurpose,
     ToolDefinitionV1,
 )
 from id_generation import new_id
@@ -208,7 +209,12 @@ class GatewayAccountSharing:
         return TeamAccountSharing(store, self._team_id, now=self._now)
 
     def _team_linked(self, store: AccessRepository, tool_id: str) -> bool:
-        return store.active_link(self._team_id, tool_id, LinkOwnerKind.TEAM, self._team_id) is not None
+        return (
+            store.active_link(
+                self._team_id, tool_id, LinkOwnerKind.TEAM, self._team_id, purpose=LinkPurpose.ACCOUNT
+            )
+            is not None
+        )
 
     # -- reading ---------------------------------------------------------------------
 
@@ -292,7 +298,12 @@ class GatewayAccountSharing:
             return None if row.fixed else AccountStatus.SIGN_IN
         if tool.account is not AccountMode.LINKED_CREDENTIAL or LinkOwnerKind.PERSON not in tool.link_owners:
             return None
-        own = store.active_link(self._team_id, tool.tool_id, LinkOwnerKind.PERSON, person_id) is not None
+        own = (
+            store.active_link(
+                self._team_id, tool.tool_id, LinkOwnerKind.PERSON, person_id, purpose=LinkPurpose.ACCOUNT
+            )
+            is not None
+        )
         return AccountStatus.LINKED if own else AccountStatus.NOT_LINKED
 
     def setup(self, *, person_id: str, roles: tuple[str, ...]) -> str:

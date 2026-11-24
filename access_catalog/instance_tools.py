@@ -48,6 +48,8 @@ def tool_document(tool: ProposedHttpToolV1) -> dict[str, Any]:
         entry["routes"] = [route.model_dump(mode="json") for route in tool.routes]
     if tool.credential_injections:
         entry["credential_injections"] = [item.model_dump(mode="json") for item in tool.credential_injections]
+    if tool.gate_injections:
+        entry["gate_injections"] = [item.model_dump(mode="json") for item in tool.gate_injections]
     if tool.setup is not None:
         # Typed and checked (custom_messages.contracts.tool_setup_spec_v1); set_up_tools reads it.
         entry["setup"] = tool.setup.model_dump(mode="json", exclude_defaults=True)

@@ -749,7 +749,7 @@ class GatewayAccessMap:
         page, meta = _page(tools, offset)
         shown = {tool.tool_id for tool in page}
         links: dict[str, list[AccountLinkV1]] = {}
-        for link in read.service.store.list_links(read.service.team_id):
+        for link in read.service.store.list_links(read.service.team_id, purpose=None):
             if link.tool_id in shown and read.link_visible(link):
                 links.setdefault(link.tool_id, []).append(link)
 

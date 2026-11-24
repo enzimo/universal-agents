@@ -30,7 +30,7 @@ def prepare(store):
     finished = request.model_copy(update={
         "status": AccessRequestStatus.GRANTED, "decided_by": OWNER, "decided_at_utc": NOW,
     })
-    recovery = DecisionRecovery(claim, finished, {"tool_files": []}, NOW + timedelta(seconds=1))
+    recovery = DecisionRecovery(claim, finished, {"tool_files": [], "replaced_tool_files": []}, NOW + timedelta(seconds=1))
     store.save_decision_recovery(recovery)
     return claim, recovery
 
@@ -134,3 +134,40 @@ def test_external_publication_and_cleanup_exclude_each_other(repositories):
     with pytest.raises(DecisionClaimLost):
         with first.decision_effect_transaction(claim):
             pytest.fail("a released decision must not publish")
+
+
+def test_older_proposal_recovery_row_gains_replaced_tool_files_on_open(repositories):
+    first, _second = repositories
+    request = first.create_request(_request())
+    claim = DecisionClaim(request.request_id, "decision_pre_upgrade")
+    first.claim_decision(request.request_id, claim_id=claim.claim_id, at=NOW, until=NOW + timedelta(seconds=1))
+    finished = request.model_copy(
+        update={"status": AccessRequestStatus.GRANTED, "decided_by": OWNER, "decided_at_utc": NOW}
+    )
+    # A pre-upgrade proposal recovery row lacks replaced_tool_files.
+    first.save_decision_recovery(
+        DecisionRecovery(claim, finished, {"tool_files": [], "programs": [], "servers": []}, NOW + timedelta(seconds=1))
+    )
+    # A non-proposal recovery row (such as file delivery) is left untouched.
+    other_request = first.create_request(_request().model_copy(update={"request_id": "access_req_pg_delivery"}))
+    other_claim = DecisionClaim(other_request.request_id, "decision_delivery")
+    first.claim_decision(
+        other_request.request_id, claim_id=other_claim.claim_id, at=NOW, until=NOW + timedelta(seconds=1)
+    )
+    other_finished = other_request.model_copy(
+        update={"status": AccessRequestStatus.GRANTED, "decided_by": OWNER, "decided_at_utc": NOW}
+    )
+    first.save_decision_recovery(
+        DecisionRecovery(other_claim, other_finished, {"delivered_files": []}, NOW + timedelta(seconds=1))
+    )
+
+    reopened = AccessRepository(first.settings)
+    later = NOW + timedelta(minutes=11)
+    by_claim = {item.claim.claim_id: item.effects for item in reopened.decision_recoveries(TEAM, now=later)}
+    assert by_claim["decision_pre_upgrade"] == {
+        "tool_files": [],
+        "programs": [],
+        "servers": [],
+        "replaced_tool_files": [],
+    }
+    assert by_claim["decision_delivery"] == {"delivered_files": []}

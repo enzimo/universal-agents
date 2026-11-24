@@ -257,7 +257,7 @@ def describe_link(link: AccountLinkV1) -> str:
     owner = "the team" if link.owner_kind is LinkOwnerKind.TEAM else f"person {link.owner_id}"
     places = ", ".join(f"{item.placement.value} {item.name} <- {item.field}" for item in link.injections) or "fixed field"
     return (
-        f"{link.link_id} [{link.status.value}] {link.tool_id} uses {owner}'s credential "
+        f"{link.link_id} [{link.status.value}] [{link.purpose.value}] {link.tool_id} uses {owner}'s credential "
         f"{link.credential_key} ({places}); linked by {link.created_by.id}"
     )
 

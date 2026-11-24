@@ -51,6 +51,7 @@ from custom_messages.contracts.access_v2 import (
     AccountMode,
     AccountSharing,
     LinkOwnerKind,
+    LinkPurpose,
     OperationResolutionV1,
     ToolDefinitionV1,
 )
@@ -265,12 +266,16 @@ class BrokerAccessGate:
             return None
         owners = TeamAccountSharing(self.links, self.team_id).link_owners(tool)
         if person_id and LinkOwnerKind.PERSON in owners:
-            own = self.links.active_link(self.team_id, tool_id, LinkOwnerKind.PERSON, person_id)
+            own = self.links.active_link(
+                self.team_id, tool_id, LinkOwnerKind.PERSON, person_id, purpose=LinkPurpose.ACCOUNT
+            )
             if own is not None:
                 return own
         if LinkOwnerKind.TEAM not in owners:
             return None
-        return self.links.active_link(self.team_id, tool_id, LinkOwnerKind.TEAM, self.team_id)
+        return self.links.active_link(
+            self.team_id, tool_id, LinkOwnerKind.TEAM, self.team_id, purpose=LinkPurpose.ACCOUNT
+        )
 
     def _with_account(
         self, resolution: OperationResolutionV1, person_id: str | None, context: Mapping[str, Any]

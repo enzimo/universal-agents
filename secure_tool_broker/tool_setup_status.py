@@ -31,7 +31,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from access_control.account_sharing import TeamAccountSharing
-from custom_messages.contracts.access_v2 import AccountMode, LinkOwnerKind, ToolDefinitionV1
+from custom_messages.contracts.access_v2 import AccountMode, LinkOwnerKind, LinkPurpose, ToolDefinitionV1
 from secure_tool_broker.credential_state import credential_owner_context
 from secure_tools.auth_methods import X_SIGN_IN_PROVIDER, ToolSignIn, tool_sign_in
 from secure_tools.providers import ToolContext
@@ -121,8 +121,11 @@ def _link_state(gate: Any, tool: ToolDefinitionV1, person_id: str) -> dict[str, 
     team_id = gate.team_id
     team_used = TeamAccountSharing(links, team_id).team_account_used(tool)
     return {
-        "own": links.active_link(team_id, tool.tool_id, LinkOwnerKind.PERSON, person_id) is not None,
-        "team": team_used and links.active_link(team_id, tool.tool_id, LinkOwnerKind.TEAM, team_id) is not None,
+        "own": links.active_link(team_id, tool.tool_id, LinkOwnerKind.PERSON, person_id, purpose=LinkPurpose.ACCOUNT)
+        is not None,
+        "team": team_used
+        and links.active_link(team_id, tool.tool_id, LinkOwnerKind.TEAM, team_id, purpose=LinkPurpose.ACCOUNT)
+        is not None,
     }
 
 

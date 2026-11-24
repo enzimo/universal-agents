@@ -151,7 +151,7 @@ class GatewayPersonDeparture:
         grants = self._revoke_grants(access, person_id, actor, now)
         links = [
             link
-            for link in access.list_links(self._team_id)
+            for link in access.list_links(self._team_id, purpose=None)
             if link.owner_kind is LinkOwnerKind.PERSON and link.owner_id == person_id
         ]
         for link in links:

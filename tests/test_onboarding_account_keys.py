@@ -24,7 +24,7 @@ from assistant_gateway.onboarding_account_keys import (
     read_handover,
     write_handover,
 )
-from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1, LinkOwnerKind
+from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1, LinkOwnerKind, LinkPurpose
 from runtime_settings.instance_layout import InstanceLayout
 from secure_tool_broker.credential_catalog import load_catalog
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
@@ -111,7 +111,9 @@ async def test_gateway_start_links_the_keys_for_the_team_and_deletes_the_file(
 
     assert not InstanceLayout.at(instance).onboarding_account_keys_path.exists()
     for tool_id in ("http:exa", "http:brave-search"):
-        link = broker.gate.links.active_link(TEST_TEAM, tool_id, LinkOwnerKind.TEAM, TEST_TEAM)
+        link = broker.gate.links.active_link(
+            TEST_TEAM, tool_id, LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT
+        )
         assert link is not None and link.created_by.id == "owner-1"
     assert set(load_catalog(scope=CredentialOwnerScope.team(TEST_TEAM)).credentials) == {
         "http-exa-team",
@@ -143,7 +145,10 @@ async def test_keys_stay_in_the_file_when_the_person_is_not_an_administrator(ins
 
     handover = read_handover(instance)
     assert handover is not None and handover.keys == {"http:exa": EXA_KEY}, "kept for the next start"
-    assert broker.gate.links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.TEAM, TEST_TEAM) is None
+    assert (
+        broker.gate.links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT)
+        is None
+    )
     assert notices == []
     assert "event=onboarding_key_not_linked tool_id=http:exa reason_code=account_link_team_admin_required" in caplog.text
     assert EXA_KEY not in caplog.text
@@ -244,9 +249,15 @@ async def test_a_private_service_key_becomes_the_administrators_own_and_serves_o
     assert sharing.for_tool(_tool("http:exa")) is AccountSharing.PRIVATE
     assert sharing.model_keys() is AccountSharing.PRIVATE
     links = broker.gate.links
-    own = links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.PERSON, "owner-1")
-    assert own is not None and links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.TEAM, TEST_TEAM) is None
-    assert links.active_link(TEST_TEAM, "http:brave-search", LinkOwnerKind.TEAM, TEST_TEAM) is not None
+    own = links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.PERSON, "owner-1", purpose=LinkPurpose.ACCOUNT)
+    assert (
+        own is not None
+        and links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT) is None
+    )
+    assert (
+        links.active_link(TEST_TEAM, "http:brave-search", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT)
+        is not None
+    )
     assert "http-exa-personal" in load_catalog(scope=CredentialOwnerScope.user("owner-1")).credentials
     assert not InstanceLayout.at(instance).onboarding_account_keys_path.exists()
     team_notice, own_notice = notices
@@ -298,8 +309,14 @@ async def test_choices_are_recorded_once_so_a_later_change_wins_over_a_restart(i
     await _handover(instance, broker, roles=("owner",), notices=[]).run(asyncio.Event())
 
     assert sharing.for_tool(_tool("http:exa")) is AccountSharing.SHARED
-    assert broker.gate.links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.TEAM, TEST_TEAM) is not None
-    assert broker.gate.links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.PERSON, "owner-1") is None
+    assert (
+        broker.gate.links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT)
+        is not None
+    )
+    assert (
+        broker.gate.links.active_link(TEST_TEAM, "http:exa", LinkOwnerKind.PERSON, "owner-1", purpose=LinkPurpose.ACCOUNT)
+        is None
+    )
 
 
 @pytest.mark.asyncio
