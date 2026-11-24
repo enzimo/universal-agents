@@ -483,7 +483,7 @@ def test_tools_without_record_kinds_need_none(tmp_path):
     assert catalog.record_kind("note_file") is None
 
 
-# Gate injections, link purpose, canonical injection matching, and host validation ----
+# Gate injections, link purpose, canonical injection matching, and tool changes ----
 
 
 def test_canonical_injections_and_injections_match_across_tool_kinds():
@@ -538,7 +538,6 @@ def test_canonical_injections_and_injections_match_across_tool_kinds():
 def test_gate_injections_and_link_purpose_contract_rules():
     from datetime import datetime, timezone
 
-    from access_catalog.catalog import builtin_tool_ids
     from custom_messages.contracts.access_v2 import (
         AccessProposalV1,
         AccountLinkRequestV1,
@@ -555,7 +554,6 @@ def test_gate_injections_and_link_purpose_contract_rules():
         SubjectRefV1,
     )
     from custom_messages.contracts.tool_setup_spec_v1 import ExternalSetupStepV1, ToolSetupSpecV1
-    from secure_tools.chat_commands import link_command
 
     gate_hdr = CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate-Secret", field="secret")
     acct_hdr = CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="token", template="Bearer {value}")
@@ -714,10 +712,135 @@ def test_gate_injections_and_link_purpose_contract_rules():
             previous_definition_digest="not-a-sha256",
         )
 
-    assert "http:github" in builtin_tool_ids()
-    assert link_command("http:gitea", purpose=LinkPurpose.GATE) == "/link http:gitea gate"
-    assert link_command("http:gitea", LinkOwnerKind.TEAM) == "/link http:gitea team"
-    assert link_command("http:gitea") == "/link http:gitea"
+
+def test_instance_tools_round_trip_gate_injections_and_replace_in_candidate_catalog(tmp_path):
+    from access_catalog.catalog import CatalogError
+    from access_catalog.instance_tools import proposed_tool_path, with_proposed_tools, write_instance_tool
+    from custom_messages.contracts.access_v2 import (
+        CredentialInjectionV1,
+        InjectionPlacement,
+        ProposedHttpToolChangeV1,
+        ProposedHttpToolV1,
+    )
+
+    gate_hdr = CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate-Key", field="secret")
+    initial = ProposedHttpToolV1(
+        tool_id="http:gitea",
+        display_name="Gitea",
+        hosts=("gitea.example.com",),
+        uses_credential=False,
+        gate_injections=(gate_hdr,),
+    )
+    written = write_instance_tool(tmp_path, initial)
+    assert written == proposed_tool_path(tmp_path, "http:gitea")
+
+    loaded = load_catalog(tmp_path)
+    assert loaded.tools["http:gitea"].gate_injections == (gate_hdr,)
+    assert loaded.resolve_http("GET", "https://gitea.example.com/api/v1/version").tool_id == "http:gitea"
+
+    # with_proposed_tools replaces the tool's definition and hosts in a candidate catalog.
+    changed = ProposedHttpToolChangeV1(
+        tool_id="http:gitea",
+        display_name="Gitea v2",
+        hosts=("git.example.com",),
+        uses_credential=True,
+        credential_injections=(
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="token", template="token {value}"),
+        ),
+        gate_injections=(gate_hdr,),
+    )
+    updated = with_proposed_tools(loaded, (), tool_changes=(changed,))
+    assert updated.tools["http:gitea"].display_name == "Gitea v2"
+    assert updated.resolve_http("GET", "https://gitea.example.com/api").tool_id == UNLISTED_WEB_TOOL
+    assert updated.resolve_http("GET", "https://git.example.com/api").tool_id == "http:gitea"
+
+    # Host clashes, unknown tools, and duplicates are refused.
+    with pytest.raises(CatalogError, match="belongs to both"):
+        with_proposed_tools(
+            loaded,
+            (),
+            tool_changes=(
+                ProposedHttpToolChangeV1(tool_id="http:gitea", display_name="Gitea", hosts=("api.github.com",)),
+            ),
+        )
+    with pytest.raises(CatalogError, match="not an existing web API tool"):
+        with_proposed_tools(
+            loaded,
+            (),
+            tool_changes=(
+                ProposedHttpToolChangeV1(tool_id="http:missing", display_name="Missing", hosts=("m.example.com",)),
+            ),
+        )
+    with pytest.raises(CatalogError, match="more than once"):
+        with_proposed_tools(loaded, (), tool_changes=(changed, changed))
+
+
+def test_pre_upgrade_proposal_json_keeps_its_exact_digest():
+    from access_control.proposals import proposal_digest
+    from custom_messages.contracts.access_v2 import (
+        AccessProposalV1,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkPurpose,
+        ProposedAccountLinkV1,
+        ProposedHttpToolV1,
+        contract_digest,
+    )
+
+    pre_upgrade_json = {
+        "schema_version": 1,
+        "title": "Add Gitea",
+        "reason": "Inspect repositories.",
+        "tools": [
+            {
+                "tool_id": "http:gitea",
+                "display_name": "Gitea",
+                "description": "",
+                "hosts": ["gitea.example.com"],
+                "routes": [],
+                "uses_credential": True,
+                "credential_injections": [
+                    {"placement": "header", "name": "Authorization", "field": "token", "template": "token {value}"}
+                ],
+                "setup": None,
+            }
+        ],
+        "clis": [],
+        "mcp_servers": [],
+        "grants": [],
+        "blocks": [],
+        "account_links": [
+            {"tool_id": "http:gitea", "owner": "team", "purpose": "Gitea API access."}
+        ],
+        "data_folders": [],
+        "revoke_grant_ids": [],
+    }
+    expected_digest = contract_digest(pre_upgrade_json)
+    parsed = AccessProposalV1.model_validate(pre_upgrade_json)
+    assert proposal_digest(parsed) == expected_digest
+
+    # Non-default gate_injections or gate link_purpose DO change the digest.
+    with_gate = AccessProposalV1(
+        title="Add Gitea",
+        reason="Inspect repositories.",
+        tools=(
+            ProposedHttpToolV1(
+                tool_id="http:gitea",
+                display_name="Gitea",
+                hosts=("gitea.example.com",),
+                credential_injections=(
+                    CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="token", template="token {value}"),
+                ),
+                gate_injections=(
+                    CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="secret"),
+                ),
+            ),
+        ),
+        account_links=(
+            ProposedAccountLinkV1(tool_id="http:gitea", owner="team", purpose="Gitea gate.", link_purpose=LinkPurpose.GATE),
+        ),
+    )
+    assert proposal_digest(with_gate) != expected_digest
 
 
 def test_instance_tool_files_load_underscore_and_trailing_dot_hosts_and_guide_unicode_hosts(tmp_path) -> None:

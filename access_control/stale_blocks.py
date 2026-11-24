@@ -16,8 +16,10 @@ nothing, so the block would quietly stop blocking. Instead:
   whole tool until an administrator replaces it. Nothing is rewritten; the
   stored block keeps naming what its author chose;
 - administrators get one Inbox notice per such block (``report_stale_blocks``,
-  run by the gateway at start), naming the block, whom it stops, the tool's
-  operations now, and the commands that replace it with a block on one of them.
+  run by the gateway at start and by ``ProposalApplier`` immediately after
+  applying a proposed web API tool change), naming the block, whom it stops,
+  the tool's operations now, and the commands that replace it with a block on
+  one of them.
 
 A team transfer converts the operation names its own release renamed
 (``team_transfer.access``), so imported blocks keep their exact scope.
@@ -166,8 +168,26 @@ def report_stale_blocks(catalog: ToolCatalog, store: Any, team_id: str, *, now: 
     return reported
 
 
+def active_operation_blocks_for_tool(
+    store: Any, team_id: str, tool_id: str, *, now: datetime
+) -> list[GrantV1]:
+    """Active, unexpired operation blocks targeting one tool (``tool_id#<operation>``)."""
+
+    prefix = f"{tool_id}#"
+    return [
+        grant
+        for grant in store.for_status(team_id, (GrantStatus.ACTIVE,))
+        if grant.kind is GrantKind.BLOCK
+        and grant.status is GrantStatus.ACTIVE
+        and (grant.expires_at_utc is None or grant.expires_at_utc > now)
+        and grant.target.kind is TargetKind.OPERATION
+        and grant.target.id.startswith(prefix)
+    ]
+
+
 __all__ = [
     "STALE_BLOCK_NOTICE_PREFIX",
+    "active_operation_blocks_for_tool",
     "decided_grant",
     "report_stale_blocks",
     "stale_block_notice",
