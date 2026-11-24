@@ -378,6 +378,41 @@ def write_bytes(root: Path, parts: tuple[str, ...], data: bytes, *, create_direc
     return len(data)
 
 
+def write_bytes_exclusive(root: Path, parts: tuple[str, ...], data: bytes, *, create_directories: bool = False) -> int:
+    """Write ``data`` atomically to ``root/parts`` only if nothing exists there (never following links)."""
+
+    folder_parts, name = _split(_checked_parts(parts), root)
+    shown = _display(root, parts)
+    directory = open_directory(root, folder_parts, create=create_directories)
+    try:
+        temporary = f".{name[:_TEMPORARY_NAME_HEAD]}.{secrets.token_hex(8)}.tmp"
+        try:
+            descriptor = os.open(
+                temporary, _FILE_WRITE_FLAGS | os.O_CREAT | os.O_EXCL, _NEW_FILE_MODE, dir_fd=directory
+            )
+        except OSError as exc:
+            raise UnsafePath(
+                f"Cannot write {shown}: its folder does not allow a new file ({exc.strerror}).",
+                reason=REASON_OPEN_FAILED,
+            ) from exc
+        try:
+            with os.fdopen(descriptor, "wb") as writer:
+                writer.write(data)
+                writer.flush()
+                os.fsync(writer.fileno())
+            try:
+                os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            except FileExistsError:
+                raise UnsafePath(f"Already exists: {shown}", reason=REASON_DESTINATION_EXISTS) from None
+            except OSError as exc:
+                raise UnsafePath(f"Cannot write {shown}: {exc.strerror}", reason=REASON_OPEN_FAILED) from exc
+        finally:
+            _remove_temporary(directory, temporary, shown)
+        return len(data)
+    finally:
+        os.close(directory)
+
+
 def copy_file(root: Path, parts: tuple[str, ...], destination: Path, *, max_bytes: int | None = None) -> int:
     """Copy ``root/parts`` to a new file at ``destination`` (a trusted path)."""
 
@@ -401,8 +436,12 @@ def copy_file(root: Path, parts: tuple[str, ...], destination: Path, *, max_byte
 
 def remove_file(
     root: Path, parts: tuple[str, ...], *, expected_identity: tuple[int, int, int, int] | None = None
-) -> None:
-    """Remove the regular file ``root/parts`` (never a link, a folder, or a path through a link)."""
+) -> bool:
+    """Remove the regular file ``root/parts`` (never a link, a folder, or a path through a link).
+
+    Returns ``True`` when the file was unlinked and ``False`` when it was kept
+    because ``expected_identity`` no longer matched.
+    """
 
     folder_parts, name = _split(_checked_parts(parts), root)
     shown = _display(root, parts)
@@ -419,8 +458,12 @@ def remove_file(
         if expected_identity is not None and (
             info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns
         ) != expected_identity:
-            return  # changed after the caller checked its ownership/content
-        os.unlink(name, dir_fd=directory)
+            return False  # changed after the caller checked its ownership/content
+        try:
+            os.unlink(name, dir_fd=directory)
+        except FileNotFoundError as exc:
+            raise UnsafePath(f"Not found: {shown}", reason=REASON_NOT_FOUND) from exc
+        return True
     finally:
         os.close(directory)
 
@@ -600,4 +643,5 @@ __all__ = [
     "remove_file",
     "writable_file",
     "write_bytes",
+    "write_bytes_exclusive",
 ]

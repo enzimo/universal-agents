@@ -27,15 +27,19 @@ from typing import Any
 
 import yaml
 
-from access_catalog.catalog import CatalogError, ToolCatalog, _http_operations, _tool_fields
+from access_catalog.catalog import INSTALLED_CLI_ACTION, CatalogError, ToolCatalog, _http_operations, _tool_fields
+from access_catalog.cli_tables import policy_from_data
 from access_control import safe_open
 from custom_messages.contracts.access_v2 import (
+    OperationDefinitionV1,
     ProposedCliToolV1,
     ProposedHttpToolChangeV1,
     ProposedHttpToolV1,
+    ProposedToolRemovalV1,
     ToolDefinitionV1,
     ToolKind,
 )
+from custom_messages.contracts.cli_tool_v1 import InstalledCliV1
 from runtime_settings.instance_layout import InstanceLayout
 
 logger = logging.getLogger(__name__)
@@ -45,7 +49,7 @@ PROPOSED_FILE_PREFIX = "proposed-"
 
 @dataclass(frozen=True)
 class ProposedToolFile:
-    """One proposal-written ``http:*`` tool file read safely from ``control/access/tools``."""
+    """One proposal-written ``http:*`` or ``cli:*`` tool file read safely from ``control/access/tools``."""
 
     path: Path
     raw_bytes: bytes
@@ -66,8 +70,66 @@ def proposed_tool_path(instance_root: str | Path, tool_id: str) -> Path:
     return directory / proposed_tool_filename(tool_id)
 
 
-def read_proposed_tool_file(instance_root: str | Path, tool_id: str) -> ProposedToolFile:
-    """Read and validate one single-tool proposal-written ``http:*`` file without following links.
+def _parse_proposed_entry(
+    entry: dict[str, Any], *, tool_id: str, filename: str, allowed_kinds: frozenset[ToolKind]
+) -> ToolDefinitionV1:
+    """Validate one single-tool YAML mapping from a ``proposed-*.yaml`` file."""
+
+    if str(entry.get("tool_id") or "").strip() != tool_id:
+        raise CatalogError(f"The catalog file {filename} does not match tool {tool_id}.")
+    if entry.get("reached_through"):
+        raise CatalogError(
+            f"The catalog file {filename}: {tool_id} cannot name a function tool from an instance definition."
+        )
+    if entry.get("tool_sets"):
+        raise CatalogError(f"The catalog file {filename}: {tool_id} cannot join tool sets from an instance definition.")
+    if "installed_cli" in entry:
+        if ToolKind.CLI not in allowed_kinds:
+            raise CatalogError(f"Tool {tool_id} is an installed CLI, not a web API tool.")
+        raw_cli = entry["installed_cli"]
+        if not isinstance(raw_cli, dict):
+            raise CatalogError(f"The catalog file {filename} for {tool_id} has an invalid installed_cli definition.")
+        try:
+            cli = InstalledCliV1(**raw_cli)
+            if tool_id != f"cli:{cli.name}":
+                raise CatalogError(f"The catalog file {filename} does not match installed CLI {tool_id}.")
+            policy = policy_from_data(cli.name, cli.command_table())
+            operations = [
+                OperationDefinitionV1(name=f"command:{path}", level=level)
+                for path, level in sorted(policy.table.commands.items())
+            ]
+            definition = ToolDefinitionV1(**_tool_fields(entry, operations))
+        except CatalogError:
+            raise
+        except Exception as exc:
+            raise CatalogError(f"The catalog file {filename} for {tool_id} is invalid: {exc}") from exc
+        if definition.kind is not ToolKind.CLI:
+            raise CatalogError(f"Tool {tool_id} is not an installed CLI tool.")
+        return definition
+    if tool_id.startswith("cli:"):
+        raise CatalogError(f"The catalog file {filename} for {tool_id} is missing its installed_cli definition.")
+    if ToolKind.HTTP not in allowed_kinds:
+        raise CatalogError(f"Tool {tool_id} is not an allowed tool kind.")
+    try:
+        definition = ToolDefinitionV1(**_tool_fields(entry, _http_operations(entry)))
+    except Exception as exc:
+        raise CatalogError(f"The catalog file {filename} for {tool_id} is invalid: {exc}") from exc
+    if definition.kind is not ToolKind.HTTP:
+        raise CatalogError(f"Tool {tool_id} is not a web API tool.")
+    return definition
+
+
+def read_proposed_tool_file(
+    instance_root: str | Path,
+    tool_id: str,
+    *,
+    allowed_kinds: frozenset[ToolKind] = frozenset({ToolKind.HTTP}),
+) -> ProposedToolFile:
+    """Read and validate one single-tool proposal-written file without following links.
+
+    Defaults to ``http:*`` tools (used by ``tool_changes``). Pass
+    ``allowed_kinds=frozenset({ToolKind.HTTP, ToolKind.CLI})`` to also accept
+    proposal-written installed CLIs (used by ``tool_removals``).
 
     Raises ``FileNotFoundError`` when the tool has no ``proposed-*.yaml`` file
     (such as an operator-managed catalog file), and ``CatalogError`` if the path
@@ -98,24 +160,15 @@ def read_proposed_tool_file(instance_root: str | Path, tool_id: str) -> Proposed
         raise CatalogError(f"The catalog file {filename} for {tool_id} is not valid YAML: {exc}") from exc
     if not isinstance(parsed, dict) or not isinstance(parsed.get("tools"), list):
         raise CatalogError(f"The catalog file {filename} for {tool_id} must contain a 'tools' list.")
+    extra_top = sorted(set(parsed) - {"tools"})
+    if extra_top:
+        raise CatalogError(
+            f"The catalog file {filename} for {tool_id} contains unexpected top-level keys: {', '.join(extra_top)}."
+        )
     entries = parsed["tools"]
     if len(entries) != 1 or not isinstance(entries[0], dict):
         raise CatalogError(f"The catalog file {filename} for {tool_id} must define exactly one tool.")
-    entry = entries[0]
-    if str(entry.get("tool_id") or "").strip() != tool_id:
-        raise CatalogError(f"The catalog file {filename} does not match tool {tool_id}.")
-    if "installed_cli" in entry:
-        raise CatalogError(f"Tool {tool_id} is an installed CLI, not a web API tool.")
-    if entry.get("reached_through"):
-        raise CatalogError(f"The catalog file {filename}: {tool_id} cannot name a function tool from an instance definition.")
-    if entry.get("tool_sets"):
-        raise CatalogError(f"The catalog file {filename}: {tool_id} cannot join tool sets from an instance definition.")
-    try:
-        definition = ToolDefinitionV1(**_tool_fields(entry, _http_operations(entry)))
-    except Exception as exc:
-        raise CatalogError(f"The catalog file {filename} for {tool_id} is invalid: {exc}") from exc
-    if definition.kind is not ToolKind.HTTP:
-        raise CatalogError(f"Tool {tool_id} is not a web API tool.")
+    definition = _parse_proposed_entry(entries[0], tool_id=tool_id, filename=filename, allowed_kinds=allowed_kinds)
     return ProposedToolFile(
         path=path,
         raw_bytes=raw_bytes,
@@ -169,15 +222,46 @@ def cli_document(tool: ProposedCliToolV1) -> dict[str, Any]:
     return entry
 
 
+def _remove_from_candidate(candidate: ToolCatalog, tool_removals: tuple[ProposedToolRemovalV1, ...]) -> None:
+    """Remove proposed tools from ``candidate`` before applying changes or additions."""
+
+    seen_removals: set[str] = set()
+    for removal in tool_removals:
+        if removal.tool_id in seen_removals:
+            raise CatalogError(f"Tool {removal.tool_id!r} is listed more than once in tool_removals.")
+        seen_removals.add(removal.tool_id)
+        existing = candidate.tools.get(removal.tool_id)
+        if existing is None or existing.kind not in {ToolKind.HTTP, ToolKind.CLI}:
+            raise CatalogError(f"Tool {removal.tool_id!r} is not an existing removable web API or CLI tool.")
+        if removal.tool_id in candidate.reached_through or any(
+            owner == removal.tool_id for owner in candidate.http_origins.values()
+        ):
+            raise CatalogError(f"Tool {removal.tool_id!r} cannot be removed through a tool removal.")
+        if existing.kind is ToolKind.CLI and existing.installed_cli is None:
+            raise CatalogError(f"Tool {removal.tool_id!r} is not an installed CLI and cannot be removed.")
+        for host in existing.hosts:
+            if candidate.http_hosts.get(host) == removal.tool_id:
+                del candidate.http_hosts[host]
+        if existing.installed_cli is not None:
+            cli_name = existing.installed_cli.name
+            candidate.cli_policies.pop(cli_name, None)
+            binding = candidate.broker_actions.get((cli_name, INSTALLED_CLI_ACTION))
+            if binding is not None and binding.tool_id == removal.tool_id:
+                del candidate.broker_actions[(cli_name, INSTALLED_CLI_ACTION)]
+        del candidate.tools[removal.tool_id]
+
+
 def with_proposed_tools(
     catalog: ToolCatalog,
     tools: tuple[ProposedHttpToolV1, ...],
     clis: tuple[ProposedCliToolV1, ...] = (),
     tool_changes: tuple[ProposedHttpToolChangeV1, ...] = (),
+    tool_removals: tuple[ProposedToolRemovalV1, ...] = (),
 ) -> ToolCatalog:
-    """A copy of ``catalog`` with proposed tools added and changed web API tools replaced; raises ``CatalogError`` on a clash."""
+    """A copy of ``catalog`` with removals applied, changed tools replaced, and new tools added; raises ``CatalogError`` on a clash."""
 
     candidate = copy.deepcopy(catalog)
+    _remove_from_candidate(candidate, tool_removals)
     seen_changes: set[str] = set()
     for changed in tool_changes:
         if changed.tool_id in seen_changes:
@@ -361,6 +445,119 @@ def replace_instance_tool(
     return existing.path
 
 
+def _hash_open_file(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    while chunk := os.read(descriptor, 65536):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def remove_proposed_tool_file(
+    instance_root: str | Path,
+    tool_id: str,
+    *,
+    expected_sha256: str,
+    before_remove: Callable[[Path, bytes], None] | None = None,
+    publish: Callable[[Callable[[], None]], None] | None = None,
+) -> Path:
+    """Remove an existing proposal-written tool file without following links if its digest still matches.
+
+    Reads the existing file, verifies its SHA-256 equals ``expected_sha256``,
+    journals the removal via ``before_remove`` before deleting anything, then
+    re-opens the file, re-verifies its digest, captures its identity, and
+    unlinks it via ``safe_open.remove_file(..., expected_identity=...)`` inside
+    ``publish`` (such as ``decision_effect_transaction``).
+    """
+
+    directory = InstanceLayout.at(instance_root).instance_tools_dir
+    filename = proposed_tool_filename(tool_id)
+    try:
+        existing = read_proposed_tool_file(
+            instance_root, tool_id, allowed_kinds=frozenset({ToolKind.HTTP, ToolKind.CLI})
+        )
+    except FileNotFoundError as exc:
+        logger.warning(
+            "Refused to remove a missing proposed tool file. event=instance_tool_remove_missing "
+            "tool_id=%s path=%s",
+            tool_id,
+            directory / filename,
+        )
+        raise CatalogError(f"The catalog file for {tool_id} no longer exists.") from exc
+    if existing.sha256 != expected_sha256:
+        logger.warning(
+            "Refused to remove a tool file that changed since review. event=instance_tool_remove_conflict "
+            "tool_id=%s path=%s",
+            tool_id,
+            existing.path,
+        )
+        raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.")
+    if before_remove is not None:
+        before_remove(existing.path, existing.raw_bytes)
+
+    def _commit_remove() -> None:
+        try:
+            with safe_open.opened_file(directory, (filename,)) as (descriptor, info):
+                current_sha256 = _hash_open_file(descriptor)
+                identity = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+        except safe_open.UnsafePath as exc:
+            logger.warning(
+                "Refused to remove a tool file that changed or became unsafe. "
+                "event=instance_tool_remove_conflict tool_id=%s path=%s reason=%s",
+                tool_id,
+                existing.path,
+                exc.reason,
+            )
+            raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.") from exc
+        if current_sha256 != expected_sha256:
+            logger.warning(
+                "Refused to remove a tool file that changed after journaling. "
+                "event=instance_tool_remove_conflict tool_id=%s path=%s",
+                tool_id,
+                existing.path,
+            )
+            raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.")
+        try:
+            removed = safe_open.remove_file(directory, (filename,), expected_identity=identity)
+        except safe_open.UnsafePath as exc:
+            logger.warning(
+                "Refused to unlink a tool file that changed or became unsafe. "
+                "event=instance_tool_remove_conflict tool_id=%s path=%s reason=%s",
+                tool_id,
+                existing.path,
+                exc.reason,
+            )
+            raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.") from exc
+        if not removed:
+            logger.warning(
+                "Refused to unlink a tool file whose identity changed concurrently. "
+                "event=instance_tool_remove_conflict tool_id=%s path=%s reason=identity_changed",
+                tool_id,
+                existing.path,
+            )
+            raise CatalogError(f"The catalog file for {tool_id} changed since it was reviewed.")
+
+    if publish is not None:
+        publish(_commit_remove)
+    else:
+        _commit_remove()
+    logger.warning(
+        "A proposed tool's catalog file was removed. event=instance_tool_removed tool_id=%s path=%s",
+        tool_id,
+        existing.path,
+    )
+    return existing.path
+
+
+def restore_removed_instance_tool(path: Path, previous_bytes: bytes) -> None:
+    """Restore a removed proposed tool file atomically without overwriting an existing file."""
+
+    safe_open.write_bytes_exclusive(path.parent, (path.name,), previous_bytes)
+    logger.warning(
+        "A removed proposed tool's catalog file was restored. event=instance_tool_restored path=%s",
+        path,
+    )
+
+
 def restore_instance_tool(path: Path, previous_bytes: bytes) -> None:
     """Restore a replaced proposed tool file to its previous bytes atomically."""
 
@@ -391,8 +588,10 @@ __all__ = [
     "proposed_tool_path",
     "read_proposed_tool_file",
     "remove_instance_tool",
+    "remove_proposed_tool_file",
     "replace_instance_tool",
     "restore_instance_tool",
+    "restore_removed_instance_tool",
     "tool_definition",
     "tool_document",
     "with_proposed_tools",
