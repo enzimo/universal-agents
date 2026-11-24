@@ -114,12 +114,17 @@ from custom_transport.protocol1.host_partitions import (
     PARTITION_CREDENTIAL_TOO_LARGE_CODE,
     HostPartitionTracker,
     OwnedPartition,
-    draw_any_agent_id,
 )
 from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, MessageHost
 from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN, HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable, Unsupported
-from custom_agents.agent_requests import AgentUnreachable, AskBlocked, SessionlessAgent, process_host
+from custom_agents.agent_requests import (
+    AgentUnreachable,
+    AskBlocked,
+    SessionlessAgent,
+    draw_launch_agent_id as draw_launch_agent_id,
+    process_host,
+)
 from custom_transport.protocol1.team_agents import TeamAgents
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
@@ -369,7 +374,8 @@ class AgentProcessHost:
                                     sessions_active=lambda: sum(1 for item in self.agents.values() if item.session),
                                     components=self._components,
                                     renewal_partitions=self._renewal_partitions,
-                                    renewal_paused=lambda: self._handover_active)
+                                    renewal_paused=self._is_renewal_paused,
+                                    on_credential=self._on_credential_changed)
             self.host.on_other_contract(self._other_contract)
             self._task = self.loop.create_task(self._run(), name="agent_process_host")
 
@@ -549,7 +555,9 @@ class AgentProcessHost:
         if hasattr(self.host, "renewal_partitions"):
             self.host.renewal_partitions = self._renewal_partitions
         if hasattr(self.host, "renewal_paused"):
-            self.host.renewal_paused = lambda: self._handover_active
+            self.host.renewal_paused = self._is_renewal_paused
+        if hasattr(self.host, "on_credential"):
+            self.host.on_credential = self._on_credential_changed
         if getattr(self.host, "records", None) is not None and hasattr(self.host.records, "watch"):
             tracker = self.partitions = HostPartitionTracker(self.host, self.team, logger=self.logger)
             tracker.on_change(self._wake_partitions)
@@ -1475,6 +1483,34 @@ class AgentProcessHost:
             return ()
         return tuple(sorted(self.partitions.owned_by_host - self.partitions.rejected_partitions))
 
+    def _is_renewal_paused(self) -> bool:
+        """Pause routine renewals while a handover is running or any release awaits step 3 completion."""
+
+        if self._handover_active:
+            return True
+        if self.partitions is None:
+            return False
+        return any(
+            self._completed_handovers.get(p) != rec.assigned_at
+            for p, rec in self.partitions.released_by_host.items()
+        )
+
+    def _on_credential_changed(
+        self,
+        _connection: Mapping[str, Any],
+        credential_partitions: frozenset[int],
+        _rotated_nats_key: bool,
+    ) -> None:
+        """Refresh usable partitions on every join/rejoin/renewal credential change and wake coordinator on drift."""
+
+        tracker = self.partitions
+        if tracker is None:
+            return
+        tracker.refresh_usable()
+        desired = tracker.owned_by_host - tracker.rejected_partitions
+        if desired != frozenset(credential_partitions) and self._partition_wake is not None:
+            self._partition_wake.set()
+
     def _wake_partitions(self) -> None:
         if self._partition_wake is not None:
             self._partition_wake.set()
@@ -1539,6 +1575,7 @@ class AgentProcessHost:
         desired = tracker.owned_by_host - tracker.rejected_partitions
         current = frozenset(getattr(host, "credential_partitions", frozenset()))
         if desired == current:
+            tracker.refresh_usable()
             return False
         dropping = bool(current - desired)
         ok = await self._renew_for_partitions(desired, rotate_nats_key=dropping)
@@ -1577,6 +1614,18 @@ class AgentProcessHost:
                 pass
         return min(deadlines)
 
+    def _still_pending_releases(
+        self,
+        pending_releases: Mapping[int, OwnedPartition],
+    ) -> dict[int, OwnedPartition]:
+        assert self.partitions is not None
+        current_released = self.partitions.released_by_host
+        return {
+            p: rec
+            for p, rec in pending_releases.items()
+            if (current := current_released.get(p)) is not None and current.assigned_at == rec.assigned_at
+        }
+
     async def _execute_handover(self, pending_releases: Mapping[int, OwnedPartition]) -> bool:
         """Run handover step 2 (stop control, drain/handback, close as handed_over) and step 3 (renew + rotate key)."""
 
@@ -1591,10 +1640,10 @@ class AgentProcessHost:
             )
             drained_ids: set[str] = set()
             while not self._stop.is_set():
-                current_released = self.partitions.released_by_host
-                still_released = partitions_set & frozenset(current_released)
-                if not still_released:
+                still_pending = self._still_pending_releases(pending_releases)
+                if not still_pending:
                     return True
+                still_released = frozenset(still_pending)
                 in_part = self._agents_in_partitions(still_released)
                 for hosted in in_part:
                     if hosted.subscription is not None:
@@ -1634,9 +1683,14 @@ class AgentProcessHost:
             if self._stop.is_set():
                 return False
 
-            # Close sessions of every agent in the released partition(s) as handed_over so placements survive step 4.
+            still_pending = self._still_pending_releases(pending_releases)
+            if not still_pending:
+                return True
+            still_released = frozenset(still_pending)
+
+            # Close sessions of every agent in the still-released partition(s) as handed_over so placements survive step 4.
             closing_sessions: set[str] = set()
-            for hosted in self._agents_in_partitions(partitions_set):
+            for hosted in self._agents_in_partitions(still_released):
                 if hosted.session is not None:
                     closing_sessions.add(hosted.session)
                 await self._close(str(hosted.agent.id), "handed_over", hosted=hosted)
@@ -1664,13 +1718,14 @@ class AgentProcessHost:
                 if not ok:
                     return False
 
-            for p, rec in pending_releases.items():
+            completed_now = self._still_pending_releases(still_pending)
+            for p, rec in completed_now.items():
                 self._completed_handovers[p] = rec.assigned_at
             self.logger.info(
                 "Finished partition handover steps 2-3. event=agent_host_partition_handover_done "
                 "runtime=%s partitions=%s credentials_issued=%s",
                 self.profile.runtime,
-                sorted(partitions_set),
+                sorted(still_released),
                 bool(getattr(self.host, "credentials_issued", False)),
             )
             return True
@@ -1683,12 +1738,13 @@ class AgentProcessHost:
         assert self.host is not None and self.partitions is not None and self._stop is not None
         working = frozenset(desired)
         while not self._stop.is_set():
-            outcome = await self.host.renew(partitions=sorted(working), rotate_nats_key=rotate_nats_key)
+            current = frozenset(getattr(self.host, "credential_partitions", frozenset()))
+            step_rotate = rotate_nats_key or bool(current - working)
+            outcome = await self.host.renew(partitions=sorted(working), rotate_nats_key=step_rotate)
             if outcome.ok:
                 self.partitions.refresh_usable()
                 return True
             if outcome.credential_too_large:
-                current = frozenset(getattr(self.host, "credential_partitions", frozenset()))
                 newly_added = sorted(working - current)
                 if newly_added:
                     drop = newly_added[-1]
@@ -1901,29 +1957,6 @@ def agent_definition_sha256(agent: Any) -> str:
         # Every type the team runs has a definition; without one the placement names the type alone.
         definition = {"named_agent_type": agent.named_agent_type}
     return definition_sha256(launch_definition_digest(definition))
-
-
-def draw_launch_agent_id(team_id: str, *, prefix: str = "agent") -> str:
-    """Draw a contract-valid (<= 32 char) agent ID for a dynamically launched worker.
-
-    When this process has an active ``AgentProcessHost`` for ``team_id`` with at least one
-    usable owned partition, the ID is drawn inside its least-filled usable owned partition.
-    Otherwise (standalone tests or before partitions are assigned), returns a <= 32-char ID
-    matching the contract's ``agent_id`` pattern.
-    """
-
-    host = process_host()
-    if host is not None and host.team == team_id and host.usable_partitions():
-        try:
-            return str(host.draw_agent_id(prefix=prefix))
-        except Exception:
-            host.logger.warning(
-                "Could not draw a partition-scoped worker agent ID; falling back to an unconstrained contract ID. "
-                "event=agent_host_draw_id_fallback team=%s",
-                team_id,
-                exc_info=True,
-            )
-    return draw_any_agent_id(prefix=prefix)
 
 
 async def assign_partition_agent_id(agent: Any, adapter: Any) -> None:

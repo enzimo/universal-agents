@@ -84,6 +84,7 @@ class _SignedCluster:
         self.trust.add(json.dumps(rev_doc).encode(), now=self.now)
         self.keys: dict[str, Any] = {}
         self.certs: dict[str, Any] = {}
+        self.cert_docs: dict[str, dict[str, Any]] = {}
         self.epochs: dict[str, int] = {}
         self.seq = 100
 
@@ -138,6 +139,7 @@ class _SignedCluster:
         cert = self.trust.store.host_certificate(INSTALLATION, runtime, epoch)
         assert cert is not None
         self.certs[runtime] = cert
+        self.cert_docs[runtime] = cert_doc
         return cert
 
     def sign_partition_owner(
@@ -684,3 +686,476 @@ def test_universal_agent_adopt_agent_id_preserves_process_scope_and_updates_subs
     assert ctx.agent_id == "agent_998877665544"
     assert mpm.agent_id == "agent_998877665544"
     assert maint_plugin.agent_id == "agent_998877665544"
+
+
+def test_adopt_agent_id_rebuilds_strands_offloader_and_passes_owns_artifact(tmp_path: Path) -> None:
+    """C25: _adopt_agent_id rebuilds _strands_agent so offloaded tool results record adopted agent_id and pass _owns_artifact."""
+
+    from custom_agents.strands_agent import UniversalAgent
+    from custom_agents.strands_agent_builder import build_strands_parts
+    from custom_agents.tool_result_offloader import TaskAwareToolResultOffloader
+    from custom_tools.runtime_context import set_agent_ref, task_work
+    from custom_tools.tool_result_artifact_tools import _owns_artifact
+    from storage.config import resolve_storage_settings
+
+    class _DummyStrandsAgent:
+        def __init__(self, *, system_prompt: str, tools: list[Any], model: Any,
+                     conversation_manager: Any, callback_handler: Any, hooks: list[Any],
+                     tool_executor: Any, **kwargs: Any) -> None:
+            self.system_prompt = system_prompt
+            self.tools = tools
+            self.model = model
+            self.conversation_manager = conversation_manager
+            self.hooks = hooks
+            self.tool_executor = tool_executor
+
+    class _DummyContextEngine:
+        def __init__(self, agent_id: str) -> None:
+            self.agent_id = agent_id
+            self.memory_plugin_manager = None
+
+        def build_inner_loop_conversation_manager(self, storage: Any) -> Any:
+            return SimpleNamespace(storage=storage)
+
+    layout = InstanceLayout.at(tmp_path / "inst")
+    layout.tool_results_dir.mkdir(parents=True, exist_ok=True)
+    tm = SimpleNamespace(
+        set_owner_identity=lambda *args: None,
+        add_task_terminal_callback=lambda cb: None,
+        add_task_release_callback=lambda cb: None,
+        storage_settings=resolve_storage_settings(None, sqlite_fallback_path=str(layout.root / "tasks.db")),
+        get_task_info=lambda tid: SimpleNamespace(meta=SimpleNamespace(conversation_id="conv-1")),
+    )
+    fake = SimpleNamespace(
+        id="agent_old00001",
+        name="clever-fox-0001",
+        team_id=TEAM,
+        named_agent_type="Researcher",
+        is_team_lead=False,
+        authorization_config={"enabled": False},
+        model_fields_set=set(),
+        _worker_launch=None,
+        task_manager=tm,
+        _context_engine=_DummyContextEngine("agent_old00001"),
+        _context_debug_dump_plugin=None,
+        _logger=None,
+        _strands_model=object(),
+        _strands_generation=1,
+        _strands_parts=None,
+        _strands_agent=None,
+        system_prompt="prompt",
+        structured_output_failure_threshold=2,
+        max_tool_calls_per_task=10,
+        max_tool_result_tokens_per_call=20,
+        tools=[],
+        plugins=[],
+        instance_config_path=str(layout.root / "instance_config.yaml"),
+        agent_definition_path=None,
+        _refresh_skills_plugins=lambda: None,
+        _model_failover_retry_strategy_config=lambda: None,
+        _configure_model=lambda: object(),
+    )
+
+    def _create_strands_agent(*, keep_loaded_tools: bool = False) -> None:
+        parts = build_strands_parts(fake, agent_class=_DummyStrandsAgent, loaded=None)
+        fake._strands_parts = parts
+        fake._strands_agent = parts.agent
+
+    fake._create_strands_agent = _create_strands_agent
+    fake._create_strands_agent()
+
+    initial_offloader = next(h for h in fake._strands_agent.hooks if isinstance(h, TaskAwareToolResultOffloader))
+    assert initial_offloader.storage.agent_id == "agent_old00001"
+    assert fake._strands_agent.conversation_manager.storage.agent_id == "agent_old00001"
+
+    UniversalAgent._adopt_agent_id(fake, "agent_new99999")  # type: ignore[arg-type]
+
+    rebuilt_offloader = next(h for h in fake._strands_agent.hooks if isinstance(h, TaskAwareToolResultOffloader))
+    assert rebuilt_offloader is not initial_offloader
+    assert rebuilt_offloader.storage.agent_id == "agent_new99999"
+    assert fake._strands_agent.conversation_manager.storage is rebuilt_offloader.storage
+
+    # Offload an oversized result during a turn (event.agent is the Strands SDK Agent with no .id) and verify _owns_artifact.
+    fake_event = SimpleNamespace(
+        agent=fake._strands_agent,
+        tool_use={"name": "big_tool", "toolUseId": "tu-1"},
+        result={"status": "success", "content": [{"text": "x" * 2000}]},
+    )
+    set_agent_ref(fake)  # type: ignore[arg-type]
+    try:
+        with task_work("task-123"):
+            stored = rebuilt_offloader.storage.store_result(
+                result=fake_event.result,
+                event=fake_event,  # type: ignore[arg-type]
+                tool_name="big_tool",
+                result_tokens=500,
+                result_text="x" * 2000,
+                max_tokens_per_call=20,
+                preview_tokens=10,
+                replacement_status="success",
+            )
+            manifest = json.loads(Path(stored["artifact_manifest_path"]).read_text(encoding="utf-8"))
+            assert manifest["agent_id"] == "agent_new99999"
+            assert _owns_artifact(manifest) is True
+    finally:
+        set_agent_ref(None)
+
+
+@pytest.mark.asyncio
+async def test_rejoin_resets_usable_partitions_and_wakes_coordinator_to_reacquire_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C26(1): rejoin resets credential_partitions, notifies on_credential to refresh usable_partitions, and wakes coordinator."""
+
+    import custom_transport.protocol1.host_runtime as host_runtime_mod
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.protocol1.identity import HostIdentity
+
+    cluster = _SignedCluster(tmp_path)
+    mhost = MessageHost(
+        cluster.layout,
+        HostProfile("worker-1", (TEAM,), ("worker_host",), ("researcher",), 4),
+        nc=None,
+        clock=lambda: cluster.now,
+    )
+    mhost.live = SimpleNamespace(
+        identity=HostIdentity(cluster.keys["worker-1"], cluster.certs["worker-1"]),
+        trust=cluster.trust,
+    )  # type: ignore[assignment]
+    mhost.credentials_issued = True
+    mhost.credential_partitions = frozenset({1, 3})
+
+    process = AgentProcessHost(cluster.layout, mhost.profile, TEAM)
+    process.host = mhost
+    process.loop = asyncio.get_running_loop()
+    process._joined, process._stop = asyncio.Event(), asyncio.Event()
+    process._joined.set()
+    process._partition_wake = asyncio.Event()
+    process.partitions = HostPartitionTracker(mhost, TEAM)
+    mhost.renewal_partitions = process._renewal_partitions
+    mhost.renewal_paused = process._is_renewal_paused
+    mhost.on_credential = process._on_credential_changed
+
+    for p in (1, 3):
+        k, raw = cluster.sign_partition_owner(p, state=OWNED, host="worker-1")
+        await process.partitions.apply_event(k, raw)
+    assert process.partitions.usable_partitions == frozenset({1, 3})
+    assert process.partitions.has_usable.is_set()
+    process._partition_wake.clear()
+
+    new_cert = cluster.issue_host(
+        "worker-1", roles=("worker_host",), agent_types=("researcher", "specialist"), session_limit=4
+    )
+
+    async def fake_join(nc: Any, keys: Any, trust: Any, profile: Any, **kwargs: Any) -> Any:
+        on_connection = kwargs.get("on_connection")
+        if on_connection is not None:
+            on_connection({"jwt": "join-jwt", "expires_at": _ts(cluster.now + timedelta(seconds=600))})
+        return new_cert
+
+    monkeypatch.setattr(host_runtime_mod, "join", fake_join)
+
+    rejoined = await mhost.rejoin(["specialist"])
+    assert "specialist" in rejoined.granted
+    assert mhost.credential_partitions == frozenset()
+    assert process.partitions.usable_partitions == frozenset()
+    assert not process.partitions.has_usable.is_set()
+    assert process._partition_wake.is_set()
+
+    # Coordinator wakes up and renews to restore owned partitions {1, 3}.
+    renew_requests: list[dict[str, Any]] = []
+    renewed_cert = cluster.issue_host(
+        "worker-1", roles=("worker_host",), agent_types=("researcher", "specialist"), session_limit=4
+    )
+    renewed_doc = cluster.cert_docs["worker-1"]
+
+    async def fake_live_request(kind: str, body: dict[str, Any], audience: Any, *, team: str) -> Any:
+        renew_requests.append(body)
+        return SimpleNamespace(
+            raw={
+                "body": {
+                    "outcome": "ok",
+                    "certificate": renewed_doc,
+                    "connection": {"jwt": "renew-jwt", "expires_at": _ts(cluster.now + timedelta(seconds=600))},
+                }
+            }
+        )
+
+    mhost.live.request = fake_live_request  # type: ignore[attr-defined]
+    assert await process._sync_partitions_once() is False
+    assert renew_requests[0]["partitions"] == [1, 3]
+    assert mhost.live.identity.certificate.membership_epoch == renewed_cert.membership_epoch
+    assert process.partitions.usable_partitions == frozenset({1, 3})
+    assert process.partitions.has_usable.is_set()
+
+
+@pytest.mark.asyncio
+async def test_routine_renew_if_due_updates_usable_partitions_and_sync_refreshes_on_match(tmp_path: Path) -> None:
+    """C26(2): routine renew_if_due picking up a new owned partition refreshes usable_partitions; sync also refreshes when equal."""
+
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.protocol1.identity import HostIdentity
+
+    cluster = _SignedCluster(tmp_path)
+    mhost = MessageHost(
+        cluster.layout,
+        HostProfile("worker-1", (TEAM,), ("worker_host",), ("researcher",), 4),
+        nc=None,
+        clock=lambda: cluster.now,
+    )
+    mhost.live = SimpleNamespace(
+        identity=HostIdentity(cluster.keys["worker-1"], cluster.certs["worker-1"]),
+        trust=cluster.trust,
+    )  # type: ignore[assignment]
+    mhost._record_join_connection({"jwt": "j0", "expires_at": _ts(cluster.now + timedelta(seconds=600))})
+    mhost.credential_partitions = frozenset({1})
+
+    process = AgentProcessHost(cluster.layout, mhost.profile, TEAM)
+    process.host = mhost
+    process.loop = asyncio.get_running_loop()
+    process._joined, process._stop = asyncio.Event(), asyncio.Event()
+    process._joined.set()
+    process._partition_wake = asyncio.Event()
+    process.partitions = HostPartitionTracker(mhost, TEAM)
+    mhost.renewal_partitions = process._renewal_partitions
+    mhost.renewal_paused = process._is_renewal_paused
+    mhost.on_credential = process._on_credential_changed
+
+    # Assign partition 1 (already in credential) and new partition 3 (not yet in credential).
+    for p in (1, 3):
+        k, raw = cluster.sign_partition_owner(p, state=OWNED, host="worker-1")
+        await process.partitions.apply_event(k, raw)
+    assert process.partitions.usable_partitions == frozenset({1})
+
+    # Routine 2/3-lifetime renewal fires before _sync_partitions_once and picks up (1, 3).
+    cluster.now = cluster.now + timedelta(seconds=450)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), session_limit=4)
+    renewed_doc = cluster.cert_docs["worker-1"]
+
+    async def fake_live_request(kind: str, body: dict[str, Any], audience: Any, *, team: str) -> Any:
+        assert body["partitions"] == [1, 3]
+        assert "new_nats_public_key" not in body
+        return SimpleNamespace(
+            raw={
+                "body": {
+                    "outcome": "ok",
+                    "certificate": renewed_doc,
+                    "connection": {"jwt": "j1", "expires_at": _ts(cluster.now + timedelta(seconds=600))},
+                }
+            }
+        )
+
+    mhost.live.request = fake_live_request  # type: ignore[attr-defined]
+    await mhost.renew_if_due()
+    assert mhost.credential_partitions == frozenset({1, 3})
+    assert process.partitions.usable_partitions == frozenset({1, 3})
+    assert process.partitions.has_usable.is_set()
+
+    # Even if on_credential were absent and credential_partitions already matched desired, _sync_partitions_once refreshes usable!
+    mhost.on_credential = None
+    k5, raw5 = cluster.sign_partition_owner(5, state=OWNED, host="worker-1")
+    await process.partitions.apply_event(k5, raw5)
+    mhost.credential_partitions = frozenset({1, 3, 5})
+    assert 5 not in process.partitions.usable_partitions
+    assert await process._sync_partitions_once() is False
+    assert process.partitions.usable_partitions == frozenset({1, 3, 5})
+
+
+@pytest.mark.asyncio
+async def test_renewal_paused_covers_pending_release_and_step3_retry_backoff_and_drop_rotates_key(
+    tmp_path: Path,
+) -> None:
+    """C26(3-4): renewal_paused stays true from release arrival through step-3 retry backoff; dropping any held partition rotates key."""
+
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.protocol1.identity import HostIdentity
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=True)
+    host.credential_partitions = frozenset({1, 3})
+
+    process = AgentProcessHost(cluster.layout, host.profile, TEAM, drain_poll_seconds=0.01)
+    process.host = host  # type: ignore[assignment]
+    process.loop = asyncio.get_running_loop()
+    process._joined, process._stop = asyncio.Event(), asyncio.Event()
+    process._joined.set()
+    process._partition_wake = asyncio.Event()
+    process.partitions = HostPartitionTracker(host, TEAM)
+
+    for p in (1, 3):
+        k, raw = cluster.sign_partition_owner(p, state=OWNED, host="worker-1")
+        await process.partitions.apply_event(k, raw)
+    assert process._is_renewal_paused() is False
+
+    # As soon as watch records a released partition (before _execute_handover starts), routine renewals are paused!
+    k1, rel1 = cluster.sign_partition_owner(1, state=RELEASED, host="worker-1", reason="operator")
+    await process.partitions.apply_event(k1, rel1)
+    assert process._handover_active is False
+    assert process._is_renewal_paused() is True
+
+    # Simulate transient step-3 renewal failure -> _handover_active resets in finally, yet renewal_paused MUST stay True!
+    orig_renew = host.renew
+
+    async def failing_renew(**kwargs: Any) -> RenewalOutcome:
+        return RenewalOutcome(ok=False, outcome="temporarily_unavailable", message="retry")
+
+    host.renew = failing_renew  # type: ignore[method-assign]
+    assert await process._sync_partitions_once() is True  # needs_retry
+    assert process._handover_active is False
+    assert process._is_renewal_paused() is True  # still paused during partition_retry_seconds sleep!
+
+    # Once step 3 succeeds, handover is recorded in _completed_handovers and renewal_paused clears.
+    host.renew = orig_renew  # type: ignore[method-assign]
+    assert await process._sync_partitions_once() is False
+    assert process._is_renewal_paused() is False
+
+    # MessageHost._renew dropping an already-held partition (non-drained, e.g. CR-4 shrink) MUST rotate the NATS key!
+    mhost = MessageHost(
+        cluster.layout,
+        HostProfile("worker-1", (TEAM,), ("worker_host",), ("researcher",), 4),
+        nc=None,
+        clock=lambda: cluster.now,
+    )
+    mhost.live = SimpleNamespace(
+        identity=HostIdentity(cluster.keys["worker-1"], cluster.certs["worker-1"]),
+        trust=cluster.trust,
+    )  # type: ignore[assignment]
+    mhost.credentials_issued = True
+    mhost.credential_partitions = frozenset({0, 2})
+
+    seen_bodies: list[dict[str, Any]] = []
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), session_limit=4)
+    renewed_doc = cluster.cert_docs["worker-1"]
+
+    async def fake_live_request(kind: str, body: dict[str, Any], audience: Any, *, team: str) -> Any:
+        seen_bodies.append(body)
+        return SimpleNamespace(
+            raw={
+                "body": {
+                    "outcome": "ok",
+                    "certificate": renewed_doc,
+                    "connection": {"jwt": "j-shrink", "expires_at": _ts(cluster.now + timedelta(seconds=600))},
+                }
+            }
+        )
+
+    mhost.live.request = fake_live_request  # type: ignore[attr-defined]
+    outcome = await mhost.renew(partitions=[0], rotate_nats_key=False)
+    assert outcome.ok is True
+    assert outcome.rotated_nats_key is True
+    assert "new_nats_public_key" in seen_bodies[0]
+    assert seen_bodies[0]["partitions"] == [0]
+
+
+@pytest.mark.asyncio
+async def test_execute_handover_recomputes_still_released_before_closing_and_marking_completed(tmp_path: Path) -> None:
+    """C27: _execute_handover closes sessions and marks _completed_handovers only for still-released partitions."""
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=True)
+    host.credential_partitions = frozenset({1, 2})
+    closed_requests: list[dict[str, Any]] = []
+
+    process = AgentProcessHost(cluster.layout, host.profile, TEAM, drain_poll_seconds=0.01, handover_seconds=60.0)
+    process.host = host  # type: ignore[assignment]
+    process.loop = asyncio.get_running_loop()
+    process._joined, process._stop = asyncio.Event(), asyncio.Event()
+    process._joined.set()
+    process._partition_wake = asyncio.Event()
+    process.partitions = HostPartitionTracker(host, TEAM)
+
+    async def fake_request(kind: str, body: dict[str, Any]) -> dict[str, Any]:
+        if kind == "sessions.close":
+            closed_requests.append(body)
+        return {"outcome": "ok"}
+
+    process._request = fake_request  # type: ignore[method-assign]
+
+    a_p1 = draw_agent_id(TEAM, [1], PARTITIONS, prefix="wrk")
+    a_p2 = draw_agent_id(TEAM, [2], PARTITIONS, prefix="wrk")
+    process.agents[a_p1] = _HostedAgent(SimpleNamespace(id=a_p1), "researcher", DEFINITION, session="s-1",
+                                        subscription=_FakeSubscription())
+    process.agents[a_p2] = _HostedAgent(SimpleNamespace(id=a_p2), "researcher", DEFINITION, session="s-2",
+                                        subscription=_FakeSubscription())
+
+    # Release both partitions 1 and 2; while _still_holds runs, partition 2 returns to owned!
+    k1, rel1 = cluster.sign_partition_owner(1, state=RELEASED, host="worker-1", reason="operator")
+    k2, rel2 = cluster.sign_partition_owner(2, state=RELEASED, host="worker-1", reason="operator")
+    await process.partitions.apply_event(k1, rel1)
+    await process.partitions.apply_event(k2, rel2)
+
+    reclaimed = False
+
+    async def fake_drain(agent: Any, reason: str) -> None:
+        return None
+
+    async def holds_and_reclaim_p2(agent: Any) -> bool:
+        nonlocal reclaimed
+        if not reclaimed:
+            reclaimed = True
+            k2_own, own2 = cluster.sign_partition_owner(2, state=OWNED, host="worker-1", reason="rebalanced")
+            await process.partitions.apply_event(k2_own, own2)
+        return False
+
+    process.drain_agent = fake_drain
+    process.holds_work = holds_and_reclaim_p2
+
+    assert await process._sync_partitions_once() is False
+    # Only partition 1's agent was closed; partition 2's agent stayed untouched and partition 2 is NOT in _completed_handovers!
+    assert a_p1 not in process.agents
+    assert a_p2 in process.agents
+    assert [(r["session"], r["reason"]) for r in closed_requests] == [("s-1", "handed_over")]
+    assert set(process._completed_handovers) == {1}
+    assert host.renew_calls == [((2,), True)]
+
+
+@pytest.mark.asyncio
+async def test_tracker_run_sets_ready_immediately_on_quiet_catch_up_and_prunes_missing_on_reconnect(
+    tmp_path: Path,
+) -> None:
+    """C28: HostPartitionTracker.run sets ready when caught_up fires on a quiet bucket and prunes deleted keys on reconnect."""
+
+    cluster = _SignedCluster(tmp_path)
+    host = _FakeMessageHost(cluster, "worker-1", credentials_issued=False)
+    k0, raw0 = cluster.sign_partition_owner(0, state=OWNED, host="worker-1", sequence=300)
+
+    watch_attempt = 0
+    release_first_watch = asyncio.Event()
+
+    async def fake_watch(record: str, pattern: str, *, team: Optional[str] = None,
+                         caught_up: Optional[asyncio.Event] = None):
+        nonlocal watch_attempt
+        watch_attempt += 1
+        if watch_attempt == 1:
+            yield k0, raw0
+            if caught_up is not None:
+                caught_up.set()
+            # Quiet bucket: stay blocked without yielding anything else until test releases us.
+            await release_first_watch.wait()
+            return
+        # Reconnect: bucket is now empty (partition 0 was deleted while watch was down), quiet after catch-up.
+        if caught_up is not None:
+            caught_up.set()
+        await asyncio.Future()
+
+    host.records.watch = fake_watch  # type: ignore[attr-defined]
+    tracker = HostPartitionTracker(host, TEAM, watch_retry_seconds=0.01)
+    stop = asyncio.Event()
+    task = asyncio.create_task(tracker.run(stop))
+    try:
+        # Must become ready immediately on catch-up even though no further KV mutations arrive!
+        await asyncio.wait_for(tracker.ready.wait(), timeout=1.0)
+        assert tracker.owned_by_host == frozenset({0})
+        assert tracker.usable_partitions == frozenset({0})
+
+        # Simulate watch reconnect where partition 0 disappeared while disconnected -> stale entry pruned on catch-up.
+        reconnected = asyncio.Event()
+        tracker.on_change(lambda: reconnected.set() if not tracker.owned_by_host else None)
+        release_first_watch.set()
+        await asyncio.wait_for(reconnected.wait(), timeout=1.0)
+        assert tracker.owned_by_host == frozenset()
+        assert tracker.usable_partitions == frozenset()
+    finally:
+        stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

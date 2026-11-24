@@ -184,6 +184,7 @@ class MessageHost:
     credential_partitions: frozenset[int] = frozenset()
     credentials_issued: bool = False
     _connection_issued_at: Optional[datetime] = None
+    _join_connection_recorded: Optional[dict[str, Any]] = None
     # Optional callbacks supplied by AgentProcessHost to supply owned partitions on routine renewals,
     # pause routine renewals during handover step 2, and react to updated NATS connection credentials.
     renewal_partitions: Optional[Callable[[], Sequence[int]]] = None
@@ -215,6 +216,7 @@ class MessageHost:
         # renewal or a new join switches both at once. The records exist before the join, whose
         # reply may name a certificate the host reads from UA1_CERTS (fetch_trust).
         self.records = StateRecords.on_connection(self.nc, lambda: self.identity, trust, fetch_trust=self.fetch_trust)
+        self._join_connection_recorded = None
         try:
             certificate, keys = await self._join_recovering_revoked_nats_key(keys, trust)
         except JoinRefused as refused:
@@ -224,16 +226,35 @@ class MessageHost:
         self.live = LiveHost(self.nc, HostIdentity(keys, certificate), trust, clock=self.clock, logger=self.logger,
                              fetch_trust=self.fetch_trust)
         self._started_at = now
+        join_conn = self._join_connection_recorded
+        self._join_connection_recorded = None
+        if join_conn is not None:
+            await self._notify_credential_change(join_conn, self.credential_partitions, rotated_nats_key=False)
         await self.refresh_trust()
         if report:
             await self.publish_liveness("accepting")
         return self.live
 
     def _record_join_connection(self, connection: Mapping[str, Any]) -> None:
-        self.connection = dict(connection)
+        conn = dict(connection)
+        self.connection = conn
         self._connection_issued_at = self.clock()
         self.credentials_issued = True
         self.credential_partitions = frozenset()
+        self._join_connection_recorded = conn
+
+    async def _notify_credential_change(
+        self,
+        connection: dict[str, Any],
+        partitions: frozenset[int],
+        *,
+        rotated_nats_key: bool,
+    ) -> None:
+        if self.on_credential is None:
+            return
+        hook_result = self.on_credential(connection, partitions, rotated_nats_key)
+        if inspect.isawaitable(hook_result):
+            await hook_result
 
     async def _join_recovering_revoked_nats_key(
         self,
@@ -550,11 +571,11 @@ class MessageHost:
         certificate = self.identity.certificate
         assert self.live is not None
         giving_up_agents = self.state == "drained" and bool(getattr(certificate, "agent_types", ()))
-        giving_up_partitions = self.state == "drained" and bool(self.credential_partitions)
-        needs_new_nats_key = rotate_nats_key or giving_up_agents or giving_up_partitions
         if partitions is None and self.renewal_partitions is not None and self.state != "drained":
             partitions = self.renewal_partitions()
         requested_partitions = () if self.state == "drained" else tuple(sorted(set(partitions or ())))
+        giving_up_partitions = bool(self.credential_partitions - frozenset(requested_partitions))
+        needs_new_nats_key = rotate_nats_key or giving_up_agents or giving_up_partitions
 
         async def _send(fresh_key: bool = False) -> tuple[Any, Optional[str]]:
             new_key = self._stage_new_nats_public_key(certificate.runtime, fresh=fresh_key) if needs_new_nats_key else None
@@ -625,10 +646,11 @@ class MessageHost:
             self._connection_issued_at = self.clock()
             self.credentials_issued = True
             self.credential_partitions = frozenset(requested_partitions)
-            if self.on_credential is not None:
-                hook_result = self.on_credential(conn, self.credential_partitions, new_nats_public_key is not None)
-                if inspect.isawaitable(hook_result):
-                    await hook_result
+            await self._notify_credential_change(
+                conn,
+                self.credential_partitions,
+                rotated_nats_key=new_nats_public_key is not None,
+            )
         self.logger.info("Renewed the host certificate. event=protocol1_renewed runtime=%s membership_epoch=%s "
                          "agent_types=%s session_limit=%s partitions=%s", certificate.runtime, renewed.membership_epoch,
                          ",".join(sorted(renewed.agent_types)), renewed.session_limit, len(requested_partitions))
@@ -663,6 +685,7 @@ class MessageHost:
         requested = frozenset(agent_types)
         certifiable = certificate_agent_types(requested, self.logger)
         not_certifiable = requested - certifiable
+        rejoin_conn: Optional[dict[str, Any]] = None
         async with self._certificate_change:
             assert self.live is not None, "start() first"
             current = self.identity.certificate
@@ -670,11 +693,13 @@ class MessageHost:
                 return Rejoined(current, certifiable, not_certifiable=not_certifiable)
             asked = frozenset(self.profile.agent_types) | current.agent_types | certifiable
             profile = replace(self.profile, agent_types=tuple(sorted(asked)))
+            self._join_connection_recorded = None
             try:
                 certificate = await join(self.nc, self.identity.keys, self.live.trust, profile, clock=self.clock,
                                          logger=self.logger, fetch_trust=self.fetch_trust,
                                          on_connection=self._record_join_connection)
             except JoinRefused as refused:
+                self._join_connection_recorded = None
                 self.logger.warning("The authority did not grant more agent types; the host keeps its certificate. "
                                     "event=protocol1_rejoin_refused runtime=%s outcome=%s agent_types=%s message=%s",
                                     current.runtime, refused.outcome, ",".join(sorted(certifiable - current.agent_types)),
@@ -683,6 +708,10 @@ class MessageHost:
                                 not_certifiable=not_certifiable, refusal=f"{refused.outcome}: {refused.message}")
             self.profile = profile
             self.live.identity = self.live.identity.with_certificate(certificate)
+            rejoin_conn = self._join_connection_recorded
+            self._join_connection_recorded = None
+        if rejoin_conn is not None:
+            await self._notify_credential_change(rejoin_conn, self.credential_partitions, rotated_nats_key=False)
         self.logger.info("Joined again for more agent types. event=protocol1_rejoined runtime=%s membership_epoch=%s "
                          "agent_types=%s", certificate.runtime, certificate.membership_epoch,
                          ",".join(sorted(certificate.agent_types)))

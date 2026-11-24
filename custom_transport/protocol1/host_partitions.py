@@ -301,22 +301,40 @@ class HostPartitionTracker:
         records = self.host.records
         assert records is not None and self.host.live is not None
         pattern = f"{self.team}.partition.*"
+        prefix = f"{self.team}.partition."
         while not stop.is_set():
             caught_up = asyncio.Event()
+            before = set(self._records)
+            seen: set[int] = set()
+
+            async def _on_caught_up() -> None:
+                await caught_up.wait()
+                if stop.is_set():
+                    return
+                removed = False
+                for stale in before - seen:
+                    if self._records.pop(stale, None) is not None:
+                        removed = True
+                pruned = self._prune_rejected()
+                if removed or pruned or not self.ready.is_set():
+                    self._recompute_snapshots(notify=True)
+                self.ready.set()
+
+            ready_task = asyncio.create_task(_on_caught_up())
             try:
                 async for key, raw in records.watch(PARTITION_OWNER, pattern, team=self.team, caught_up=caught_up):
                     if stop.is_set():
                         return
+                    if raw is not None and key.startswith(prefix):
+                        suffix = key[len(prefix):]
+                        if suffix.isdigit():
+                            seen.add(int(suffix))
                     result = await self._apply_raw(key, raw)
                     pruned = self._prune_rejected()
                     if (result is not None and result[1]) or pruned:
                         self._recompute_snapshots(notify=True)
-                    if caught_up.is_set() and not self.ready.is_set():
-                        self._recompute_snapshots(notify=True)
-                        self.ready.set()
-                if caught_up.is_set() and not self.ready.is_set():
-                    self._recompute_snapshots(notify=True)
-                    self.ready.set()
+                if caught_up.is_set() and not stop.is_set():
+                    await ready_task
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - reconnect watch on transient NATS failure
@@ -328,6 +346,9 @@ class HostPartitionTracker:
                     type(error).__name__,
                     error,
                 )
+            finally:
+                ready_task.cancel()
+                await asyncio.gather(ready_task, return_exceptions=True)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._watch_retry_seconds)
             except asyncio.TimeoutError:

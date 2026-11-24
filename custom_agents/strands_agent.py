@@ -1538,6 +1538,8 @@ class UniversalAgent(BaseModel):
                 for plugin in getattr(mpm, "maintenance_plugins", ()) or ():
                     if hasattr(plugin, "agent_id"):
                         plugin.agent_id = self.id
+        if getattr(self, "_strands_agent", None) is not None:
+            self._create_strands_agent()
         self._logger.info(
             "Adopted partition-scoped agent ID. event=agent_id_partition_adopted agent_id=%s previous_agent_id=%s",
             self.id,
