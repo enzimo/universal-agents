@@ -876,9 +876,9 @@ class CatalogSource:
 
     Instance tool definitions, MCP connection records and confirmed MCP levels
     change while the process runs; ``current()`` reloads the catalog when any of
-    those files change (their names, sizes and modification times), so a newly
-    confirmed level or connection is decided on the next request. A reload that
-    fails keeps the previous catalog and logs the error.
+    those files change (their names, device/inode numbers, sizes and modification
+    times), so a newly confirmed level or connection is decided on the next
+    request. A reload that fails keeps the previous catalog and logs the error.
     """
 
     def __init__(
@@ -889,13 +889,13 @@ class CatalogSource:
     ) -> None:
         self._root = Path(instance_root).expanduser().resolve() if instance_root else None
         self._service_urls = dict(service_urls or {})
-        self._fingerprint: tuple[tuple[str, int, int], ...] | None = None
+        self._fingerprint: tuple[tuple[str, int, int, int, int], ...] | None = None
         self._catalog: ToolCatalog | None = None
 
-    def _current_fingerprint(self) -> tuple[tuple[str, int, int], ...]:
+    def _current_fingerprint(self) -> tuple[tuple[str, int, int, int, int], ...]:
         if self._root is None:
             return ()
-        entries: list[tuple[str, int, int]] = []
+        entries: list[tuple[str, int, int, int, int]] = []
         for directory in _instance_paths(self._root):
             if not directory.is_dir():
                 continue
@@ -904,7 +904,7 @@ class CatalogSource:
                     stat = path.stat()
                 except OSError:
                     continue
-                entries.append((str(path), stat.st_size, stat.st_mtime_ns))
+                entries.append((str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
         return tuple(entries)
 
     def current(self) -> ToolCatalog:

@@ -48,6 +48,12 @@ class GatewaySetupGuide:
         tool = self._catalogs.current().tools.get(tool_id)
         return tool.display_name if tool is not None else None
 
+    def has_gate(self, tool_id: str) -> bool:
+        """Whether ``tool_id`` declares team gate credential injections in the current catalog."""
+
+        tool = self._catalogs.current().tools.get(tool_id)
+        return bool(tool is not None and tool.gate_injections)
+
     def workflow_url(self, task_id: str) -> str | None:
         """The workflow page of the task's access workflow, if it has one (logged on failure)."""
 

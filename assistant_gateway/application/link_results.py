@@ -108,6 +108,7 @@ class PersonFinishedSetups(Protocol):
         kind: str,
         owner: str | None = None,
         account_label: str | None = None,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> int:
         """End the matching waits; the number of tasks told."""
 
@@ -391,11 +392,12 @@ class GatewayLinkResults:
         )
         await self._post(target, text, page=_PAGE_ACCOUNT_LINK, outcome=outcome, owner=owner)
         if (
-            purpose == ACCOUNT_LINK_PURPOSE_ACCOUNT
-            and _page_completed(outcome, sign_in=False)
+            _page_completed(outcome, sign_in=False)
             and not created_link_mismatch(outcome, tool_id=tool_id, owner=owner, purpose=purpose)
         ):
-            await self._tell_waiting_tasks(target, tool_id=tool_id, kind=TOOL_SETUP_ACCOUNT_LINK, owner=owner)
+            await self._tell_waiting_tasks(
+                target, tool_id=tool_id, kind=TOOL_SETUP_ACCOUNT_LINK, owner=owner, purpose=purpose
+            )
 
     async def _finish_sign_in(
         self, page: BrokerSignInPage, restart_command: str, target: LinkResultTarget, tool_id: str, kind: str
@@ -425,6 +427,7 @@ class GatewayLinkResults:
         kind: str,
         owner: str | None = None,
         account_label: str | None = None,
+        purpose: AccountLinkPurpose = ACCOUNT_LINK_PURPOSE_ACCOUNT,
     ) -> None:
         """A task of this person waiting on the same setup hears that it is done."""
 
@@ -432,7 +435,12 @@ class GatewayLinkResults:
             return
         try:
             told = await self._tool_setups.person_finished(
-                person_id=target.person_id, tool_id=tool_id, kind=kind, owner=owner, account_label=account_label
+                person_id=target.person_id,
+                tool_id=tool_id,
+                kind=kind,
+                owner=owner,
+                account_label=account_label,
+                purpose=purpose,
             )
         except Exception:
             self._logger.exception(

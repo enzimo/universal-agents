@@ -17,8 +17,10 @@ the access model replaces.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
+import socket
 from collections.abc import Iterable
 from datetime import datetime
 from enum import StrEnum
@@ -93,6 +95,19 @@ def validate_host_name(raw: str) -> str:
             "Hosts are exact ASCII names (letters, digits, hyphens, underscores inside labels, dots; "
             f"labels up to 63 characters) without wildcards, ports, or non-ASCII characters: {raw!r}"
         )
+    # Reject non-canonical IPv4 inet_aton literals (e.g. 127.1, 0x7f000001, 2130706433,
+    # 0177.0.0.1) so they cannot bypass private_host_names checks while resolving to an IPv4 address.
+    try:
+        packed_ipv4 = socket.inet_aton(host)
+    except OSError:
+        packed_ipv4 = None
+    if packed_ipv4 is not None:
+        canonical_ipv4 = str(ipaddress.IPv4Address(packed_ipv4))
+        if host != canonical_ipv4:
+            raise ValueError(
+                f"IPv4 host addresses must use canonical dotted-quad notation "
+                f"(replace {raw!r} with {canonical_ipv4!r})."
+            )
     return host
 
 

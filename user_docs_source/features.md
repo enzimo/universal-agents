@@ -728,18 +728,25 @@ credentials such a tool uses. Send:
 ```text
 /link cli:huggingface
 /link http:portainer team
+/link http:gitea gate
 ```
 
 `/link <tool_id>` (or `/link <tool_id> me`) links your own account;
 `/link <tool_id> team` links the team's account and needs a team owner or
-administrator. Chat shows **Open account link form**. The broker's form shows
-whose account it is, which agents use it, where the credential goes, and how it
-is sent. Pick one of the stored credentials that fit, or type a new one under
-**Add a new credential**; the broker saves it and links it in the same step.
-Then confirm. The broker uses your own link first, then the team's while the
-team shares the service; for a service the team keeps private, `/link
-<tool_id> team` is refused and each person links their own. `/accounts` shows
-which services are shared (see
+administrator; `/link <tool_id> gate` links the team's gate credential (for a
+web API tool behind an infrastructure gate such as Cloudflare Access or a
+reverse-proxy rule that declares `gate_injections`) and also needs a team owner
+or administrator. Chat shows **Open account link form** (or **Open gate link
+form** for `gate`). The broker's form shows whose account or gate credential it
+is, which agents use it, where the credential goes, and how it is sent. Pick
+one of the stored credentials that fit, or type a new one under **Add a new
+credential**; the broker saves it and links it in the same step. Then confirm.
+The broker uses your own link first, then the team's while the team shares the
+service; for a service the team keeps private, `/link <tool_id> team` is
+refused and each person links their own. A team gate credential is sent on
+every request to that tool's hosts alongside any personal or team account
+credential (even when the service is private or uses no account). `/accounts`
+shows which services are shared (see
 [Shared or private](permissions.md#shared-or-private)). A link gives nobody
 access to the tool by itself.
 

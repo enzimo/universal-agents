@@ -1450,16 +1450,16 @@ class AccessRepository:
     @staticmethod
     def _link_from_row(row: Any) -> AccountLinkV1:
         link = AccountLinkV1.model_validate_json(row["payload_json"])
-        return link.model_copy(
-            update={
-                "purpose": LinkPurpose(row["purpose"]),
-                "status": AccountLinkStatus(row["status"]),
-                "revoked_at_utc": datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
-                "revoked_by": SubjectRefV1.model_validate_json(row["revoked_by_json"])
-                if row["revoked_by_json"]
-                else None,
-            }
-        )
+        updates: dict[str, Any] = {
+            "status": AccountLinkStatus(row["status"]),
+            "revoked_at_utc": datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
+            "revoked_by": SubjectRefV1.model_validate_json(row["revoked_by_json"])
+            if row["revoked_by_json"]
+            else None,
+        }
+        if "purpose" in row.keys():
+            updates["purpose"] = LinkPurpose(row["purpose"])
+        return link.model_copy(update=updates)
 
     def get_link(self, link_id: str) -> AccountLinkV1 | None:
         p = self.dialect.bind

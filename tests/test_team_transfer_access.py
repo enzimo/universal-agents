@@ -832,3 +832,31 @@ def test_access_v3_section_converts_links_to_account_purpose_on_import(
     assert imported is not None
     assert imported.link_id == "link_github_ana"
     assert imported.purpose is LinkPurpose.ACCOUNT
+
+
+def test_link_owner_key_defaults_omitted_purpose_to_account() -> None:
+    """F13: a link document omitting defaulted purpose matches an explicit account purpose."""
+
+    from team_transfer.access import _link_owner_key, _newest_links
+
+    omitted = {
+        "team_id": TEAM,
+        "tool_id": "http:gitea",
+        "owner_kind": "team",
+        "owner_id": TEAM,
+        "created_at_utc": "2026-11-01T00:00:00+00:00",
+    }
+    explicit = {**omitted, "purpose": "account", "created_at_utc": "2026-11-02T00:00:00+00:00"}
+    gate = {**omitted, "purpose": "gate", "created_at_utc": "2026-11-01T12:00:00+00:00"}
+
+    assert _link_owner_key(omitted) == _link_owner_key(explicit)
+    assert _link_owner_key(omitted) != _link_owner_key(gate)
+    newest = _newest_links(
+        [
+            {"kind": "account_link", "record_id": "link_older", "document": omitted},
+            {"kind": "account_link", "record_id": "link_newer", "document": explicit},
+            {"kind": "account_link", "record_id": "link_gate", "document": gate},
+        ]
+    )
+    assert newest[_link_owner_key(explicit)] == "link_newer"
+    assert newest[_link_owner_key(gate)] == "link_gate"

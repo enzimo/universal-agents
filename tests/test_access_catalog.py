@@ -887,3 +887,88 @@ tools:
     message = str(caught.value)
     assert str(idn_file) in message
     assert "xn--bcher-kva.example.com" in message
+
+
+def test_catalog_source_reloads_after_equal_size_same_mtime_atomic_replace(tmp_path) -> None:
+    """F4: CatalogSource includes (st_dev, st_ino) so an equal-size same-mtime atomic replace invalidates cache."""
+
+    import hashlib
+    import os
+
+    from access_catalog.catalog import CatalogSource
+    from access_catalog.instance_tools import proposed_tool_path, replace_instance_tool, write_instance_tool
+    from custom_messages.contracts.access_v2 import ProposedHttpToolChangeV1, ProposedHttpToolV1
+
+    write_instance_tool(
+        tmp_path,
+        ProposedHttpToolV1(
+            tool_id="http:same_size",
+            display_name="Same Size",
+            hosts=("alpha.example.com",),
+            uses_credential=False,
+        ),
+    )
+    path = proposed_tool_path(tmp_path, "http:same_size")
+    before_stat = path.stat()
+    before_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    source = CatalogSource(tmp_path)
+    first = source.current()
+    assert first.tools["http:same_size"].hosts == ("alpha.example.com",)
+
+    # Replace atomically with a same-length host ("bravo.example.com") and restore identical mtime_ns.
+    replace_instance_tool(
+        tmp_path,
+        ProposedHttpToolChangeV1(
+            tool_id="http:same_size",
+            display_name="Same Size",
+            hosts=("bravo.example.com",),
+            uses_credential=False,
+        ),
+        expected_previous_sha256=before_sha,
+    )
+    os.utime(path, ns=(before_stat.st_atime_ns, before_stat.st_mtime_ns))
+    after_stat = path.stat()
+    assert after_stat.st_size == before_stat.st_size
+    assert after_stat.st_mtime_ns == before_stat.st_mtime_ns
+
+    reloaded = source.current()
+    assert reloaded.tools["http:same_size"].hosts == ("bravo.example.com",)
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "127.1",
+        "127.0.1",
+        "0x7f000001",
+        "0xa9fea9fe",
+        "2130706433",
+        "0177.0.0.1",
+        "127.0.0.01",
+        "127.1.",
+    ],
+)
+def test_validate_host_name_rejects_non_canonical_ipv4_literals(bad_host: str) -> None:
+    """F6: non-canonical IPv4 inet_aton forms cannot bypass private_host_names checks."""
+
+    from custom_messages.contracts.access_v2 import validate_host_name
+
+    with pytest.raises(ValueError, match="canonical dotted-quad"):
+        validate_host_name(bad_host)
+
+
+@pytest.mark.parametrize(
+    ("raw_host", "expected"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("169.254.169.254", "169.254.169.254"),
+        ("10.0.0.5.", "10.0.0.5"),
+        ("api.example.com", "api.example.com"),
+        ("gitea_web", "gitea_web"),
+    ],
+)
+def test_validate_host_name_accepts_canonical_ipv4_and_dns_names(raw_host: str, expected: str) -> None:
+    from custom_messages.contracts.access_v2 import validate_host_name
+
+    assert validate_host_name(raw_host) == expected

@@ -210,6 +210,10 @@ def _account_ready(tool_def: Any, broker: dict[str, Any], owners: tuple[str, ...
         return sign_in == SIGNED_IN or bool(link.get("team"))
     if tool_def.account is AccountMode.LINKED_CREDENTIAL:
         # Only the owners the tool and the team's sharing allow count.
+        # The broker prefers the person's own link when present, so an outdated
+        # personal link still causes account_link_outdated even with a valid team link.
+        if "person" in owners and link.get("own_outdated"):
+            return False
         return bool(("person" in owners and link.get("own")) or ("team" in owners and link.get("team")))
     return True
 
@@ -299,7 +303,7 @@ def _link_steps(
         "kind": TOOL_SETUP_ACCOUNT_LINK, "owner": TOOL_SETUP_OWNER_PERSON,
         "say": own_say,
     }]
-    if "team" not in owners:
+    if "team" not in owners or own_outdated:
         return steps
     team_cmd = link_command(tool_id, LinkOwnerKind.TEAM)
     team_say = (

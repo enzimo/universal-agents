@@ -41,7 +41,7 @@ from strands import tool
 from strands.interrupt import InterruptException
 from strands.types.tools import ToolContext
 
-from access_catalog.catalog import CatalogError, load_catalog
+from access_catalog.catalog import CatalogError, ToolCatalog, load_catalog
 from access_catalog.instance_tools import (
     remove_instance_tool,
     replace_instance_tool,
@@ -51,7 +51,7 @@ from access_catalog.instance_tools import (
     write_instance_tool,
 )
 from access_control.account_sharing import TeamAccountSharing
-from access_control.data_folders import DataFolderRefused, DataFolderRegistry
+from access_control.data_folders import DataFolderRefused, DataFolderRegistry, registration_problem
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal
 from access_control.identity import IdentityRejected
@@ -73,8 +73,13 @@ from custom_messages.contracts.access_v2 import (
     ChangeApprovalMode,
     ChangeApprovalRecordV1,
     ChangeProposalV1,
+    CredentialInjectionV1,
+    DataFolderRecordV1,
     LinkOwnerKind,
     LinkPurpose,
+    SubjectKind,
+    SubjectRefV1,
+    injections_match,
 )
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.task_v1 import ACCESS_REQUEST_INTERRUPT_KIND
@@ -82,7 +87,7 @@ from custom_tools.provider_contract import ToolProvider
 from custom_tools.providers.access import ACCESS_REQUEST_INTERRUPT_NAME
 from custom_tools.runtime_context import active_task_context, get_agent_ref
 from id_generation import new_id
-from storage.access_repository import AccessRepository
+from storage.access_repository import AccessRepository, AccessStoreConflict
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +132,37 @@ def _proposal(
     )
 
 
-def _link_states(store: AccessRepository | None, request: AccessRequestV1) -> list[dict[str, Any]]:
-    """For each account or gate link the proposal asked for: whether a link exists now.
+def _expected_link_injections(
+    proposal: AccessProposalV1,
+    tool_id: str,
+    purpose: LinkPurpose,
+    catalog: ToolCatalog | None,
+) -> tuple[CredentialInjectionV1, ...] | None:
+    """Expected injections for ``tool_id`` and ``purpose`` after this proposal applied."""
+
+    for item in (*proposal.tool_changes, *proposal.tools):
+        if item.tool_id == tool_id:
+            return item.gate_injections if purpose is LinkPurpose.GATE else item.credential_injections
+    for cli in proposal.clis:
+        if cli.tool_id == tool_id:
+            return () if purpose is LinkPurpose.GATE else cli.credential_injections
+    tool_def = catalog.tools.get(tool_id) if catalog is not None else None
+    if tool_def is None:
+        return None
+    return tool_def.gate_injections if purpose is LinkPurpose.GATE else tool_def.credential_injections
+
+
+def _link_states(
+    store: AccessRepository | None,
+    request: AccessRequestV1,
+    catalog: ToolCatalog | None = None,
+) -> list[dict[str, Any]]:
+    """For each account or gate link the proposal asked for: whether a matching link exists now.
 
     The approver's forms ended before the task was told of the decision, so
-    this says what was linked; ``person`` links belong to the approver.
+    this says what was linked; ``person`` links belong to the approver. An
+    older active link whose injections no longer match the updated tool
+    definition is reported as not linked.
     """
 
     if store is None or request.change is None:
@@ -145,13 +176,15 @@ def _link_states(store: AccessRepository | None, request: AccessRequestV1) -> li
     for item in proposal.account_links:
         owner_kind = LinkOwnerKind(item.owner)
         owner_id = request.team_id if owner_kind is LinkOwnerKind.TEAM else approver
-        linked = (
-            bool(owner_id)
-            and store.active_link(
+        active = (
+            store.active_link(
                 request.team_id, item.tool_id, owner_kind, owner_id, purpose=item.link_purpose
             )
-            is not None
+            if owner_id
+            else None
         )
+        expected = _expected_link_injections(proposal, item.tool_id, item.link_purpose, catalog)
+        linked = active is not None and (expected is None or injections_match(active.injections, expected))
         entry: dict[str, Any] = {"tool_id": item.tool_id, "owner": item.owner, "linked": linked}
         if item.link_purpose is LinkPurpose.GATE:
             entry["link_purpose"] = item.link_purpose.value
@@ -159,7 +192,11 @@ def _link_states(store: AccessRepository | None, request: AccessRequestV1) -> li
     return states
 
 
-def _result(request: AccessRequestV1, store: AccessRepository | None = None) -> dict[str, Any]:
+def _result(
+    request: AccessRequestV1,
+    store: AccessRepository | None = None,
+    catalog: ToolCatalog | None = None,
+) -> dict[str, Any]:
     if request.status is AccessRequestStatus.GRANTED and request.applied_at_utc is not None:
         applied: dict[str, Any] = {
             "status": "applied",
@@ -172,7 +209,7 @@ def _result(request: AccessRequestV1, store: AccessRepository | None = None) -> 
                 "on the next model call of each agent that may use it, for the work of the person it serves."
             ),
         }
-        links = _link_states(store, request)
+        links = _link_states(store, request, catalog=catalog)
         if links:
             applied["account_links"] = links
             applied["message"] += (
@@ -258,18 +295,21 @@ def _prepare_agreement_tool_changes(
     return proposal, change_rows
 
 
-def _install_by_agreement(agent: Any, proposal: AccessProposalV1) -> list[Any]:
-    """Activate the proposed MCP servers with the person's agreement; the installed records."""
+def _install_by_agreement(
+    agent: Any,
+    proposal: AccessProposalV1,
+    *,
+    approval: ChangeApprovalRecordV1,
+    previous_servers: list[Any],
+) -> list[Any]:
+    """Activate the proposed MCP servers with the person's agreement; record pending originals for rollback."""
 
     from mcp_control.registry import MCPConnectionLifecycle
 
     if not proposal.mcp_servers:
         return []
     store = _mcp_store(agent)
-    approval = ChangeApprovalRecordV1(
-        mode=ChangeApprovalMode.AGREEMENT, approved_by=AGREEMENT_APPROVER, approved_at_utc=datetime.now(timezone.utc)
-    )
-    installed = []
+    pending_records = []
     for item in proposal.mcp_servers:
         record = store.require(item.connection_id)
         if record.lifecycle is not MCPConnectionLifecycle.PENDING or record.record_digest != item.record_digest:
@@ -277,8 +317,76 @@ def _install_by_agreement(agent: Any, proposal: AccessProposalV1) -> list[Any]:
                 f"The MCP server {record.descriptor.connection_name} is not the pending server you proposed; "
                 "propose it again."
             )
-        installed.append(store.update_lifecycle(record.connection_id, lifecycle=MCPConnectionLifecycle.ACTIVE, approval=approval))
+        pending_records.append(record)
+    installed = []
+    for record in pending_records:
+        previous_servers.append(record)
+        installed.append(
+            store.update_lifecycle(record.connection_id, lifecycle=MCPConnectionLifecycle.ACTIVE, approval=approval)
+        )
     return installed
+
+
+def _restore_agreement_server(agent: Any, record: Any, approval: ChangeApprovalRecordV1) -> None:
+    """Restore one pending MCP server record activated before an agreement apply failed."""
+
+    from mcp_control.registry import MCPConnectionLifecycle
+
+    store = _mcp_store(agent)
+    current = store.require(record.connection_id)
+    if current.lifecycle is MCPConnectionLifecycle.PENDING and current.record_digest == record.record_digest:
+        return
+    ignored = {"record_digest", "updated_at_utc", "lifecycle", "approval"}
+    if (
+        current.lifecycle is not MCPConnectionLifecycle.ACTIVE
+        or current.approval != approval
+        or current.model_dump(exclude=ignored) != record.model_dump(exclude=ignored)
+    ):
+        logger.warning(
+            "An MCP record changed during agreement rollback; its replacement is kept. "
+            "event=proposal_agreement_mcp_changed connection_id=%s",
+            record.connection_id,
+        )
+        return
+    store.save(record)
+
+
+def _prepare_agreement_data_folders(
+    agent: Any, proposal: AccessProposalV1, *, now: datetime
+) -> tuple[AccessRepository | None, list[DataFolderRecordV1]]:
+    """Pre-validate all proposed data folders (including intra-proposal overlaps) before writing anything."""
+
+    if not proposal.data_folders:
+        return None, []
+    from custom_tools.workspace_scope import _protected
+
+    store = AccessRepository(agent.task_manager.storage_settings)
+    team_id = str(agent.team_id)
+    registry = DataFolderRegistry(store, team_id)
+    owner = PersonPrincipal(AGREEMENT_APPROVER, team_id, ("owner",))
+    guarded = tuple(_protected(agent))
+    existing = list(registry.records())
+    seen_names = {record.name for record in existing}
+    records: list[DataFolderRecordV1] = []
+    for folder in proposal.data_folders:
+        name = str(folder.name).strip()
+        if name in seen_names:
+            raise DataFolderRefused(f"A data folder named {name!r} is already registered.")
+        problem = registration_problem(name, folder.path, protected=guarded, existing=existing)
+        if problem:
+            raise DataFolderRefused(problem)
+        record = registry.new_record(
+            owner,
+            name=name,
+            path=folder.path,
+            writable=folder.writable,
+            reason=proposal.reason,
+            now=now,
+        )
+        records.append(record)
+        existing.append(record)
+        seen_names.add(name)
+    return store, records
 
 
 def _when_tools_appear(agent: Any, installed: list[Any]) -> dict[str, str]:
@@ -308,7 +416,7 @@ def apply_by_agreement(
     baseline and writing (``expected_previous_sha256``).
     """
 
-    from custom_tools.workspace_scope import _protected, runtime_layout
+    from custom_tools.workspace_scope import runtime_layout
 
     layout = runtime_layout(agent)
     proposal, change_rows = _prepare_agreement_tool_changes(agent, layout.root, proposal)
@@ -320,6 +428,12 @@ def apply_by_agreement(
             "message": "Authorization is off. Explain these changes to the person, get their agreement in the "
             "conversation, and call again with confirmed=true. Grants and restrictions are not needed.",
         }
+    now = datetime.now(timezone.utc)
+    approval = ChangeApprovalRecordV1(
+        mode=ChangeApprovalMode.AGREEMENT, approved_by=AGREEMENT_APPROVER, approved_at_utc=now
+    )
+    folder_store, folder_records = _prepare_agreement_data_folders(agent, proposal, now=now)
+    previous_servers: list[Any] = []
     programs: list[tuple[Path, OwnedFile]] = []
     written_tools: list[Path] = []
     replaced_tools: list[ReplacedFile] = []
@@ -337,7 +451,7 @@ def apply_by_agreement(
         )
 
     try:
-        installed = _install_by_agreement(agent, proposal)
+        installed = _install_by_agreement(agent, proposal, approval=approval, previous_servers=previous_servers)
         install_programs(layout.root, proposal.clis, fetch_https, before_write=prepare_program)
         for proposed_http in proposal.tools:
             written_tools.append(write_instance_tool(layout.root, proposed_http))
@@ -351,37 +465,57 @@ def apply_by_agreement(
                 expected_previous_sha256=changed.previous_definition_digest,
                 before_replace=capture_previous,
             )
-        storage = agent.task_manager.storage_settings
-        registry = DataFolderRegistry(AccessRepository(storage), str(agent.team_id))
-        owner = PersonPrincipal(AGREEMENT_APPROVER, str(agent.team_id), ("owner",))
-        for folder in proposal.data_folders:
-            registry.register(
-                owner,
-                name=folder.name,
-                path=folder.path,
-                writable=folder.writable,
-                reason=proposal.reason,
-                protected=_protected(agent),
-                now=datetime.now(timezone.utc),
-            )
+        if folder_records:
+            assert folder_store is not None
+            try:
+                folder_store.apply_together(
+                    str(agent.team_id),
+                    data_folders=folder_records,
+                    actor=SubjectRefV1(kind=SubjectKind.USER, id=AGREEMENT_APPROVER),
+                    at=now,
+                )
+            except AccessStoreConflict as exc:
+                raise DataFolderRefused(str(exc)) from exc
     except BaseException:
         tools_dir = layout.instance_tools_dir
+        rollback_steps: list[tuple[str, Callable[[], None]]] = []
         for replaced in reversed(replaced_tools):
             target_path = tools_dir.joinpath(*replaced.parts)
 
-            def _restore(previous: bytes, target: Path = target_path) -> None:
-                restore_instance_tool(target, previous)
+            def _restore_replaced(item: ReplacedFile = replaced, target: Path = target_path) -> None:
+                item.restore(tools_dir, lambda previous: restore_instance_tool(target, previous))
 
-            replaced.restore(tools_dir, _restore)
+            rollback_steps.append((f"replaced tool file {'/'.join(replaced.parts)}", _restore_replaced))
         for path in reversed(written_tools):
-            remove_instance_tool(path)
+            def _remove_written(target: Path = path) -> None:
+                remove_instance_tool(target)
+
+            rollback_steps.append((f"tool file {path.name}", _remove_written))
         for root, owned in reversed(programs):
-            owned.remove(root)
+            def _remove_program(base: Path = root, file_ref: OwnedFile = owned) -> None:
+                file_ref.remove(base)
+
+            rollback_steps.append((f"program {'/'.join(owned.parts)}", _remove_program))
+        for record in reversed(previous_servers):
+            def _restore_server(rec: Any = record) -> None:
+                _restore_agreement_server(agent, rec, approval)
+
+            rollback_steps.append((f"MCP server {record.connection_id}", _restore_server))
+        for what, step in rollback_steps:
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - isolate each rollback step so all remaining steps run
+                logger.exception(
+                    "Could not roll back part of a failed agreement proposal. "
+                    "event=proposal_agreement_rollback_step_failed part=%s",
+                    what,
+                )
         logger.warning(
-            "Applying an access proposal by agreement failed; file changes were rolled back. "
-            "event=proposal_agreement_apply_failed tools=%s tool_changes=%s",
+            "Applying an access proposal by agreement failed; changes were rolled back. "
+            "event=proposal_agreement_apply_failed tools=%s tool_changes=%s mcp_servers=%s",
             ",".join([*(t.tool_id for t in proposal.tools), *(c.tool_id for c in proposal.clis)]),
             ",".join(changed.tool_id for changed in proposal.tool_changes),
+            ",".join(record.connection_id for record in previous_servers),
         )
         raise
     logger.warning(
@@ -505,7 +639,8 @@ def submit_and_wait(agent: Any, build: Callable[[], AccessProposalV1], tool_cont
             },
         )
         request = runtime_requests(agent).service.store.get_request(request.request_id) or request
-    return _result(request, runtime_requests(agent).service.store)
+    service = runtime_requests(agent).service
+    return _result(request, service.store, service.catalog)
 
 
 def _propose(
@@ -644,7 +779,7 @@ def get_proposal_status(proposal_id: str) -> str:
         return _json({"status": "not_needed", "reason": str(exc)})
     for request in requests.service.store.list_requests(requests.service.team_id):
         if request.change is not None and request.change.change_id == str(proposal_id).strip():
-            return _json(_result(request, requests.service.store))
+            return _json(_result(request, requests.service.store, requests.service.catalog))
     return _json({"status": "unknown", "reason": f"There is no proposal {proposal_id}."})
 
 

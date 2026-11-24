@@ -1095,3 +1095,154 @@ async def test_slash_link_gate_opens_gate_form_for_admin_refuses_member_and_post
     assert "Could not open the team gate link form for http:portainer." in refused.text
     assert "administrator" in refused.text.lower()
 
+
+@pytest.mark.asyncio
+async def test_gate_link_result_is_posted_after_linking_with_the_real_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """F3 + F10: end-to-end real broker gate /link posts gate confirmation, stores gate link, and clears STEP_GATE_LINK."""
+
+    from access_catalog.catalog import CatalogSource
+    from access_control.identity import ContextVerifier
+    from access_control.tool_setup_states import SOURCE_SETUP_CHECK, STEP_GATE_LINK, ToolSetupStates
+    from custom_messages.contracts.access_v2 import LinkOwnerKind, LinkPurpose, ToolSetupState
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "cred_catalog.db"))
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_MODE", "files")
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIALS_DIR", str(tmp_path / "broker_creds"))
+    monkeypatch.setenv("GATE_SECRET_VAL", "CF-REAL-BROKER-GATE-SECRET")
+
+    tools_dir = tmp_path / "instance" / "control" / "access" / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "proposed-http-gitea.yaml").write_text(
+        """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - {placement: header, name: Authorization, field: api_token, template: "token {value}"}
+    gate_injections:
+      - {placement: header, name: CF-Access-Client-Secret, field: client_secret}
+""",
+        encoding="utf-8",
+    )
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    gate = BrokerAccessGate(
+        catalogs=CatalogSource(tmp_path / "instance"),
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    save_credentials(
+        CredentialOwnerScope.team(TEST_TEAM),
+        gitea_gate_cred=token_credential("GATE_SECRET_VAL", field="client_secret"),
+    )
+    states = ToolSetupStates(store)
+    states.note_needs_setup(TEST_TEAM, "usr_member_1", "http:gitea", step=STEP_GATE_LINK, source=SOURCE_SETUP_CHECK)
+
+    caplog.set_level("DEBUG")
+    server = TestServer(SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate).build_app())
+    await server.start_server()
+    events: list = []
+    finished_calls: list[dict] = []
+
+    class _Output:
+        async def emit(self, event) -> None:
+            events.append(event)
+
+    class _Sessions:
+        def get_session(self, session_key: str):
+            return SimpleNamespace(
+                session_key=session_key,
+                channel_name="website",
+                user_id="admin-1",
+                chat_id="web-chat",
+                thread_id=None,
+                conversation_id="conversation_web",
+            )
+
+    class _ToolSetupsStub:
+        async def person_finished(self, **kwargs) -> int:
+            finished_calls.append(kwargs)
+            if kwargs.get("purpose") == "gate":
+                states.note_unknown(TEST_TEAM, "usr_member_1", kwargs["tool_id"], source="person_action")
+            return 0
+
+    try:
+        client = HttpGatewaySecureBroker(
+            internal_base_url=str(server.make_url("")).rstrip("/"),
+            public_base_url=None,
+            token=caller_token(CALLER_GATEWAY),
+        )
+        form = await GatewayAccountLinks(
+            broker=client, team_id=TEST_TEAM, clock=SystemGatewayClock()
+        ).open_form(
+            request_id="acct_link_cmd_real_gate",
+            person_id="admin-1",
+            person_roles=("admin",),
+            tool_id="http:gitea",
+            owner="team",
+            reason="You asked for this with /link.",
+            purpose="gate",
+        )
+        results = GatewayLinkResults(
+            broker=client,
+            sessions=_Sessions(),  # type: ignore[arg-type]
+            event_output=_Output(),
+            clock=SystemGatewayClock(),
+            poll_interval_seconds=0.01,
+            tool_setups=_ToolSetupsStub(),
+        )
+        results.watch_account_link(
+            form=form,
+            tool_id="http:gitea",
+            owner="team",
+            restart_command="/link http:gitea gate",
+            target=LinkResultTarget(session_key="session_web", correlation_id="link_cmd_gate", person_id="admin-1"),
+            purpose="gate",
+        )
+        async with aiohttp.ClientSession() as browser:
+            submitted = await browser.post(
+                form.form_url,
+                data={"credential_key": "gitea_gate_cred", "confirm": "yes"},
+            )
+            assert submitted.status == 200
+        event = await _posted(events)
+        await results.close()
+    finally:
+        await server.close()
+
+    assert form.tool_display_name == "Gitea"
+    assert event.text == (
+        "Linked the team's gate credential to Gitea (http:gitea). "
+        "Settings → Access → By Tool lists it. "
+        "Linking a gate credential gives nobody access by itself."
+    )
+    assert finished_calls == [
+        {
+            "person_id": "admin-1",
+            "tool_id": "http:gitea",
+            "kind": "account_link",
+            "owner": "team",
+            "account_label": None,
+            "purpose": "gate",
+        }
+    ]
+    assert states.get(TEST_TEAM, "usr_member_1", "http:gitea").state is ToolSetupState.UNKNOWN
+    stored_gate = store.active_link(TEST_TEAM, "http:gitea", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.GATE)
+    assert stored_gate is not None
+    assert stored_gate.credential_key == "gitea_gate_cred"
+    for forbidden in ("CF-REAL-BROKER-GATE-SECRET", "gitea_gate_cred", form.session_id):
+        assert forbidden not in event.text
+    assert "CF-REAL-BROKER-GATE-SECRET" not in caplog.text
+

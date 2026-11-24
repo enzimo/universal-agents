@@ -468,3 +468,194 @@ async def test_gate_tool_setup_check_reports_missing_outdated_and_configured_gat
     assert ready_report["ready"] is True
     assert ready_report["gate"] == {"state": "configured"}
     assert ready_report["known_state"]["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_set_up_tools_reports_not_ready_when_own_link_outdated_despite_valid_team_link(
+    world, monkeypatch, tmp_path
+) -> None:
+    """F1: a shared tool with an outdated personal link is NOT ready even when a valid team link exists."""
+
+    from datetime import datetime, timezone
+
+    from access_catalog.catalog import CatalogSource
+    from access_catalog.instance_tools import write_instance_tool
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccountLinkV1,
+        CredentialInjectionV1,
+        HttpRouteV1,
+        InjectionPlacement,
+        LinkPurpose,
+        ProposedHttpToolV1,
+        SubjectKind,
+        SubjectRefV1,
+    )
+
+    instance_root = tmp_path / "own_outdated_instance"
+    new_injections = (
+        CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-New-Token", field="token"),
+    )
+    old_injections = (
+        CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Old-Token", field="token"),
+    )
+    write_instance_tool(
+        instance_root,
+        ProposedHttpToolV1(
+            tool_id="http:shared_api",
+            display_name="Shared API",
+            description="Shared service.",
+            hosts=("shared.example.com",),
+            uses_credential=True,
+            credential_injections=new_injections,
+            routes=(HttpRouteV1(name="items.list", method="GET", path="/**", level=AccessLevel.READ),),
+        ),
+    )
+    catalogs = CatalogSource(instance_root)
+    world.gate.catalogs = catalogs
+    world.gate.access = None
+    agent = _lead(world, roles=("member",), enabled=False)
+    agent.instance_root = instance_root
+    access_runtime._runtime_access.cache_clear()
+
+    # Valid team link AND outdated personal link for PERSON.
+    world.store.create_link(
+        AccountLinkV1(
+            link_id="link_shared_team_valid",
+            team_id=TEAM,
+            tool_id="http:shared_api",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="team_shared_token",
+            injections=new_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="admin-1"),
+            created_at_utc=datetime(2026, 11, 2, tzinfo=timezone.utc),
+        )
+    )
+    world.store.create_link(
+        AccountLinkV1(
+            link_id="link_shared_own_old",
+            team_id=TEAM,
+            tool_id="http:shared_api",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=PERSON,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="alice_shared_token",
+            injections=old_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=PERSON),
+            created_at_utc=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        )
+    )
+
+    result = await _check(world, monkeypatch, tool_ids=["http:shared_api"])
+    [report] = result["tools"]
+    assert report["ready"] is False
+    assert report["link"] == {"own": False, "team": True, "own_outdated": True}
+    steps = _steps(report)
+    assert "account_link" in steps
+    assert "older tool definition" in steps["account_link"]["say"]
+    assert "/link http:shared_api" in steps["account_link"]["say"]
+    assert "team_account_link" not in steps, "re-linking the team account does not fix an outdated personal link"
+
+
+@pytest.mark.asyncio
+async def test_set_up_tools_dual_account_and_gate_reports_both_gaps_and_ready_only_when_both_configured(
+    world, monkeypatch, tmp_path
+) -> None:
+    """F10: a tool with both linked account and gate_injections reports both gaps and is ready only when both exist."""
+
+    from datetime import datetime, timezone
+
+    from access_catalog.catalog import CatalogSource
+    from access_catalog.instance_tools import write_instance_tool
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccountLinkV1,
+        CredentialInjectionV1,
+        HttpRouteV1,
+        InjectionPlacement,
+        LinkPurpose,
+        ProposedHttpToolV1,
+        SubjectKind,
+        SubjectRefV1,
+    )
+
+    instance_root = tmp_path / "dual_instance"
+    acct_inj = (
+        CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="token", template="token {value}"),
+    )
+    gate_inj = (
+        CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="CF-Access-Client-Secret", field="gate_secret"),
+    )
+    write_instance_tool(
+        instance_root,
+        ProposedHttpToolV1(
+            tool_id="http:gated_gitea",
+            display_name="Gated Gitea",
+            description="Gitea behind a team gate.",
+            hosts=("git.example.com",),
+            uses_credential=True,
+            credential_injections=acct_inj,
+            gate_injections=gate_inj,
+            routes=(HttpRouteV1(name="repos.list", method="GET", path="/**", level=AccessLevel.READ),),
+        ),
+    )
+    catalogs = CatalogSource(instance_root)
+    world.gate.catalogs = catalogs
+    world.gate.access = None
+    agent = _lead(world, roles=("admin",), enabled=False)
+    agent.instance_root = instance_root
+    access_runtime._runtime_access.cache_clear()
+
+    # 1. Both account and gate missing.
+    both_missing = await _check(world, monkeypatch, tool_ids=["http:gated_gitea"])
+    [r1] = both_missing["tools"]
+    assert r1["ready"] is False
+    assert "account_link" in _steps(r1)
+    assert "team_gate_link" in _steps(r1)
+
+    # 2. Account linked, gate still missing -> not ready, only gate step remains.
+    world.store.create_link(
+        AccountLinkV1(
+            link_id="link_dual_acct",
+            team_id=TEAM,
+            tool_id="http:gated_gitea",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=PERSON,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="alice_gitea_tok",
+            injections=acct_inj,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=PERSON),
+            created_at_utc=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        )
+    )
+    gate_only_missing = await _check(world, monkeypatch, tool_ids=["http:gated_gitea"])
+    [r2] = gate_only_missing["tools"]
+    assert r2["ready"] is False
+    assert "account_link" not in _steps(r2)
+    assert "team_gate_link" in _steps(r2)
+    assert r2["known_state"]["missing_step"] == "gate_link"
+
+    # 3. Both account and gate linked -> ready.
+    world.store.create_link(
+        AccountLinkV1(
+            link_id="link_dual_gate",
+            team_id=TEAM,
+            tool_id="http:gated_gitea",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="team_gitea_gate",
+            injections=gate_inj,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=PERSON),
+            created_at_utc=datetime(2026, 11, 2, tzinfo=timezone.utc),
+        )
+    )
+    both_ready = await _check(world, monkeypatch, tool_ids=["http:gated_gitea"])
+    [r3] = both_ready["tools"]
+    assert r3["ready"] is True
+    assert r3["next_steps"] == []
+    assert r3["gate"] == {"state": "configured"}
+    assert r3["link"] == {"own": True, "team": False}
+    assert r3["known_state"]["state"] == "ready"

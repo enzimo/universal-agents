@@ -2500,12 +2500,23 @@ def _expand_secret_variants(secret_values: list[str]) -> tuple[str, ...]:
     for raw in secret_values:
         if not raw:
             continue
+        json_escaped = json.dumps(raw)[1:-1]
+        json_utf8_escaped = json.dumps(raw, ensure_ascii=False)[1:-1]
+        json_forms = {json_escaped, json_utf8_escaped}
+        for form in tuple(json_forms):
+            slash = form.replace("/", r"\/")
+            json_forms.add(slash)
+            for base in (form, slash):
+                go_lower = base.replace("&", r"\u0026").replace("<", r"\u003c").replace(">", r"\u003e")
+                go_upper = base.replace("&", r"\u0026").replace("<", r"\u003C").replace(">", r"\u003E")
+                json_forms.add(go_lower)
+                json_forms.add(go_upper)
         candidates = [
             raw,
             urllib_parse.quote_plus(raw),
             urllib_parse.quote(raw, safe=""),
             urllib_parse.quote(raw),
-            json.dumps(raw)[1:-1],
+            *json_forms,
         ]
         for candidate in candidates:
             if len(candidate) >= 4:

@@ -1385,3 +1385,177 @@ tools:
         assert ok_status["status"] == "account_link_created"
 
     assert "event=account_link_definition_changed" in caplog.text
+
+
+def test_read_only_access_repository_reads_pre_upgrade_links_without_purpose_column(tmp_path: Path) -> None:
+    """F5: opening a pre-upgrade SQLite DB read-only must not crash on missing access_account_links.purpose."""
+
+    import sqlite3
+
+    db_path = tmp_path / "pre_upgrade_access.db"
+    link = AccountLinkV1(
+        link_id="link_pre_upgrade_ro",
+        team_id=TEST_TEAM,
+        tool_id="http:portainer",
+        owner_kind=LinkOwnerKind.PERSON,
+        owner_id="user-1",
+        credential_key="portainer_token",
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+        created_at_utc=NOW,
+    )
+    payload_without_purpose = link.model_dump(mode="json")
+    payload_without_purpose.pop("purpose", None)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE access_account_links (
+                link_id TEXT PRIMARY KEY,
+                team_id TEXT NOT NULL,
+                tool_id TEXT NOT NULL,
+                owner_kind TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                revoked_at TEXT,
+                revoked_by_json TEXT,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO access_account_links
+            (link_id, team_id, tool_id, owner_kind, owner_id, status, revoked_at, revoked_by_json, payload_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+            """,
+            (
+                link.link_id,
+                link.team_id,
+                link.tool_id,
+                link.owner_kind.value,
+                link.owner_id,
+                "active",
+                json.dumps(payload_without_purpose, sort_keys=True),
+                NOW.isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    from storage.read_only import read_only_repositories
+
+    settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(db_path)}})
+    with read_only_repositories():
+        ro_store = AccessRepository(settings)
+        links = ro_store.list_links(TEST_TEAM, purpose=None)
+        assert len(links) == 1
+        assert links[0].link_id == "link_pre_upgrade_ro"
+        assert links[0].purpose is LinkPurpose.ACCOUNT
+        fetched = ro_store.get_link("link_pre_upgrade_ro")
+        assert fetched is not None and fetched.purpose is LinkPurpose.ACCOUNT
+
+
+@pytest.mark.asyncio
+async def test_real_broker_api_request_sends_default_user_agent_and_respects_explicit_header(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F10: through SecureToolBrokerService, credential.api_request sends DEFAULT_API_REQUEST_USER_AGENT unless supplied."""
+
+    import io
+    from types import SimpleNamespace
+
+    from secure_tool_broker.defaults import DEFAULT_API_REQUEST_USER_AGENT
+
+    gate, store = world
+    monkeypatch.setenv("PORTAINER_TOKEN", "portainer-secret")
+    save_credentials(
+        CredentialOwnerScope.user("user-1"),
+        portainer_token=token_credential("PORTAINER_TOKEN"),
+    )
+    tool = gate.catalog.tools["http:portainer"]
+    store.create_link(
+        AccountLinkV1(
+            link_id="link_ua_test",
+            team_id=TEST_TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="user-1",
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="portainer_token",
+            injections=tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
+            created_at_utc=NOW,
+        )
+    )
+
+    captured_requests: list = []
+
+    class _FakeResp:
+        def __init__(self) -> None:
+            self.status = self.code = 200
+            self.headers = SimpleNamespace(
+                get=lambda name, default="": "application/json" if name.lower() == "content-type" else default,
+                get_content_charset=lambda default="utf-8": "utf-8",
+            )
+            self._buf = io.BytesIO(b'{"ok": true}')
+
+        def read(self, n: int = -1) -> bytes:
+            return self._buf.read(n)
+
+        def getcode(self) -> int:
+            return 200
+
+        def close(self) -> None:
+            self._buf.close()
+
+    def fake_send(req, *, timeout):
+        captured_requests.append(req)
+        return _FakeResp()
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", fake_send)
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
+
+    async with TestClient(TestServer(service.build_app())) as client:
+        # 1. No User-Agent header -> broker sends browser-like default.
+        r1 = await client.post(
+            "/v1/tools/credential_catalog",
+            headers=caller_headers(),
+            json={
+                "provider": "credential_catalog",
+                "action": "credential.api_request",
+                "params": {"url": "https://portainer.example.test/api/status"},
+                "reason": "Check status",
+                "context": agent_context("user-1"),
+            },
+        )
+        assert r1.status == 200
+        body1 = await r1.json()
+        assert body1["status"] == "success"
+
+        # 2. Explicit User-Agent header -> agent's header wins.
+        r2 = await client.post(
+            "/v1/tools/credential_catalog",
+            headers=caller_headers(),
+            json={
+                "provider": "credential_catalog",
+                "action": "credential.api_request",
+                "params": {
+                    "url": "https://portainer.example.test/api/status",
+                    "headers": {"User-Agent": "CustomClient/2.0"},
+                },
+                "reason": "Check status with custom UA",
+                "context": agent_context("user-1"),
+            },
+        )
+        assert r2.status == 200
+        body2 = await r2.json()
+        assert body2["status"] == "success"
+
+    assert len(captured_requests) == 2
+    headers1 = {k.lower(): v for k, v in captured_requests[0].header_items()}
+    headers2 = {k.lower(): v for k, v in captured_requests[1].header_items()}
+    assert headers1["user-agent"] == DEFAULT_API_REQUEST_USER_AGENT
+    assert headers2["user-agent"] == "CustomClient/2.0"

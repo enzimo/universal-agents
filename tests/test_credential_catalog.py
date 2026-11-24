@@ -2108,6 +2108,113 @@ def test_api_request_uses_the_catalog_of_the_links_owner(
     assert dict(sent[0].header_items())["X-api-key"] == expected
 
 
+def test_api_request_redacts_json_escaped_slash_and_go_html_escaped_secrets_before_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F10 + F11: JSON-escaped (\", \\), PHP (\\/), and Go (\\u0026/\\u003c/\\u003e) secrets are redacted before truncation."""
+
+    import io
+
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    acct_secret = 'acct"with\\slash/and&<tag>end'
+    gate_secret = "gate/part&<html_go>secret"
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_OWNER_SCOPE,
+        token_env="JSON_ESC_ACCT",
+        token=acct_secret,
+        credential_key="json_esc_acct",
+    )
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="JSON_ESC_GATE",
+        token=gate_secret,
+        credential_key="json_esc_gate",
+    )
+    acct_link = _link(_header("X-API-Key"), credential_key="json_esc_acct")
+    gate_link = AccountLinkV1(
+        link_id="account_link_team_json_esc_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="json_esc_gate",
+        injections=(_header("X-Gate-Key"),),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    class _StreamJsonResponse:
+        def __init__(self, body: bytes) -> None:
+            self.status = self.code = 200
+            self.headers = _JsonHeaders({"Content-Type": "application/json"})
+            self._stream = io.BytesIO(body)
+
+        def read(self, limit: int = -1) -> bytes:
+            return self._stream.read(limit)
+
+        def getcode(self) -> int:
+            return self.status
+
+        def close(self) -> None:
+            self._stream.close()
+
+    # Standard JSON-escaped account secret, PHP slash-escaped, and Go HTML-escaped gate secret.
+    std_acct = json.dumps(acct_secret)[1:-1]
+    php_gate = json.dumps(gate_secret)[1:-1].replace("/", r"\/")
+    go_gate = (
+        json.dumps(gate_secret)[1:-1]
+        .replace("&", r"\u0026")
+        .replace("<", r"\u003c")
+        .replace(">", r"\u003e")
+    )
+    go_php_gate = php_gate.replace("&", r"\u0026").replace("<", r"\u003c").replace(">", r"\u003e")
+
+    # 1. Non-truncated valid JSON response containing escaped secrets.
+    full_json_body = (
+        '{"a":"' + std_acct + '","g1":"' + php_gate + '","g2":"' + go_gate + '"}'
+    ).encode("utf-8")
+    monkeypatch.setattr(
+        credential_catalog,
+        "_send_api_request",
+        lambda _req, *, timeout: _StreamJsonResponse(full_json_body),
+    )
+    full_res = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(acct_link, gate_link=gate_link),
+    )
+    assert full_res.status == "success"
+    dumped = json.dumps(full_res.content["json"])
+    for forbidden in ("acct", "slash", "html_go", "gate/part"):
+        assert forbidden not in dumped
+
+    # 2. Truncated JSON response cutting across each escaped form: zero secret characters leak.
+    for escaped_form in (std_acct, php_gate, go_gate, go_php_gate):
+        prefix = '{"echo":"'
+        body = (prefix + escaped_form + '","more":"padding"}').encode("utf-8")
+        cut = len(prefix) + 8
+        monkeypatch.setattr(
+            credential_catalog,
+            "_send_api_request",
+            lambda _req, *, timeout, payload=body: _StreamJsonResponse(payload),
+        )
+        res = credential_catalog.api_request(
+            {"url": "https://api.example.test/items", "max_response_bytes": cut},
+            context=_linked_context(acct_link, gate_link=gate_link),
+        )
+        assert res.status == "success"
+        assert res.content["truncated"] is True
+        text = res.content["text"]
+        assert text == prefix + "[REDACTED]"
+        assert "acct" not in text and "gate" not in text
+
+
 def test_api_request_sends_default_browser_user_agent_when_unset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -726,3 +726,343 @@ def test_tool_change_removing_blocked_route_warns_on_card_and_reports_stale_bloc
     assert "blk-portainer-delete" in notice.summary
     assert "route:stacks.delete" in notice.summary
     assert "--replace blk-portainer-delete" in notice.summary
+
+
+def test_proposal_link_states_reports_not_linked_when_old_links_are_outdated_after_tool_change(world) -> None:
+    """F2: declining/expiring follow-up forms after a tool_change must not report outdated active links as linked."""
+
+    from custom_messages.contracts.access_v2 import (
+        AccountLinkV1,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+    )
+
+    lead, requests, _gate, _instance, service = world
+    set_agent_ref(lead)
+
+    # 1. Seed http:portainer with an account injection and a gate injection, plus matching active links.
+    initial = {
+        **PORTAINER,
+        "gate_injections": [{"placement": "header", "name": "X-Gate-Old", "field": "gate_secret"}],
+    }
+    c1 = Context("tooluse-f2-seed")
+    with pytest.raises(InterruptException):
+        asyncio.run(
+            propose_access_change(
+                title="Add gated Portainer",
+                reason="Manage stacks",
+                tool_context=c1,
+                tools=[initial],
+            )
+        )
+    requests().decide(c1.raised[0]["access_request_id"], OWNER, AccessReviewChoice.APPROVE)
+
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_f2_old_acct",
+            team_id=TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="portainer_old_acct",
+            injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-API-Key", field="token"),
+            ),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=service.clock(),
+        )
+    )
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_f2_old_gate",
+            team_id=TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="portainer_old_gate",
+            injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate-Old", field="gate_secret"),
+            ),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=service.clock(),
+        )
+    )
+
+    # 2. Propose tool_changes updating both credential_injections and gate_injections, with follow-up links.
+    updated = {
+        **PORTAINER,
+        "credential_injections": [{"placement": "header", "name": "X-API-Key-V2", "field": "token"}],
+        "gate_injections": [{"placement": "header", "name": "X-Gate-V2", "field": "gate_secret"}],
+    }
+    c2 = Context("tooluse-f2-update")
+    with pytest.raises(InterruptException):
+        asyncio.run(
+            propose_access_change(
+                title="Rotate Portainer headers",
+                reason="Proxy moved to new headers",
+                tool_context=c2,
+                tool_changes=[updated],
+                account_links=[
+                    {"tool_id": "http:portainer", "owner": "team", "purpose": "Re-link team account"},
+                    {
+                        "tool_id": "http:portainer",
+                        "owner": "team",
+                        "purpose": "Re-link team gate",
+                        "link_purpose": "gate",
+                    },
+                ],
+            )
+        )
+    requests().decide(c2.raised[0]["access_request_id"], OWNER, AccessReviewChoice.APPROVE)
+
+    # Approver declined/expired both follow-up forms so only the old links remain ACTIVE.
+    resumed = json.loads(
+        asyncio.run(
+            propose_access_change(
+                title="Rotate Portainer headers",
+                reason="Proxy moved to new headers",
+                tool_context=c2,
+                tool_changes=[updated],
+            )
+        )
+    )
+    assert resumed["status"] == "applied"
+    assert resumed["account_links"] == [
+        {"tool_id": "http:portainer", "owner": "team", "linked": False},
+        {"tool_id": "http:portainer", "owner": "team", "link_purpose": "gate", "linked": False},
+    ]
+
+    # Once matching links are created, _link_states reports linked: True.
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_f2_new_acct",
+            team_id=TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="portainer_new_acct",
+            injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-API-Key-V2", field="token"),
+            ),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=service.clock(),
+        )
+    )
+    service.store.create_link(
+        AccountLinkV1(
+            link_id="link_f2_new_gate",
+            team_id=TEAM,
+            tool_id="http:portainer",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="portainer_new_gate",
+            injections=(
+                CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate-V2", field="gate_secret"),
+            ),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=service.clock(),
+        )
+    )
+    resumed_after = json.loads(
+        asyncio.run(
+            propose_access_change(
+                title="Rotate Portainer headers",
+                reason="Proxy moved to new headers",
+                tool_context=c2,
+                tool_changes=[updated],
+            )
+        )
+    )
+    assert resumed_after["account_links"] == [
+        {"tool_id": "http:portainer", "owner": "team", "linked": True},
+        {"tool_id": "http:portainer", "owner": "team", "link_purpose": "gate", "linked": True},
+    ]
+
+
+def test_apply_by_agreement_rolls_back_mcp_servers_batches_data_folders_and_isolates_rollback_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """F9: auth-off mid-apply failure restores MCP servers, commits no partial data folders, and isolates rollback errors."""
+
+    from datetime import datetime, timezone
+
+    from custom_tools.providers import access_proposals as ap_module
+    from mcp_control.registry import (
+        MCPConnectionDescriptorV1,
+        MCPConnectionLifecycle,
+        MCPConnectionRecordV1,
+        MCPConnectionSource,
+        MCPConnectionStore,
+        MCPConnectionTransport,
+        resolve_mcp_connection_paths,
+    )
+    from storage.access_repository import AccessRepository
+
+    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    access_runtime._runtime_access.cache_clear()
+    instance = tmp_path / "instance"
+    (instance / "control").mkdir(parents=True)
+    good_dir_a = tmp_path / "data_a"
+    good_dir_b = tmp_path / "data_b"
+    good_dir_a.mkdir()
+    good_dir_b.mkdir()
+
+    lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
+    lead.instance_root = str(instance)
+    lead.authorization_config = {"enabled": False}
+    set_agent_ref(lead)
+
+    try:
+        # Seed a pending MCP server and an existing proposal-written tool.
+        mcp_store = MCPConnectionStore(resolve_mcp_connection_paths(instance))
+        now = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        descriptor = MCPConnectionDescriptorV1(
+            connection_name="docs_mcp",
+            source=MCPConnectionSource.AGENT_PROPOSAL,
+            source_locator="agent:TeamArchitect",
+            team_id=str(lead.team_id),
+            owner_canonical_user_id=OWNER.person_id,
+            transport=MCPConnectionTransport.STREAMABLE_HTTP,
+            endpoint="https://mcp.example.test/sse",
+            tool_name_prefix="docs_mcp",
+            source_config_sha256="a" * 64,
+        )
+        pending_record = MCPConnectionRecordV1.build(
+            connection_id="mcp_conn_docs_mcp_0123456789abcdef",
+            descriptor=descriptor,
+            lifecycle=MCPConnectionLifecycle.PENDING,
+            created_at_utc=now,
+            updated_at_utc=now,
+            target_agent_types=("TeamArchitect",),
+        )
+        mcp_store.save(pending_record)
+
+        seed = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Seed Portainer",
+                    reason="Seed tool",
+                    tool_context=Context("tooluse-f9-seed"),
+                    tools=[PORTAINER],
+                    confirmed=True,
+                )
+            )
+        )
+        assert seed["status"] == "applied"
+        tool_file = instance / "control" / "access" / "tools" / "proposed-http-portainer.yaml"
+        original_bytes = tool_file.read_bytes()
+
+        # 1. Pre-validation rejects overlapping/protected data folders without registering the earlier good folder or activating MCP.
+        bad_second = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Bad second folder",
+                    reason="Add folders and MCP",
+                    tool_context=Context("tooluse-f9-prevalidate"),
+                    mcp_servers=[
+                        {
+                            "connection_id": pending_record.connection_id,
+                            "record_digest": pending_record.record_digest,
+                        }
+                    ],
+                    data_folders=[
+                        {"name": "good_a", "path": str(good_dir_a), "writable": False},
+                        {"name": "bad_nested", "path": str(instance), "writable": False},
+                    ],
+                    confirmed=True,
+                )
+            )
+        )
+        assert bad_second["status"] == "refused"
+        store = AccessRepository(lead.task_manager.storage_settings)
+        assert store.data_folders(str(lead.team_id)) == []
+        assert mcp_store.require(pending_record.connection_id).lifecycle is MCPConnectionLifecycle.PENDING
+
+        # 2. Mid-apply failure at DB commit after MCP activation, new tool write, and tool replacement:
+        #    even when one rollback step raises, remaining rollback steps still run and restore MCP + files!
+        real_apply_together = AccessRepository.apply_together
+
+        def failing_apply_together(self, *args, **kwargs):
+            raise RuntimeError("simulated database failure")
+
+        real_remove = ap_module.remove_instance_tool
+        remove_calls = {"count": 0}
+
+        def flaky_remove(path: Path) -> None:
+            remove_calls["count"] += 1
+            real_remove(path)
+            raise OSError("simulated cleanup failure after unlink")
+
+        monkeypatch.setattr(AccessRepository, "apply_together", failing_apply_together)
+        monkeypatch.setattr(ap_module, "remove_instance_tool", flaky_remove)
+
+        updated_portainer = {**PORTAINER, "hosts": ["portainer.example.test", "portainer-v2.example.test"]}
+        extra_tool = {
+            **PORTAINER,
+            "tool_id": "http:extra_api",
+            "display_name": "Extra API",
+            "hosts": ["extra.example.test"],
+        }
+        with caplog.at_level("WARNING"):
+            mid_fail = json.loads(
+                asyncio.run(
+                    propose_access_change(
+                        title="Combined mid-apply fail",
+                        reason="Update everything together",
+                        tool_context=Context("tooluse-f9-midfail"),
+                        tools=[extra_tool],
+                        tool_changes=[updated_portainer],
+                        mcp_servers=[
+                            {
+                                "connection_id": pending_record.connection_id,
+                                "record_digest": pending_record.record_digest,
+                            }
+                        ],
+                        data_folders=[
+                            {"name": "good_a", "path": str(good_dir_a), "writable": False},
+                            {"name": "good_b", "path": str(good_dir_b), "writable": False},
+                        ],
+                        confirmed=True,
+                    )
+                )
+            )
+
+        assert mid_fail["status"] == "refused"
+        assert "simulated database failure" in mid_fail["reason"]
+        assert remove_calls["count"] == 1
+        assert "event=proposal_agreement_rollback_step_failed" in caplog.text
+        assert tool_file.read_bytes() == original_bytes
+        assert not (instance / "control" / "access" / "tools" / "proposed-http-extra_api.yaml").exists()
+        assert mcp_store.require(pending_record.connection_id).lifecycle is MCPConnectionLifecycle.PENDING
+        assert store.data_folders(str(lead.team_id)) == []
+
+        # Restore real apply_together and verify batched registration succeeds cleanly.
+        monkeypatch.setattr(AccessRepository, "apply_together", real_apply_together)
+        monkeypatch.setattr(ap_module, "remove_instance_tool", real_remove)
+        ok = json.loads(
+            asyncio.run(
+                propose_access_change(
+                    title="Combined success",
+                    reason="Register both folders",
+                    tool_context=Context("tooluse-f9-ok"),
+                    data_folders=[
+                        {"name": "good_a", "path": str(good_dir_a), "writable": False},
+                        {"name": "good_b", "path": str(good_dir_b), "writable": False},
+                    ],
+                    confirmed=True,
+                )
+            )
+        )
+        assert ok["status"] == "applied"
+        assert {f.name for f in store.data_folders(str(lead.team_id))} == {"good_a", "good_b"}
+    finally:
+        access_runtime._runtime_access.cache_clear()
+        set_agent_ref(None)
