@@ -42,6 +42,7 @@ import sys
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
@@ -152,6 +153,7 @@ def expected_host(
     agent_types_from_catalog: bool = False,
     edges: Optional[Mapping[str, tuple[str, ...]]] = None,
     bootstrap_nats_public_key: Optional[str] = None,
+    bootstrap_nats_expires_at: Optional[datetime] = None,
 ) -> ExpectedHost:
     """The approval entry of a host the launcher starts, with its key made when missing.
 
@@ -172,6 +174,7 @@ def expected_host(
         agent_types_from_catalog=agent_types_from_catalog,
         edges=edges or {},
         bootstrap_nats_public_key=bootstrap_nats_public_key,
+        bootstrap_nats_expires_at=bootstrap_nats_expires_at,
     )
 
 

@@ -13,10 +13,11 @@ import asyncio
 import dataclasses
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -25,6 +26,7 @@ from nats.js.errors import KeyNotFoundError, NotFoundError
 
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.trust import kept_for
+from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1 import host_keys
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.bucket_reads import BucketReadTimedOut
@@ -696,3 +698,308 @@ def test_host_keys_stage_promote_and_discard_pending_nats_key(tmp_path: Path) ->
     cleared = host_keys.discard_pending_nats_key(layout, "worker-1")
     assert cleared.pending_nats_public_key is None
     assert cleared.nats_public_key == promoted.nats_public_key
+
+
+def test_expected_hosts_persists_bootstrap_nats_expires_at(tmp_path: Path) -> None:
+    """C12: bootstrap_nats_expires_at persists through expected-hosts.json round-trips."""
+
+    from custom_transport.protocol1.nats_jwt import NatsSigningKey
+
+    path = tmp_path / "expected-hosts.json"
+    boot = NatsSigningKey.generate("user").public_key
+    boot_exp = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc)
+    host = ExpectedHost(
+        "worker-boot",
+        "worker.key1",
+        "PUBLIC1",
+        frozenset({"worker_host"}),
+        frozenset({"team_a"}),
+        bootstrap_nats_public_key=boot,
+        bootstrap_nats_expires_at=boot_exp,
+    )
+    write_expected_hosts(path, {host.runtime: host})
+    loaded = read_expected_hosts(path)[host.runtime]
+    assert loaded.bootstrap_nats_public_key == boot
+    assert loaded.bootstrap_nats_expires_at == boot_exp
+
+
+def test_ledger_persists_certificate_partitions_and_min_revoke_until(tmp_path: Path) -> None:
+    """C11, C12: ledger persists per-certificate granted partitions and compares confirmation timestamps."""
+
+    from custom_transport.protocol1.nats_jwt import NatsSigningKey
+
+    now = utc_now()
+    k1 = NatsSigningKey.generate("user").public_key
+    ledger = IssueLedger.open(tmp_path, "install_one")
+    ledger.record_certificate_partitions("cert.worker-1.1", ())
+    ledger.record_certificate_partitions("cert.worker-1.2", (3, 1))
+    ledger.record_confirmed_nats_revocation(k1, 1000)
+    assert ledger.is_nats_revocation_confirmed(k1, min_revoke_until=1000)
+    assert not ledger.is_nats_revocation_confirmed(k1, min_revoke_until=2000)
+
+    # Raising revoke_until invalidates earlier lower confirmation until re-confirmed.
+    ledger.record_revoked_nats_key(k1, 2000)
+    assert not ledger.is_nats_revocation_confirmed(k1)
+    ledger.save(now)
+
+    reopened = IssueLedger.open(tmp_path, "install_one")
+    assert reopened.certificate_partitions("cert.worker-1.1") == ()
+    assert reopened.certificate_partitions("cert.worker-1.2") == (1, 3)
+    assert reopened.certificate_partitions("cert.worker-1.99") is None
+    assert not reopened.is_nats_revocation_confirmed(k1)
+    reopened.record_confirmed_nats_revocation(k1, 2000)
+    assert reopened.is_nats_revocation_confirmed(k1)
+    reopened.forget_certificate_partitions("cert.worker-1.2")
+    assert reopened.certificate_partitions("cert.worker-1.2") is None
+
+
+def test_host_keys_rotate_nats_key_prefers_pending_then_generates_fresh(tmp_path: Path) -> None:
+    """C16: rotate_nats_key promotes a staged pending key first or generates a fresh key, keeping application_key."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    original, _ = host_keys.ensure_host_keys(layout, "worker-1")
+    staged = host_keys.stage_pending_nats_key(layout, "worker-1")
+    assert staged.pending_nats_public_key is not None
+
+    promoted = host_keys.rotate_nats_key(layout, "worker-1", prefer_pending=True)
+    assert promoted.key_id == original.key_id
+    assert promoted.public_key_text == original.public_key_text
+    assert promoted.nats_public_key == staged.pending_nats_public_key
+    assert promoted.pending_nats_public_key is None
+
+    # Without a staged pending key, rotate_nats_key generates a brand-new NATS user key.
+    fresh = host_keys.rotate_nats_key(layout, "worker-1", prefer_pending=True)
+    assert fresh.key_id == original.key_id
+    assert fresh.public_key_text == original.public_key_text
+    assert fresh.nats_public_key != promoted.nats_public_key
+    assert fresh.pending_nats_public_key is None
+    assert host_keys.load_host_keys(layout, "worker-1").nats_public_key == fresh.nats_public_key
+
+
+@pytest.mark.asyncio
+async def test_retire_host_validation_max_expires_and_upkeep_revocation_reconciliation(tmp_path: Path) -> None:
+    """C12, C13, C14: retire_host default reason & validation, max key_expires_at/revoke_until, and upkeep retry."""
+
+    from custom_transport.protocol1.bootstrap import BootstrapBundle, write_bundle
+    from custom_transport.protocol1.nats_jwt import NatsSigningKey
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from installation_authority.revocation import RevocationOutcome
+    from installation_authority.service import AUTHORITY_RUNTIME, CertificateRequest, InstallationAuthority
+
+    class _FakeRevoker:
+        def __init__(self) -> None:
+            self.fail_next = False
+            self.calls: list[tuple[str, int]] = []
+
+        @property
+        def supports_instant_revocation(self) -> bool:
+            return True
+
+        async def revoke(
+            self,
+            nats_public_key: str,
+            *,
+            revoke_until: int,
+            all_revocations: dict[str, int] = {},  # noqa: B006
+            prune_before: int | None = None,
+        ) -> RevocationOutcome:
+            self.calls.append((nats_public_key, revoke_until))
+            if self.fail_next:
+                self.fail_next = False
+                return RevocationOutcome(revoked=False, revoked_at=revoke_until, detail="transient error")
+            merged = dict(all_revocations)
+            merged[nats_public_key] = max(merged.get(nats_public_key, 0), revoke_until)
+            if prune_before is not None:
+                merged = {k: v for k, v in merged.items() if k == nats_public_key or v >= prune_before}
+            return RevocationOutcome(
+                revoked=True,
+                revoked_at=merged[nats_public_key],
+                detail="ok",
+                confirmed_revocations=merged,
+            )
+
+    class _FakeBucket:
+        def __init__(self) -> None:
+            self.data: dict[str, bytes] = {}
+
+        async def get(self, key: str) -> Any:
+            from nats.js.errors import KeyNotFoundError
+
+            if key not in self.data:
+                raise KeyNotFoundError()
+            return type("Entry", (), {"value": self.data[key]})()
+
+        async def put(self, key: str, value: bytes) -> None:
+            self.data[key] = value
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    auth_keys, _ = host_keys.ensure_authority_keys(layout, "install-c13")
+    auth_host_keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
+    worker_keys, _ = host_keys.ensure_host_keys(layout, "worker-1")
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+    revoker = _FakeRevoker()
+    authority = InstallationAuthority(
+        layout,
+        auth_keys,
+        auth_host_keys,
+        partitions=8,
+        queues=TEST_QUEUE_LIMITS,
+        clock=lambda: now,
+        revoker=revoker,
+    )
+    bundle = BootstrapBundle("install-c13", ((auth_keys.key_id, auth_keys.public_key_text),), partitions=8)
+    write_bundle(layout.trust_bootstrap_path, bundle)
+    authority._trust = PersistentTrustStore.open(bundle, layout.host_trust_dir(AUTHORITY_RUNTIME), now)
+    bucket = _FakeBucket()
+    authority._records = AsyncMock(return_value=bucket)  # type: ignore[method-assign]
+
+    # Invalid reason is rejected before touching state.
+    with pytest.raises(ValueError, match="revocation reason"):
+        await authority.retire_host("worker-1", reason="retired", now=now)
+
+    # Issue two epochs sharing both application key and NATS key, 10 days apart.
+    req = CertificateRequest(
+        runtime="worker-1",
+        teams=("team_a",),
+        roles=("worker_host",),
+        agent_types=("helper",),
+        session_limit=4,
+        connection_class="connected",
+        key_id=worker_keys.key_id,
+        public_key=worker_keys.public_key_text,
+        nats_public_key=worker_keys.nats_public_key,
+    )
+    t1 = now - timedelta(days=10)
+    cert1 = authority.certificate_record(req, epoch=1, revocation_epoch=1, issued=t1)
+    cert2 = authority.certificate_record(req, epoch=2, revocation_epoch=1, issued=now, replaces=cert1["body"]["certificate_id"])
+    authority._trust.add(json.dumps(cert1).encode(), now=now)
+    authority._trust.add(json.dumps(cert2).encode(), now=now)
+    authority._revocations = authority.revocations_record(sequence=1, revocation_epoch=1, entries=[], issued=now)
+
+    # C13 + C12: default reason='decommissioned' validates, key_expires_at is cert2's expires_at for BOTH entries,
+    # and NATS key revoke_until is cert2's expires_at (not cert1's).
+    outcomes = await authority.retire_host("worker-1", now=now)
+    assert len(outcomes) == 1 and outcomes[0].revoked is True
+    expected_exp = cert2["body"]["expires_at"]
+    expected_exp_ts = int(parse_timestamp(expected_exp).timestamp())
+    entries = authority._revocations["body"]["entries"]
+    assert len(entries) == 2
+    assert all(e["reason"] == "decommissioned" for e in entries)
+    assert all(e["key_expires_at"] == expected_exp for e in entries)
+    assert outcomes[0].revoked_at == expected_exp_ts
+
+    # C14: failed revocation stays unconfirmed; a later push confirms all pushed keys; upkeep retries remaining unconfirmed.
+    k_fail1 = NatsSigningKey.generate("user").public_key
+    k_ok = NatsSigningKey.generate("user").public_key
+    k_fail2 = NatsSigningKey.generate("user").public_key
+    revoker.fail_next = True
+    out1 = await authority._revoke_nats_key(k_fail1, revoke_until=int(now.timestamp()) + 600, now=now)
+    assert out1.revoked is False
+    assert not authority.is_nats_key_revocation_confirmed(k_fail1)
+
+    # Later successful push for k_ok includes k_fail1 in all_revocations and confirms both.
+    out2 = await authority._revoke_nats_key(k_ok, revoke_until=int(now.timestamp()) + 600, now=now)
+    assert out2.revoked is True
+    assert authority.is_nats_key_revocation_confirmed(k_ok)
+    assert authority.is_nats_key_revocation_confirmed(k_fail1)
+
+    # Another failed revocation is retried and confirmed by upkeep(now).
+    revoker.fail_next = True
+    out3 = await authority._revoke_nats_key(k_fail2, revoke_until=int(now.timestamp()) + 600, now=now)
+    assert out3.revoked is False
+    assert not authority.is_nats_key_revocation_confirmed(k_fail2)
+    authority._forgotten_at = now
+    await authority.upkeep(now)
+    assert authority.is_nats_key_revocation_confirmed(k_fail2)
+
+
+@pytest.mark.asyncio
+async def test_renew_skips_placement_scan_for_non_partition_owning_roles(tmp_path: Path) -> None:
+    """C15: gateway/team_services renewals do not scan UA1_PLACEMENT."""
+
+    from custom_messages.wire.frame import VerifiedFrame
+    from custom_transport.protocol1.bootstrap import BootstrapBundle, write_bundle
+    from custom_transport.protocol1.joining import HostProfile
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from installation_authority.service import AUTHORITY_RUNTIME, CertificateRequest, InstallationAuthority
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    auth_keys, _ = host_keys.ensure_authority_keys(layout, "install-c15")
+    auth_host_keys, _ = host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
+    gw_keys, _ = host_keys.ensure_host_keys(layout, "gateway-1")
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
+
+    gw_profile = HostProfile("gateway-1", ("team_a", "team_b"), ("gateway",), (), 0)
+    write_expected_hosts(
+        layout.trust_expected_hosts_path,
+        {
+            "gateway-1": ExpectedHost(
+                "gateway-1",
+                gw_keys.key_id,
+                gw_keys.public_key_text,
+                frozenset({"gateway"}),
+                frozenset({"team_a", "team_b"}),
+            )
+        },
+    )
+    bundle = BootstrapBundle("install-c15", ((auth_keys.key_id, auth_keys.public_key_text),), partitions=8)
+    write_bundle(layout.trust_bootstrap_path, bundle)
+
+    authority = InstallationAuthority(
+        layout,
+        auth_keys,
+        auth_host_keys,
+        partitions=8,
+        queues=TEST_QUEUE_LIMITS,
+        clock=lambda: now,
+    )
+    authority._trust = PersistentTrustStore.open(bundle, layout.host_trust_dir(AUTHORITY_RUNTIME), now)
+    authority._teams = ("team_a", "team_b")
+    authority._started = True
+    authority.live = object()  # type: ignore[assignment]
+    authority._revocations = authority.revocations_record(sequence=1, revocation_epoch=1, entries=[], issued=now)
+
+    req = CertificateRequest(
+        runtime="gateway-1",
+        teams=("team_a", "team_b"),
+        roles=("gateway",),
+        agent_types=(),
+        session_limit=0,
+        connection_class="connected",
+        key_id=gw_keys.key_id,
+        public_key=gw_keys.public_key_text,
+        nats_public_key=gw_keys.nats_public_key,
+    )
+    cert_rec = authority.certificate_record(req, epoch=1, revocation_epoch=1, issued=now)
+    authority._trust.add(json.dumps(cert_rec).encode(), now=now)
+    gw_cert = authority._trust.store.host_certificate("install-c15", "gateway-1", 1)
+    assert gw_cert is not None
+
+    scan_mock = AsyncMock(side_effect=AssertionError("UA1_PLACEMENT must not be scanned for gateway renewals"))
+    authority._read_host_partition_ownership = scan_mock  # type: ignore[method-assign]
+    authority._latest_certificate = AsyncMock(return_value=cert_rec)  # type: ignore[method-assign]
+    fake_bucket = AsyncMock()
+    authority._records = AsyncMock(return_value=fake_bucket)  # type: ignore[method-assign]
+
+    body = {
+        "renew_id": "renew-gw-1",
+        "certificate_id": gw_cert.certificate_id,
+        "membership_epoch": 1,
+        "profile_sha256": gw_profile.digest(),
+        "contract_sha256": authority.contract_sha256,
+    }
+    fake_frame = type("Frame", (), {"idempotency_key": "gateway-1|renew-gw-1", "kind": "host.renew"})()
+    verified = VerifiedFrame(
+        frame=fake_frame,  # type: ignore[arg-type]
+        body=body,
+        raw={"body": body},
+        certificate=gw_cert,
+        session=None,
+        authority=None,
+        replay_key="rk",
+        frame_digest="fd",
+    )
+
+    reply = await authority._renew(verified, give_up=False)
+    assert reply["outcome"] == "ok"
+    scan_mock.assert_not_awaited()

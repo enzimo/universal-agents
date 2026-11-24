@@ -144,6 +144,8 @@ FORGET_INTERVAL = timedelta(days=1)
 CERTIFICATES_BUCKET = "UA1_CERTS"
 PLACEMENT_BUCKET = "UA1_PLACEMENT"
 _PARTITION_OWNING_ROLES = frozenset({"lead_host", "worker_host"})
+# revocations.schema.json entry reason enum (C13).
+_REVOCATION_REASONS = frozenset({"compromised", "decommissioned", "quarantined"})
 _RELEASED_WATCH_RETRY_SECONDS = 5.0
 # common.schema.json "epoch".
 MAX_EPOCH = 2**53 - 1
@@ -353,6 +355,16 @@ class InstallationAuthority:
         self._publish_bundle()
         self.live = LiveHost(nc, HostIdentity(self.host_keys, certificate), trust, clock=self.clock, logger=self.logger)
         await self._take_issued_certificates(now)
+        if self._unconfirmed_nats_revocations(now):
+            try:
+                await self._reconcile_nats_revocations(now)
+            except Exception:
+                self.logger.warning(
+                    "Startup reconciliation of unconfirmed NATS key revocations failed; upkeep will retry. "
+                    "event=nats_revocation_startup_reconcile_failed installation=%s",
+                    self.installation,
+                    exc_info=True,
+                )
         await self.live.serve(_INSTALLATION_ADDRESS, Receiver(self.installation, INSTALLATION_SCOPE, "installation_service",
                                                               AUTHORITY_SERVICE_ID, AUTHORITY_RUNTIME), self._handle_live)
         await nc.flush()
@@ -402,7 +414,13 @@ class InstallationAuthority:
         release_watcher = ReleasedPartitionWatcher(
             records,
             verify=lambda raw: trust.store.verify(raw, record=PARTITION_OWNER, now=self.clock()),
-            on_host_lost=lambda host, epoch: self.revoke_cut_off_host_nats_key(host, min_epoch=epoch),
+            on_host_lost=lambda release: self.revoke_cut_off_host_nats_key(
+                release.host,
+                host_epoch=release.host_epoch,
+                partition=release.partition,
+                team=release.team,
+                released_at=release.issued_at,
+            ),
             teams=self._teams,
             logger=self.logger,
         )
@@ -415,40 +433,73 @@ class InstallationAuthority:
         self,
         runtime: str,
         *,
-        min_epoch: int = 1,
+        host_epoch: int,
+        partition: int,
+        team: Optional[str] = None,
+        released_at: Optional[datetime] = None,
         now: Optional[datetime] = None,
     ) -> list[RevocationOutcome]:
-        """Revoke the NATS user key(s) of a cut-off host whose certificates are at ``min_epoch`` or later."""
+        """Revoke the NATS user key(s) of a cut-off host that could have held ``partition`` at ``host_epoch`` (C11, C12).
+
+        Selects the certificate at ``host_epoch`` plus any later certificate that was actually issued
+        with ``partition`` (before a post-release reassignment). A recovered host that rejoined
+        (``partitions=()``) or renewed without ``partition`` is never revoked by late or replayed
+        ``host_lost`` records. Each targeted key's ``revoke_until`` covers the latest expiry across
+        all unexpired certificates of ``runtime`` sharing that NATS key.
+        """
 
         ts = self.clock() if now is None else now
-        certs = await self._host_certificates_for_revocation(runtime, ts, min_epoch=min_epoch)
-        outcomes: list[RevocationOutcome] = []
-        seen_keys: set[str] = set()
-        for cert in certs:
-            if cert.nats_public_key in seen_keys:
+        all_certs = await self._host_certificates_for_revocation(
+            runtime, ts, min_epoch=1, include_epoch=host_epoch
+        )
+        skew = timedelta(seconds=CLOCK_SKEW_SECONDS)
+        targeted: list[HostCertificate] = []
+        for cert in all_certs:
+            if team is not None and team not in cert.teams:
                 continue
-            seen_keys.add(cert.nats_public_key)
-            if self._ledger.is_nats_revocation_confirmed(cert.nats_public_key):
+            if cert.membership_epoch == host_epoch:
+                targeted.append(cert)
+            elif cert.membership_epoch > host_epoch:
+                if released_at is not None and cert.issued_at > released_at + skew:
+                    continue
+                granted = self._ledger.certificate_partitions(cert.certificate_id)
+                if granted is not None:
+                    if partition in granted:
+                        targeted.append(cert)
+                elif released_at is not None:
+                    targeted.append(cert)
+
+        revoke_until_by_key = self._max_revoke_until_by_nats_key(all_certs)
+        target_keys = sorted({cert.nats_public_key for cert in targeted})
+        outcomes: list[RevocationOutcome] = []
+        for nats_key in target_keys:
+            revoke_until = revoke_until_by_key[nats_key]
+            if self._ledger.is_nats_revocation_confirmed(nats_key, min_revoke_until=revoke_until):
                 continue
             outcomes.append(
                 await self._revoke_nats_key(
-                    cert.nats_public_key,
-                    revoke_until=int(cert.expires_at.timestamp()),
+                    nats_key,
+                    revoke_until=revoke_until,
                     now=ts,
                 )
             )
         return outcomes
 
-    # -- NATS key lifecycle and host retirement (A5, A7, CR-1, S1, C01, C09) ----------------------
+    # -- NATS key lifecycle and host retirement (A5, A7, CR-1, S1, C01, C09, C11-C14) -----------
 
     @property
     def supports_instant_revocation(self) -> bool:
         return self._revoker.supports_instant_revocation
 
-    def is_nats_key_revocation_confirmed(self, nats_public_key: str) -> bool:
-        """Whether instant revocation of ``nats_public_key`` was confirmed on the NATS server (C01/C08)."""
+    def is_nats_key_revocation_confirmed(
+        self,
+        nats_public_key: str,
+        *,
+        min_revoke_until: Optional[int] = None,
+    ) -> bool:
+        """Whether instant revocation of ``nats_public_key`` was confirmed on the NATS server (C01/C08/C12)."""
 
-        return self._ledger.is_nats_revocation_confirmed(nats_public_key)
+        return self._ledger.is_nats_revocation_confirmed(nats_public_key, min_revoke_until=min_revoke_until)
 
     def register_bootstrap_nats_key(self, nats_public_key: str, *, now: Optional[datetime] = None) -> None:
         """Record a bootstrap bundle's NATS user key so no join or renewal can ever reuse it (S1)."""
@@ -456,6 +507,60 @@ class InstallationAuthority:
         public_key_bytes(nats_public_key)
         self._ledger.record_bootstrap_nats_key(nats_public_key)
         self._ledger.save(self.clock() if now is None else now)
+
+    @staticmethod
+    def _max_revoke_until_by_nats_key(certs: Iterable[HostCertificate]) -> dict[str, int]:
+        """Latest ``expires_at`` unix timestamp per ``nats_public_key`` across ``certs`` (C12)."""
+
+        by_key: dict[str, int] = {}
+        for cert in certs:
+            exp_ts = int(cert.expires_at.timestamp())
+            by_key[cert.nats_public_key] = max(by_key.get(cert.nats_public_key, 0), exp_ts)
+        return by_key
+
+    def _max_nats_key_revoke_until(
+        self,
+        runtime: str,
+        nats_public_key: str,
+        *,
+        fallback_expires_at: datetime,
+        now: datetime,
+    ) -> int:
+        """Latest ``expires_at`` unix timestamp across all unexpired certificates of ``runtime`` holding ``nats_public_key`` (C12)."""
+
+        best = int(fallback_expires_at.timestamp())
+        if self._trust is not None:
+            for cert in self._trust.store.certificates_of_runtime(self.installation, runtime):
+                if cert.nats_public_key == nats_public_key and cert.expires_at > now:
+                    best = max(best, int(cert.expires_at.timestamp()))
+        return best
+
+    def _unconfirmed_nats_revocations(self, now: datetime) -> dict[str, int]:
+        """Revoked NATS keys within their JWT validity window whose server confirmation is pending (C14)."""
+
+        if not self.supports_instant_revocation:
+            return {}
+        cutoff = int(now.timestamp()) - CLOCK_SKEW_SECONDS
+        return {
+            key: revoke_until
+            for key, revoke_until in self._ledger.revoked_nats_keys.items()
+            if revoke_until >= cutoff
+            and not self._ledger.is_nats_revocation_confirmed(key, min_revoke_until=revoke_until)
+        }
+
+    async def _reconcile_nats_revocations(self, now: datetime) -> None:
+        """Retry pushing unconfirmed NATS key revocations to the server (C14)."""
+
+        pending = self._unconfirmed_nats_revocations(now)
+        if not pending:
+            return
+        for key in sorted(pending):
+            revoke_until = pending[key]
+            if self._ledger.is_nats_revocation_confirmed(key, min_revoke_until=revoke_until):
+                continue
+            outcome = await self._revoke_nats_key(key, revoke_until=revoke_until, now=now)
+            if not outcome.revoked:
+                break
 
     async def _revoke_nats_key(
         self,
@@ -478,6 +583,8 @@ class InstallationAuthority:
             prune_before=prune_before,
         )
         if outcome.revoked:
+            for confirmed_key, confirmed_ts in outcome.confirmed_revocations.items():
+                self._ledger.record_confirmed_nats_revocation(confirmed_key, confirmed_ts)
             self._ledger.record_confirmed_nats_revocation(nats_public_key, outcome.revoked_at)
             self._ledger.save(now)
         return outcome
@@ -488,6 +595,7 @@ class InstallationAuthority:
         now: datetime,
         *,
         min_epoch: int = 1,
+        include_epoch: Optional[int] = None,
     ) -> list[HostCertificate]:
         """Unexpired certificates issued to ``runtime`` at ``min_epoch`` or later."""
 
@@ -496,9 +604,9 @@ class InstallationAuthority:
             for cert in self._trust.store.certificates_of_runtime(self.installation, runtime):
                 if cert.membership_epoch >= min_epoch and cert.expires_at > now:
                     found[cert.membership_epoch] = cert
-        if self._js is not None:
+        if self._js is not None and self._trust is not None:
             latest = await self._latest_certificate(runtime, now)
-            if latest is not None and self._trust is not None:
+            if latest is not None:
                 try:
                     self._trust.add(_encoded(latest), now=now)
                 except FrameRefused:
@@ -508,21 +616,55 @@ class InstallationAuthority:
                 )
                 if latest_cert is not None and latest_cert.membership_epoch >= min_epoch and latest_cert.expires_at > now:
                     found[latest_cert.membership_epoch] = latest_cert
+            if include_epoch is not None and include_epoch >= min_epoch and include_epoch not in found:
+                stored_epoch = await self._stored(
+                    CERTIFICATE, certificate_key(self.installation, runtime, include_epoch), now
+                )
+                if stored_epoch is not None:
+                    try:
+                        self._trust.add(_encoded(stored_epoch), now=now)
+                    except FrameRefused:
+                        pass
+                    epoch_cert = self._trust.store.host_certificate(self.installation, runtime, include_epoch)
+                    if epoch_cert is not None and epoch_cert.expires_at > now:
+                        found[epoch_cert.membership_epoch] = epoch_cert
         return [found[epoch] for epoch in sorted(found)]
 
     async def retire_host(
         self,
         runtime: str,
         *,
-        reason: str = "retired",
+        reason: str = "decommissioned",
         now: Optional[datetime] = None,
     ) -> list[RevocationOutcome]:
-        """Revoke a host's active certificate(s) in ``UA1_CERTS`` and revoke its NATS user key(s) (decision 100)."""
+        """Revoke a host's active certificate(s) in ``UA1_CERTS`` and revoke its NATS user key(s) (decision 100, C12, C13)."""
 
+        if reason not in _REVOCATION_REASONS:
+            raise ValueError(f"revocation reason must be one of {sorted(_REVOCATION_REASONS)}, got {reason!r}")
         assert self._trust is not None, "start() first"
         ts = self.clock() if now is None else now
         certs = await self._host_certificates_for_revocation(runtime, ts, min_epoch=1)
         if certs:
+            # revocations.schema.json: key_expires_at is the latest expires_at across every
+            # certificate of this runtime with this key_id, or of the installation with this public key.
+            max_key_expires: dict[str, datetime] = {}
+            for cert in certs:
+                cert_pub_raw = cert.public_key.public_bytes_raw()
+                matching = [
+                    *self._trust.store.certificates_of_runtime(self.installation, cert.runtime),
+                    *self._trust.store.certificates_with_key(self.installation, cert.key_id),
+                    *self._trust.store.certificates_with_public_key(self.installation, cert.public_key),
+                ]
+                latest_exp = cert.expires_at
+                for other in matching:
+                    if (
+                        (other.runtime == cert.runtime and other.key_id == cert.key_id)
+                        or other.public_key.public_bytes_raw() == cert_pub_raw
+                    ):
+                        if other.expires_at > latest_exp:
+                            latest_exp = other.expires_at
+                max_key_expires[cert.certificate_id] = latest_exp
+
             async with self._lock:
                 held = self._newest_revocations(await self._stored_data(revocations_key(self.installation)), ts)
                 entries = list(held["body"]["entries"]) if held else []
@@ -536,7 +678,7 @@ class InstallationAuthority:
                             "certificate_id": cert.certificate_id,
                             "runtime": cert.runtime,
                             "key_id": cert.key_id,
-                            "key_expires_at": format_timestamp(cert.expires_at),
+                            "key_expires_at": format_timestamp(max_key_expires[cert.certificate_id]),
                             "membership_epoch": cert.membership_epoch,
                             "revoked_at": format_timestamp(ts),
                             "reason": reason,
@@ -561,15 +703,12 @@ class InstallationAuthority:
                     if self._own:
                         self._publish_bundle()
         outcomes: list[RevocationOutcome] = []
-        seen_keys: set[str] = set()
-        for cert in certs:
-            if cert.nats_public_key in seen_keys:
-                continue
-            seen_keys.add(cert.nats_public_key)
+        revoke_until_by_key = self._max_revoke_until_by_nats_key(certs)
+        for nats_key, revoke_until in sorted(revoke_until_by_key.items()):
             outcomes.append(
                 await self._revoke_nats_key(
-                    cert.nats_public_key,
-                    revoke_until=int(cert.expires_at.timestamp()),
+                    nats_key,
+                    revoke_until=revoke_until,
                     now=ts,
                 )
             )
@@ -752,6 +891,8 @@ class InstallationAuthority:
             (self._revocations_due(now), self._sign_revocations, "revocations_resign_failed", next_check),
             (self._own_certificate_due(now), self._renew_own_certificate, "authority_certificate_renewal_failed",
              next_check),
+            (bool(self._unconfirmed_nats_revocations(now)), self._reconcile_nats_revocations,
+             "nats_revocation_reconcile_failed", next_check),
             (self._forget_due(now), self.forget, "authority_forget_failed",
              f"in {int(FORGET_INTERVAL.total_seconds() // 3600)} hours"),
         )
@@ -826,7 +967,11 @@ class InstallationAuthority:
             if document.get("record") != CERTIFICATE or now - issued < kept or self._listed(body):
                 continue
             await bucket.delete(key)
+            if isinstance(body, Mapping) and body.get("certificate_id"):
+                self._ledger.forget_certificate_partitions(str(body["certificate_id"]))
             deleted += 1
+        if deleted:
+            self._ledger.save(now)
         self.logger.info("The authority forgot old trust records. event=authority_records_forgotten forgotten=%s "
                          "deleted=%s", forgotten, deleted)
         return deleted
@@ -995,6 +1140,7 @@ class InstallationAuthority:
         record = self.certificate_record(request, epoch=epoch, revocation_epoch=revocation_epoch, issued=now,
                                          replaces=replaces)
         self._ledger.take_epoch(request.runtime, epoch)
+        self._ledger.record_certificate_partitions(str(record["body"]["certificate_id"]), partitions)
         self._trust.add(_encoded(record), now=now)
         if renewal is not None:
             self._ledger.store_renewal(
@@ -1373,11 +1519,22 @@ class InstallationAuthority:
                 ),
             }
 
+        bootstrap_revoke_until: Optional[int] = None
+        if bootstrap_key:
+            if expected is not None and expected.bootstrap_nats_expires_at is not None:
+                bootstrap_revoke_until = int(expected.bootstrap_nats_expires_at.timestamp())
+            else:
+                # Conservative upper bound when no explicit bootstrap JWT expiry was recorded (C12).
+                bootstrap_revoke_until = max(
+                    int((now + CERTIFICATE_LIFETIME).timestamp()),
+                    int(now.timestamp()) + self.credential_lifetime_seconds + CLOCK_SKEW_SECONDS,
+                )
+
         async def _revoke_bootstrap_after_join() -> None:
-            if bootstrap_key:
+            if bootstrap_key and bootstrap_revoke_until is not None:
                 await self._revoke_nats_key(
                     bootstrap_key,
-                    revoke_until=int(now.timestamp()) + self.credential_lifetime_seconds + CLOCK_SKEW_SECONDS,
+                    revoke_until=bootstrap_revoke_until,
                     now=now,
                 )
 
@@ -1385,7 +1542,15 @@ class InstallationAuthority:
             reply: dict[str, Any] = {"outcome": "ok", "certificate": stored}
             if connection is not None:
                 reply["connection"] = connection
-            if bootstrap_key:
+            if (
+                bootstrap_key
+                and bootstrap_revoke_until is not None
+                and not self._ledger.is_nats_revocation_confirmed(
+                    bootstrap_key, min_revoke_until=bootstrap_revoke_until
+                )
+            ):
+                self._ledger.record_revoked_nats_key(bootstrap_key, bootstrap_revoke_until)
+                self._ledger.save(now)
                 pending = self._schedule_post_flush(deferred, _revoke_bootstrap_after_join)
                 if pending is not None:
                     await pending
@@ -1406,7 +1571,15 @@ class InstallationAuthority:
         reply = {"outcome": "ok", "certificate": record}
         if connection is not None:
             reply["connection"] = connection
-        if bootstrap_key:
+        if (
+            bootstrap_key
+            and bootstrap_revoke_until is not None
+            and not self._ledger.is_nats_revocation_confirmed(
+                bootstrap_key, min_revoke_until=bootstrap_revoke_until
+            )
+        ):
+            self._ledger.record_revoked_nats_key(bootstrap_key, bootstrap_revoke_until)
+            self._ledger.save(now)
             pending = self._schedule_post_flush(deferred, _revoke_bootstrap_after_join)
             if pending is not None:
                 await pending
@@ -1519,19 +1692,21 @@ class InstallationAuthority:
                     reply["connection"] = fresh_conn
 
         # If the old NATS key rotation wasn't confirmed revoked yet (e.g. transient NATS error), retry after flush.
-        if (
-            stored_nats_key != certificate.nats_public_key
-            and not self._ledger.is_nats_revocation_confirmed(certificate.nats_public_key)
-        ):
+        if stored_nats_key != certificate.nats_public_key:
             old_key = certificate.nats_public_key
-            old_exp = int(certificate.expires_at.timestamp())
+            old_exp = self._max_nats_key_revoke_until(
+                certificate.runtime,
+                old_key,
+                fallback_expires_at=certificate.expires_at,
+                now=now,
+            )
+            if not self._ledger.is_nats_revocation_confirmed(old_key, min_revoke_until=old_exp):
+                async def _retry_revoke() -> None:
+                    await self._revoke_nats_key(old_key, revoke_until=old_exp, now=now)
 
-            async def _retry_revoke() -> None:
-                await self._revoke_nats_key(old_key, revoke_until=old_exp, now=now)
-
-            pending = self._schedule_post_flush(deferred, _retry_revoke)
-            if pending is not None:
-                await pending
+                pending = self._schedule_post_flush(deferred, _retry_revoke)
+                if pending is not None:
+                    await pending
         return reply
 
     async def _renew(
@@ -1596,9 +1771,13 @@ class InstallationAuthority:
                                 certificate.runtime, certificate.membership_epoch, sorted(certificate.teams), refusal)
             return {"outcome": "not_allowed", "message": refusal}
 
-        owned_by_team, released_by_team = await self._read_host_partition_ownership(
-            certificate.runtime, certificate.teams, now
-        )
+        # Only partition-owning roles can hold or release partition ownership records (C15).
+        if certificate.roles & _PARTITION_OWNING_ROLES:
+            owned_by_team, released_by_team = await self._read_host_partition_ownership(
+                certificate.runtime, certificate.teams, now
+            )
+        else:
+            owned_by_team, released_by_team = {}, {}
         granted_partitions = self._validate_requested_partitions(
             certificate,
             body.get("partitions"),
@@ -1688,7 +1867,12 @@ class InstallationAuthority:
 
         if target_nats_key != certificate.nats_public_key:
             old_key = certificate.nats_public_key
-            old_exp = int(certificate.expires_at.timestamp())
+            old_exp = self._max_nats_key_revoke_until(
+                certificate.runtime,
+                old_key,
+                fallback_expires_at=certificate.expires_at,
+                now=now,
+            )
             # Persist the permanent ban before replying so no concurrent or post-crash call reissues old_key.
             self._ledger.record_revoked_nats_key(old_key, old_exp)
             self._ledger.save(now)

@@ -271,6 +271,35 @@ def discard_pending_nats_key(layout: InstanceLayout, runtime: str) -> HostKeys:
     return load_host_keys(layout, runtime)
 
 
+def rotate_nats_key(layout: InstanceLayout, runtime: str, *, prefer_pending: bool = True) -> HostKeys:
+    """Replace the stored ``nats_key`` while preserving ``application_key`` (C16).
+
+    Used when ``host.join`` refuses the stored ``nats_key`` as revoked (for example after a crash
+    between staging ``pending_nats_key`` and promoting it, or after a cut-off host's NATS key was
+    revoked while offline). When ``prefer_pending`` is true and a valid ``pending_nats_key`` is
+    staged on disk, that staged key is promoted; otherwise a fresh NATS user seed is generated.
+    """
+
+    path = _host_keys_path(layout, runtime)
+    document = _read_private(path)
+    if document.get("runtime") != runtime:
+        raise KeyFileError(f"Key file {path} belongs to {document.get('runtime')!r}, not {runtime!r}.")
+    if prefer_pending and isinstance(document.get("pending_nats_key"), dict) and "seed" in document["pending_nats_key"]:
+        try:
+            pending_seed = nkeys.seed_bytes(str(document["pending_nats_key"]["seed"]))
+        except ValueError:
+            pending_seed = None
+        if pending_seed is not None:
+            document["nats_key"] = {"seed": nkeys.user_seed(pending_seed)}
+            document.pop("pending_nats_key", None)
+            _write_key_document(path, document)
+            return load_host_keys(layout, runtime)
+    document["nats_key"] = {"seed": nkeys.user_seed(secrets.token_bytes(32))}
+    document.pop("pending_nats_key", None)
+    _write_key_document(path, document)
+    return load_host_keys(layout, runtime)
+
+
 def ensure_authority_keys(layout: InstanceLayout, installation: str) -> tuple[AuthorityKeys, bool]:
     """The installation authority's key, created when missing; only the launcher calls this.
 

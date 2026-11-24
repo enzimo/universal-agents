@@ -39,6 +39,7 @@ class RevocationOutcome:
     revoked: bool
     revoked_at: int
     detail: str = ""
+    confirmed_revocations: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -288,6 +289,7 @@ class OperatorModeRevoker:
                 revoked=True,
                 revoked_at=merged[nats_public_key],
                 detail=detail,
+                confirmed_revocations=dict(merged),
             )
 
 

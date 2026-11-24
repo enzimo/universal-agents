@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Optional, Protocol
 
 from pydantic import TypeAdapter, ValidationError
@@ -53,6 +54,7 @@ from custom_messages.wire.models import AgentId
 from custom_messages.wire.partitions import RELEASED
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import PARTITION_OWNER, PLACEMENT, VerifiedRecord
+from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.state_records import require_record_key
 from installation_authority.queues import AgentBacklog
 
@@ -320,16 +322,29 @@ class PlacedConsumers:
         return True
 
 
+@dataclass(frozen=True)
+class HostLostRelease:
+    """Verified ``host_lost`` partition release observed in ``UA1_PLACEMENT`` (C01, C11)."""
+
+    team: str
+    partition: int
+    host: str
+    host_epoch: int
+    key: str
+    sequence: int
+    issued_at: datetime
+
+
 class ReleasedPartitionWatcher:
     """Watches ``<team>.partition.*`` in ``UA1_PLACEMENT`` and triggers NATS key revocation
-    for verified ``host_lost`` released records (C01)."""
+    for verified ``host_lost`` released records (C01, C11)."""
 
     def __init__(
         self,
         records: PlacementRecords,
         *,
         verify: Callable[[bytes], VerifiedRecord],
-        on_host_lost: Callable[[str, int], Awaitable[Any]],
+        on_host_lost: Callable[[HostLostRelease], Awaitable[Any]],
         teams: Iterable[str],
         logger: logging.Logger = _LOGGER,
         retry_seconds: float = RETRY_SECONDS,
@@ -340,6 +355,7 @@ class ReleasedPartitionWatcher:
         self.teams = tuple(sorted(set(teams)))
         self._logger = logger
         self._retry_seconds = retry_seconds
+        self._handled_releases: dict[str, int] = {}
 
     async def run(self, stop: asyncio.Event) -> None:
         if not self.teams:
@@ -394,7 +410,20 @@ class ReleasedPartitionWatcher:
             return
         if body.state != RELEASED or body.reason != "host_lost":
             return
-        await self._on_host_lost(str(body.host), int(body.host_epoch))
+        sequence = int(verified.document.sequence)
+        if self._handled_releases.get(key, -1) >= sequence:
+            return
+        release = HostLostRelease(
+            team=team,
+            partition=int(body.partition),
+            host=str(body.host),
+            host_epoch=int(body.host_epoch),
+            key=key,
+            sequence=sequence,
+            issued_at=parse_timestamp(verified.document.issued_at),
+        )
+        await self._on_host_lost(release)
+        self._handled_releases[key] = sequence
 
 
 async def _stopped_within(stop: asyncio.Event, seconds: float) -> bool:

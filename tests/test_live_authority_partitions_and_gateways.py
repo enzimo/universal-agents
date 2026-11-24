@@ -951,3 +951,338 @@ async def test_several_gateways_join_with_scoped_team_and_route_credentials(tmp_
             await flush_fully(alpha_nc)
             await asyncio.sleep(0.1)
             assert any("permissions violation" in str(err).lower() for err in errors), errors
+
+
+@pytest.mark.asyncio
+async def test_c11_c12_c13_c16_live_recovery_pruning_default_retire_and_host_start(tmp_path: Path) -> None:
+    """Live operator-mode nats-server 2.15.1 verification for C11, C12, C13, and C16:
+    - C11: Cut-off host with two host_lost partitions recovers to K2; second host_lost event and watch
+      replay do NOT revoke K2.
+    - C12 + C13: Multi-epoch shared NATS key uses max expires_at on default retire_host(runtime)
+      (reason='decommissioned', max key_expires_at) and survives prune_before past epoch 1's expiry;
+      longer-lived bootstrap key with bootstrap_nats_expires_at survives prune_before past
+      credential_lifetime_seconds.
+    - C16: MessageHost.start() recovers from a revoked stored nats_key both by promoting a staged
+      pending_nats_key and by generating a fresh NATS user key when none is staged.
+    """
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.protocol1.state_records import StateRecords
+    from installation_authority.placements import ReleasedPartitionWatcher
+
+    nats_dir = tmp_path / "nats"
+    nats_dir.mkdir()
+    with _operator_nats_server(nats_dir) as server:
+        layout = InstanceLayout.at(tmp_path / "instance")
+        clock = _Clock(utc_now())
+
+        ts_profile = HostProfile("team-services", (TEAM_A,), ("team_services",), (), 0)
+        w1_profile = HostProfile("worker-recover", (TEAM_A,), ("worker_host",), ("helper",), 4)
+        w2_profile = HostProfile("worker-shared-key", (TEAM_A,), ("worker_host",), ("helper",), 4)
+        w3_profile = HostProfile("worker-long-boot", (TEAM_A,), ("worker_host",), ("helper",), 4)
+        w4_profile = HostProfile("worker-crash-pending", (TEAM_A,), ("worker_host",), ("helper",), 4)
+        w5_profile = HostProfile("worker-offline-revoked", (TEAM_A,), ("worker_host",), ("helper",), 4)
+
+        auth_keys, _ = host_keys.ensure_authority_keys(layout, INSTALLATION)
+        host_keys.ensure_host_keys(layout, AUTHORITY_RUNTIME)
+        ts_keys, _ = host_keys.ensure_host_keys(layout, ts_profile.runtime)
+        w1_keys, _ = host_keys.ensure_host_keys(layout, w1_profile.runtime)
+        w2_keys, _ = host_keys.ensure_host_keys(layout, w2_profile.runtime)
+        w3_keys, _ = host_keys.ensure_host_keys(layout, w3_profile.runtime)
+        w4_keys, _ = host_keys.ensure_host_keys(layout, w4_profile.runtime)
+        w5_keys, _ = host_keys.ensure_host_keys(layout, w5_profile.runtime)
+
+        long_boot_key = NatsSigningKey.generate("user")
+        long_boot_exp = clock() + timedelta(seconds=3600)
+        long_boot_perms = roles_permissions(
+            [role_permissions("joining_host")],
+            HostPlacement(w3_profile.runtime, (), installation=INSTALLATION),
+            partition_count=PARTITIONS,
+        )
+        long_boot_jwt = encode_user_jwt(
+            server.installation_signing,
+            server.installation_account.public_key,
+            long_boot_key.public_key,
+            f"{w3_profile.runtime}-bootstrap",
+            long_boot_perms,
+            issued_at=int(clock().timestamp()),
+            expires_at=int(long_boot_exp.timestamp()),
+        )
+
+        write_expected_hosts(
+            layout.trust_expected_hosts_path,
+            {
+                ts_profile.runtime: message_hosts.expected_host(layout, ts_profile),
+                w1_profile.runtime: message_hosts.expected_host(layout, w1_profile),
+                w2_profile.runtime: message_hosts.expected_host(layout, w2_profile),
+                w3_profile.runtime: message_hosts.expected_host(
+                    layout,
+                    w3_profile,
+                    bootstrap_nats_public_key=long_boot_key.public_key,
+                    bootstrap_nats_expires_at=long_boot_exp,
+                ),
+                w4_profile.runtime: message_hosts.expected_host(layout, w4_profile),
+                w5_profile.runtime: message_hosts.expected_host(layout, w5_profile),
+            },
+        )
+        write_bundle(
+            layout.trust_bootstrap_path,
+            BootstrapBundle(
+                INSTALLATION, ((auth_keys.key_id, auth_keys.public_key_text),), partitions=PARTITIONS
+            ),
+        )
+
+        async with AsyncExitStack() as stack:
+            sys_key, sys_jwt = server.issue_system_user()
+            sys_nc = await nats.connect(server.url, **sys_key.login_options(sys_jwt), allow_reconnect=False)
+            stack.push_async_callback(sys_nc.close)
+
+            auth_nk, auth_nj = server.issue_host_user(AUTHORITY_RUNTIME)
+            auth_nc = await nats.connect(
+                server.url,
+                **auth_nk.login_options(auth_nj),
+                inbox_prefix=f"_INBOX.{AUTHORITY_RUNTIME}".encode(),
+                allow_reconnect=False,
+            )
+            stack.push_async_callback(auth_nc.close)
+
+            revoker = OperatorModeRevoker(server.operator_signing, server.base_claims, sys_nc)
+            authority = InstallationAuthority(
+                layout,
+                auth_keys,
+                host_keys.load_host_keys(layout, AUTHORITY_RUNTIME),
+                partitions=PARTITIONS,
+                queues=TEST_QUEUE_LIMITS,
+                clock=clock,
+                credential_lifetime_seconds=300,
+                nats_account_public_key=server.installation_account.public_key,
+                nats_account_signing_key=server.installation_signing,
+                revoker=revoker,
+            )
+            await authority.start(auth_nc, teams=[TEAM_A])
+            stop_follow = asyncio.Event()
+            follow_task = asyncio.create_task(authority.follow_placements(stop_follow))
+
+            try:
+                # Join team_services so it can write verified partition_owner records.
+                ts_uk, ts_uj = server.issue_host_user(ts_profile.runtime)
+                ts_nc = await nats.connect(
+                    server.url,
+                    **ts_uk.login_options(ts_uj),
+                    inbox_prefix=f"_INBOX.{ts_profile.runtime}".encode(),
+                    allow_reconnect=False,
+                )
+                stack.push_async_callback(ts_nc.close)
+                ts_trust = _host_trust(layout, ts_profile.runtime, clock())
+                ts_cert = await join(ts_nc, ts_keys, ts_trust, ts_profile, clock=clock)
+                ts_identity = HostIdentity(ts_keys, ts_cert)
+
+                # --- C11: cut-off host with two partitions recovers to K2; second host_lost & replay spare K2 ---
+                w1_join_k, w1_join_j = server.issue_host_user("w1-join")
+                w1_join_nc = await nats.connect(
+                    server.url,
+                    **w1_join_k.login_options(w1_join_j),
+                    inbox_prefix=f"_INBOX.{w1_profile.runtime}".encode(),
+                    allow_reconnect=False,
+                )
+                stack.push_async_callback(w1_join_nc.close)
+                w1_trust = _host_trust(layout, w1_profile.runtime, clock())
+                w1_r1 = await _join_raw(w1_join_nc, w1_keys, w1_trust, w1_profile, clock=clock)
+                k1_signer = NatsSigningKey.from_private_key(
+                    "user", Ed25519PrivateKey.from_private_bytes(w1_keys.nats_seed)
+                )
+                k1_disconnected = asyncio.Event()
+
+                async def on_k1_disc() -> None:
+                    k1_disconnected.set()
+
+                k1_nc = await nats.connect(
+                    server.url,
+                    **k1_signer.login_options(w1_r1["connection"]["jwt"]),
+                    allow_reconnect=False,
+                    disconnected_cb=on_k1_disc,
+                )
+                stack.push_async_callback(k1_nc.close)
+                await flush_fully(k1_nc)
+
+                # Release partition 0 as host_lost at host_epoch=1 -> revokes K1.
+                await _write_partition_owner(
+                    ts_nc, ts_identity, team=TEAM_A, partition=0, state=RELEASED,
+                    host=w1_profile.runtime, host_epoch=1, reason="host_lost", now=clock(), sequence=1
+                )
+                await asyncio.wait_for(k1_disconnected.wait(), timeout=5.0)
+                for _ in range(50):
+                    if authority.is_nats_key_revocation_confirmed(k1_signer.public_key):
+                        break
+                    await asyncio.sleep(0.05)
+                assert authority.is_nats_key_revocation_confirmed(k1_signer.public_key)
+
+                # Worker-1 recovers with a fresh NATS key K2 -> epoch 2 with partitions=().
+                w1_keys_k2 = host_keys.rotate_nats_key(layout, w1_profile.runtime, prefer_pending=False)
+                w1_r2 = await _join_raw(w1_join_nc, w1_keys_k2, w1_trust, w1_profile, clock=clock)
+                assert int(w1_r2["certificate"]["body"]["membership_epoch"]) == 2
+                k2_signer = NatsSigningKey.from_private_key(
+                    "user", Ed25519PrivateKey.from_private_bytes(w1_keys_k2.nats_seed)
+                )
+                k2_disconnected = asyncio.Event()
+
+                async def on_k2_disc() -> None:
+                    k2_disconnected.set()
+
+                k2_nc = await nats.connect(
+                    server.url,
+                    **k2_signer.login_options(w1_r2["connection"]["jwt"]),
+                    allow_reconnect=False,
+                    disconnected_cb=on_k2_disc,
+                )
+                stack.push_async_callback(k2_nc.close)
+                await flush_fully(k2_nc)
+
+                # Now partition 1's host_lost record arrives with host_epoch=1!
+                await _write_partition_owner(
+                    ts_nc, ts_identity, team=TEAM_A, partition=1, state=RELEASED,
+                    host=w1_profile.runtime, host_epoch=1, reason="host_lost", now=clock(), sequence=1
+                )
+                await asyncio.sleep(0.3)
+
+                # Also simulate a fresh watcher replaying partition 0's still-released record after restart/reconnect.
+                assert authority._trust is not None and authority.live is not None
+                replay_watcher = ReleasedPartitionWatcher(
+                    StateRecords(authority._js, lambda: authority.live.identity, authority._trust),
+                    verify=lambda raw: authority._trust.store.verify(raw, record="partition_owner", now=clock()),
+                    on_host_lost=lambda rel: authority.revoke_cut_off_host_nats_key(
+                        rel.host, host_epoch=rel.host_epoch, partition=rel.partition, team=rel.team, released_at=rel.issued_at
+                    ),
+                    teams=[TEAM_A],
+                )
+                bucket = await auth_nc.jetstream().key_value("UA1_PLACEMENT")
+                p0_entry = await bucket.get(f"{TEAM_A}.partition.0")
+                await replay_watcher._handle_record(TEAM_A, f"{TEAM_A}.partition.0", p0_entry.value)
+                await flush_fully(k2_nc)
+                assert not k2_disconnected.is_set()
+                assert not authority._ledger.is_nats_key_revoked(k2_signer.public_key)
+
+                # --- C16: MessageHost.start() recovers when stored nats_key is revoked ---
+                # Case 1: pending_nats_key staged before crash, old nats_key already revoked in ledger.
+                w4_staged = host_keys.stage_pending_nats_key(layout, w4_profile.runtime)
+                assert w4_staged.pending_nats_public_key is not None
+                await authority._revoke_nats_key(
+                    w4_keys.nats_public_key, revoke_until=int(clock().timestamp()) + 600, now=clock()
+                )
+                w4_nc_k, w4_nc_j = server.issue_host_user("w4-start")
+                w4_nc = await nats.connect(
+                    server.url,
+                    **w4_nc_k.login_options(w4_nc_j),
+                    inbox_prefix=f"_INBOX.{w4_profile.runtime}".encode(),
+                    allow_reconnect=False,
+                )
+                stack.push_async_callback(w4_nc.close)
+                w4_host = MessageHost(layout=layout, profile=w4_profile, nc=w4_nc, clock=clock)
+                w4_live = await w4_host.start(report=False)
+                assert w4_live.identity.certificate.nats_public_key == w4_staged.pending_nats_public_key
+                assert w4_live.identity.keys.key_id == w4_keys.key_id
+                assert host_keys.load_host_keys(layout, w4_profile.runtime).pending_nats_public_key is None
+
+                # Case 2: no pending_nats_key staged, stored nats_key was revoked while offline.
+                await authority._revoke_nats_key(
+                    w5_keys.nats_public_key, revoke_until=int(clock().timestamp()) + 600, now=clock()
+                )
+                w5_nc_k, w5_nc_j = server.issue_host_user("w5-start")
+                w5_nc = await nats.connect(
+                    server.url,
+                    **w5_nc_k.login_options(w5_nc_j),
+                    inbox_prefix=f"_INBOX.{w5_profile.runtime}".encode(),
+                    allow_reconnect=False,
+                )
+                stack.push_async_callback(w5_nc.close)
+                w5_host = MessageHost(layout=layout, profile=w5_profile, nc=w5_nc, clock=clock)
+                w5_live = await w5_host.start(report=False)
+                assert w5_live.identity.certificate.nats_public_key != w5_keys.nats_public_key
+                assert w5_live.identity.keys.key_id == w5_keys.key_id
+                assert host_keys.load_host_keys(layout, w5_profile.runtime).nats_public_key == (
+                    w5_live.identity.certificate.nats_public_key
+                )
+
+                # --- C12 + C13: multi-epoch shared key & longer-lived bootstrap key survive prune_before ---
+                # Worker-3 joins over long_boot_key (expires +3600s > credential_lifetime_seconds=300s).
+                w3_boot_disc = asyncio.Event()
+
+                async def on_w3_boot_disc() -> None:
+                    w3_boot_disc.set()
+
+                w3_boot_nc = await nats.connect(
+                    server.url,
+                    **long_boot_key.login_options(long_boot_jwt),
+                    inbox_prefix=f"_INBOX.{w3_profile.runtime}.join".encode(),
+                    allow_reconnect=False,
+                    disconnected_cb=on_w3_boot_disc,
+                )
+                stack.push_async_callback(w3_boot_nc.close)
+                await _join_raw(w3_boot_nc, w3_keys, _host_trust(layout, w3_profile.runtime, clock()), w3_profile, clock=clock)
+                await asyncio.wait_for(w3_boot_disc.wait(), timeout=3.0)
+                await asyncio.wait_for(authority.live.drain(), timeout=3.0)
+                assert authority.is_nats_key_revocation_confirmed(long_boot_key.public_key)
+
+                # Worker-2 joins at epoch 1 with K_w2, then renews at epoch 2 keeping K_w2 (later expires_at).
+                w2_join_k, w2_join_j = server.issue_host_user("w2-join")
+                w2_join_nc = await nats.connect(
+                    server.url,
+                    **w2_join_k.login_options(w2_join_j),
+                    inbox_prefix=f"_INBOX.{w2_profile.runtime}".encode(),
+                    allow_reconnect=False,
+                )
+                stack.push_async_callback(w2_join_nc.close)
+                w2_trust = _host_trust(layout, w2_profile.runtime, clock())
+                await _join_raw(w2_join_nc, w2_keys, w2_trust, w2_profile, clock=clock)
+                w2_cert1 = w2_trust.store.host_certificate(INSTALLATION, w2_profile.runtime, 1)
+                assert w2_cert1 is not None
+                w2_live = LiveHost(w2_join_nc, HostIdentity(w2_keys, w2_cert1), w2_trust, clock=clock)
+
+                # Advance authority clock by 500s (> credential_lifetime_seconds + 2*CLOCK_SKEW_SECONDS) and renew w2 keeping K_w2.
+                clock.now = clock.now + timedelta(seconds=500)
+                w2_r2 = await w2_live.request(
+                    "host.renew",
+                    {
+                        "renew_id": "renew-w2-same-key",
+                        "certificate_id": w2_cert1.certificate_id,
+                        "membership_epoch": 1,
+                        "profile_sha256": w2_profile.digest(),
+                        "contract_sha256": CONTRACT_SHA256,
+                    },
+                    AUTHORITY_AUDIENCE,
+                    team="_install",
+                )
+                assert w2_r2.raw["body"]["outcome"] == "ok"
+                w2_cert2_exp = parse_timestamp(w2_r2.raw["body"]["certificate"]["body"]["expires_at"])
+                w2_cert2_jwt = w2_r2.raw["body"]["connection"]["jwt"]
+
+                # C13: retire_host(runtime) with DEFAULT reason='decommissioned' succeeds and revokes w2's key through cert2's expires_at.
+                retire_outcomes = await authority.retire_host(w2_profile.runtime)
+                assert len(retire_outcomes) == 1 and retire_outcomes[0].revoked is True
+                assert retire_outcomes[0].revoked_at == int(w2_cert2_exp.timestamp())
+                w2_entries = [e for e in authority._revocations["body"]["entries"] if e["runtime"] == w2_profile.runtime]
+                assert len(w2_entries) == 2
+                assert all(e["reason"] == "decommissioned" for e in w2_entries)
+                assert all(e["key_expires_at"] == w2_r2.raw["body"]["certificate"]["body"]["expires_at"] for e in w2_entries)
+
+                # Because clock is now +500s (> 300 + 2*CLOCK_SKEW), prune_before ran during retire_host;
+                # long_boot_key (expires +3600s) must STILL be revoked on nats-server!
+                assert long_boot_key.public_key in revoker.applied_revocations
+                with pytest.raises(Exception, match="Authorization Violation"):
+                    await nats.connect(server.url, **long_boot_key.login_options(long_boot_jwt), allow_reconnect=False)
+
+                # Trigger another pruning revocation at cert1.expires_at + 120s (< cert2.expires_at):
+                # w2's shared NATS key must STILL remain in revoker.applied_revocations and blocked on nats-server!
+                dummy_key = NatsSigningKey.generate("user").public_key
+                prune_time = w2_cert1.expires_at + timedelta(seconds=120)
+                await authority._revoke_nats_key(dummy_key, revoke_until=int(prune_time.timestamp()) + 300, now=prune_time)
+                assert w2_keys.nats_public_key in revoker.applied_revocations
+                w2_user_key = NatsSigningKey.from_private_key(
+                    "user", Ed25519PrivateKey.from_private_bytes(w2_keys.nats_seed)
+                )
+                with pytest.raises(Exception, match="Authorization Violation"):
+                    await nats.connect(server.url, **w2_user_key.login_options(w2_cert2_jwt), allow_reconnect=False)
+            finally:
+                stop_follow.set()
+                await asyncio.gather(follow_task, return_exceptions=True)

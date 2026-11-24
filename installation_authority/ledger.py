@@ -33,7 +33,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.kinds import AUTHORITY_TOKEN_MAX_SECONDS
@@ -74,6 +74,8 @@ class IssueLedger:
         self._confirmed_nats_revocations: dict[str, int] = {}
         # Permanent record of bootstrap bundle NATS user keys (S1): never accepted as a host's own key.
         self._bootstrap_nats_keys: set[str] = set()
+        # Granted partitions recorded per issued certificate_id (C11): distinguishes post-release recovery certs.
+        self._certificate_partitions: dict[str, tuple[int, ...]] = {}
 
     @classmethod
     def open(cls, folder: Path, installation: str, *, logger: logging.Logger = _LOGGER) -> "IssueLedger":
@@ -114,9 +116,15 @@ class IssueLedger:
             ledger._confirmed_nats_revocations = {str(k): int(v) for k, v in raw_confirmed.items()}
             raw_bootstrap = document.get("bootstrap_nats_keys") or []
             ledger._bootstrap_nats_keys = {str(k) for k in raw_bootstrap}
+            raw_cert_parts = document.get("certificate_partitions") or {}
+            ledger._certificate_partitions = {
+                str(cert_id): tuple(sorted(set(int(p) for p in parts)))
+                for cert_id, parts in raw_cert_parts.items()
+            }
         except (KeyError, TypeError, ValueError, AttributeError) as error:
             ledger._epochs, ledger._renewals, ledger._revocations = {}, {}, None
             ledger._revoked_nats_keys, ledger._confirmed_nats_revocations, ledger._bootstrap_nats_keys = {}, {}, set()
+            ledger._certificate_partitions = {}
             ledger._set_aside(error)
         return ledger
 
@@ -196,8 +204,17 @@ class IssueLedger:
             self._revoked_nats_keys.get(nats_public_key, 0), int(revoke_until)
         )
 
-    def is_nats_revocation_confirmed(self, nats_public_key: str) -> bool:
-        return nats_public_key in self._confirmed_nats_revocations
+    def is_nats_revocation_confirmed(
+        self,
+        nats_public_key: str,
+        *,
+        min_revoke_until: Optional[int] = None,
+    ) -> bool:
+        confirmed_until = self._confirmed_nats_revocations.get(nats_public_key)
+        if confirmed_until is None:
+            return False
+        required = int(min_revoke_until) if min_revoke_until is not None else self._revoked_nats_keys.get(nats_public_key, 0)
+        return confirmed_until >= required
 
     def record_confirmed_nats_revocation(self, nats_public_key: str, revoke_until: int) -> None:
         ts = int(revoke_until)
@@ -205,6 +222,19 @@ class IssueLedger:
         self._confirmed_nats_revocations[nats_public_key] = max(
             self._confirmed_nats_revocations.get(nats_public_key, 0), ts
         )
+
+    def record_certificate_partitions(self, certificate_id: str, partitions: Iterable[int]) -> None:
+        """Record the exact partition list granted with ``certificate_id`` (including ``()`` on join)."""
+
+        self._certificate_partitions[str(certificate_id)] = tuple(sorted(set(int(p) for p in partitions)))
+
+    def certificate_partitions(self, certificate_id: str) -> Optional[tuple[int, ...]]:
+        """The partitions granted with ``certificate_id``, or ``None`` if not recorded."""
+
+        return self._certificate_partitions.get(str(certificate_id))
+
+    def forget_certificate_partitions(self, certificate_id: str) -> None:
+        self._certificate_partitions.pop(str(certificate_id), None)
 
     @property
     def bootstrap_nats_keys(self) -> frozenset[str]:
@@ -247,4 +277,8 @@ class IssueLedger:
             document["confirmed_nats_revocations"] = dict(sorted(self._confirmed_nats_revocations.items()))
         if self._bootstrap_nats_keys:
             document["bootstrap_nats_keys"] = sorted(self._bootstrap_nats_keys)
+        if self._certificate_partitions:
+            document["certificate_partitions"] = {
+                cert_id: list(parts) for cert_id, parts in sorted(self._certificate_partitions.items())
+            }
         write_private_file(self.path, json.dumps(document, sort_keys=True).encode())

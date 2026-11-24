@@ -69,6 +69,7 @@ from custom_transport.protocol1.bootstrap import read_bundle
 from custom_transport.protocol1.host_keys import (
     load_host_keys,
     promote_pending_nats_key,
+    rotate_nats_key,
     stage_pending_nats_key,
 )
 from custom_transport.protocol1.identity import HostIdentity
@@ -80,7 +81,7 @@ from custom_transport.protocol1.joining import (
     certificate_agent_types,
     join,
 )
-from custom_transport.protocol1.live import LiveHost, utc_now
+from custom_transport.protocol1.live import LiveHost, RequestRefused, utc_now
 from custom_transport.protocol1.state_records import StateRecords, rising_sequence, require_record_key
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from release_version import release_version
@@ -188,8 +189,7 @@ class MessageHost:
         # reply may name a certificate the host reads from UA1_CERTS (fetch_trust).
         self.records = StateRecords.on_connection(self.nc, lambda: self.identity, trust, fetch_trust=self.fetch_trust)
         try:
-            certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
-                                     fetch_trust=self.fetch_trust)
+            certificate, keys = await self._join_recovering_revoked_nats_key(keys, trust)
         except JoinRefused as refused:
             if refused.outcome == "protocol_mismatch":
                 self.learned_other_contract(refused.accepted_contract_sha256, "join")
@@ -201,6 +201,49 @@ class MessageHost:
         if report:
             await self.publish_liveness("accepting")
         return self.live
+
+    async def _join_recovering_revoked_nats_key(
+        self,
+        keys: Any,
+        trust: PersistentTrustStore,
+    ) -> tuple[HostCertificate, Any]:
+        """Join the installation, rotating a revoked stored NATS user key once (or promoting pending first) (C16)."""
+
+        try:
+            certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
+                                     fetch_trust=self.fetch_trust)
+            return certificate, keys
+        except RequestRefused as refused:
+            if refused.code != "invalid_body" or refused.at != "/body/nats_public_key":
+                raise
+            had_pending = keys.pending_nats_public_key is not None
+            self.logger.warning(
+                "Join refused the stored NATS user key; rotating the NATS user key and retrying join. "
+                "event=protocol1_join_nats_key_rotated runtime=%s used_pending=%s",
+                self.profile.runtime,
+                had_pending,
+            )
+            keys = rotate_nats_key(self.layout, self.profile.runtime, prefer_pending=True)
+            try:
+                certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
+                                         fetch_trust=self.fetch_trust)
+                return certificate, keys
+            except RequestRefused as retry_refused:
+                if (
+                    not had_pending
+                    or retry_refused.code != "invalid_body"
+                    or retry_refused.at != "/body/nats_public_key"
+                ):
+                    raise
+                self.logger.warning(
+                    "Join also refused the promoted pending NATS user key; generating a fresh NATS user key and retrying once. "
+                    "event=protocol1_join_nats_key_regenerated runtime=%s",
+                    self.profile.runtime,
+                )
+                keys = rotate_nats_key(self.layout, self.profile.runtime, prefer_pending=False)
+                certificate = await join(self.nc, keys, trust, self.profile, clock=self.clock, logger=self.logger,
+                                         fetch_trust=self.fetch_trust)
+                return certificate, keys
 
     async def fetch_trust(self, data: bytes) -> bool:
         """Read the certificate and session a frame or a host's record of this installation names.
