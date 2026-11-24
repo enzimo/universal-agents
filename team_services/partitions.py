@@ -62,6 +62,7 @@ from team_services.sessions import AGENT_SESSION, LEAD_ROLE, PLACEMENT, placemen
 PARTITION_OWNER = "partition_owner"
 HOST_RECORD = "host"
 CERTIFICATE_RECORD = "certificate"
+REVOCATIONS_RECORD = "revocations"
 PARTITION_OWNING_ROLES = frozenset({"lead_host", "worker_host"})
 PARTITION_COMPONENT_PREFIX = "partition-"
 PARTITION_CREDENTIAL_TOO_LARGE_CODE = "partition_credential_too_large"
@@ -150,8 +151,8 @@ class PartitionRecord:
         return None if prev is None else str(prev)
 
     @property
-    def issued_at(self) -> datetime:
-        return parse_timestamp(self.record.document.issued_at)
+    def assigned_at(self) -> datetime:
+        return parse_timestamp(str(self.record.body.assigned_at))
 
 
 @dataclass(frozen=True)
@@ -208,6 +209,10 @@ class PartitionService:
         self._seen_live: set[str] = set()
         self._first_missing_at: dict[str, datetime] = {}
         self._planned_targets: dict[int, str] = {}
+        # Maps (partition, host, assigned_at) -> highest host membership_epoch observed in UA1_CERTS
+        # at release time, so clock skew between authority and team services cannot exclude a pre-release
+        # certificate on host_lost releases without altering body.host_epoch (C19).
+        self._release_pre_epochs: dict[tuple[int, str, datetime], int] = {}
         self._woke = asyncio.Event()
 
     @property
@@ -217,7 +222,7 @@ class PartitionService:
     # -- lifecycle & watches ----------------------------------------------------------------------
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Watch ``UA1_HOSTS`` (and ``UA1_CERTS`` when credentials are enforced) and reconcile until ``stop``."""
+        """Watch ``UA1_HOSTS``, ``revocations.<installation>``, and (when enforced) ``UA1_CERTS`` until ``stop``."""
 
         try:
             await self.reconcile()
@@ -229,6 +234,7 @@ class PartitionService:
             )
         tasks = [
             asyncio.create_task(self._watch_hosts(stop)),
+            asyncio.create_task(self._watch_revocations(stop)),
             asyncio.create_task(self._reconcile_loop(stop)),
         ]
         if self.credentials_enforced:
@@ -241,9 +247,72 @@ class PartitionService:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _watch_hosts(self, stop: asyncio.Event) -> None:
+        seen: dict[str, tuple[str, int, bool, frozenset[int]]] = {}
         while not stop.is_set():
             try:
-                async for _key, _raw in self.records.watch(HOST_RECORD, ">"):
+                async for key, raw in self.records.watch(HOST_RECORD, ">"):
+                    if stop.is_set():
+                        return
+                    if self._host_watch_event_relevant(key, raw, seen):
+                        self._woke.set()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.warning(
+                    "Host liveness watch for partition ownership stopped; reopening. "
+                    "event=partition_host_watch_failed team=%s",
+                    self.team,
+                    exc_info=True,
+                )
+                seen.clear()
+            if await _stopped_within(stop, WATCH_RETRY_SECONDS):
+                return
+
+    def _host_watch_event_relevant(
+        self,
+        key: str,
+        raw: Optional[bytes],
+        seen: dict[str, tuple[str, int, bool, frozenset[int]]],
+    ) -> bool:
+        """Ignore non-team/non-owning host records and unchanged steady-state heartbeats (C23)."""
+
+        if raw is None:
+            return (seen.pop(key, None) is not None) or (key in self._seen_live)
+        try:
+            verified = self.trust.store.verify(raw, record=HOST_RECORD, now=self.clock())
+        except FrameRefused as refused:
+            if refused.code == "unknown_key":
+                # New host or newly rotated certificate not yet fetched into trust.store: wake to fetch it.
+                return True
+            return (seen.pop(key, None) is not None) or (key in self._seen_live)
+        cert = verified.signer
+        if cert is None or cert.runtime != key or self.team not in cert.teams or not (cert.roles & PARTITION_OWNING_ROLES):
+            return seen.pop(key, None) is not None
+        if verified.other_contract:
+            fingerprint: tuple[str, int, bool, frozenset[int]] = (
+                "other_contract",
+                cert.membership_epoch,
+                True,
+                frozenset(),
+            )
+        else:
+            body: Any = verified.body
+            fingerprint = (
+                str(body.state),
+                cert.membership_epoch,
+                False,
+                parse_refused_partitions(getattr(body, "components", ())),
+            )
+        if seen.get(key) == fingerprint:
+            return False
+        seen[key] = fingerprint
+        return True
+
+    async def _watch_revocations(self, stop: asyncio.Event) -> None:
+        key = f"revocations.{self.installation}"
+        while not stop.is_set():
+            try:
+                async for _key, _raw in self.records.watch(REVOCATIONS_RECORD, key):
                     if stop.is_set():
                         return
                     self._woke.set()
@@ -251,8 +320,8 @@ class PartitionService:
                 raise
             except Exception:
                 self.logger.warning(
-                    "Host liveness watch for partition ownership stopped; reopening. "
-                    "event=partition_host_watch_failed team=%s",
+                    "Revocations watch for partition ownership stopped; reopening. "
+                    "event=partition_revocations_watch_failed team=%s",
                     self.team,
                     exc_info=True,
                 )
@@ -322,9 +391,11 @@ class PartitionService:
 
         assert self._lock.locked(), "ensure_unowned_assigned requires the shared mutation lock"
         now = self.clock()
+        await self._refresh_revocations(now)
         live_hosts = await self._read_live_hosts(now)
         ownership, raw_revisions = await self._read_ownership(now)
-        await self._assign_unowned_locked(live_hosts, ownership, raw_revisions, now)
+        placements = await self._read_placements(now)
+        await self._assign_unowned_locked(live_hosts, ownership, raw_revisions, placements, now)
 
     async def release_partition(
         self,
@@ -396,16 +467,18 @@ class PartitionService:
 
     async def _reconcile_locked(self) -> None:
         now = self.clock()
+        await self._refresh_revocations(now)
         live_hosts = await self._read_live_hosts(now)
         ownership, raw_revisions = await self._read_ownership(now)
         placements = await self._read_placements(now)
         self._update_host_presence(live_hosts, ownership, now)
 
         await self._release_lost_and_retired_hosts_locked(live_hosts, ownership, now)
-        await self._recover_refused_partitions_locked(live_hosts, ownership, placements, now)
+        await self._recover_refused_partitions_locked(live_hosts, ownership, raw_revisions, placements, now)
+        await self._reconcile_stranded_placements_locked(live_hosts, ownership, placements, now)
         await self._advance_releases_locked(live_hosts, ownership, placements, now)
         await self._release_draining_hosts_locked(live_hosts, ownership, placements, now)
-        await self._assign_unowned_locked(live_hosts, ownership, raw_revisions, now)
+        await self._assign_unowned_locked(live_hosts, ownership, raw_revisions, placements, now)
         await self._rebalance_empty_partitions_locked(live_hosts, ownership, placements, now)
 
     def _update_host_presence(
@@ -443,7 +516,9 @@ class PartitionService:
                     for c in certs
                 )
             if retired:
-                await self._release_host_all_locked(runtime, ownership, reason="host_lost", now=now)
+                await self._release_host_all_locked(
+                    runtime, ownership, reason="host_lost", now=now, known_certs=certs
+                )
                 continue
             if runtime in live_hosts:
                 continue
@@ -452,12 +527,15 @@ class PartitionService:
             first_missing = self._first_missing_at.get(runtime, now)
             grace_passed = (now - first_missing) >= timedelta(seconds=self.cut_off_grace_seconds)
             if runtime in self._seen_live or grace_passed:
-                await self._release_host_all_locked(runtime, ownership, reason="host_lost", now=now)
+                await self._release_host_all_locked(
+                    runtime, ownership, reason="host_lost", now=now, known_certs=certs
+                )
 
     async def _recover_refused_partitions_locked(
         self,
         live_hosts: Mapping[str, LivePartitionHost],
         ownership: dict[int, PartitionRecord],
+        raw_revisions: dict[int, int],
         placements: list[PlacedAgent],
         now: datetime,
     ) -> None:
@@ -468,8 +546,8 @@ class PartitionService:
                 rec = ownership.get(partition)
                 if rec is None or rec.state != OWNED or rec.host != host.runtime:
                     continue
-                part_agents = [p for p in placements if p.partition == partition and p.host == host.runtime]
-                has_active_agents = any(not agent.handed_over for agent in part_agents)
+                part_agents = [p for p in placements if p.partition == partition]
+                has_active_agents = any(p.host == host.runtime and not p.handed_over for p in part_agents)
                 if has_active_agents:
                     await self._start_connected_handover_locked(
                         partition,
@@ -513,7 +591,9 @@ class PartitionService:
                 else:
                     if await self.records.delete(PARTITION_OWNER, rec.key, last_revision=rec.revision):
                         ownership.pop(partition, None)
+                        raw_revisions[partition] = 0
                         self._planned_targets.pop(partition, None)
+                        self._clear_release_pre_epochs(partition)
                         self.logger.warning(
                             "Left a partition unowned after its host refused it as credential_too_large and no "
                             "other host could fit it. event=partition_left_unowned_credential_too_large "
@@ -522,6 +602,47 @@ class PartitionService:
                             partition,
                             host.runtime,
                         )
+
+    async def _reconcile_stranded_placements_locked(
+        self,
+        live_hosts: Mapping[str, LivePartitionHost],
+        ownership: Mapping[int, PartitionRecord],
+        placements: list[PlacedAgent],
+        now: datetime,
+    ) -> None:
+        """Finish moving any verified placements still naming an earlier host in an ``owned`` partition (C18).
+
+        Step 4 writes ``partition_owner`` as ``owned`` before updating each agent's placement record.
+        If team services crash, lose their lock, time out, or hit a placement CAS conflict mid-group,
+        this idempotent pass finishes ending stale sessions and moving every stranded agent to the
+        partition's current owner on the next reconcile.
+        """
+
+        for partition, rec in sorted(ownership.items()):
+            if rec.state != OWNED:
+                continue
+            stranded = [p for p in placements if p.partition == partition and p.host != rec.host]
+            if not stranded:
+                continue
+            target_epoch = (
+                live_hosts[rec.host].certificate.membership_epoch if rec.host in live_hosts else rec.host_epoch
+            )
+            await self._move_placements_to_owner_locked(
+                stranded,
+                target_runtime=rec.host,
+                target_epoch=target_epoch,
+                reason=rec.reason,
+                placements=placements,
+                now=now,
+            )
+            self.logger.warning(
+                "Reconciled stranded agent placements onto the partition's current owner. "
+                "event=partition_stranded_placements_reconciled team=%s partition=%s host=%s agents=%s",
+                self.team,
+                partition,
+                rec.host,
+                len(stranded),
+            )
 
     async def _advance_releases_locked(
         self,
@@ -570,14 +691,19 @@ class PartitionService:
                 )
                 if started:
                     if not self.credentials_enforced and partition not in occupied:
-                        await self._complete_release_locked(ownership[partition], live_hosts, ownership, placements, now)
+                        completed = await self._complete_release_locked(
+                            ownership[partition], live_hosts, ownership, placements, now
+                        )
+                        if completed:
+                            continue
                     break
 
     async def _assign_unowned_locked(
         self,
         live_hosts: Mapping[str, LivePartitionHost],
         ownership: dict[int, PartitionRecord],
-        raw_revisions: Mapping[int, int],
+        raw_revisions: dict[int, int],
+        placements: list[PlacedAgent],
         now: datetime,
     ) -> None:
         eligible = [h for h in live_hosts.values() if h.eligible]
@@ -586,7 +712,24 @@ class PartitionService:
         for partition in range(self.partition_count):
             if partition in ownership:
                 continue
-            target = self._pick_least_loaded_for_empty(partition, eligible, ownership)
+            part_agents = [p for p in placements if p.partition == partition]
+            if part_agents:
+                # Occupied unowned partition (e.g. left unowned by CR-4 refusal recovery, C20):
+                # check agent_types, lead_host role, session_limit, and credential fit, then move placements.
+                target = await self._select_destination_host(
+                    partition,
+                    live_hosts=live_hosts,
+                    ownership=ownership,
+                    placements=placements,
+                    moving_agents=part_agents,
+                    exclude_hosts=set(),
+                    preferred_runtime=None,
+                    now=now,
+                )
+                reason = "rebalanced"
+            else:
+                target = self._pick_least_loaded_for_empty(partition, eligible, ownership)
+                reason = "initial"
             if target is None:
                 continue
             key = partition_owner_key(self.team, partition, self.partition_count)
@@ -598,7 +741,7 @@ class PartitionService:
                 "host": target.runtime,
                 "host_epoch": target.certificate.membership_epoch,
                 "assigned_at": format_timestamp(now),
-                "reason": "initial",
+                "reason": reason,
             }
             seq = rising_sequence(0, now)
             document = self.records.signed(PARTITION_OWNER, key, body, sequence=seq, issued_at=now)
@@ -608,13 +751,26 @@ class PartitionService:
                 continue
             verified = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
             ownership[partition] = PartitionRecord(partition, key, revision, verified)
+            raw_revisions[partition] = revision
+            self._clear_release_pre_epochs(partition)
+            to_move = [p for p in part_agents if p.host != target.runtime]
+            if to_move:
+                await self._move_placements_to_owner_locked(
+                    to_move,
+                    target_runtime=target.runtime,
+                    target_epoch=target.certificate.membership_epoch,
+                    reason=reason,
+                    placements=placements,
+                    now=now,
+                )
             self.logger.info(
                 "Assigned an unowned partition to a host. event=partition_assigned team=%s partition=%s "
-                "host=%s host_epoch=%s",
+                "host=%s host_epoch=%s agents_moved=%s",
                 self.team,
                 partition,
                 target.runtime,
                 target.certificate.membership_epoch,
+                len(to_move),
             )
 
     async def _rebalance_empty_partitions_locked(
@@ -704,7 +860,7 @@ class PartitionService:
         old_host = rec.host
         if self._host_has_active_release(old_host, ownership):
             return False
-        part_agents = [agent for agent in placements if agent.partition == partition and agent.host == old_host]
+        part_agents = [agent for agent in placements if agent.partition == partition]
         if target_host is not None:
             dest = live_hosts.get(target_host)
             if dest is None or dest.runtime == old_host or not await self._host_can_take_partition(
@@ -726,12 +882,20 @@ class PartitionService:
                 return False
             target_host = dest.runtime
 
+        # Record the host's highest pre-release certificate epoch in the released record so clock skew
+        # between authority and team services cannot let an earlier renewal satisfy step 3 (C19).
+        certs = await self._load_host_certificates(old_host, now)
+        known_epochs = [rec.host_epoch, *(c.membership_epoch for c in certs)]
+        if old_host in live_hosts:
+            known_epochs.append(live_hosts[old_host].certificate.membership_epoch)
+        release_epoch = max(known_epochs)
+
         body = {
             "team": self.team,
             "partition": partition,
             "state": RELEASED,
             "host": old_host,
-            "host_epoch": rec.host_epoch,
+            "host_epoch": release_epoch,
             "assigned_at": format_timestamp(now),
             "reason": reason,
         }
@@ -742,7 +906,9 @@ class PartitionService:
         except KeyWrongLastSequenceError:
             return False
         verified = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
-        ownership[partition] = PartitionRecord(partition, rec.key, revision, verified)
+        updated = PartitionRecord(partition, rec.key, revision, verified)
+        ownership[partition] = updated
+        self._release_pre_epochs[(partition, old_host, updated.assigned_at)] = release_epoch
         if target_host is not None:
             self._planned_targets[partition] = target_host
         self.logger.info(
@@ -751,7 +917,7 @@ class PartitionService:
             self.team,
             partition,
             old_host,
-            rec.host_epoch,
+            release_epoch,
             reason,
             target_host or "-",
         )
@@ -764,14 +930,20 @@ class PartitionService:
         *,
         reason: str,
         now: datetime,
+        known_certs: Optional[list[HostCertificate]] = None,
     ) -> list[int]:
         released: list[int] = []
+        certs = await self._load_host_certificates(runtime, now) if known_certs is None else known_certs
+        max_known_epoch = max((c.membership_epoch for c in certs), default=0)
         for partition in sorted(ownership):
             rec = ownership[partition]
             if rec.host != runtime:
                 continue
             if rec.state == RELEASED and rec.reason == reason:
                 continue
+            # Preserve rec.host_epoch in the record so InstallationAuthority's host_lost watcher
+            # (C17) never skips the original epoch or revokes a freshly rejoined host; track
+            # max_known_epoch separately in _release_pre_epochs for clock-skew-safe waiting (C19).
             body = {
                 "team": self.team,
                 "partition": partition,
@@ -788,7 +960,9 @@ class PartitionService:
             except KeyWrongLastSequenceError:
                 continue
             verified = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
-            ownership[partition] = PartitionRecord(partition, rec.key, revision, verified)
+            updated = PartitionRecord(partition, rec.key, revision, verified)
+            ownership[partition] = updated
+            self._release_pre_epochs[(partition, runtime, updated.assigned_at)] = max(rec.host_epoch, max_known_epoch)
             released.append(partition)
             self.logger.warning(
                 "Released a partition for a cut-off or retired host. event=partition_released_host_lost "
@@ -810,7 +984,7 @@ class PartitionService:
         now: datetime,
     ) -> bool:
         old_host = rec.host
-        released_at = rec.issued_at
+        released_at = rec.assigned_at
         if not self.credentials_enforced:
             if rec.reason == "host_lost" or old_host not in live_hosts:
                 return True
@@ -821,10 +995,22 @@ class PartitionService:
 
         certs = await self._load_host_certificates(old_host, now)
         skew = timedelta(seconds=CLOCK_SKEW_SECONDS)
+        recorded_epoch = self._release_pre_epochs.get((rec.partition, old_host, released_at))
+        pre_epoch = max(rec.host_epoch, recorded_epoch or 0)
+        if rec.reason == "host_lost":
+            base_old_certs = [
+                c for c in certs
+                if c.membership_epoch <= pre_epoch
+                or (recorded_epoch is None and c.membership_epoch > pre_epoch and c.issued_at <= released_at)
+            ]
+        else:
+            # Connected handovers persist pre_epoch in rec.host_epoch at release time (C19).
+            base_old_certs = [c for c in certs if c.membership_epoch <= pre_epoch]
+        base_old_epochs = {c.membership_epoch for c in base_old_certs}
+        base_old_keys = {c.nats_public_key for c in base_old_certs}
         old_certs = [
             c for c in certs
-            if c.membership_epoch == rec.host_epoch
-            or (c.membership_epoch > rec.host_epoch and c.issued_at <= released_at)
+            if c.membership_epoch in base_old_epochs or c.nats_public_key in base_old_keys
         ]
         active_old_certs = [c for c in old_certs if c.expires_at + skew > now]
         if old_certs and not active_old_certs:
@@ -843,8 +1029,9 @@ class PartitionService:
 
         renewed = next(
             (
-                c for c in reversed(certs)
-                if c.membership_epoch > rec.host_epoch
+                c for c in certs
+                if c.membership_epoch > pre_epoch
+                and c.nats_public_key not in base_old_keys
                 and c.nats_public_key not in old_nats_keys
                 and c.issued_at >= released_at - skew
                 and not self.trust.store.revoked(c)
@@ -854,7 +1041,9 @@ class PartitionService:
         if renewed is None:
             if now >= released_at + timedelta(seconds=self.handover_seconds):
                 # Connected host missed the step-2/3 deadline: escalate to host_lost so authority revokes its key.
-                await self._release_host_all_locked(old_host, ownership, reason="host_lost", now=now)
+                await self._release_host_all_locked(
+                    old_host, ownership, reason="host_lost", now=now, known_certs=certs
+                )
             return False
 
         if old_nats_keys and await self._all_keys_revoked(old_nats_keys):
@@ -862,16 +1051,25 @@ class PartitionService:
         wait_until = renewed.issued_at + timedelta(seconds=self.credential_lifetime_seconds + CLOCK_SKEW_SECONDS)
         return now >= wait_until
 
+    async def _is_key_revoked(self, nats_key: str) -> bool:
+        if self._is_nats_key_revoked is None:
+            return False
+        result = self._is_nats_key_revoked(nats_key)
+        if inspect.isawaitable(result):
+            result = await result
+        return bool(result)
+
     async def _all_keys_revoked(self, nats_keys: Iterable[str]) -> bool:
         if self._is_nats_key_revoked is None:
             return False
         for key in nats_keys:
-            result = self._is_nats_key_revoked(key)
-            if inspect.isawaitable(result):
-                result = await result
-            if not result:
+            if not await self._is_key_revoked(key):
                 return False
         return True
+
+    def _clear_release_pre_epochs(self, partition: int) -> None:
+        for key in [k for k in self._release_pre_epochs if k[0] == partition]:
+            self._release_pre_epochs.pop(key, None)
 
     async def _complete_release_locked(
         self,
@@ -882,18 +1080,37 @@ class PartitionService:
         now: datetime,
     ) -> bool:
         old_host = rec.host
-        part_agents = [p for p in placements if p.partition == rec.partition and p.host == old_host]
-        exclude = set() if rec.reason == "host_lost" else {old_host}
+        part_agents = [p for p in placements if p.partition == rec.partition]
+        # Always prefer healthy peers over old_host first (C22).
         target = await self._select_destination_host(
             rec.partition,
             live_hosts=live_hosts,
             ownership=ownership,
             placements=placements,
             moving_agents=part_agents,
-            exclude_hosts=exclude,
+            exclude_hosts={old_host},
             preferred_runtime=self._planned_targets.get(rec.partition),
             now=now,
         )
+        if target is None and rec.reason == "host_lost":
+            # Fall back to old_host only if it rejoined at a strictly newer epoch with an unrevoked
+            # certificate and (when credentials are enforced) an unrevoked NATS key (C22).
+            candidate = live_hosts.get(old_host)
+            recorded_epoch = self._release_pre_epochs.get((rec.partition, old_host, rec.assigned_at))
+            min_recovered_epoch = max(rec.host_epoch, recorded_epoch or 0)
+            if (
+                candidate is not None
+                and candidate.certificate.membership_epoch > min_recovered_epoch
+                and not self.trust.store.revoked(candidate.certificate)
+                and (
+                    not self.credentials_enforced
+                    or not await self._is_key_revoked(candidate.certificate.nats_public_key)
+                )
+                and await self._host_can_take_partition(
+                    candidate, rec.partition, ownership, placements, part_agents, now
+                )
+            ):
+                target = candidate
         if target is None:
             return False
         moved = await self._write_owned_and_move_agents_locked(
@@ -907,6 +1124,7 @@ class PartitionService:
         )
         if moved:
             self._planned_targets.pop(rec.partition, None)
+            self._clear_release_pre_epochs(rec.partition)
         return moved
 
     async def _write_owned_and_move_agents_locked(
@@ -939,11 +1157,17 @@ class PartitionService:
             return False
         verified = self.trust.store.verify(json.dumps(document).encode(), record=PARTITION_OWNER, now=now)
         ownership[rec.partition] = PartitionRecord(rec.partition, rec.key, revision, verified)
+        self._clear_release_pre_epochs(rec.partition)
 
-        moving = [p for p in placements if p.partition == rec.partition and p.host == old_host]
+        moving = [p for p in placements if p.partition == rec.partition and p.host != target.runtime]
         if moving:
-            await self._move_placements_as_group_locked(
-                moving, target=target, old_host=old_host, reason=reason, placements=placements, now=now
+            await self._move_placements_to_owner_locked(
+                moving,
+                target_runtime=target.runtime,
+                target_epoch=target.certificate.membership_epoch,
+                reason=reason,
+                placements=placements,
+                now=now,
             )
         self.logger.info(
             "Completed partition ownership transfer. event=partition_reassigned team=%s partition=%s "
@@ -958,20 +1182,23 @@ class PartitionService:
         )
         return True
 
-    async def _move_placements_as_group_locked(
+    async def _move_placements_to_owner_locked(
         self,
         moving: list[PlacedAgent],
         *,
-        target: LivePartitionHost,
-        old_host: str,
+        target_runtime: str,
+        target_epoch: int,
         reason: str,
         placements: list[PlacedAgent],
         now: datetime,
     ) -> None:
-        """Move every placed agent in a partition to ``target`` and end stale sessions on ``old_host``."""
+        """Move every placed agent in ``moving`` to ``target_runtime`` and end stale sessions on their old hosts."""
 
-        moved_names = {agent.agent for agent in moving}
-        await self._end_old_host_sessions(old_host, moved_names, now)
+        by_old_host: dict[str, set[str]] = {}
+        for agent in moving:
+            by_old_host.setdefault(agent.host, set()).add(agent.agent)
+        for src_host, agent_names in sorted(by_old_host.items()):
+            await self._end_old_host_sessions(src_host, agent_names, now)
         now_ms = parse_timestamp(format_timestamp(now))
         for agent in moving:
             prev_body = dict(agent.record.document.body)
@@ -981,8 +1208,8 @@ class PartitionService:
                 "team": self.team,
                 "agent": agent.agent,
                 "agent_type": agent.agent_type,
-                "host": target.runtime,
-                "host_epoch": target.certificate.membership_epoch,
+                "host": target_runtime,
+                "host_epoch": target_epoch,
                 "definition_sha256": str(prev_body["definition_sha256"]),
                 "placed_at": format_timestamp(placed_at),
                 "reason": reason,
@@ -992,21 +1219,30 @@ class PartitionService:
             }
             if "required_labels" in prev_body:
                 new_body["required_labels"] = list(prev_body["required_labels"])
-            if old_host != target.runtime:
-                new_body["previous_host"] = old_host
+            if agent.host != target_runtime:
+                new_body["previous_host"] = agent.host
             key = placement_key(self.team, agent.agent)
             seq = rising_sequence(agent.record.document.sequence, placed_at)
             doc = self.records.signed(PLACEMENT, key, new_body, sequence=seq, issued_at=placed_at)
             try:
                 rev = await self.records.put(PLACEMENT, key, doc, last_revision=agent.revision)
             except KeyWrongLastSequenceError:
+                self.logger.warning(
+                    "Placement CAS conflict while moving agent to new partition owner; scheduling retry. "
+                    "event=partition_placement_move_conflict team=%s agent=%s old_host=%s new_host=%s",
+                    self.team,
+                    agent.agent,
+                    agent.host,
+                    target_runtime,
+                )
+                self._woke.set()
                 continue
             verified = self.trust.store.verify(json.dumps(doc).encode(), record=PLACEMENT, now=placed_at)
             updated = PlacedAgent(
                 agent=agent.agent,
                 agent_type=agent.agent_type,
                 partition=agent.partition,
-                host=target.runtime,
+                host=target_runtime,
                 revision=rev,
                 record=verified,
                 handed_over=True,
@@ -1289,12 +1525,25 @@ class PartitionService:
             )
         return placed
 
-    async def _load_host_certificates(self, runtime: str, now: datetime) -> list[HostCertificate]:
-        prefix = f"host.{self.installation}.{runtime}."
+    async def _refresh_revocations(self, now: datetime) -> None:
+        """Read ``revocations.<installation>`` into the trust store so retired hosts are released promptly (C21)."""
+
+        key = f"revocations.{self.installation}"
         try:
-            keys = await self.records.keys(CERTIFICATE_RECORD, prefix)
-        except Exception:
-            keys = []
+            await self.records.take_trust_record(REVOCATIONS_RECORD, key, now=now)
+        except FrameRefused as refused:
+            self.logger.warning(
+                "The revocations record did not verify and was not applied. "
+                "event=team_services_record_refused record=revocations key=%s code=%s at=%s",
+                key,
+                refused.code,
+                refused.at,
+            )
+
+    async def _load_host_certificates(self, runtime: str, now: datetime) -> list[HostCertificate]:
+        # Let listing failures propagate (fail closed) so reconcile never decides step-4 readiness on a partial cache (C19).
+        prefix = f"host.{self.installation}.{runtime}."
+        keys = await self.records.keys(CERTIFICATE_RECORD, prefix)
         for key in keys:
             with contextlib.suppress(FrameRefused):
                 await self.records.take_trust_record(CERTIFICATE_RECORD, key, now=now)

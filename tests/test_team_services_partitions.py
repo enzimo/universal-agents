@@ -56,6 +56,8 @@ class _MemoryStateRecords:
         self._buckets: dict[str, dict[str, _Entry]] = {}
         self._rev = 0
         self.before_put_hook: Optional[Any] = None
+        self.before_keys_hook: Optional[Any] = None
+        self.watched: list[tuple[str, str]] = []
 
     def _bucket_name(self, record: str) -> str:
         return StateRecords._bucket_name(record, team=TEAM)
@@ -134,6 +136,8 @@ class _MemoryStateRecords:
         return 0 if entry is None else entry.revision
 
     async def keys(self, record: str, prefix: str, *, team: Optional[str] = None) -> list[str]:
+        if self.before_keys_hook is not None:
+            await self.before_keys_hook(record, prefix)
         return sorted(k for k in self._bucket(record) if k.startswith(prefix))
 
     async def read_report(self, record: str, key: str, *, now: datetime, held: Optional[tuple[int, str]] = None) -> Optional[StoredRecord]:
@@ -155,6 +159,7 @@ class _MemoryStateRecords:
 
     async def watch(self, record: str, keys: str = ">", *, team: Optional[str] = None,
                     caught_up: Optional[asyncio.Event] = None) -> AsyncIterator[tuple[str, Optional[bytes]]]:
+        self.watched.append((record, keys))
         if caught_up is not None:
             caught_up.set()
         if False:
@@ -197,7 +202,7 @@ class _ClusterFixture:
         self.now += timedelta(seconds=seconds)
         return self.now
 
-    def _publish_revocations(self) -> None:
+    def _publish_revocations(self, *, add_to_trust: bool = True) -> None:
         self.revocation_seq += 1
         self.revocation_epoch += 1
         key = f"revocations.{INSTALLATION}"
@@ -220,10 +225,11 @@ class _ClusterFixture:
             self.auth_priv,
         )
         raw = json.dumps(doc).encode()
-        self.trust.add(raw, now=self.now)
+        if add_to_trust:
+            self.trust.add(raw, now=self.now)
         self.records._bucket("revocations")[key] = _Entry(self.revocation_seq, raw)
 
-    def revoke_host(self, runtime: str) -> None:
+    def revoke_host(self, runtime: str, *, add_to_trust: bool = True) -> None:
         cert_doc = self.host_certs[runtime]
         body = cert_doc["body"]
         self.revoked_entries.append(
@@ -237,18 +243,21 @@ class _ClusterFixture:
                 "reason": "decommissioned",
             }
         )
-        self._publish_revocations()
+        self._publish_revocations(add_to_trust=add_to_trust)
 
     def issue_host(
         self,
         runtime: str,
         *,
         roles: tuple[str, ...] = ("worker_host",),
+        teams: tuple[str, ...] = (TEAM,),
         agent_types: tuple[str, ...] = ("researcher",),
         session_limit: int = 8,
         connection_class: str = "connected",
         new_nats_key: bool = False,
         cert_lifetime_days: int = 30,
+        issued_at_offset_seconds: float = 0.0,
+        add_to_trust: bool = True,
     ) -> HostIdentity:
         if runtime not in self.host_keys:
             app_priv = Ed25519PrivateKey.generate()
@@ -271,14 +280,15 @@ class _ClusterFixture:
         self.host_epochs[runtime] = epoch
         prev = self.host_certs.get(runtime)
         cert_id = f"cert.{runtime}.{epoch}"
-        expires = self.now + timedelta(days=cert_lifetime_days)
+        issued = self.now + timedelta(seconds=issued_at_offset_seconds)
+        expires = issued + timedelta(days=cert_lifetime_days)
         body: dict[str, Any] = {
             "certificate_id": cert_id,
             "installation": INSTALLATION,
             "runtime": runtime,
             "membership_epoch": epoch,
             "revocation_epoch": self.revocation_epoch,
-            "teams": [TEAM],
+            "teams": list(teams),
             "roles": list(roles),
             "agent_types": list(agent_types),
             "session_limit": session_limit,
@@ -291,7 +301,7 @@ class _ClusterFixture:
             },
             "nats_public_key": keys.nats_public_key,
             "profile_sha256": DEFINITION_SHA,
-            "issued_at": format_timestamp(self.now),
+            "issued_at": format_timestamp(issued),
             "expires_at": format_timestamp(expires),
         }
         if prev is not None:
@@ -304,17 +314,21 @@ class _ClusterFixture:
                 "key": key,
                 "writer": {"type": "authority", "installation": INSTALLATION, "key_id": self.auth_key_id},
                 "sequence": epoch,
-                "issued_at": format_timestamp(self.now),
+                "issued_at": format_timestamp(issued),
                 "expires_at": format_timestamp(expires),
                 "body": body,
             },
             self.auth_priv,
         )
         raw = json.dumps(doc).encode()
-        self.trust.add(raw, now=self.now)
+        if add_to_trust:
+            self.trust.add(raw, now=self.now)
         self.records._bucket("certificate")[key] = _Entry(epoch, raw)
         self.host_certs[runtime] = doc
         cert = self.trust.store.host_certificate(INSTALLATION, runtime, epoch)
+        if not add_to_trust:
+            # Verify against a throwaway check only when not adding to the service trust store.
+            return HostIdentity(keys, cert)  # type: ignore[arg-type]
         assert cert is not None
         ident = HostIdentity(keys, cert)
         if runtime == "team-services":
@@ -880,3 +894,366 @@ async def test_draining_and_other_contract_host_releases_partitions_and_maintain
         rec = await cluster.records.read_report(PARTITION_OWNER, partition_owner_key(TEAM, p, PARTITIONS), now=cluster.now)
         assert rec is not None and rec.record.signer is not None
         assert rec.record.signer.membership_epoch == 2
+
+
+@pytest.mark.asyncio
+async def test_stranded_placements_after_step4_crash_or_cas_failure_reconcile_on_next_pass(tmp_path: Path) -> None:
+    """C18: a crash or placement CAS failure after writing owned never permanently strands agents on old_host."""
+
+    cluster = _ClusterFixture(tmp_path)
+    cluster.issue_host("lead-1", roles=("lead_host", "worker_host"), agent_types=(MANAGER_AGENT_TYPE, "researcher"))
+    cluster.issue_host("lead-2", roles=("lead_host", "worker_host"), agent_types=(MANAGER_AGENT_TYPE, "researcher"))
+    cluster.write_liveness("lead-1")
+    cluster.write_liveness("lead-2")
+
+    sessions, partitions = cluster.make_services(credentials_enforced=False, handover_seconds=30)
+    await partitions.reconcile()
+    p_move = next(p for p, (_s, h) in (await cluster.owners()).items() if h == "lead-1")
+
+    lead_agent = cluster.agent_in_partition(p_move, prefix="lead")
+    worker_agent = cluster.agent_in_partition(p_move, prefix="wrk")
+    lead_open = await sessions.open(cluster.open_frame("lead-1", lead_agent, MANAGER_AGENT_TYPE))
+    worker_open = await sessions.open(cluster.open_frame("lead-1", worker_agent, "researcher"))
+    assert lead_open["outcome"] == "ok" and worker_open["outcome"] == "ok"
+
+    assert await partitions.release_partition(p_move, reason="operator", target_host="lead-2") is True
+    cluster.advance(31)
+    cluster.write_liveness("lead-1")
+    cluster.write_liveness("lead-2")
+
+    # Simulate crash right after writing partition_owner=owned for lead-2, before moving any placement.
+    async def fail_on_placement_move(record: str, key: str, document: Mapping[str, Any]) -> None:
+        if record == PLACEMENT and document["body"]["host"] == "lead-2":
+            raise RuntimeError("simulated crash mid step-4 group move")
+
+    cluster.records.before_put_hook = fail_on_placement_move
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await partitions.reconcile()
+    cluster.records.before_put_hook = None
+
+    # Partition is owned by lead-2 while both agents are still stranded on lead-1.
+    assert (await cluster.owners())[p_move] == (OWNED, "lead-2")
+    for ag in (lead_agent, worker_agent):
+        pl = await cluster.records.read_report(PLACEMENT, placement_key(TEAM, ag), now=cluster.now)
+        assert pl is not None and pl.record.body.host == "lead-1"
+
+    # Now also inject a CAS conflict on the first placement move in a restarted PartitionService.
+    first_cas_failed = False
+
+    async def cas_conflict_once(record: str, key: str, document: Mapping[str, Any]) -> None:
+        nonlocal first_cas_failed
+        if record == PLACEMENT and document["body"]["host"] == "lead-2" and not first_cas_failed:
+            first_cas_failed = True
+            raise KeyWrongLastSequenceError("simulated placement CAS conflict")
+
+    cluster.records.before_put_hook = cas_conflict_once
+    _sessions2, partitions_restarted = cluster.make_services(credentials_enforced=False, handover_seconds=30)
+    await partitions_restarted.reconcile()
+    cluster.records.before_put_hook = None
+    assert first_cas_failed
+
+    # One agent moved, the conflicted one is still stranded; next reconcile moves the remaining agent too.
+    await partitions_restarted.reconcile()
+    for ag in (lead_agent, worker_agent):
+        pl = await cluster.records.read_report(PLACEMENT, placement_key(TEAM, ag), now=cluster.now)
+        assert pl is not None
+        assert pl.record.body.host == "lead-2"
+        assert pl.record.body.previous_host == "lead-1"
+        assert pl.record.body.handed_over is True
+
+    # Lead session on lead-1 was ended, so lead-2 can immediately reopen the team lead.
+    reopened = await sessions.open(cluster.open_frame("lead-2", lead_agent, MANAGER_AGENT_TYPE))
+    assert reopened["outcome"] == "ok"
+    assert reopened["session"]["body"]["agent_role"] == "lead"
+
+
+@pytest.mark.asyncio
+async def test_maintain_resigning_released_record_preserves_handover_and_lifetime_timers(tmp_path: Path) -> None:
+    """C19 (1): maintain() re-signing a released record must not shift deadlines or sweep step-3 renewal into old_certs."""
+
+    cluster = _ClusterFixture(tmp_path)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+
+    lifetime = 120
+    _sessions, partitions = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=lifetime,
+        handover_seconds=600,
+        is_nats_key_revoked=None,
+    )
+    await partitions.reconcile()
+    p_move = next(p for p, (_s, h) in (await cluster.owners()).items() if h == "worker-1")
+    assert await partitions.release_partition(p_move, reason="operator", target_host="worker-2") is True
+
+    # Step 3 completes at t0 + 10s.
+    cluster.advance(10)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    assert (await cluster.owners())[p_move] == (RELEASED, "worker-1")
+
+    # Team services renew at t0 + 50s and maintain() re-signs the released record with document.issued_at = t0 + 50s.
+    cluster.advance(40)
+    cluster.issue_host("team-services", roles=("team_services",), agent_types=(), session_limit=0)
+    await partitions.maintain()
+
+    # Advance to t0 + 10s + lifetime + CLOCK_SKEW_SECONDS: step 4 completes cleanly (not delayed or escalated to host_lost).
+    cluster.advance(lifetime + CLOCK_SKEW_SECONDS - 40)
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    assert (await cluster.owners())[p_move] == (OWNED, "worker-2")
+
+
+@pytest.mark.asyncio
+async def test_clock_skew_pre_release_renewal_cannot_satisfy_step3_and_certs_listing_fails_closed(tmp_path: Path) -> None:
+    """C19 (2, 3): authority clock skew cannot let a pre-release cert satisfy step 3, and UA1_CERTS listing fails closed."""
+
+    cluster = _ClusterFixture(tmp_path)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), cert_lifetime_days=1)
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",), cert_lifetime_days=30)
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+
+    revoked_nats: set[str] = set()
+    _sessions, partitions = cluster.make_services(
+        credentials_enforced=True,
+        credential_lifetime_seconds=3600,
+        is_nats_key_revoked=lambda k: k in revoked_nats,
+    )
+    await partitions.reconcile()
+    w1_parts = sorted(p for p, (_s, h) in (await cluster.owners()).items() if h == "worker-1")
+    p1, p2 = w1_parts[0], w1_parts[1]
+    k1 = cluster.host_keys["worker-1"].nats_public_key
+
+    # Hand over p1: worker-1 renews to epoch 2 (K2) with authority clock 3s ahead of team services (within CLOCK_SKEW_SECONDS).
+    assert await partitions.release_partition(p1, reason="operator", target_host="worker-2") is True
+    cluster.issue_host(
+        "worker-1",
+        roles=("worker_host",),
+        agent_types=("researcher",),
+        new_nats_key=True,
+        cert_lifetime_days=30,
+        issued_at_offset_seconds=3.0,
+    )
+    k2 = cluster.host_keys["worker-1"].nats_public_key
+    revoked_nats.add(k1)
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    assert (await cluster.owners())[p1] == (OWNED, "worker-2")
+    # p2 still carries host_epoch=1 from initial assignment while worker-1's active cert is epoch 2 (K2, issued_at > now).
+    assert (await cluster.owners())[p2] == (OWNED, "worker-1")
+
+    # Release p2 while K2 is still live and unrevoked (and issued_at is 10s ahead of team services' clock).
+    assert await partitions.release_partition(p2, reason="operator", target_host="worker-2") is True
+    await partitions.reconcile()
+    assert (await cluster.owners())[p2] == (RELEASED, "worker-1")
+
+    # Simulate UA1_CERTS listing error: must fail closed (raise) rather than fall back to a partial cache.
+    async def fail_cert_keys(record: str, prefix: str) -> None:
+        if record == "certificate":
+            raise RuntimeError("NATS UA1_CERTS listing timed out")
+
+    cluster.records.before_keys_hook = fail_cert_keys
+    with pytest.raises(RuntimeError, match="UA1_CERTS listing timed out"):
+        await partitions.reconcile()
+    cluster.records.before_keys_hook = None
+    assert (await cluster.owners())[p2] == (RELEASED, "worker-1")
+
+    # Genuine step 3 renewal to epoch 3 (K3) + revoking K2 completes step 4 cleanly.
+    cluster.advance(15)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",), new_nats_key=True)
+    revoked_nats.add(k2)
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    assert (await cluster.owners())[p2] == (OWNED, "worker-2")
+
+
+@pytest.mark.asyncio
+async def test_unowned_occupied_partition_from_cr4_refusal_checks_requirements_and_moves_placements(tmp_path: Path) -> None:
+    """C20: an occupied partition left unowned by CR-4 refusal recovery is only assigned to a compatible host and moves placements."""
+
+    cluster = _ClusterFixture(tmp_path)
+    cluster.issue_host("lead-1", roles=("lead_host",), agent_types=(MANAGER_AGENT_TYPE,), session_limit=4)
+    cluster.issue_host("lead-2", roles=("lead_host",), agent_types=(MANAGER_AGENT_TYPE,), session_limit=4)
+    cluster.write_liveness("lead-1")
+    cluster.write_liveness("lead-2")
+
+    sessions, partitions = cluster.make_services(credentials_enforced=False)
+    await partitions.reconcile()
+    p_lead = next(p for p, (_s, h) in (await cluster.owners()).items() if h == "lead-1")
+    lead_agent = cluster.agent_in_partition(p_lead, prefix="lead")
+    opened = await sessions.open(cluster.open_frame("lead-1", lead_agent, MANAGER_AGENT_TYPE))
+    assert opened["outcome"] == "ok"
+
+    # Hand over p_lead from lead-1 to lead-2 -> lead_agent placement is now on lead-2 with handed_over=True.
+    closed = await sessions.close(cluster.close_frame("lead-1", opened["session"]["body"]["session"], "handed_over"))
+    assert closed["outcome"] == "ok"
+    assert await partitions.release_partition(p_lead, reason="operator", target_host="lead-2") is True
+    await partitions.reconcile()
+    assert (await cluster.owners())[p_lead] == (OWNED, "lead-2")
+
+    # lead-1 leaves; worker-only (lacks lead_host and MANAGER_AGENT_TYPE) joins; lead-2 refuses p_lead as credential_too_large.
+    cluster.advance(5)
+    cluster.remove_liveness("lead-1")
+    cluster.issue_host("worker-only", roles=("worker_host",), agent_types=("researcher",), session_limit=8)
+    cluster.write_liveness("worker-only")
+    cluster.write_liveness(
+        "lead-2",
+        components=[{"component": f"partition-{p_lead}", "state": "unhealthy", "code": PARTITION_CREDENTIAL_TOO_LARGE_CODE}],
+    )
+    await partitions.reconcile()
+
+    # p_lead MUST remain unowned (not assigned as an empty partition to worker-only!).
+    assert p_lead not in await cluster.owners()
+
+    # Now a compatible lead-3 joins -> p_lead is assigned to lead-3 and lead_agent's placement moves to lead-3!
+    cluster.advance(5)
+    cluster.issue_host("lead-3", roles=("lead_host",), agent_types=(MANAGER_AGENT_TYPE,), session_limit=4)
+    cluster.write_liveness("worker-only")
+    cluster.write_liveness(
+        "lead-2",
+        components=[{"component": f"partition-{p_lead}", "state": "unhealthy", "code": PARTITION_CREDENTIAL_TOO_LARGE_CODE}],
+    )
+    cluster.write_liveness("lead-3")
+    await partitions.reconcile()
+
+    assert (await cluster.owners())[p_lead] == (OWNED, "lead-3")
+    pl = await cluster.records.read_report(PLACEMENT, placement_key(TEAM, lead_agent), now=cluster.now)
+    assert pl is not None and pl.record.body.host == "lead-3" and pl.record.body.handed_over is True
+    reopened = await sessions.open(cluster.open_frame("lead-3", lead_agent, MANAGER_AGENT_TYPE))
+    assert reopened["outcome"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_revocations_bucket_refresh_and_watch_releases_retired_intermittent_host_immediately(tmp_path: Path) -> None:
+    """C21: PartitionService watches revocations.<installation> and refreshes it on reconcile so retired hosts release immediately."""
+
+    cluster = _ClusterFixture(tmp_path)
+    cluster.issue_host("worker-edge", roles=("worker_host",), agent_types=("researcher",), connection_class="intermittent")
+    cluster.issue_host("worker-live", roles=("worker_host",), agent_types=("researcher",), connection_class="connected")
+    cluster.write_liveness("worker-edge")
+    cluster.write_liveness("worker-live")
+
+    _sessions, partitions = cluster.make_services(credentials_enforced=False)
+    await partitions.reconcile()
+    edge_parts = sorted(p for p, (_s, h) in (await cluster.owners()).items() if h == "worker-edge")
+    assert edge_parts
+
+    # Verify PartitionService.run() watches revocations.<installation> even when credentials_enforced=False.
+    stop = asyncio.Event()
+    runner = asyncio.create_task(partitions.run(stop))
+    await asyncio.sleep(0.02)
+    stop.set()
+    await runner
+    assert ("revocations", f"revocations.{INSTALLATION}") in cluster.records.watched
+
+    # Authority writes a new revocations record ONLY to the KV bucket (not pushed into team services' trust store directly).
+    cluster.advance(2)
+    cluster.remove_liveness("worker-edge")
+    cluster.write_liveness("worker-live")
+    cluster.revoke_host("worker-edge", add_to_trust=False)
+
+    # Next reconcile refreshes revocations.<installation> and immediately reassigns worker-edge's partitions to worker-live.
+    await partitions.reconcile()
+    owners = await cluster.owners()
+    for p in edge_parts:
+        assert owners[p] == (OWNED, "worker-live")
+
+
+@pytest.mark.asyncio
+async def test_host_lost_escalation_does_not_reassign_back_to_unrecovered_stalled_host(tmp_path: Path) -> None:
+    """C22: host_lost escalation never reassigns back to an unrecovered host at its old epoch and prefers healthy peers."""
+
+    cluster = _ClusterFixture(tmp_path)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+
+    revoked_nats: set[str] = set()
+    _sessions, partitions = cluster.make_services(
+        credentials_enforced=True,
+        handover_seconds=60,
+        is_nats_key_revoked=lambda k: k in revoked_nats,
+    )
+    await partitions.reconcile()
+    w1_parts = sorted(p for p, (_s, h) in (await cluster.owners()).items() if h == "worker-1")
+    p_stall = w1_parts[0]
+    k1 = cluster.host_keys["worker-1"].nats_public_key
+
+    # Start connected handover on p_stall; worker-1 stalls past handover_seconds while still writing liveness at epoch 1.
+    assert await partitions.release_partition(p_stall, reason="operator", target_host="worker-2") is True
+    cluster.advance(65)
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    # All of worker-1's partitions are escalated to host_lost.
+    for p in w1_parts:
+        assert (await cluster.owners())[p] == (RELEASED, "worker-1")
+
+    # Authority revokes K1; worker-1 is still writing liveness at epoch 1 with owned_count=0.
+    # Even with worker-2 offline, worker-1 must NOT get partitions back while still at epoch 1!
+    revoked_nats.add(k1)
+    cluster.remove_liveness("worker-2")
+    cluster.advance(2)
+    cluster.write_liveness("worker-1")
+    await partitions.reconcile()
+    for p in w1_parts:
+        assert (await cluster.owners())[p] == (RELEASED, "worker-1")
+
+    # When worker-2 is healthy again, all of worker-1's partitions go to worker-2 (never back to stalled worker-1).
+    cluster.write_liveness("worker-2")
+    await partitions.reconcile()
+    for p in w1_parts:
+        assert (await cluster.owners())[p] == (OWNED, "worker-2")
+
+
+@pytest.mark.asyncio
+async def test_watch_hosts_ignores_steady_state_heartbeats_and_draining_moves_all_empty_in_one_pass(tmp_path: Path) -> None:
+    """C23: _watch_hosts ignores non-team/non-owning hosts and unchanged heartbeats; draining moves all empty partitions in one pass."""
+
+    cluster = _ClusterFixture(tmp_path)
+    cluster.issue_host("worker-1", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("worker-2", roles=("worker_host",), agent_types=("researcher",))
+    cluster.issue_host("gateway", roles=("gateway",), agent_types=(), session_limit=0)
+    cluster.issue_host("other-team-worker", roles=("worker_host",), teams=("team_beta",), agent_types=("researcher",))
+    cluster.write_liveness("worker-1")
+    cluster.write_liveness("worker-2")
+    cluster.write_liveness("gateway")
+    cluster.write_liveness("other-team-worker")
+
+    _sessions, partitions = cluster.make_services(credentials_enforced=False)
+    await partitions.reconcile()
+
+    seen: dict[str, tuple[str, int, bool, frozenset[int]]] = {}
+    gw_raw = (await cluster.records.raw("host", "gateway"))[1]  # type: ignore[index]
+    other_raw = (await cluster.records.raw("host", "other-team-worker"))[1]  # type: ignore[index]
+    w1_raw = (await cluster.records.raw("host", "worker-1"))[1]  # type: ignore[index]
+
+    # Gateway and other-team worker heartbeats are ignored completely.
+    assert partitions._host_watch_event_relevant("gateway", gw_raw, seen) is False
+    assert partitions._host_watch_event_relevant("other-team-worker", other_raw, seen) is False
+
+    # First heartbeat for worker-1 wakes; repeated steady-state heartbeat does NOT wake.
+    assert partitions._host_watch_event_relevant("worker-1", w1_raw, seen) is True
+    cluster.advance(10)
+    cluster.write_liveness("worker-1", state="accepting")
+    w1_hb2 = (await cluster.records.raw("host", "worker-1"))[1]  # type: ignore[index]
+    assert partitions._host_watch_event_relevant("worker-1", w1_hb2, seen) is False
+
+    # Transitioning worker-1 to draining DOES wake, and one reconcile() moves ALL empty partitions of worker-1 to worker-2!
+    cluster.advance(2)
+    cluster.write_liveness("worker-1", state="draining")
+    cluster.write_liveness("worker-2", state="accepting")
+    w1_drain = (await cluster.records.raw("host", "worker-1"))[1]  # type: ignore[index]
+    assert partitions._host_watch_event_relevant("worker-1", w1_drain, seen) is True
+
+    await partitions.reconcile()
+    assert all(state == OWNED and host == "worker-2" for state, host in (await cluster.owners()).values())
