@@ -38,7 +38,7 @@ from typing import Any, Iterable, Optional
 
 import nats
 import pytest
-from nats.js.api import AckPolicy, ConsumerConfig, DiscardPolicy, ObjectInfo, RetentionPolicy, StorageType, StreamConfig
+from nats.js.api import AckPolicy, ConsumerConfig, DiscardPolicy, RetentionPolicy, StorageType, StreamConfig
 from nats.js.errors import NotFoundError
 from nats.nuid import NUID
 
@@ -1448,32 +1448,25 @@ async def put_blob(writer: Client, team: str, content: bytes, request_id: str) -
 
 
 async def read_blob(reader: Client, team: str, sha256: str) -> Optional[bytes]:
-    """A reader's get: the last metadata, then the chunks through an ordered consumer naming the stream."""
+    """A reader's get: the last metadata, then direct STREAM.MSG.GET chunk reads (S2, no consumer)."""
 
-    js = reader.nc.jetstream()
-    name = BLOBS["object_name"].format(team=team, sha256=sha256)
-    meta = await js.get_last_msg(BLOB_STREAM, META + base64.urlsafe_b64encode(name.encode()).decode())
-    info = ObjectInfo.from_response(json.loads(meta.data))  # NATS's own object information
-    if info.deleted:
+    from custom_transport.protocol1.blobs import BlobDeleted, get_blob
+
+    try:
+        return await get_blob(reader.nc.jetstream(), team, sha256)
+    except BlobDeleted:
         return None
-    subscription = await js.subscribe(CHUNKS + info.nuid, stream=BLOB_STREAM, ordered_consumer=True)
-    content = b""
-    for _chunk in range(info.chunks):
-        content += (await subscription.next_msg(timeout=5)).data
-    await subscription.unsubscribe()
-    found = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
-    assert (len(content), found, info.headers["UA-Blob-SHA256"]) == (info.size, sha256, [sha256])
-    return content
 
 
 @pytest.mark.asyncio
 async def test_blob_writers_put_readers_read_and_only_the_team_services_delete(isolated_broker) -> None:
     """README, "Blobs": writers, readers and the deleter each with their own generated grants.
 
-    A blob of many chunks makes the server ask the reader's ordered consumer for flow
-    control, so a missing flow-control grant fails here. NATS's object store helpers cannot
-    be used as they are: put and delete send rollup headers, which the bucket refuses, and
-    get asks for every stream's name, which no reader may.
+    Readers fetch chunks directly through ``$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS`` (S2)
+    and hold no ``CONSUMER.CREATE`` or ``STREAM.NAMES`` grant on ``OBJ_UA1_BLOBS``.
+    NATS's object store helpers cannot be used as they are: put and delete send rollup
+    headers, which the bucket refuses, and get asks for every stream's name, which no
+    reader may.
     """
 
     async with AsyncExitStack() as stack:
@@ -1486,7 +1479,8 @@ async def test_blob_writers_put_readers_read_and_only_the_team_services_delete(i
         await admin.nc.jetstream().add_stream(config=StreamConfig(
             name=BLOB_STREAM, subjects=[CHUNKS + ">", META + ">"], storage=STORAGE[settings["storage"]],
             allow_rollup_hdrs=settings["allow_rollup_hdrs"], deny_delete=settings["deny_delete"],
-            deny_purge=settings["deny_purge"], discard=DiscardPolicy.NEW))
+            deny_purge=settings["deny_purge"], max_consumers=settings["max_consumers"],
+            discard=DiscardPolicy.NEW))
         large = random.Random(3).randbytes(4 * 1024 * 1024 + 17)
         small = b"a short answer kept as a blob"
         large_name = await put_blob(worker, TEAM, large, "task_context_7f3a9c1e5b2d")
@@ -1501,6 +1495,9 @@ async def test_blob_writers_put_readers_read_and_only_the_team_services_delete(i
         with pytest.raises(nats.errors.TimeoutError):
             await bare.get(large_name)
         await edge.refused("$JS.API.STREAM.NAMES")
+        # S2: blob readers cannot create consumers on OBJ_UA1_BLOBS.
+        await edge.publish_refused(f"$JS.API.CONSUMER.CREATE.{BLOB_STREAM}")
+        await worker.publish_refused(f"$JS.API.CONSUMER.CREATE.{BLOB_STREAM}")
         # A reader cannot write; a writer cannot purge, nor erase other objects with a rollup.
         await edge.publish_refused(CHUNKS + NUID().next().decode())
         await edge.publish_refused(blob_name(TEAM, b"x")[1])

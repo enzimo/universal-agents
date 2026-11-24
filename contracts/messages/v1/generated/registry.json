@@ -557,6 +557,17 @@
       },
       "authority": "none",
       "body": "bodies/blobs.register.schema.json",
+      "body_rules": [
+        {
+          "forbids": "/body/person",
+          "when": [
+            {
+              "at": "/body/owner/type",
+              "is": "agent"
+            }
+          ]
+        }
+      ],
       "class": "request_reply",
       "description": "Register an owner of a team blob in UA1_BLOBS, confirming whether the object is already live or must be uploaded first.",
       "expiry_seconds": 30,

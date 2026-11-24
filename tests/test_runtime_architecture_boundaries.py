@@ -871,6 +871,7 @@ NATS_CLIENT_MODULES = {
     "custom_transport/nats_consumer_reconciler.py": "removes consumers the topology no longer names",
     "custom_transport/nats_topology.py": "creates and updates the streams",
     "custom_transport/protocol1/live.py": "protocol 1 requests, replies and served addresses",
+    "custom_transport/protocol1/blobs.py": "protocol 1 UA1_BLOBS object store reads, writes, deletes and orphan sweeps via JetStream APIs without rollups or consumers",
     "custom_transport/protocol1/state_records.py": "protocol 1 signed records in key-value buckets",
     "custom_transport/protocol1/bucket_reads.py": "key-value listings and watches that cannot end early",
     "custom_transport/protocol1/joining.py": "a host's join request, signed before it has a certificate",

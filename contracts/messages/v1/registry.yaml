@@ -2562,6 +2562,8 @@ kinds:
     class: request_reply
     address: svc.team
     body: bodies/blobs.register.schema.json
+    body_rules:
+      - {forbids: /body/person, when: [{at: /body/owner/type, is: agent}]}
     reply:
       body: bodies/blobs.register.reply.schema.json
       errors: [not_allowed, runtime_error]
