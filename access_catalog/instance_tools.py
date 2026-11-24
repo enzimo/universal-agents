@@ -222,7 +222,7 @@ def cli_document(tool: ProposedCliToolV1) -> dict[str, Any]:
     return entry
 
 
-def _remove_from_candidate(candidate: ToolCatalog, tool_removals: tuple[ProposedToolRemovalV1, ...]) -> None:
+def _remove_from_candidate(candidate: ToolCatalog, tool_removals: tuple[ProposedToolRemovalV1, ...]) -> set[str]:
     """Remove proposed tools from ``candidate`` before applying changes or additions."""
 
     seen_removals: set[str] = set()
@@ -249,6 +249,7 @@ def _remove_from_candidate(candidate: ToolCatalog, tool_removals: tuple[Proposed
             if binding is not None and binding.tool_id == removal.tool_id:
                 del candidate.broker_actions[(cli_name, INSTALLED_CLI_ACTION)]
         del candidate.tools[removal.tool_id]
+    return seen_removals
 
 
 def with_proposed_tools(
@@ -261,9 +262,11 @@ def with_proposed_tools(
     """A copy of ``catalog`` with removals applied, changed tools replaced, and new tools added; raises ``CatalogError`` on a clash."""
 
     candidate = copy.deepcopy(catalog)
-    _remove_from_candidate(candidate, tool_removals)
+    removed_ids = _remove_from_candidate(candidate, tool_removals)
     seen_changes: set[str] = set()
     for changed in tool_changes:
+        if changed.tool_id in removed_ids:
+            raise CatalogError(f"Tool {changed.tool_id!r} cannot be both removed and changed in the same proposal.")
         if changed.tool_id in seen_changes:
             raise CatalogError(f"Tool {changed.tool_id!r} is listed more than once in tool_changes.")
         seen_changes.add(changed.tool_id)
@@ -281,8 +284,12 @@ def with_proposed_tools(
     for changed in tool_changes:
         candidate.add_tool(tool_definition(changed))
     for tool in tools:
+        if tool.tool_id in removed_ids:
+            raise CatalogError(f"Tool {tool.tool_id!r} cannot be both removed and added in the same proposal.")
         candidate.add_tool(tool_definition(tool))
     for cli in clis:
+        if cli.tool_id in removed_ids:
+            raise CatalogError(f"Tool {cli.tool_id!r} cannot be both removed and added in the same proposal.")
         candidate.add_installed_cli(cli_document(cli))
     candidate.validate()
     return candidate

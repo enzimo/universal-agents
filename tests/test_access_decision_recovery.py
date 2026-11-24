@@ -30,7 +30,9 @@ def prepare(store):
     finished = request.model_copy(update={
         "status": AccessRequestStatus.GRANTED, "decided_by": OWNER, "decided_at_utc": NOW,
     })
-    recovery = DecisionRecovery(claim, finished, {"tool_files": [], "replaced_tool_files": []}, NOW + timedelta(seconds=1))
+    recovery = DecisionRecovery(
+        claim, finished, {"tool_files": [], "replaced_tool_files": [], "removed_tool_files": []}, NOW + timedelta(seconds=1)
+    )
     store.save_decision_recovery(recovery)
     return claim, recovery
 
@@ -136,7 +138,7 @@ def test_external_publication_and_cleanup_exclude_each_other(repositories):
             pytest.fail("a released decision must not publish")
 
 
-def test_older_proposal_recovery_row_gains_replaced_tool_files_on_open(repositories):
+def test_older_proposal_recovery_row_gains_replaced_and_removed_tool_files_on_open(repositories):
     first, _second = repositories
     request = first.create_request(_request())
     claim = DecisionClaim(request.request_id, "decision_pre_upgrade")
@@ -144,9 +146,26 @@ def test_older_proposal_recovery_row_gains_replaced_tool_files_on_open(repositor
     finished = request.model_copy(
         update={"status": AccessRequestStatus.GRANTED, "decided_by": OWNER, "decided_at_utc": NOW}
     )
-    # A pre-upgrade proposal recovery row lacks replaced_tool_files.
+    # A pre-upgrade proposal recovery row lacks both replaced_tool_files and removed_tool_files.
     first.save_decision_recovery(
         DecisionRecovery(claim, finished, {"tool_files": [], "programs": [], "servers": []}, NOW + timedelta(seconds=1))
+    )
+    # A PR-#174 proposal recovery row has replaced_tool_files but lacks removed_tool_files.
+    mid_request = first.create_request(_request().model_copy(update={"request_id": "access_req_pg_mid_upgrade"}))
+    mid_claim = DecisionClaim(mid_request.request_id, "decision_mid_upgrade")
+    first.claim_decision(
+        mid_request.request_id, claim_id=mid_claim.claim_id, at=NOW, until=NOW + timedelta(seconds=1)
+    )
+    mid_finished = mid_request.model_copy(
+        update={"status": AccessRequestStatus.GRANTED, "decided_by": OWNER, "decided_at_utc": NOW}
+    )
+    first.save_decision_recovery(
+        DecisionRecovery(
+            mid_claim,
+            mid_finished,
+            {"tool_files": [], "replaced_tool_files": [], "programs": [], "servers": []},
+            NOW + timedelta(seconds=1),
+        )
     )
     # A non-proposal recovery row (such as file delivery) is left untouched.
     other_request = first.create_request(_request().model_copy(update={"request_id": "access_req_pg_delivery"}))
@@ -164,10 +183,13 @@ def test_older_proposal_recovery_row_gains_replaced_tool_files_on_open(repositor
     reopened = AccessRepository(first.settings)
     later = NOW + timedelta(minutes=11)
     by_claim = {item.claim.claim_id: item.effects for item in reopened.decision_recoveries(TEAM, now=later)}
-    assert by_claim["decision_pre_upgrade"] == {
+    expected_proposal = {
         "tool_files": [],
         "programs": [],
         "servers": [],
         "replaced_tool_files": [],
+        "removed_tool_files": [],
     }
+    assert by_claim["decision_pre_upgrade"] == expected_proposal
+    assert by_claim["decision_mid_upgrade"] == expected_proposal
     assert by_claim["decision_delivery"] == {"delivered_files": []}

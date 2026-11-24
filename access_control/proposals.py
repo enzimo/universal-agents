@@ -141,6 +141,8 @@ def proposal_digest(proposal: AccessProposalV1) -> str:
     payload = proposal.model_dump(mode="json")
     if not payload.get("tool_changes"):
         payload.pop("tool_changes", None)
+    if not payload.get("tool_removals"):
+        payload.pop("tool_removals", None)
     for tool in payload.get("tools") or ():
         if not tool.get("gate_injections"):
             tool.pop("gate_injections", None)

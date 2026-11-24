@@ -189,6 +189,95 @@ class ReplacedFile(BaseModel):
             restore(previous)
 
 
+class RemovedFile(BaseModel):
+    """A journaled removal of an existing file, storing the exact bytes to restore."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    parts: tuple[str, ...]
+    sha256: str
+    size: int
+    previous_b64: str
+
+    @classmethod
+    def prepared(cls, parts: tuple[str, ...], previous_data: bytes) -> RemovedFile:
+        return cls(
+            parts=parts,
+            sha256=hashlib.sha256(previous_data).hexdigest(),
+            size=len(previous_data),
+            previous_b64=base64.b64encode(previous_data).decode("ascii"),
+        )
+
+    def previous_bytes(self) -> bytes:
+        return base64.b64decode(self.previous_b64.encode("ascii"))
+
+    def _existing_state(self, root: Path) -> str:
+        """Classify ``root/parts`` as ``'matches'``, ``'changed'``, or ``'missing'`` without following links."""
+
+        try:
+            with safe_open.opened_file(root, self.parts) as (descriptor, info):
+                if info.st_size != self.size:
+                    return "changed"
+                count, digest, exceeded = _read_bounded_sha256(descriptor, self.size)
+                if not exceeded and count == self.size and digest == self.sha256:
+                    return "matches"
+                return "changed"
+        except safe_open.UnsafePath as exc:
+            if exc.reason == safe_open.REASON_NOT_FOUND:
+                return "missing"
+            if exc.reason in {
+                safe_open.REASON_LINK,
+                safe_open.REASON_NOT_REGULAR_FILE,
+                safe_open.REASON_SEVERAL_LINKS,
+            }:
+                if safe_open.entry_status(root, self.parts) is not None:
+                    return "changed"
+                return "missing"
+            raise
+
+    def restore(self, root: Path, restore: Callable[[bytes], None] | None = None) -> None:
+        """Restore the removed bytes atomically when missing; never overwrite another file or link.
+
+        - If the path still holds the exact original bytes (stopped before unlink
+          or already restored), return quietly.
+        - If another file, symlink, directory, or multi-link entry now exists at
+          the path, leave it untouched and log ``access_decision_artifact_changed``.
+        - If missing, write ``previous_bytes()`` atomically via
+          ``safe_open.write_bytes_exclusive`` (or ``restore``).
+        """
+
+        state = self._existing_state(root)
+        if state == "matches":
+            return
+        if state == "changed":
+            logger.warning(
+                "A decision's removed artifact was replaced externally before it could be restored; "
+                "the current file is kept. event=access_decision_artifact_changed path=%s",
+                "/".join(self.parts),
+            )
+            return
+        previous = self.previous_bytes()
+        try:
+            if restore is None:
+                safe_open.write_bytes_exclusive(root, self.parts, previous)
+            else:
+                restore(previous)
+        except safe_open.UnsafePath as exc:
+            if exc.reason != safe_open.REASON_DESTINATION_EXISTS:
+                raise
+            after = self._existing_state(root)
+            if after == "matches":
+                return
+            if after == "changed":
+                logger.warning(
+                    "A decision's removed artifact was replaced externally before it could be restored; "
+                    "the current file is kept. event=access_decision_artifact_changed path=%s",
+                    "/".join(self.parts),
+                )
+                return
+            raise
+
+
 class EffectJournal:
     def __init__(self, store: AccessRepository, recovery: DecisionRecovery) -> None:
         self.store = store
@@ -229,3 +318,21 @@ class EffectJournal:
             replaced.restore(root)
             raise
         return replaced
+
+    def prepare_removal(
+        self,
+        category: str,
+        parts: tuple[str, ...],
+        previous_data: bytes,
+    ) -> RemovedFile:
+        removed = RemovedFile.prepared(parts, previous_data)
+        self.recovery.effects[category].append(removed.model_dump(mode="json"))
+        try:
+            self.store.save_decision_recovery(self.recovery)
+        except BaseException:
+            # No file has been unlinked yet. Drop the unsaved in-memory entry;
+            # if the save committed before raising, recovery sees the original
+            # bytes intact and treats it as a quiet no-op.
+            self.recovery.effects[category].pop()
+            raise
+        return removed
