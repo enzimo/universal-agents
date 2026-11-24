@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from custom_messages.contracts.access_v2 import LinkOwnerKind
+from custom_messages.contracts.access_v2 import LinkOwnerKind, LinkPurpose
 from custom_messages.contracts.model_keys_v1 import MODEL_KEY_AUTH_PROVIDER
 
-# Sign in to a tool, or choose which stored credential it uses (``/link <tool_id> [me|team]``).
+# Sign in to a tool, or choose which stored credential it uses (``/link <tool_id> [me|team|gate]``).
 LINK_COMMAND = "/link"
 # Whose account agents use for each service, and the administrators' change (``access_control.account_sharing``).
 ACCOUNTS_COMMAND = "/accounts"
@@ -31,9 +31,16 @@ OWN_MODEL_COMMAND = f"{MODEL_KEY_COMMAND} me"
 UPGRADE_COMMAND = "/upgrade"
 
 
-def link_command(tool_id: str, owner: LinkOwnerKind | None = None) -> str:
-    """``/link <tool_id>`` for the person's own account, or ``/link <tool_id> team`` for the team's."""
+def link_command(
+    tool_id: str,
+    owner: LinkOwnerKind | None = None,
+    *,
+    purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+) -> str:
+    """``/link <tool_id>`` for the person's own account, ``/link <tool_id> team`` for the team's, or ``/link <tool_id> gate`` for the team's gate."""
 
+    if purpose is LinkPurpose.GATE:
+        return f"{LINK_COMMAND} {tool_id} {LinkPurpose.GATE.value}"
     return f"{LINK_COMMAND} {tool_id} {LinkOwnerKind.TEAM.value}" if owner is LinkOwnerKind.TEAM else f"{LINK_COMMAND} {tool_id}"
 
 

@@ -35,6 +35,7 @@ class ToolContext:
     invocation_id: str | None = None
     # Chosen by the broker's access gate, never by the request.
     account_link: AccountLinkV1 | None = None
+    gate_link: AccountLinkV1 | None = None
 
     def require_user(self) -> str:
         user_id = str(self.canonical_user_id or "").strip()
