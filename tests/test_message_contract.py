@@ -1056,7 +1056,9 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
             consumer_lists = {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.LIST.")}
             assert consumer_lists == {f"$JS.API.CONSUMER.LIST.{stream}" for stream in withdrawal_streams}
             stream_infos = {subject for subject in publish if subject.startswith("$JS.API.STREAM.INFO.")}
-            assert stream_infos == {f"$JS.API.STREAM.INFO.{stream}" for stream in streams}
+            # Read-only STREAM.INFO on UA1_TEAM_WORK_{team} lets team_services warn administrators of near-expiry
+            # without granting MSG.GET, MSG.DELETE, or CONSUMER.LIST on its own inbox (C26).
+            assert stream_infos == {f"$JS.API.STREAM.INFO.{stream}" for stream in (*streams, "UA1_TEAM_WORK_{team}")}
         else:
             assert not creates and not reads, role
     for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
