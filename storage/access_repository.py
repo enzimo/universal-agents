@@ -106,6 +106,7 @@ from custom_messages.contracts.access_v2 import (
     GrantStatus,
     GrantV1,
     LinkOwnerKind,
+    LinkPurpose,
     SubjectKind,
     SubjectRefV1,
     TASK_BOUND_LIFETIMES,
@@ -121,8 +122,10 @@ from storage.sqlite_connection import connect_sqlite
 
 logger = logging.getLogger(__name__)
 
-# The partial unique index that allows one active account link per tool and owner.
-ONE_ACTIVE_LINK_INDEX = "access_account_links_one_active"
+# The partial unique index that allows one active link per tool, owner, and purpose.
+ONE_ACTIVE_LINK_INDEX = "access_account_links_one_active_purpose"
+# The pre-purpose unique index (replaced in place by ``_one_active_link_per_owner``).
+_LEGACY_ONE_ACTIVE_LINK_INDEX = "access_account_links_one_active"
 # The index that finds the grants one decision stored (``GrantV1.approval_id``).
 APPROVAL_ID_INDEX = "access_grants_approval"
 # The open write transaction that the owning thread's other store operations
@@ -323,7 +326,8 @@ class AccessRepository:
                 link_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, tool_id TEXT NOT NULL,
                 owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, status TEXT NOT NULL,
                 revoked_at TEXT, revoked_by_json TEXT,
-                payload_json TEXT NOT NULL, created_at TEXT NOT NULL
+                payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                purpose TEXT NOT NULL DEFAULT 'account'
             )""")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS access_account_links_owner "
@@ -420,6 +424,7 @@ class AccessRepository:
             conn.commit()
         self._approval_id_column()
         self._one_active_link_per_owner()
+        self._proposal_recovery_effects()
 
     def _connect(self) -> Any:
         joined = _OPEN_WRITE.get()
@@ -507,6 +512,49 @@ class AccessRepository:
             conn.execute(f"CREATE INDEX IF NOT EXISTS {APPROVAL_ID_INDEX} ON access_grants(approval_id)")
             conn.commit()
 
+    def _proposal_recovery_effects(self) -> None:
+        """Add ``replaced_tool_files`` to pre-upgrade proposal recovery rows on open.
+
+        Proposal recovery rows saved before tool replacement existed carry
+        ``tool_files`` without ``replaced_tool_files``. Adding the empty list
+        once at open keeps reconciliation reading each effect category directly
+        without fallback keys or ``KeyError`` loops. Later opens find nothing
+        to update with a read and take no write lock.
+        """
+
+        def _needs_upgrade(raw: str) -> dict[str, Any] | None:
+            effects = json.loads(raw)
+            if isinstance(effects, dict) and "tool_files" in effects and "replaced_tool_files" not in effects:
+                effects["replaced_tool_files"] = []
+                return effects
+            return None
+
+        with self._connect() as conn:
+            rows = conn.execute("SELECT claim_id, effects_json FROM access_decision_recoveries").fetchall()
+            if not any(_needs_upgrade(row["effects_json"]) is not None for row in rows):
+                return
+        p = self.dialect.bind
+        upgraded = 0
+        with self._connect() as conn:
+            conn.begin_write()
+            rows = conn.execute("SELECT claim_id, effects_json FROM access_decision_recoveries").fetchall()
+            for row in rows:
+                updated = _needs_upgrade(row["effects_json"])
+                if updated is None:
+                    continue
+                conn.execute(
+                    f"UPDATE access_decision_recoveries SET effects_json={p} WHERE claim_id={p}",
+                    (json.dumps(updated), str(row["claim_id"])),
+                )
+                upgraded += 1
+            conn.commit()
+        if upgraded:
+            logger.info(
+                "Upgraded proposal decision recovery rows with replaced_tool_files. "
+                "event=access_decision_recoveries_upgraded rows=%s",
+                upgraded,
+            )
+
     def _index_exists(self, conn: Any, name: str) -> bool:
         p = self.dialect.bind
         query = (
@@ -517,30 +565,62 @@ class AccessRepository:
         return conn.execute(query, (name,)).fetchone() is not None
 
     def _one_active_link_per_owner(self) -> None:
-        """Create the index that allows one active account link per tool and owner.
+        """Ensure the ``purpose`` column and one-active-link-per-purpose index exist.
 
-        Stores written before it existed may hold two active links for one tool
-        and owner (two link forms finished at once both saw no earlier link).
-        Only the one ``active_link`` returned was ever used: the newest, or
-        with the same time the larger link id. It stays and each other one is
-        revoked as replaced by it, with an event in the log and a warning
-        naming both links and the rule, before the index is created. Runs
-        once per store: later opens find the index with a read and take no
-        write lock.
+        Stores written before ``purpose`` existed lack the column and may hold
+        the earlier ``access_account_links_one_active`` index (without purpose)
+        or two active links for one tool, owner and purpose (before any unique
+        index existed). This adds the column, stamps ``"purpose": "account"``
+        onto earlier JSON records that lack it, drops the older index, revokes
+        any older duplicate active links (keeping the newest, or with the same
+        time the larger link id, with an event in the log and a warning), and
+        creates ``ONE_ACTIVE_LINK_INDEX`` in one transaction. Runs once per
+        store: later opens check with reads and take no write lock.
         """
 
         with self._connect() as conn:
-            if self._index_exists(conn, ONE_ACTIVE_LINK_INDEX):
+            has_column = self._column_exists(conn, "access_account_links", "purpose")
+            has_new_index = self._index_exists(conn, ONE_ACTIVE_LINK_INDEX)
+            has_legacy_index = self._index_exists(conn, _LEGACY_ONE_ACTIVE_LINK_INDEX)
+            if has_column and has_new_index and not has_legacy_index:
                 return
+        p = self.dialect.bind
         with self._connect() as conn:
             conn.begin_write()
-            if self._index_exists(conn, ONE_ACTIVE_LINK_INDEX):
+            has_column = self._column_exists(conn, "access_account_links", "purpose")
+            has_new_index = self._index_exists(conn, ONE_ACTIVE_LINK_INDEX)
+            has_legacy_index = self._index_exists(conn, _LEGACY_ONE_ACTIVE_LINK_INDEX)
+            if has_column and has_new_index and not has_legacy_index:
                 conn.commit()
                 return
+            if not has_column:
+                conn.execute(
+                    f"ALTER TABLE access_account_links ADD COLUMN purpose "
+                    f"TEXT NOT NULL DEFAULT '{LinkPurpose.ACCOUNT.value}'"
+                )
+                rows = conn.execute("SELECT link_id, payload_json FROM access_account_links").fetchall()
+                backfilled = 0
+                for row in rows:
+                    link_id, payload_json = row[0], row[1]
+                    payload = json.loads(payload_json)
+                    if isinstance(payload, dict) and "purpose" not in payload:
+                        payload["purpose"] = LinkPurpose.ACCOUNT.value
+                        conn.execute(
+                            f"UPDATE access_account_links SET payload_json={p}, purpose={p} WHERE link_id={p}",
+                            (json.dumps(payload), LinkPurpose.ACCOUNT.value, link_id),
+                        )
+                        backfilled += 1
+                logger.info(
+                    "Added the purpose column to access account links and set earlier records to account links. "
+                    "event=access_account_links_purpose_added links=%s",
+                    backfilled,
+                )
+            if has_legacy_index:
+                conn.execute(f"DROP INDEX IF EXISTS {_LEGACY_ONE_ACTIVE_LINK_INDEX}")
             self._revoke_older_duplicate_links_in(conn)
             conn.execute(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS {ONE_ACTIVE_LINK_INDEX} "
-                "ON access_account_links(team_id, tool_id, owner_kind, owner_id) "
+                "ON access_account_links(team_id, tool_id, owner_kind, owner_id, purpose) "
                 f"WHERE status = '{AccountLinkStatus.ACTIVE.value}'"
             )
             conn.commit()
@@ -549,13 +629,13 @@ class AccessRepository:
         p = self.dialect.bind
         rows = conn.execute(
             f"SELECT * FROM access_account_links WHERE status={p} "
-            "ORDER BY team_id, tool_id, owner_kind, owner_id, created_at DESC, link_id DESC",
+            "ORDER BY team_id, tool_id, owner_kind, owner_id, purpose, created_at DESC, link_id DESC",
             (AccountLinkStatus.ACTIVE.value,),
         ).fetchall()
-        newest: dict[tuple[str, str, str, str], AccountLinkV1] = {}
+        newest: dict[tuple[str, str, str, str, str], AccountLinkV1] = {}
         for row in rows:
             link = self._link_from_row(row)
-            key = (link.team_id, link.tool_id, link.owner_kind.value, link.owner_id)
+            key = (link.team_id, link.tool_id, link.owner_kind.value, link.owner_id, link.purpose.value)
             kept = newest.setdefault(key, link)
             if kept.link_id == link.link_id:
                 continue
@@ -568,14 +648,15 @@ class AccessRepository:
             )
             self._bump(conn, link.team_id)
             logger.warning(
-                "Two active account links named the same tool and owner; the one in use stays and the other was "
+                "Two active links named the same tool, owner and purpose; the one in use stays and the other was "
                 "revoked. The one in use is the newer one, or with the same time the one with the larger link id. "
-                "event=account_link_duplicate_revoked team_id=%s tool_id=%s owner_kind=%s owner_id=%s "
+                "event=account_link_duplicate_revoked team_id=%s tool_id=%s owner_kind=%s owner_id=%s purpose=%s "
                 "revoked_link_id=%s kept_link_id=%s rule=%s",
                 link.team_id,
                 link.tool_id,
                 link.owner_kind.value,
                 link.owner_id,
+                link.purpose.value,
                 link.link_id,
                 kept.link_id,
                 rule,
@@ -1369,15 +1450,16 @@ class AccessRepository:
     @staticmethod
     def _link_from_row(row: Any) -> AccountLinkV1:
         link = AccountLinkV1.model_validate_json(row["payload_json"])
-        return link.model_copy(
-            update={
-                "status": AccountLinkStatus(row["status"]),
-                "revoked_at_utc": datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
-                "revoked_by": SubjectRefV1.model_validate_json(row["revoked_by_json"])
-                if row["revoked_by_json"]
-                else None,
-            }
-        )
+        updates: dict[str, Any] = {
+            "status": AccountLinkStatus(row["status"]),
+            "revoked_at_utc": datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
+            "revoked_by": SubjectRefV1.model_validate_json(row["revoked_by_json"])
+            if row["revoked_by_json"]
+            else None,
+        }
+        if "purpose" in row.keys():
+            updates["purpose"] = LinkPurpose(row["purpose"])
+        return link.model_copy(update=updates)
 
     def get_link(self, link_id: str) -> AccountLinkV1 | None:
         p = self.dialect.bind
@@ -1386,26 +1468,49 @@ class AccessRepository:
         return self._link_from_row(row) if row else None
 
     def active_link(
-        self, team_id: str, tool_id: str, owner_kind: LinkOwnerKind, owner_id: str
+        self,
+        team_id: str,
+        tool_id: str,
+        owner_kind: LinkOwnerKind,
+        owner_id: str,
+        *,
+        purpose: LinkPurpose,
     ) -> AccountLinkV1 | None:
         with self._connect() as conn:
-            return self._active_link_in(conn, team_id, tool_id, owner_kind, owner_id)
+            return self._active_link_in(conn, team_id, tool_id, owner_kind, owner_id, purpose=purpose)
 
     def _active_link_in(
-        self, conn: Any, team_id: str, tool_id: str, owner_kind: LinkOwnerKind, owner_id: str
+        self,
+        conn: Any,
+        team_id: str,
+        tool_id: str,
+        owner_kind: LinkOwnerKind,
+        owner_id: str,
+        *,
+        purpose: LinkPurpose,
     ) -> AccountLinkV1 | None:
         p = self.dialect.bind
         row = conn.execute(
             f"SELECT * FROM access_account_links WHERE team_id={p} AND tool_id={p} "
-            f"AND owner_kind={p} AND owner_id={p} AND status={p} ORDER BY created_at DESC, link_id DESC",
-            (team_id, tool_id, owner_kind.value, owner_id, AccountLinkStatus.ACTIVE.value),
+            f"AND owner_kind={p} AND owner_id={p} AND purpose={p} AND status={p} "
+            "ORDER BY created_at DESC, link_id DESC",
+            (team_id, tool_id, owner_kind.value, owner_id, purpose.value, AccountLinkStatus.ACTIVE.value),
         ).fetchone()
         return self._link_from_row(row) if row else None
 
-    def list_links(self, team_id: str, *, include_revoked: bool = False) -> list[AccountLinkV1]:
+    def list_links(
+        self,
+        team_id: str,
+        *,
+        purpose: LinkPurpose | None,
+        include_revoked: bool = False,
+    ) -> list[AccountLinkV1]:
         p = self.dialect.bind
         query = f"SELECT * FROM access_account_links WHERE team_id={p}"
         params: list[Any] = [team_id]
+        if purpose is not None:
+            query += f" AND purpose={p}"
+            params.append(purpose.value)
         if not include_revoked:
             query += f" AND status={p}"
             params.append(AccountLinkStatus.ACTIVE.value)
@@ -1424,6 +1529,7 @@ class AccessRepository:
                 "tool_id": link.tool_id,
                 "owner_kind": link.owner_kind.value,
                 "owner_id": link.owner_id,
+                "purpose": link.purpose.value,
                 **detail,
             },
             recorded_at_utc=at,
@@ -1439,26 +1545,33 @@ class AccessRepository:
         self._event(conn, self._link_event(link, "account_link_revoked", actor, at, **detail))
 
     def create_link(self, link: AccountLinkV1) -> AccountLinkV1:
-        """Store a link, revoking the owner's earlier link for the same tool.
+        """Store a link, revoking the owner's earlier link for the same tool and purpose.
 
         The earlier link is read inside the write transaction, so of two links
         stored at once the second replaces the first; the unique index on
         active links (``_one_active_link_per_owner``) refuses any other path
-        to a second active link.
+        to a second active link for the same tool, owner, and purpose.
         """
 
         p = self.dialect.bind
         with self._connect() as conn:
             conn.begin_write()
-            previous = self._active_link_in(conn, link.team_id, link.tool_id, link.owner_kind, link.owner_id)
+            previous = self._active_link_in(
+                conn,
+                link.team_id,
+                link.tool_id,
+                link.owner_kind,
+                link.owner_id,
+                purpose=link.purpose,
+            )
             if previous is not None:
                 self._mark_link_revoked(
                     conn, previous, actor=link.created_by, at=link.created_at_utc, replaced_by=link.link_id
                 )
             conn.execute(
                 f"INSERT INTO access_account_links(link_id, team_id, tool_id, owner_kind, owner_id, status, "
-                f"revoked_at, revoked_by_json, payload_json, created_at) "
-                f"VALUES ({p},{p},{p},{p},{p},{p},NULL,NULL,{p},{p})",
+                f"revoked_at, revoked_by_json, payload_json, created_at, purpose) "
+                f"VALUES ({p},{p},{p},{p},{p},{p},NULL,NULL,{p},{p},{p})",
                 (
                     link.link_id,
                     link.team_id,
@@ -1468,6 +1581,7 @@ class AccessRepository:
                     AccountLinkStatus.ACTIVE.value,
                     link.model_dump_json(),
                     _utc(link.created_at_utc),
+                    link.purpose.value,
                 ),
             )
             self._event(conn, self._link_event(link, "account_link_created", link.created_by, link.created_at_utc,

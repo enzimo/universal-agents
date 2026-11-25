@@ -505,19 +505,75 @@ async def test_an_approved_proposals_forms_are_watched_until_they_end(setup_gate
         released.set()
 
     form = await setups.open_proposal_link(
-        request_id="access_req_1:http:portainer",
+        request_id="access_req_1:http:portainer:account",
         person_id=owner,
         person_roles=gateway._request_context_service.team_roles(owner),
         tool_id="http:portainer",
         owner="team",
         reason="Restart the stack",
+        purpose="account",
     )
-    setups.after_proposal_links(request_id="access_req_1", forms=[(form, "http:portainer", "team")], then=release)
+    setups.after_proposal_links(
+        request_id="access_req_1",
+        forms=[(form, "http:portainer", "team", "account")],
+        then=release,
+    )
     await asyncio.sleep(0.05)
     assert not released.is_set(), "the task waits while the approver's form is open"
 
     broker.complete(form.session_id)
     await asyncio.wait_for(released.wait(), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_proposals_gate_form_passes_gate_purpose_and_verifies_result(setup_gateway) -> None:
+    gateway, broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    setups = gateway._credential_workflow.tool_setups
+    released = asyncio.Event()
+
+    async def release() -> None:
+        released.set()
+
+    form = await setups.open_proposal_link(
+        request_id="access_req_gate:http:portainer:gate",
+        person_id=owner,
+        person_roles=gateway._request_context_service.team_roles(owner),
+        tool_id="http:portainer",
+        owner="team",
+        reason="Pass the Cloudflare gate",
+        purpose="gate",
+    )
+    assert broker.requests[-1]["purpose"] == "gate"
+    setups.after_proposal_links(
+        request_id="access_req_gate",
+        forms=[(form, "http:portainer", "team", "gate")],
+        then=release,
+    )
+    broker.complete(form.session_id)
+    await asyncio.wait_for(released.wait(), timeout=5)
+
+    # A gate form whose broker result claims purpose="account" is rejected as a mismatch.
+    wrong = account_link_page_ending(
+        BrokerSessionOutcome(
+            ending=WATCH_FINISHED,
+            payload={
+                "status": "account_link_created",
+                "result": {
+                    "status": "account_link_created",
+                    "link_id": "link-1",
+                    "tool_id": "http:portainer",
+                    "owner_kind": "team",
+                    "purpose": "account",
+                },
+            },
+        ),
+        what="the team gate credential for Portainer",
+        tool_id="http:portainer",
+        owner="team",
+        purpose="gate",
+    )
+    assert (wrong.status, wrong.reason_code) == ("unavailable", "tool_setup_link_mismatch")
 
 
 @pytest.mark.asyncio
@@ -556,7 +612,7 @@ async def test_after_proposal_links_reports_each_form_ending_as_it_finishes(setu
     )
     setups.after_proposal_links(
         request_id="access_req_2",
-        forms=[(form_one, "http:portainer", "team"), (form_two, "cli:x", "team")],
+        forms=[(form_one, "http:portainer", "team", "account"), (form_two, "cli:x", "team", "account")],
         then=release,
         on_form_ended=on_form_ended,
     )
@@ -614,7 +670,7 @@ async def test_after_proposal_links_watch_failure_clears_link_and_waits_for_sibl
 
     real_page = setups._account_link_page
 
-    def patched_page(tool_id: str, owner_kind: str, form):
+    def patched_page(tool_id: str, owner_kind: str, form, *, purpose: str = "account"):
         if tool_id == "http:portainer":
             async def boom():
                 raise ValueError("malformed expires_at_utc")
@@ -626,12 +682,12 @@ async def test_after_proposal_links_watch_failure_clears_link_and_waits_for_sibl
                 expires_at_utc=form.expires_at_utc,
                 watch=boom,
             )
-        return real_page(tool_id, owner_kind, form)
+        return real_page(tool_id, owner_kind, form, purpose=purpose)
 
     monkeypatch.setattr(setups, "_account_link_page", patched_page)
     setups.after_proposal_links(
         request_id="access_req_3",
-        forms=[(form_one, "http:portainer", "team"), (form_two, "cli:x", "team")],
+        forms=[(form_one, "http:portainer", "team", "account"), (form_two, "cli:x", "team", "account")],
         then=release,
         on_form_ended=on_form_ended,
     )
@@ -1843,3 +1899,147 @@ async def test_no_retry_starts_after_the_gateway_began_to_stop(flaky_gateway, ca
     await asyncio.sleep(0.05)
     assert len(transport.attempts) == 1, "nothing tries again after close"
     assert _setups(gateway).get_tool_setup("tool_setup_req_kept").result_state == "unsent", "kept for the next start"
+
+
+@pytest.mark.asyncio
+async def test_after_proposal_links_gate_watch_failure_uses_gate_wording(
+    setup_gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F10: a failing watch on a proposal gate form reports team-gate wording, not account-link wording."""
+
+    from assistant_gateway.application.tool_setup import REASON_PAGE_UNCONFIRMED, _OpenedPage
+
+    gateway, _broker, _transport = setup_gateway
+    owner = gateway.config.user.canonical_user_id
+    roles = gateway._request_context_service.team_roles(owner)
+    setups = gateway._credential_workflow.tool_setups
+    done = asyncio.Event()
+    recorded: list[tuple[str, str, str | None, str]] = []
+
+    async def release() -> None:
+        done.set()
+
+    def on_form_ended(_form, tool_id: str, _owner_kind: str, ending) -> None:
+        recorded.append((tool_id, ending.status, ending.reason_code, ending.message))
+
+    gate_form = await setups.open_proposal_link(
+        request_id="access_req_gate_err:http:portainer",
+        person_id=owner,
+        person_roles=roles,
+        tool_id="http:portainer",
+        owner="team",
+        reason="Cloudflare gate",
+        purpose="gate",
+    )
+
+    def broken_page(tool_id: str, owner_kind: str, form, *, purpose: str = "account"):
+        async def boom():
+            raise RuntimeError("broker read failed")
+
+        return _OpenedPage(
+            label="Choose the team's gate credential for Portainer",
+            receipt="opened",
+            url=form.form_url,
+            expires_at_utc=form.expires_at_utc,
+            watch=boom,
+        )
+
+    monkeypatch.setattr(setups, "_account_link_page", broken_page)
+    setups.after_proposal_links(
+        request_id="access_req_gate_err",
+        forms=[(gate_form, "http:portainer", "team", "gate")],
+        then=release,
+        on_form_ended=on_form_ended,
+    )
+    await asyncio.wait_for(done.wait(), timeout=5)
+    assert recorded == [
+        (
+            "http:portainer",
+            "unavailable",
+            REASON_PAGE_UNCONFIRMED,
+            "Nobody could confirm whether the team gate credential for Portainer finished.",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_setup_states_preserve_gate_link_on_account_completion_and_clear_on_gate_completion(
+    setup_gateway, tmp_path
+) -> None:
+    """F3: account completion never overwrites missing gate_link to READY; gate completion clears STEP_GATE_LINK team-wide."""
+
+    from access_control.tool_setup_states import (
+        SOURCE_SETUP_CHECK,
+        STEP_ACCOUNT_LINK,
+        STEP_GATE_LINK,
+        ToolSetupStates,
+    )
+    from custom_messages.contracts.access_v2 import ToolSetupState
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+
+    gateway, _broker, _transport = setup_gateway
+    setups = gateway._credential_workflow.tool_setups
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "f3_access.db")}})
+    )
+    states = ToolSetupStates(store)
+    team_id = gateway.config.manager.team_id
+    setups._states = states
+    setups._team_id = team_id
+
+    alice = "usr_alice_f3"
+    bob = "usr_bob_f3"
+    carol = "usr_carol_f3"
+
+    # Alice and Bob lack the team gate link; Carol lacks an account link.
+    states.note_needs_setup(team_id, alice, "http:gated_api", step=STEP_GATE_LINK, source=SOURCE_SETUP_CHECK)
+    states.note_needs_setup(team_id, bob, "http:gated_api", step=STEP_GATE_LINK, source=SOURCE_SETUP_CHECK)
+    states.note_needs_setup(team_id, carol, "http:gated_api", step=STEP_ACCOUNT_LINK, source=SOURCE_SETUP_CHECK)
+
+    # 1. Alice completes an account link: her missing_step=gate_link must NOT be overwritten to READY.
+    await setups.person_finished(
+        person_id=alice, tool_id="http:gated_api", kind="account_link", owner="person", purpose="account"
+    )
+    alice_state = states.get(team_id, alice, "http:gated_api")
+    assert alice_state is not None
+    assert alice_state.state is ToolSetupState.NEEDS_SETUP
+    assert alice_state.missing_step == STEP_GATE_LINK
+
+    # 2. Even when Carol had missing_step=account_link, if the catalog guide says the tool has gate_injections,
+    #    completing an account link marks her state UNKNOWN rather than READY.
+    class _GatedGuide:
+        def external_step(self, tool_id: str, step_id: str):
+            return None
+
+        def display_name(self, tool_id: str):
+            return "Gated API"
+
+        def workflow_url(self, task_id: str):
+            return None
+
+        def has_gate(self, tool_id: str) -> bool:
+            return tool_id == "http:gated_api"
+
+    setups.guide = _GatedGuide()
+    await setups.person_finished(
+        person_id=carol, tool_id="http:gated_api", kind="account_link", owner="person", purpose="account"
+    )
+    carol_state = states.get(team_id, carol, "http:gated_api")
+    assert carol_state is not None
+    assert carol_state.state is ToolSetupState.UNKNOWN
+
+    # Re-mark Carol missing account_link to verify gate completion does NOT clear account_link rows.
+    states.note_needs_setup(team_id, carol, "http:gated_api", step=STEP_ACCOUNT_LINK, source=SOURCE_SETUP_CHECK)
+
+    # 3. Admin completes /link http:gated_api gate -> clears team-wide STEP_GATE_LINK rows (Alice and Bob) to UNKNOWN,
+    #    leaves Carol's STEP_ACCOUNT_LINK untouched, and ends no account-link waiting task.
+    told = await setups.person_finished(
+        person_id="usr_admin_f3", tool_id="http:gated_api", kind="account_link", owner="team", purpose="gate"
+    )
+    assert told == 0
+    assert states.get(team_id, alice, "http:gated_api").state is ToolSetupState.UNKNOWN
+    assert states.get(team_id, bob, "http:gated_api").state is ToolSetupState.UNKNOWN
+    carol_after = states.get(team_id, carol, "http:gated_api")
+    assert carol_after.state is ToolSetupState.NEEDS_SETUP
+    assert carol_after.missing_step == STEP_ACCOUNT_LINK

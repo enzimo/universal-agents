@@ -274,7 +274,7 @@ def test_two_links_stored_at_once_leave_one_active_link(settings) -> None:
         lambda: second.create_link(link("link_b")),
     )
 
-    links = first.list_links(TEAM, include_revoked=True)
+    links = first.list_links(TEAM, purpose=None, include_revoked=True)
     assert sorted(item.status for item in links) == [AccountLinkStatus.ACTIVE, AccountLinkStatus.REVOKED]
 
 
@@ -396,7 +396,7 @@ def test_an_older_store_with_two_active_links_keeps_the_newest_on_postgres(setti
     with caplog.at_level(logging.WARNING, logger="storage.access_repository"):
         reopened = AccessRepository(settings)
 
-    assert sorted(item.link_id for item in reopened.list_links(TEAM)) == ["link_new", "link_team"]
+    assert sorted(item.link_id for item in reopened.list_links(TEAM, purpose=None)) == ["link_new", "link_team"]
     revoked = [(e.grant_id, e.detail.get("reason"), e.detail.get("replaced_by")) for e in reopened.events(TEAM)
                if e.kind == "account_link_revoked"]
     assert revoked == [("link_old", "duplicate_active_link", "link_new")]
@@ -427,6 +427,76 @@ def test_an_older_store_gets_the_approval_id_column_on_postgres(settings) -> Non
         assert conn.execute(
             "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'access_grants_approval'"
         ).fetchone()
+
+
+def test_an_older_store_gets_the_purpose_column_and_index_on_postgres(settings) -> None:
+    """In-place upgrade for ``access_account_links.purpose`` and the purpose-scoped active-link index on PostgreSQL."""
+
+    import json
+
+    from custom_messages.contracts.access_v2 import CredentialInjectionV1, InjectionPlacement, LinkPurpose
+    from storage.access_repository import ONE_ACTIVE_LINK_INDEX, _LEGACY_ONE_ACTIVE_LINK_INDEX
+    from storage.postgres_connection import connect_postgres
+
+    store = AccessRepository(settings)
+    original = store.create_link(
+        AccountLinkV1(
+            link_id="link_pre_purpose",
+            team_id=TEAM,
+            tool_id="http:gitea",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            credential_key="gitea_team",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="token"),),
+            created_by=OWNER,
+            created_at_utc=NOW,
+        )
+    )
+    with connect_postgres(settings.postgres_dsn) as conn:
+        for row in conn.execute("SELECT link_id, payload_json FROM access_account_links").fetchall():
+            payload = json.loads(row[1])
+            payload.pop("purpose", None)
+            conn.execute("UPDATE access_account_links SET payload_json=%s WHERE link_id=%s", (json.dumps(payload), row[0]))
+        conn.execute(f"DROP INDEX {ONE_ACTIVE_LINK_INDEX}")
+        conn.execute("ALTER TABLE access_account_links DROP COLUMN purpose")
+        conn.execute(
+            f"CREATE UNIQUE INDEX {_LEGACY_ONE_ACTIVE_LINK_INDEX} "
+            "ON access_account_links(team_id, tool_id, owner_kind, owner_id) WHERE status = 'active'"
+        )
+        conn.commit()
+
+    upgraded = AccessRepository(settings)
+
+    active = upgraded.active_link(TEAM, "http:gitea", LinkOwnerKind.TEAM, TEAM, purpose=LinkPurpose.ACCOUNT)
+    assert active is not None and active.link_id == original.link_id and active.purpose is LinkPurpose.ACCOUNT
+    gate = upgraded.create_link(
+        AccountLinkV1(
+            link_id="link_gate_pg",
+            team_id=TEAM,
+            tool_id="http:gitea",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="gitea_gate",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="secret"),),
+            created_by=OWNER,
+            created_at_utc=NOW,
+        )
+    )
+    assert upgraded.active_link(TEAM, "http:gitea", LinkOwnerKind.TEAM, TEAM, purpose=LinkPurpose.GATE) == gate
+    assert upgraded.active_link(TEAM, "http:gitea", LinkOwnerKind.TEAM, TEAM, purpose=LinkPurpose.ACCOUNT) == active
+    with connect_postgres(settings.postgres_dsn) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = %s",
+            (ONE_ACTIVE_LINK_INDEX,),
+        ).fetchone()
+        assert (
+            conn.execute(
+                "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = %s",
+                (_LEGACY_ONE_ACTIVE_LINK_INDEX,),
+            ).fetchone()
+            is None
+        )
 
 
 def test_a_grant_plan_reads_through_the_transactions_own_connection_on_postgres(settings, monkeypatch) -> None:

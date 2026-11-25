@@ -34,7 +34,14 @@ from access_control.account_sharing import TeamAccountSharing
 from access_control.entities import AgentPrincipal, PersonPrincipal
 from access_control.identity import IdentityRejected
 from access_control.people import is_administrator
-from custom_messages.contracts.access_v2 import AccessLevel, AccountMode, LinkOwnerKind, TargetKind, TargetRefV1
+from custom_messages.contracts.access_v2 import (
+    AccessLevel,
+    AccountMode,
+    LinkOwnerKind,
+    LinkPurpose,
+    TargetKind,
+    TargetRefV1,
+)
 from custom_messages.contracts.credentials_v1 import (
     TOOL_SETUP_ACCOUNT_LINK,
     TOOL_SETUP_OWNER_PERSON,
@@ -46,6 +53,7 @@ from access_control.tool_setup_states import SOURCE_SETUP_CHECK, STEP_ACCESS, To
 from custom_tools.runtime_context import get_agent_ref
 from id_generation import new_id
 from secure_tools.auth_methods import tool_sign_in
+from secure_tools.chat_commands import link_command
 from storage.access_repository import AccessRepository
 
 logger = logging.getLogger(__name__)
@@ -59,6 +67,7 @@ ALLOWED = "allowed"
 NEEDS_REQUEST = "needs_request"
 BLOCKED = "blocked"
 MISSING = "missing"
+OUTDATED = "outdated"
 NOT_NEEDED = "not_needed"
 UNKNOWN = "unknown"
 SIGNED_IN = "signed_in"
@@ -201,6 +210,10 @@ def _account_ready(tool_def: Any, broker: dict[str, Any], owners: tuple[str, ...
         return sign_in == SIGNED_IN or bool(link.get("team"))
     if tool_def.account is AccountMode.LINKED_CREDENTIAL:
         # Only the owners the tool and the team's sharing allow count.
+        # The broker prefers the person's own link when present, so an outdated
+        # personal link still causes account_link_outdated even with a valid team link.
+        if "person" in owners and link.get("own_outdated"):
+            return False
         return bool(("person" in owners and link.get("own")) or ("team" in owners and link.get("team")))
     return True
 
@@ -239,14 +252,23 @@ def _sign_in_steps(tool_id: str, broker: dict[str, Any], is_admin: bool) -> list
     return steps
 
 
-def _team_only_link_step(tool_id: str, name: str, is_admin: bool) -> list[dict[str, Any]]:
+def _team_only_link_step(
+    tool_id: str, name: str, is_admin: bool, *, outdated: bool = False
+) -> list[dict[str, Any]]:
     """A tool that uses only the team's account: an administrator links it."""
 
+    cmd = link_command(tool_id, LinkOwnerKind.TEAM)
+    say = (
+        f"The team's account link for {name} was made for an older tool definition; "
+        f"a team administrator needs to link it again with {cmd}."
+        if outdated
+        else f"{name} uses the team's account, which a team administrator links with {cmd}."
+    )
     return [{
         "step": "team_account_link", "who": BY_ADMINISTRATOR,
         "fix_with": TOOL_SETUP_ACTION if is_admin else "tell_person_and_stop",
         "kind": TOOL_SETUP_ACCOUNT_LINK, "owner": TOOL_SETUP_OWNER_TEAM,
-        "say": f"{name} uses the team's account, which a team administrator links with /link {tool_id} team.",
+        "say": say,
     }]
 
 
@@ -257,30 +279,46 @@ def _link_steps(
     owners: tuple[str, ...] = (LinkOwnerKind.PERSON.value, LinkOwnerKind.TEAM.value),
     *,
     private: bool = False,
+    own_outdated: bool = False,
+    team_outdated: bool = False,
 ) -> list[dict[str, Any]]:
     """The link steps for the owners that count; ``private``: the team keeps the service private."""
 
     if "person" not in owners:
-        return _team_only_link_step(tool_id, name, is_admin)
+        return _team_only_link_step(tool_id, name, is_admin, outdated=team_outdated)
+    if own_outdated:
+        own_say = (
+            f"Your linked account for {name} was made for an older tool definition; "
+            f"link it again with {link_command(tool_id)}."
+        )
+    elif private:
+        own_say = (
+            f"The team keeps {name} private, so agents use your own account: choose which of your "
+            "saved accounts it should use."
+        )
+    else:
+        own_say = f"To use {name}, choose which of your saved accounts it should use."
     steps = [{
         "step": TOOL_SETUP_ACCOUNT_LINK, "who": BY_PERSON, "fix_with": TOOL_SETUP_ACTION,
         "kind": TOOL_SETUP_ACCOUNT_LINK, "owner": TOOL_SETUP_OWNER_PERSON,
-        "say": (
-            f"The team keeps {name} private, so agents use your own account: choose which of your "
-            "saved accounts it should use."
-            if private
-            else f"To use {name}, choose which of your saved accounts it should use."
-        ),
+        "say": own_say,
     }]
-    if "team" not in owners:
+    if "team" not in owners or own_outdated:
         return steps
+    team_cmd = link_command(tool_id, LinkOwnerKind.TEAM)
+    team_say = (
+        f"Or link the team's account again for everyone ({'you can do it' if is_admin else 'a team administrator can do it'} "
+        f"with {team_cmd}); the earlier team link was made for an older tool definition."
+        if team_outdated
+        else f"Or the team's account can be linked for everyone ({'you can do it' if is_admin else 'a team administrator can do it'} "
+        f"with {team_cmd})."
+    )
     steps.append({
         # Another way to fix the same gap, not a second piece.
         "step": "team_account_link", "who": BY_ADMINISTRATOR, "alternative_to": TOOL_SETUP_ACCOUNT_LINK,
         "fix_with": TOOL_SETUP_ACTION if is_admin else "tell_person",
         "kind": TOOL_SETUP_ACCOUNT_LINK, "owner": TOOL_SETUP_OWNER_TEAM,
-        "say": f"Or the team's account can be linked for everyone ({'you can do it' if is_admin else 'a team administrator can do it'} "
-        f"with /link {tool_id} team).",
+        "say": team_say,
     })
     return steps
 
@@ -295,7 +333,48 @@ def _account_steps(
     if tool_sign_in(tool_def.tool_id) is not None:
         return _sign_in_steps(tool_def.tool_id, broker, is_admin)
     private = tool_def.sharing_choice and LinkOwnerKind.TEAM not in owners
-    return _link_steps(tool_def.tool_id, tool_def.display_name, is_admin, owners, private=private)
+    link = broker.get("link") or {}
+    return _link_steps(
+        tool_def.tool_id,
+        tool_def.display_name,
+        is_admin,
+        owners,
+        private=private,
+        own_outdated=bool(link.get("own_outdated")),
+        team_outdated=bool(link.get("team_outdated")),
+    )
+
+
+def _gate_steps(tool_def: Any, broker: dict[str, Any], is_admin: bool) -> list[dict[str, Any]]:
+    """Administrator step when a web API tool needs a team gate credential (missing or outdated)."""
+
+    if not tool_def.gate_injections:
+        return []
+    if not broker:
+        return [{"step": "gate_unknown", "fix_with": "try_the_tool", "note": "The team gate credential could not be checked."}]
+    gate = broker.get("gate") or {}
+    state = str(gate.get("state") or MISSING)
+    if state == CONFIGURED:
+        return []
+    cmd = link_command(tool_def.tool_id, LinkOwnerKind.TEAM, purpose=LinkPurpose.GATE)
+    if state == OUTDATED:
+        say = (
+            f"The team gate credential for {tool_def.display_name} was linked for an older tool definition. "
+            f"{'Link it again' if is_admin else 'A team administrator needs to link it again'} with {cmd}."
+        )
+    else:
+        say = (
+            f"{tool_def.display_name} needs a team gate credential before requests can be sent. "
+            f"{'Link it' if is_admin else 'A team administrator needs to link it'} with {cmd}."
+        )
+    return [{
+        "step": "team_gate_link",
+        "who": BY_ADMINISTRATOR,
+        "fix_with": "tell_person_and_stop",
+        "command": cmd,
+        "state": state,
+        "say": say,
+    }]
 
 
 # -- the tool ---------------------------------------------------------------------------
@@ -331,7 +410,7 @@ def _known_state(context: dict[str, Any], tool_def: Any, access: dict[str, Any])
     person's access. States cover tools that act with an account.
     """
 
-    if tool_def.account is AccountMode.NONE:
+    if tool_def.account is AccountMode.NONE and not tool_def.gate_injections:
         return None
     states: ToolSetupStates = context["states"]
     person = context["person"]
@@ -365,6 +444,8 @@ def _tool_report(context: dict[str, Any], tool_id: str, broker: dict[str, Any], 
         steps += _account_steps(tool_def, broker, is_admin, owners) if broker else [
             {"step": "account_unknown", "fix_with": "try_the_tool", "note": "The account part could not be checked."}
         ]
+    if tool_def.gate_injections:
+        steps += _gate_steps(tool_def, broker, is_admin)
     report: dict[str, Any] = {
         "tool_id": tool_id,
         "name": tool_def.display_name,
@@ -372,7 +453,7 @@ def _tool_report(context: dict[str, Any], tool_id: str, broker: dict[str, Any], 
         "ready": not steps,
         "next_steps": steps,
     }
-    for key in ("sign_in", "link", "team_sign_in_app"):
+    for key in ("sign_in", "link", "gate", "team_sign_in_app"):
         if key in broker:
             report[key] = broker[key]
     known = _known_state(context, tool_def, access)

@@ -22,6 +22,13 @@ DEFAULT_SEALBOX_ROOT_TOKEN_FILE = "sealbox/root_token"
 DEFAULT_SEALBOX_TENANT_MATERIAL_DIR = "sealbox/tenants"
 DEFAULT_SEALBOX_API_VERSION = "v2"
 DEFAULT_SEALBOX_READY_TIMEOUT_SECONDS = 30
+# Default User-Agent for brokered web API requests (credential.api_request) when
+# the request sets none: what Helium on Linux sends (Chrome's reduced User-Agent;
+# Helium adds no token of its own).
+DEFAULT_API_REQUEST_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+)
 
 
 def resolve_secure_tool_broker_internal_base_url(

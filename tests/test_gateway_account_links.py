@@ -37,7 +37,7 @@ from assistant_gateway.gateway import UserGateway
 from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
 from assistant_gateway.runtime_ports import SystemGatewayClock
 from assistant_gateway.store import GatewayStateStore
-from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind
+from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkOwnerKind, LinkPurpose
 from access_control.caller_tokens import CALLER_GATEWAY
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from secure_tool_broker.service import SecureToolBrokerService
@@ -134,6 +134,7 @@ class FakeAccountLinkBroker:
                 "link_id": link_id,
                 "tool_id": request["tool_id"],
                 "owner_kind": request["owner_kind"],
+                "purpose": request.get("purpose", "account"),
                 "message": "Account linked; no credential value was returned.",
             },
         )
@@ -386,6 +387,7 @@ async def test_link_command_opens_the_persons_own_form(linked_gateway) -> None:
             "team_id": gateway.config.manager.team_id,
             "tool_id": "http:portainer",
             "owner_kind": "person",
+            "purpose": "account",
             "person_id": owner,
             "person_roles": list(gateway._request_context_service.team_roles(owner)),
             "reason": "You asked for this with /link.",
@@ -474,9 +476,9 @@ async def test_link_command_reports_broker_refusals_for_unusable_tools(
 @pytest.mark.parametrize(
     ("command", "expected_start"),
     [
-        ("/link", "Usage: /link <tool_id> [me|team]"),
-        ("/link help", "Usage: /link <tool_id> [me|team]"),
-        ("/link http:portainer everyone", "Usage: /link <tool_id> [me|team]"),
+        ("/link", "Usage: /link <tool_id> [me|team|gate]"),
+        ("/link help", "Usage: /link <tool_id> [me|team|gate]"),
+        ("/link http:portainer everyone", "Usage: /link <tool_id> [me|team|gate]"),
         ("/link cli:github everyone", "Usage: /link cli:github [token | web | web-all]"),
         ("/link cli:x token", "Usage: /link cli:x [web]"),
         (
@@ -527,8 +529,8 @@ def test_link_command_is_listed_in_help() -> None:
         build_web_chat_help,
     )
 
-    assert "/link <tool_id> [me|team]" in build_interactive_session_help()
-    assert "/link <tool_id> [ me | team ]" in build_web_chat_help()
+    assert "/link <tool_id> [me|team|gate]" in build_interactive_session_help()
+    assert "/link <tool_id> [ me | team | gate ]" in build_web_chat_help()
 
 
 # /link for tools a person signs in to ---------------------------------------
@@ -702,7 +704,7 @@ async def test_gateway_opener_links_an_account_through_the_real_broker(
     finally:
         await server.close()
 
-    stored = store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1")
+    stored = store.active_link(TEST_TEAM, "http:portainer", LinkOwnerKind.PERSON, "user-1", purpose=LinkPurpose.ACCOUNT)
     assert stored is not None
     assert status["status"] == "account_link_created"
     assert status["result"]["link_id"] == stored.link_id
@@ -1052,4 +1054,195 @@ async def test_link_result_is_posted_after_linking_with_the_real_broker(
     for secret_or_key in ("portainer-secret", "portainer_token", form.session_id):
         assert secret_or_key not in event.text
     assert "portainer-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_slash_link_gate_opens_gate_form_for_admin_refuses_member_and_posts_gate_result(
+    chat_gateway,
+) -> None:
+    gateway, broker, events, _transport = chat_gateway
+
+    help_result = await _link_in_chat(gateway, "/link help")
+    assert "[me|team|gate]" in help_result.text
+
+    # Owner runs /link http:portainer gate: gateway sends owner_kind=team, purpose=gate.
+    opened = await _link_in_chat(gateway, "/link http:portainer gate")
+    assert opened.transient_action is not None
+    assert opened.transient_action.label == "Open gate link form"
+    assert opened.transient_action.receipt == "Team gate link form opened for http:portainer."
+    assert broker.requests[-1]["owner_kind"] == "team"
+    assert broker.requests[-1]["purpose"] == "gate"
+
+    broker.complete("link_session_1")
+    event = await _posted(events)
+    assert event.text == (
+        "Linked the team's gate credential to Portainer (http:portainer). "
+        "Settings → Access → By Tool lists it. "
+        "Linking a gate credential gives nobody access by itself."
+    )
+
+    # A sign-in tool with 'gate' goes to the broker as a gate link request, not a sign-in method.
+    sign_in_gate = await _link_in_chat(gateway, "/link cli:x gate")
+    assert sign_in_gate.transient_action is not None
+    assert broker.requests[-1]["tool_id"] == "cli:x"
+    assert broker.requests[-1]["purpose"] == "gate"
+    assert broker.sign_ins == []
+
+    # A non-admin member is refused by the broker.
+    member_id = _member(gateway, role="member")
+    refused = await _run_link_command(gateway, "/link http:portainer gate", person=member_id)
+    assert refused.transient_action is None
+    assert "Could not open the team gate link form for http:portainer." in refused.text
+    assert "administrator" in refused.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_gate_link_result_is_posted_after_linking_with_the_real_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """F3 + F10: end-to-end real broker gate /link posts gate confirmation, stores gate link, and clears STEP_GATE_LINK."""
+
+    from access_catalog.catalog import CatalogSource
+    from access_control.identity import ContextVerifier
+    from access_control.tool_setup_states import SOURCE_SETUP_CHECK, STEP_GATE_LINK, ToolSetupStates
+    from custom_messages.contracts.access_v2 import LinkOwnerKind, LinkPurpose, ToolSetupState
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "cred_catalog.db"))
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_MODE", "files")
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIALS_DIR", str(tmp_path / "broker_creds"))
+    monkeypatch.setenv("GATE_SECRET_VAL", "CF-REAL-BROKER-GATE-SECRET")
+
+    tools_dir = tmp_path / "instance" / "control" / "access" / "tools"
+    tools_dir.mkdir(parents=True)
+    (tools_dir / "proposed-http-gitea.yaml").write_text(
+        """
+tools:
+  - tool_id: http:gitea
+    display_name: Gitea
+    account: linked_credential
+    hosts: [gitea.example.com]
+    credential_injections:
+      - {placement: header, name: Authorization, field: api_token, template: "token {value}"}
+    gate_injections:
+      - {placement: header, name: CF-Access-Client-Secret, field: client_secret}
+""",
+        encoding="utf-8",
+    )
+    store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    gate = BrokerAccessGate(
+        catalogs=CatalogSource(tmp_path / "instance"),
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=store,
+    )
+    save_credentials(
+        CredentialOwnerScope.team(TEST_TEAM),
+        gitea_gate_cred=token_credential("GATE_SECRET_VAL", field="client_secret"),
+    )
+    states = ToolSetupStates(store)
+    states.note_needs_setup(TEST_TEAM, "usr_member_1", "http:gitea", step=STEP_GATE_LINK, source=SOURCE_SETUP_CHECK)
+
+    caplog.set_level("DEBUG")
+    server = TestServer(SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate).build_app())
+    await server.start_server()
+    events: list = []
+    finished_calls: list[dict] = []
+
+    class _Output:
+        async def emit(self, event) -> None:
+            events.append(event)
+
+    class _Sessions:
+        def get_session(self, session_key: str):
+            return SimpleNamespace(
+                session_key=session_key,
+                channel_name="website",
+                user_id="admin-1",
+                chat_id="web-chat",
+                thread_id=None,
+                conversation_id="conversation_web",
+            )
+
+    class _ToolSetupsStub:
+        async def person_finished(self, **kwargs) -> int:
+            finished_calls.append(kwargs)
+            if kwargs.get("purpose") == "gate":
+                states.note_unknown(TEST_TEAM, "usr_member_1", kwargs["tool_id"], source="person_action")
+            return 0
+
+    try:
+        client = HttpGatewaySecureBroker(
+            internal_base_url=str(server.make_url("")).rstrip("/"),
+            public_base_url=None,
+            token=caller_token(CALLER_GATEWAY),
+        )
+        form = await GatewayAccountLinks(
+            broker=client, team_id=TEST_TEAM, clock=SystemGatewayClock()
+        ).open_form(
+            request_id="acct_link_cmd_real_gate",
+            person_id="admin-1",
+            person_roles=("admin",),
+            tool_id="http:gitea",
+            owner="team",
+            reason="You asked for this with /link.",
+            purpose="gate",
+        )
+        results = GatewayLinkResults(
+            broker=client,
+            sessions=_Sessions(),  # type: ignore[arg-type]
+            event_output=_Output(),
+            clock=SystemGatewayClock(),
+            poll_interval_seconds=0.01,
+            tool_setups=_ToolSetupsStub(),
+        )
+        results.watch_account_link(
+            form=form,
+            tool_id="http:gitea",
+            owner="team",
+            restart_command="/link http:gitea gate",
+            target=LinkResultTarget(session_key="session_web", correlation_id="link_cmd_gate", person_id="admin-1"),
+            purpose="gate",
+        )
+        async with aiohttp.ClientSession() as browser:
+            submitted = await browser.post(
+                form.form_url,
+                data={"credential_key": "gitea_gate_cred", "confirm": "yes"},
+            )
+            assert submitted.status == 200
+        event = await _posted(events)
+        await results.close()
+    finally:
+        await server.close()
+
+    assert form.tool_display_name == "Gitea"
+    assert event.text == (
+        "Linked the team's gate credential to Gitea (http:gitea). "
+        "Settings → Access → By Tool lists it. "
+        "Linking a gate credential gives nobody access by itself."
+    )
+    assert finished_calls == [
+        {
+            "person_id": "admin-1",
+            "tool_id": "http:gitea",
+            "kind": "account_link",
+            "owner": "team",
+            "account_label": None,
+            "purpose": "gate",
+        }
+    ]
+    assert states.get(TEST_TEAM, "usr_member_1", "http:gitea").state is ToolSetupState.UNKNOWN
+    stored_gate = store.active_link(TEST_TEAM, "http:gitea", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.GATE)
+    assert stored_gate is not None
+    assert stored_gate.credential_key == "gitea_gate_cred"
+    for forbidden in ("CF-REAL-BROKER-GATE-SECRET", "gitea_gate_cred", form.session_id):
+        assert forbidden not in event.text
+    assert "CF-REAL-BROKER-GATE-SECRET" not in caplog.text
 

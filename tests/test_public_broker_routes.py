@@ -133,7 +133,7 @@ async def test_account_link_form_renders_and_submits_through_documented_route(
             headers=gateway_headers(),
         )
         assert (await status.json())["status"] == "account_link_created"
-    assert store.list_links("team-1")[0].credential_key == "portainer_token"
+    assert store.list_links("team-1", purpose=None)[0].credential_key == "portainer_token"
 
 
 @pytest.mark.asyncio
@@ -164,7 +164,7 @@ async def test_a_new_credential_is_saved_and_linked_through_documented_route(
             headers=gateway_headers(),
         )
         assert (await status.json())["status"] == "account_link_created"
-    link = store.list_links("team-1")[0]
+    link = store.list_links("team-1", purpose=None)[0]
     assert (link.owner_kind.value, link.credential_key) == ("team", "http-portainer-team")
     assert set(load_catalog(scope=CredentialOwnerScope.team("team-1")).credentials) == {"http-portainer-team"}
     assert list(sealbox.values()) == ["routed-team-secret"]

@@ -68,5 +68,6 @@ def destination_identity(section: str, raw: dict[str, Any]) -> tuple[str, ...]:
                 link.tool_id,
                 link.owner_kind.value,
                 link.owner_id,
+                link.purpose.value,
             )
     return (record_key(section, raw),)

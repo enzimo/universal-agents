@@ -828,8 +828,8 @@ def test_dev_preview_serves_production_compatible_endpoints(tmp_path: Path) -> N
         if command["syntax"].startswith("/link ")
     )
     assert link_guide == {
-        "syntax": "/link <tool_id> [ me | team ]",
-        "description": "sign in to a tool or choose the stored credential it uses",
+        "syntax": "/link <tool_id> [ me | team | gate ]",
+        "description": "sign in to a tool, choose its stored account, or link its team gate credential",
         "documentation_url": "/docs/features/#secure-tool-authentication",
         "documentation_label": "see options",
     }

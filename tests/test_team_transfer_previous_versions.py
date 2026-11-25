@@ -79,6 +79,9 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
             # The block names an operation by its catalog id, which this version still has.
             [block] = [record for record in converted if record["kind"] == "grant"]
             assert block["document"]["target"]["id"] == "fn:tool_loading#find_tools"
+            # Version 3 account links had no purpose field; version 4 stamps them as account links.
+            [link] = [record for record in converted if record["kind"] == "account_link"]
+            assert link["document"]["purpose"] == "account"
         if name == "schedules":
             [schedule] = [
                 section.record_model.model_validate(record)

@@ -360,59 +360,82 @@ access that nobody can hand on to TeamLead. TeamLead then proposes the whole
 change at once with `propose_access_change`, and an administrator reviews it
 once. A proposal can contain:
 
-- new [web API tools](#web-api-tools) (`http:<name>`): their exact hosts, and
-  optional named routes with the level each one needs;
+- new [web API tools](#web-api-tools) (`http:<name>`): their exact hosts,
+  optional named routes with the level each one needs, and optional account or
+  team gate credential injections;
+- changes to existing proposal-written web API tools (`tool_changes`, files at
+  `control/access/tools/proposed-*.yaml`): the full replacement definition.
+  Built-in tools and operator hand-written files are refused. On the review
+  card, these rows appear under their own **Tool changes** section (separate
+  from **New tools**), describe every difference in Universal Agents' own words
+  (hosts added or removed, routes added, removed or re-levelled, credential and
+  gate injections changed, setup changed), flag when a new host would receive
+  existing linked credentials (**Credentials to new host**), when removing or
+  renaming a route widens an active one-operation block to the whole tool
+  (**Block widens to whole tool**), or when changing a blocked route's method
+  or path moves an active restriction off the endpoint it was written to stop
+  (**Blocked route changes**), and name any existing account or gate links
+  that must be linked again with `/link`;
 - access for TeamLead to tools, tool sets or folders (a level on a whole tool,
   never one operation), optionally with the right to hand it on to workers'
   tasks; a worker type may get access only for this task, since workers keep
   nothing between tasks;
 - restrictions (blocks) on agent types;
 - [data folders](#data-folders) to register;
-- [account links](#account-links) to set up for the tools;
+- [account links](#account-links) (or team gate links with
+  `link_purpose: "gate"`) to set up for the tools;
 - grants to remove.
 
 Before anyone sees it, Universal Agents checks every item against the tool
-catalog as it would be with the new tools, and writes each row of the review
-card in its own words; the agent's description is never used for the effect.
-Items that widen access carry a warning: **New host**, **Private address** (a
-host on a local or private network), **Full access**, **Can hand on**, **Runs
-code** or **New folder**. The access in a proposal serves the work of the
-person the proposal's task works for. When that person lacks the access, the
-proposal gives it to them too, on its own row. A person's own folder is never
-part of a proposal; its owner shares it instead.
+catalog as it would be with the new and changed tools, and writes each row of
+the review card in its own words (grouping tool-change rows under **Tool
+changes**); the agent's description is never used for the effect. Items that
+widen access or affect existing restrictions carry a warning: **New host**,
+**Credentials to new host**, **Private address** (a host on a local or private
+network), **Block widens to whole tool** (`block_widened`), **Blocked route
+changes** (`block_moved`), **Full access**, **Can hand on**, **Runs code** or
+**New folder**. The access in a proposal serves the work of the person the
+proposal's task works for. When that person lacks the access, the proposal
+gives it to them too, on its own row. A person's own folder is never part of a
+proposal; its owner shares it instead.
 
 An administrator approves or denies the proposal as a whole: in the Inbox,
 where each row that gives access has its own **Keep for later tasks** box
 (unticked rows last for the task), or with **Approve all as proposed** in chat,
 which keeps every access row as proposed. The gateway applies an approved
 proposal at that moment, all together. It checks that the stored proposal is
-exactly the one reviewed and that the administrator may give each item, adds
-the new tools, and stores the access, blocks, data folders and removals in one
-step. If any part fails, nothing is applied and the reason is shown. TeamLead's
-waiting task then continues and learns what was applied.
+exactly the one reviewed, that any tool file being changed still matches what
+was reviewed, and that the administrator may give each item, adds or replaces
+the tool files, and stores the access, blocks, data folders and removals in one
+step. If any part fails, new files are removed, replaced files are restored,
+nothing is applied, and the reason is shown. TeamLead's waiting task then
+continues and learns what was applied.
 
-When the proposal asked for an account link, the administrator who approved it
-chooses the credential straight away: the approved card shows a link such as
-**Choose the credential for Portainer**, and a notice with the same link waits
-in the Inbox, so a decision made with a chat button can be finished there. Only
-the administrator who approved sees that button; it stays on the Web Chat card
-across reloads (and the Inbox notice keeps the link in Settings) until the form
-is used, closed or expires, and is then replaced on the card by a short line
-saying what happened (if the form's time runs out while the gateway is still
-checking with the broker, the card briefly says it is checking whether the form
-finished for up to about a minute first). The broker's form
+When the proposal asked for an account link or a team gate link, the
+administrator who approved it chooses the credential straight away: the
+approved card shows a link such as **Choose the credential for Portainer** (or
+**Choose the team gate credential for Portainer**), and a notice with the same
+link waits in the Inbox, so a decision made with a chat button can be finished
+there. Only the administrator who approved sees that button; it stays on the
+Web Chat card across reloads (and the Inbox notice keeps the link in Settings)
+until the form is used, closed or expires, and is then replaced on the card by
+a short line saying what happened (if the form's time runs out while the
+gateway is still checking with the broker, the card briefly says it is checking
+whether the form finished for up to about a minute first). The broker's form
 can also take a new credential in the same step
 ([Account links](#account-links)). TeamLead's task keeps waiting until those
-forms are used, closed or expired, and then learns which accounts were linked,
-so it does not call a tool whose account is still missing. Until someone links
-an account, calls that need it are refused with `account_link_missing`;
-TeamLead can then offer the form in the requester's chat, or `/link <tool_id>`
-opens it again.
+forms are used, closed or expired, and then learns which credentials were
+linked, so it does not call a tool whose credential is still missing. Until
+someone links an account, calls that need it are refused with
+`account_link_missing` (or `gate_link_missing` for a missing team gate
+credential); TeamLead can then offer the form in the requester's chat, or
+`/link <tool_id>` (`/link <tool_id> gate` for a gate) opens it again.
 
 Proposals are decided in the gateway (the Inbox or chat), not with
 `assistant_cli access decide`, because the gateway applies them. With
-authorization off there are no grants: TeamLead explains the new tools and data
-folders and adds them after you agree in the conversation.
+authorization off there are no grants: TeamLead explains the new tools, tool
+changes (with Universal Agents' list of differences) and data folders, and
+applies them after you agree in the conversation.
 
 ## Internet access
 
@@ -1057,8 +1080,16 @@ tools:
           verify: Portainer shows the new token once; paste it into the account link form next.
 ```
 
-- `hosts` are exact host names without wildcards or ports. Each host belongs
-  to one tool.
+- `hosts` are exact ASCII host names up to 253 characters, without wildcards or
+  ports, and each host belongs to one tool. Names are normalized to lowercase
+  and a single trailing dot is removed (double dots and empty labels are
+  refused). Each dot-separated label is 1 to 63 ASCII characters, starts and
+  ends with an ASCII letter or digit (`a-z`, `0-9`), and may contain ASCII
+  letters, digits, hyphens (`-`), or underscores (`_`) inside the label (for
+  example Docker Compose service names such as `gitea_web`). Labels cannot
+  start or end with `-` or `_`, and non-ASCII characters are refused (for an
+  internationalized domain name, the error names its ASCII punycode form to use
+  instead).
 - `routes` are optional. Each gives one method and path its own level;
   `{id}` matches one path segment. Other requests use the method's level:
   GET, HEAD, and OPTIONS need read, POST, PUT, and PATCH need write, and
@@ -1076,20 +1107,33 @@ tools:
   set up first. The text is checked: no secrets, and bounded lengths.
   TeamLead may include it in an access proposal; the review card shows each
   step in the exact words people will see (flagged "Steps for people").
-- `credential_injections` say where each credential field goes. `placement`
-  is `header` or `query` (or `env`, used only for
+- `credential_injections` say where each account credential field goes.
+  `placement` is `header` or `query` (or `env`, used only for
   [OpenShell credential leases](configuration.md#secure-broker)), `name` is
   the header, query parameter, or variable, and `field` is the stored
   credential's field. An optional `template` places the value, such as
   `"Bearer {value}"`.
+- `gate_injections` are optional header or query fields for a team
+  infrastructure gate (such as a Cloudflare rule or API gateway secret) that
+  the broker sends on every request to the tool's hosts alongside any account
+  credential. `gate_injections` work whether or not the tool also uses an
+  account (`account: linked_credential` or public), and gate header and query
+  names cannot overlap with `credential_injections`.
 
-The broker sends the credential only to the tool's hosts, and a request cannot
-set a header or query value that the tool's account sets. Requests carry no
-credentials and no `${...}` placeholders. Redirects are returned to the agent,
-not followed, and the next request is checked again. The broker reads these
-files again when they change. If a changed file is invalid, it keeps the
-previous definitions and logs `tool_catalog_reload_failed`; an invalid file at
-startup stops the broker.
+The broker sends account and gate credentials only to the tool's hosts, and a
+request cannot set a header or query value that either `credential_injections`
+or `gate_injections` sets. Both account secrets and gate values are removed
+from returned content and error text. When a web API request sets no
+`User-Agent` header, the broker sends a browser-like default (Chrome's reduced
+Linux User-Agent used by Helium); a `User-Agent` header set on the request
+keeps winning. Requests carry no credentials and no `${...}` placeholders.
+Redirects are returned to the agent, not followed, and the next request is
+checked again. TeamLead can propose changes to a proposal-written file
+(`proposed-*.yaml`) through `propose_access_change` (`tool_changes`), while
+operator-written files stay operator-edited. The broker reads these files again
+when they change. If a changed file is invalid, it keeps the previous
+definitions and logs `tool_catalog_reload_failed`; an invalid file at startup
+stops the broker.
 
 ### Command-line tools (CLIs)
 
@@ -1215,12 +1259,15 @@ no account replies that there is nothing to link.
 Links are made in the broker's form, never in chat. There are three ways to
 open it:
 
-- Send `/link <tool_id>` in chat to link your own account, or
-  `/link <tool_id> team` to link the team's account. Only team owners and
-  administrators can link the team's account, and only for a service the team
-  shares. When you finish the form, the
-  same chat gets one message saying whether it linked, was closed, expired or
-  could not be confirmed (see
+- Send `/link <tool_id>` in chat to link your own account,
+  `/link <tool_id> team` to link the team's account, or `/link <tool_id> gate`
+  to link a web API tool's team gate credential. Only team owners and
+  administrators can link the team's account (only for a service the team
+  shares) or a team gate credential. A gate link is always the team's, one
+  active per tool, and is sent on every request to the tool's hosts regardless
+  of whether the tool's account is shared or private. When you finish the form,
+  the same chat gets one message saying whether it linked, was closed, expired
+  or could not be confirmed (see
   [How you know `/link` worked](features.md#how-you-know-link-worked)).
 - Before using such a tool, or when an agent reports that no account is
   linked (`account_link_missing`), TeamLead checks the setup and offers the
@@ -1253,11 +1300,25 @@ you do one of two things and confirm:
   is replaced. The values go only to the broker's credential store, never into
   chat, logs or the result page.
 
-A new link replaces the earlier link for the same tool and owner. A
-link keeps the placement you confirmed, so after you change a tool's
-`credential_injections`, link the account again.
+A new link replaces the earlier link for the same tool, owner, and purpose
+(`account` or `gate`). The form pins the tool's hosts and injections that were
+shown when it opened: if the tool's definition changes while the form is open,
+submitting the form is refused with `account_link_definition_changed` without
+storing or linking any credential, and names the `/link` command to open the
+updated form. A link also records the injections confirmed on the form: if a
+tool's `credential_injections` or `gate_injections` later change, the broker
+refuses requests before sending anything with `account_link_outdated`, names
+the exact `/link` command for whose link it is, and marks the tool as needing
+setup until it is linked again. The one exception is X (`cli:x`), which is a
+sign-in tool with an optional team fallback link: if the team's fallback link
+for X is outdated, the broker skips it and logs `broker_team_link_outdated` so
+people who already signed in to X keep working, while a person without their
+own X sign-in gets X's usual no-account result. A web API tool with
+`gate_injections` and no active gate link is refused before sending with
+`gate_link_missing` and `/link <tool_id> gate`.
 
-Operators can list and remove links:
+Operators can list links (including each link's `[account]` or `[gate]`
+purpose) and remove them (including gate links):
 
 ```bash
 assistant_cli.py access links --config /data/instance_config.yaml
@@ -1683,6 +1744,39 @@ Inbox and chat commands.
 The sections below apply once, when you upgrade an instance that used the
 earlier permission system, tool attachments or the earlier account rules. A
 new instance needs none of them.
+
+### Upgrading to tool changes, outdated link checks, and gate credentials
+
+Account and gate links now check their stored injections against the tool's
+current definition before any request is sent, carry a purpose (`account` or
+`gate`), and web API tool host names follow stricter ASCII rules:
+
+- **Links made before a tool's definition changed must be linked again.** If an
+  existing account link's stored injections no longer match the tool's current
+  `credential_injections`, or a gate link's stored injections no longer match
+  the tool's current `gate_injections`, the broker refuses calls with
+  `account_link_outdated` and gives the exact `/link` command to re-link it.
+  The one exception is X (`cli:x`, a sign-in tool): an outdated team fallback
+  link for X is skipped and logged (`broker_team_link_outdated`) rather than
+  blocking people who already have their own X sign-in, and a person without
+  their own X sign-in gets X's usual no-account result. Matching links keep
+  working without change.
+- **Stricter host-name rules for web API tool files.** Every `hosts` entry in
+  built-in, proposed, and operator-written tool files must now be an exact
+  ASCII host name up to 253 characters whose dot-separated labels (1 to 63
+  characters) start and end with an ASCII letter or digit (`a-z`, `0-9`) and
+  use only ASCII letters, digits, `-`, or `_` inside labels (a single trailing
+  dot is removed). Operator-written tool files containing a non-ASCII host or a
+  label starting or ending with `-` or `_` are refused when the catalog loads
+  (stopping the broker at startup); for a non-ASCII internationalized domain
+  name, the error names the file path and its ASCII punycode replacement.
+- **In-place store upgrade and team transfer versions.** Opening an older
+  access store automatically adds the `purpose` column to
+  `access_account_links`, treats existing links as `account` links, and updates
+  the one-active-link index to cover `(tool, owner, purpose)`. In team
+  transfers, link purpose travels in the `access` section (v4, converting older
+  v3 exports on import) and `gate_injections` travel inside the tool files in
+  the `team_tools` section (still v1); the `settings` section remains at v9.
 
 ### Upgrading to shared or private accounts
 

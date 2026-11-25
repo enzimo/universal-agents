@@ -179,10 +179,14 @@ def account_link(
     owner_kind: LinkOwnerKind = LinkOwnerKind.PERSON,
     owner_id: str = "user-1",
     team_id: str = TEST_TEAM,
-    injections: tuple[CredentialInjectionV1, ...] = (),
+    injections: tuple[CredentialInjectionV1, ...] | None = None,
 ) -> AccountLinkV1:
     """An account link: which stored credential ``tool_id`` uses for a person or the team."""
 
+    resolved_injections = injections
+    if resolved_injections is None:
+        tool = CatalogSource(None).current().tools.get(tool_id)
+        resolved_injections = tool.credential_injections if tool is not None else ()
     return AccountLinkV1(
         link_id=f"account_link_{owner_kind.value}_{owner_id}_{tool_id.replace(':', '_')}_{credential_key}",
         team_id=team_id,
@@ -190,7 +194,7 @@ def account_link(
         owner_kind=owner_kind,
         owner_id=owner_id,
         credential_key=credential_key,
-        injections=injections,
+        injections=resolved_injections,
         created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
         created_at_utc=datetime.now(timezone.utc),
     )

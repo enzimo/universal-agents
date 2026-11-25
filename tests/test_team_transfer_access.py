@@ -12,11 +12,16 @@ from access_control.entities import agent_type_id
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccountLinkV1,
+    AccountSharing,
+    AccountSharingV1,
+    CredentialInjectionV1,
     DataFolderRecordV1,
     GrantKind,
     GrantLifetime,
     GrantV1,
+    InjectionPlacement,
     LinkOwnerKind,
+    LinkPurpose,
     SubjectKind,
     SubjectRefV1,
     TargetKind,
@@ -167,7 +172,7 @@ def test_lasting_access_arrives_and_what_would_dangle_is_refused(tmp_path: Path)
     assert set(grants) == {"g_schedules", "g_share", "g_data"}
     assert grants["g_data"].for_person_id == "usr_ana" and grants["g_data"].granted_by == OWNER
     assert [folder.path for folder in store.data_folders(TEAM)] == [str(datasets)]
-    assert [link.link_id for link in store.list_links(TEAM)] == ["link_github_ana"]
+    assert [link.link_id for link in store.list_links(TEAM, purpose=None)] == ["link_github_ana"]
     assert store.person_settings(TEAM, "usr_ana").uses_team_keys is False
     assert store.profile_choice(TEAM, "usr_ben") == ("standard", "person")
 
@@ -537,7 +542,7 @@ def test_team_links_this_version_would_not_use_are_refused_or_shown_for_attentio
     assert "not used while X (xurl) is private (where this version starts it)" in x.reason
     assert "/accounts share cli:x after the import uses it" in x.reason
     assert outcomes["account_link/link_http_exa_team"].outcome is RecordOutcome.IMPORT
-    imported = {link.tool_id for link in _target_store(target).list_links(TEAM)}
+    imported = {link.tool_id for link in _target_store(target).list_links(TEAM, purpose=None)}
     assert {"cli:x", "http:exa"} <= imported and "http:github" not in imported
 
 
@@ -566,7 +571,7 @@ def test_a_file_with_two_links_for_one_tool_and_owner_refuses_the_older(tmp_path
     assert older.outcome is RecordOutcome.REFUSED
     assert "the newer account link link_github_ana for the same tool and owner replaces it" in older.reason
     assert outcomes["account_link/link_github_ana"].outcome is RecordOutcome.IMPORT
-    assert [link.link_id for link in _target_store(target).list_links(TEAM)] == ["link_github_ana"]
+    assert [link.link_id for link in _target_store(target).list_links(TEAM, purpose=None)] == ["link_github_ana"]
 
 
 @pytest.mark.skipif(not _CEDAR_BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
@@ -654,3 +659,204 @@ def test_a_later_batch_does_not_guess_what_the_destination_chose() -> None:
     assert _unused_team_link(record, known, {}, fresh=False) == ""
     assert "as the team chose" in _unused_team_link(record, known, {"cli:x": "private"}, fresh=False)
     assert _unused_team_link(record, known, {"cli:x": "shared"}, fresh=True) == ""
+
+
+def test_team_transfer_round_trip_keeps_gate_injections_and_link_purpose(tmp_path: Path) -> None:
+    from access_catalog.catalog import load_catalog
+    from access_catalog.instance_tools import write_instance_tool
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_messages.contracts.access_v2 import (
+        HttpRouteV1,
+        ProposedHttpToolV1,
+    )
+    from team_transfer.team_tools import TeamToolsSection
+
+    config_path, _datasets = _old_instance(tmp_path)
+    config = GatewayInstanceConfig.load(config_path)
+    store = AccessRepository(config.manager_storage_settings)
+    gitea = ProposedHttpToolV1(
+        tool_id="http:gitea",
+        display_name="Gitea",
+        description="Self-hosted Gitea API.",
+        hosts=("gitea.example.com",),
+        uses_credential=True,
+        credential_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization",
+                field="api_token",
+                template="token {value}",
+            ),
+        ),
+        gate_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="X-Gate-Secret",
+                field="gate_secret",
+            ),
+        ),
+        routes=(HttpRouteV1(name="list_repos", method="GET", path="/api/v1/**", level=AccessLevel.READ),),
+    )
+    write_instance_tool(config.layout.root, gitea)
+    store.set_account_sharing(
+        AccountSharingV1(
+            team_id=TEAM,
+            subject="http:gitea",
+            sharing=AccountSharing.PRIVATE,
+            changed_by_person_id="usr_ana",
+            changed_at_utc=NOW,
+        )
+    )
+    store.create_link(
+        AccountLinkV1(
+            link_id="link_gitea_team_account",
+            team_id=TEAM,
+            tool_id="http:gitea",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="http-gitea-team",
+            injections=gitea.credential_injections,
+            created_by=OWNER,
+            created_at_utc=NOW,
+        )
+    )
+    store.create_link(
+        AccountLinkV1(
+            link_id="link_gitea_team_gate",
+            team_id=TEAM,
+            tool_id="http:gitea",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="http-gitea-gate",
+            injections=gitea.gate_injections,
+            created_by=OWNER,
+            created_at_utc=NOW,
+        )
+    )
+    store.create_link(
+        AccountLinkV1(
+            link_id="link_exa_stray_gate",
+            team_id=TEAM,
+            tool_id="http:exa",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="http-exa-gate",
+            injections=(
+                CredentialInjectionV1(
+                    placement=InjectionPlacement.HEADER,
+                    name="X-Gate-Secret",
+                    field="gate_secret",
+                ),
+            ),
+            created_by=OWNER,
+            created_at_utc=NOW,
+        )
+    )
+
+    sections = (SettingsSection(), TeamToolsSection(), PeopleSection(), AccessSection())
+    out = tmp_path / "team.uatransfer"
+    export_team(
+        export_source(config_path),
+        out,
+        PASSPHRASE,
+        owner_person_id="usr_ana",
+        sections=sections,
+        key_derivation=new_key_derivation(**FAST_KEYS),
+    )
+    target = tmp_path / "new"
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        plan = import_team(reader, target, dry_run=False, sections=sections)
+
+    outcomes = {r.key: r for r in plan.records if r.section == "access"}
+    assert outcomes["account_link/link_gitea_team_gate"].outcome is RecordOutcome.IMPORT
+    assert outcomes["account_link/link_gitea_team_account"].outcome is RecordOutcome.IMPORT
+    assert outcomes["account_link/link_exa_stray_gate"].outcome is RecordOutcome.REFUSED
+    assert "defines no gate injections" in outcomes["account_link/link_exa_stray_gate"].reason
+
+    dest_catalog = load_catalog(target)
+    assert dest_catalog.tools["http:gitea"].gate_injections == gitea.gate_injections
+
+    dest_store = _target_store(target)
+    imported_gate = dest_store.active_link(
+        TEAM, "http:gitea", LinkOwnerKind.TEAM, TEAM, purpose=LinkPurpose.GATE
+    )
+    imported_account = dest_store.active_link(
+        TEAM, "http:gitea", LinkOwnerKind.TEAM, TEAM, purpose=LinkPurpose.ACCOUNT
+    )
+    assert imported_gate is not None and imported_gate.link_id == "link_gitea_team_gate"
+    assert imported_gate.purpose is LinkPurpose.GATE
+    assert imported_gate.injections == gitea.gate_injections
+    assert imported_account is not None and imported_account.link_id == "link_gitea_team_account"
+    assert imported_account.purpose is LinkPurpose.ACCOUNT
+
+
+def test_access_v3_section_converts_links_to_account_purpose_on_import(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from team_transfer.access import AccessSection as CurrentAccessSection
+
+    config_path, _datasets = _old_instance(tmp_path)
+
+    class AccessAsV3(CurrentAccessSection):
+        schema_version = 3
+
+        def export(self, source, files):  # noqa: ANN001 - test subclass
+            exported = super().export(source, files)
+            # Strip purpose from exported account links to match what version 3 wrote.
+            for record in exported.records:
+                if record.get("kind") == "account_link":
+                    record["document"].pop("purpose", None)
+            return exported
+
+    out = tmp_path / "v3.uatransfer"
+    export_team(
+        export_source(config_path),
+        out,
+        PASSPHRASE,
+        owner_person_id="usr_ana",
+        sections=(SettingsSection(), PeopleSection(), AccessAsV3()),
+        key_derivation=new_key_derivation(**FAST_KEYS),
+    )
+    target = tmp_path / "new"
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        plan = import_team(reader, target, dry_run=False, sections=SECTIONS)
+
+    outcomes = {r.key: r for r in plan.records if r.section == "access"}
+    assert outcomes["account_link/link_github_ana"].outcome is RecordOutcome.IMPORT
+    imported = _target_store(target).active_link(
+        TEAM, "cli:github", LinkOwnerKind.PERSON, "usr_ana", purpose=LinkPurpose.ACCOUNT
+    )
+    assert imported is not None
+    assert imported.link_id == "link_github_ana"
+    assert imported.purpose is LinkPurpose.ACCOUNT
+
+
+def test_link_owner_key_defaults_omitted_purpose_to_account() -> None:
+    """F13: a link document omitting defaulted purpose matches an explicit account purpose."""
+
+    from team_transfer.access import _link_owner_key, _newest_links
+
+    omitted = {
+        "team_id": TEAM,
+        "tool_id": "http:gitea",
+        "owner_kind": "team",
+        "owner_id": TEAM,
+        "created_at_utc": "2026-11-01T00:00:00+00:00",
+    }
+    explicit = {**omitted, "purpose": "account", "created_at_utc": "2026-11-02T00:00:00+00:00"}
+    gate = {**omitted, "purpose": "gate", "created_at_utc": "2026-11-01T12:00:00+00:00"}
+
+    assert _link_owner_key(omitted) == _link_owner_key(explicit)
+    assert _link_owner_key(omitted) != _link_owner_key(gate)
+    newest = _newest_links(
+        [
+            {"kind": "account_link", "record_id": "link_older", "document": omitted},
+            {"kind": "account_link", "record_id": "link_newer", "document": explicit},
+            {"kind": "account_link", "record_id": "link_gate", "document": gate},
+        ]
+    )
+    assert newest[_link_owner_key(explicit)] == "link_newer"
+    assert newest[_link_owner_key(gate)] == "link_gate"

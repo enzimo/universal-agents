@@ -37,7 +37,7 @@ from access_catalog.catalog import CatalogSource
 from access_control.account_sharing import SharingNotChosen, TeamAccountSharing
 from assistant_gateway.http_secure_broker import HttpGatewaySecureBroker
 from assistant_gateway.onboarding_account_keys import OnboardingAccountKeyHandover, write_handover
-from custom_messages.contracts.access_v2 import AccountLinkRequestV1, AccountSharing, LinkOwnerKind
+from custom_messages.contracts.access_v2 import AccountLinkRequestV1, AccountSharing, LinkOwnerKind, LinkPurpose
 from runtime_settings.instance_layout import InstanceLayout
 from runtime_settings.services import CRAWL4AI_URL_SETTING
 from secure_tool_broker import credential_catalog
@@ -184,7 +184,7 @@ def test_the_teams_own_crawl4ai_server_takes_only_the_teams_token(
     ) as submitted:
         assert submitted.status == 200
     links = live_broker.gate.links
-    assert links.active_link(TEST_TEAM, "http:crawl4ai", LinkOwnerKind.TEAM, TEST_TEAM) is not None
+    assert links.active_link(TEST_TEAM, "http:crawl4ai", LinkOwnerKind.TEAM, TEST_TEAM, purpose=LinkPurpose.ACCOUNT) is not None
     with pytest.raises(SharingNotChosen):
         TeamAccountSharing(links, TEST_TEAM).choose_tool(
             CatalogSource(None).current().tools["http:crawl4ai"], AccountSharing.PRIVATE, by=ADMIN

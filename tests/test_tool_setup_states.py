@@ -146,6 +146,8 @@ def test_a_working_tool_is_written_again_only_after_a_change_or_an_hour(store) -
         ("cli:x", "x_account_missing", "sign_in"),
         ("cli:google", "google_oauth_client_missing", "team_sign_in_app"),
         ("http:portainer", "account_link_missing", "account_link"),
+        ("http:portainer", "account_link_outdated", "account_link"),
+        ("http:gitea", "gate_link_missing", "gate_link"),
         ("cli:github", "api_request_failed", None),
         ("cli:github", "", None),
     ],
@@ -155,7 +157,26 @@ def test_setup_failures_are_told_from_other_failures(tool_id: str, code: str, st
 
 
 def test_a_status_entry_becomes_a_state() -> None:
+    from access_control.tool_setup_states import FIXED_BY_ADMINISTRATOR, HOW_GATE_LINK, STEP_GATE_LINK, fixed_by
+
+    assert fixed_by(STEP_GATE_LINK) == FIXED_BY_ADMINISTRATOR
     assert verdict_from_status({"known": True, "account_mode": "none"}) is None
+    assert verdict_from_status({"known": True, "account_mode": "none", "gate": {"state": "missing"}}) == {
+        "state": ToolSetupState.NEEDS_SETUP,
+        "step": STEP_GATE_LINK,
+    }
+    assert verdict_from_status({"known": True, "account_mode": "none", "gate": {"state": "outdated"}}) == {
+        "state": ToolSetupState.NEEDS_SETUP,
+        "step": STEP_GATE_LINK,
+    }
+    assert verdict_from_status({"known": True, "account_mode": "none", "gate": {"state": "configured"}}) == {
+        "state": ToolSetupState.READY,
+        "how": HOW_GATE_LINK,
+        "account_label": None,
+    }
+    assert verdict_from_status(
+        {"known": True, "account_mode": "linked_credential", "link": {"own": False, "team": True, "own_outdated": True}}
+    ) == {"state": ToolSetupState.NEEDS_SETUP, "step": "account_link"}
     signed_in = {"known": True, "account_mode": "personal_login", "sign_in": {"state": "signed_in", "account": "exampleuser"}}
     assert verdict_from_status(signed_in)["how"] == HOW_SIGNED_IN
     x_team = {"known": True, "account_mode": "linked_credential", "sign_in": {"state": "missing"}, "link": {"team": True}}
@@ -409,3 +430,101 @@ def test_teamlead_uses_a_ready_tool_and_sets_up_the_rest_without_asking() -> Non
     assert "check_tool_setup" not in prompt and "tool_setup_request" not in prompt
     assert "A tool listed as `ready` is used without any check." in " ".join(skill.split())
     assert json.dumps({"ok": True})  # keeps json imported for fixtures that need it
+
+
+def test_gate_only_tool_status_tracking_and_recheck_notice(tmp_path: Path) -> None:
+    from access_catalog.catalog import CatalogSource
+    from access_control.identity import ContextVerifier
+    from access_control.tool_setup_states import FIXED_BY_ADMINISTRATOR, HOW_GATE_LINK, STEP_GATE_LINK
+    from custom_messages.contracts.access_v2 import (
+        AccountLinkV1,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+    )
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.tool_setup_status import tool_status_entry
+    from tests.broker_access_support import context_verify_keys
+
+    tools = tmp_path / "instance" / "control" / "access" / "tools"
+    tools.mkdir(parents=True)
+    (tools / "gated.yaml").write_text(
+        """
+tools:
+  - tool_id: http:gated-docs
+    display_name: Gated Docs
+    account: none
+    hosts: [docs.example.com]
+    gate_injections:
+      - {placement: header, name: X-Gate, field: secret}
+""",
+        encoding="utf-8",
+    )
+    access = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    gate = BrokerAccessGate(
+        catalogs=CatalogSource(tmp_path / "instance"),
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEAM,
+        access=None,
+        links=access,
+    )
+
+    assert tool_status_entry("http:gated-docs", PERSON, gate)["gate"] == {"state": "missing"}
+    gate_link = access.create_link(
+        AccountLinkV1(
+            link_id="gate_link_1",
+            team_id=TEAM,
+            tool_id="http:gated-docs",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="docs_gate",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="secret"),),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="admin-1"),
+            created_at_utc=NOW,
+        )
+    )
+    assert tool_status_entry("http:gated-docs", PERSON, gate)["gate"] == {"state": "configured"}
+
+    action = ValidatedAction("secure_requests", "get", {"url": "https://docs.example.com/a"})
+    context = ToolContext(canonical_user_id=PERSON, principal_type="user", gate_link=gate_link)
+    note_broker_result(gate, action, context, ToolResult("success", content={"http_status": 200}))
+    states = ToolSetupStates(access)
+    ready = states.get(TEAM, PERSON, "http:gated-docs")
+    assert ready is not None and (ready.state, ready.how) == (ToolSetupState.READY, HOW_GATE_LINK)
+
+    note_broker_result(gate, action, context, ToolResult("success", content={"http_status": 401}))
+    after_401 = states.get(TEAM, PERSON, "http:gated-docs")
+    assert after_401 is not None and (after_401.state, after_401.missing_step, after_401.fixed_by) == (
+        ToolSetupState.NEEDS_SETUP,
+        STEP_GATE_LINK,
+        FIXED_BY_ADMINISTRATOR,
+    )
+
+    # Periodic re-check notices an outdated gate link with /link <tool> gate.
+    ToolSetupStates(access, clock=Clock(NOW - timedelta(days=40))).note_ready(
+        TEAM, PERSON, "http:gated-docs", how=HOW_GATE_LINK, source="tool_call"
+    )
+    access.create_link(
+        AccountLinkV1(
+            link_id="gate_link_outdated",
+            team_id=TEAM,
+            tool_id="http:gated-docs",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM,
+            purpose=LinkPurpose.GATE,
+            credential_key="docs_gate",
+            injections=(CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Old-Gate", field="secret"),),
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="admin-1"),
+            created_at_utc=NOW,
+        )
+    )
+    assert tool_status_entry("http:gated-docs", PERSON, gate)["gate"] == {"state": "outdated"}
+    report = recheck_due(gate, every_days=30, now=NOW)
+    assert (report.checked, report.now_needs_setup, report.notices) == (1, 1, 1)
+    [(notice, _read)] = access.notices_for(TEAM, person_id=PERSON, roles=("member",))
+    assert "/link http:gated-docs gate" in notice.summary

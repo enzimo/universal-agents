@@ -529,7 +529,7 @@ def test_a_decision_with_account_link_forms_wakes_the_agent_after_the_forms_end(
             url=form.form_url,
             expires_at_utc=parse_utc(form.expires_at_utc),
         )
-        return [entry], [(form, "http:portainer", "team")]
+        return [entry], [(form, "http:portainer", "team", "account")]
 
     harness.inbox.tool_setups = Setups()
     monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
@@ -611,7 +611,7 @@ def test_proposal_follow_up_links_persist_across_reads_and_dismiss_as_each_form_
                 expires_at_utc=parse_utc(form_two.expires_at_utc),
             ),
         ]
-        return entries, [(form_one, "http:portainer", "team"), (form_two, "http:gitea", "team")]
+        return entries, [(form_one, "http:portainer", "team", "account"), (form_two, "http:gitea", "team", "account")]
 
     harness.inbox.tool_setups = Setups()
     monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
@@ -709,7 +709,7 @@ def test_proposal_follow_up_review_reports_settling_during_watch_grace_until_lat
             url=form_one.form_url,
             expires_at_utc=parse_utc(form_one.expires_at_utc),
         )
-        return [entry], [(form_one, "http:portainer", "team")]
+        return [entry], [(form_one, "http:portainer", "team", "account")]
 
     harness.inbox.tool_setups = Setups()
     monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
@@ -818,7 +818,7 @@ def test_proposal_with_no_waiting_task_sends_resolution_once_and_still_watches_f
                 expires_at_utc=parse_utc(form_two.expires_at_utc),
             ),
         ]
-        return entries, [(form_one, "http:portainer", "team"), (form_two, "http:gitea", "team")]
+        return entries, [(form_one, "http:portainer", "team", "account"), (form_two, "http:gitea", "team", "account")]
 
     harness.inbox.tool_setups = Setups()
     monkeypatch.setattr(harness.inbox, "_open_account_links", open_links)
@@ -920,3 +920,44 @@ def test_a_decided_card_for_someone_linked_to_it_is_shown_without_asking_the_acc
 
     assert asyncio.run(harness.inbox.review("member-1", request.request_id)) is None
     assert asked == ["member-1"], "someone with no link to it is checked, and does not see it"
+
+
+def test_an_approved_proposals_gate_link_opens_with_gate_purpose_and_distinct_request_id(harness: Harness) -> None:
+    from assistant_gateway.application.account_links import AccountLinkForm
+    from custom_messages.contracts.access_v2 import LinkPurpose, ProposedAccountLinkV1
+
+    request = ask(harness)
+    opened: list[dict[str, Any]] = []
+
+    class Setups:
+        async def open_proposal_link(self, **fields: Any) -> AccountLinkForm:
+            opened.append(fields)
+            return AccountLinkForm(
+                session_id=f"s-{fields['purpose']}",
+                form_url=f"http://127.0.0.1:18600/account-link/v1.{fields['purpose']}.sig",
+                status_url=f"http://127.0.0.1:18600/account-link/v1.{fields['purpose']}.sig/status",
+                expires_at_utc="2026-11-20T10:15:00Z",
+                tool_display_name="Gitea",
+            )
+
+    harness.inbox.tool_setups = Setups()
+    harness.inbox.proposals.account_links[request.request_id] = [
+        ProposedAccountLinkV1(tool_id="http:gitea", owner="team", purpose="Use team account"),
+        ProposedAccountLinkV1(
+            tool_id="http:gitea",
+            owner="team",
+            purpose="Pass the Cloudflare gate",
+            link_purpose=LinkPurpose.GATE,
+        ),
+    ]
+
+    links, forms = asyncio.run(harness.inbox._open_account_links("owner-1", request))
+
+    assert [f["request_id"] for f in opened] == [
+        f"{request.request_id}:http:gitea:account",
+        f"{request.request_id}:http:gitea:gate",
+    ]
+    assert [f["purpose"] for f in opened] == ["account", "gate"]
+    assert links[0].label.startswith("Choose the credential for ")
+    assert links[1].label.startswith("Choose the team gate credential for ")
+    assert [entry[3] for entry in forms] == ["account", "gate"]

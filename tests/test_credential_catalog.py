@@ -1372,7 +1372,10 @@ def _link(
 
 
 def _linked_context(
-    link: AccountLinkV1 | None, person_id: str = TEST_CANONICAL_USER_ID
+    link: AccountLinkV1 | None,
+    person_id: str = TEST_CANONICAL_USER_ID,
+    *,
+    gate_link: AccountLinkV1 | None = None,
 ) -> ToolContext:
     return ToolContext(
         agent_id="agent-1",
@@ -1380,6 +1383,7 @@ def _linked_context(
         principal_type="user",
         team_id=TEST_TEAM_ID,
         account_link=link,
+        gate_link=gate_link,
     )
 
 
@@ -1549,6 +1553,508 @@ def test_api_request_refuses_a_header_the_linked_account_sets(
     assert result.content["headers"] == ["authorization"]
 
 
+def test_api_request_injects_account_and_team_gate_credentials_and_redacts_both(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    # Person holds their own API token; team holds the Cloudflare-style gate credentials.
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_OWNER_SCOPE,
+        token_env="GITEA_PERSON_TOKEN",
+        token="PERSON-GITEA-TOKEN",
+        credential_key="gitea_person",
+    )
+    monkeypatch.setenv("GATE_CLIENT_SECRET", "CF-GATE-SECRET-VALUE")
+    monkeypatch.setenv("GATE_QUERY_KEY", "GATE-QUERY-SECRET")
+    credential_catalog.save_catalog(
+        CredentialCatalog(
+            credentials={
+                "gitea_gate": CatalogCredential(
+                    display_name="Gitea Gate",
+                    purpose="Team gate credential.",
+                    fields={
+                        "client_secret": CatalogCredentialField(
+                            kind="secret",
+                            visibility="secret",
+                            resolution_order=[CatalogSourceRef(source="env", env_var="GATE_CLIENT_SECRET")],
+                        ),
+                        "gate_key": CatalogCredentialField(
+                            kind="api_key",
+                            visibility="secret",
+                            resolution_order=[CatalogSourceRef(source="env", env_var="GATE_QUERY_KEY")],
+                        ),
+                    },
+                )
+            }
+        ),
+        scope=TEST_TEAM_SCOPE,
+    )
+    account = _link(
+        _header("Authorization", template="token {value}"),
+        credential_key="gitea_person",
+        owner_kind=LinkOwnerKind.PERSON,
+    )
+    gate = AccountLinkV1(
+        link_id="account_link_team_gitea_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="gitea_gate",
+        injections=(
+            _header("CF-Access-Client-Secret", field="client_secret"),
+            _query("gate_token", field="gate_key"),
+        ),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+    sent = _capture_requests(
+        monkeypatch,
+        b'{"acct": "PERSON-GITEA-TOKEN", "gate": "CF-GATE-SECRET-VALUE", "q": "GATE-QUERY-SECRET"}',
+    )
+
+    result = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/repos", "params": {"page": "1"}},
+        context=_linked_context(account, gate_link=gate),
+    )
+
+    assert result.status == "success", result
+    headers = {key.lower(): value for key, value in sent[0].header_items()}
+    assert headers["authorization"] == "token PERSON-GITEA-TOKEN"
+    assert headers["cf-access-client-secret"] == "CF-GATE-SECRET-VALUE"
+    assert sent[0].full_url == "https://gitea.example.com/api/v1/repos?page=1&gate_token=GATE-QUERY-SECRET"
+    assert result.content["account_link_id"] == account.link_id
+    assert result.content["gate_link_id"] == gate.link_id
+    assert result.content["json"] == {"acct": "[REDACTED]", "gate": "[REDACTED]", "q": "[REDACTED]"}
+    dumped = json.dumps(result.content, sort_keys=True)
+    for secret in ("PERSON-GITEA-TOKEN", "CF-GATE-SECRET-VALUE", "GATE-QUERY-SECRET"):
+        assert secret not in dumped
+
+    # Gate-only tool (account_link=None) also injects and redacts the gate secret in URLError and redirect Location.
+    from urllib import error as urllib_error
+
+    def fail_url(_req, *, timeout):
+        raise urllib_error.URLError("dial failed for ?gate_token=GATE-QUERY-SECRET with CF-GATE-SECRET-VALUE")
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", fail_url)
+    err_result = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/public"},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert err_result.status == "error"
+    assert err_result.content["error_code"] == "api_request_failed"
+    assert "GATE-QUERY-SECRET" not in (err_result.error or "")
+    assert "CF-GATE-SECRET-VALUE" not in (err_result.error or "")
+
+    class _RedirectResponse(_JsonResponse):
+        def __init__(self) -> None:
+            super().__init__(b"moved CF-GATE-SECRET-VALUE", status=302)
+            self.headers = _JsonHeaders(
+                {"Content-Type": "text/plain", "Location": "https://other.example.com/?gate_token=GATE-QUERY-SECRET"}
+            )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", lambda _req, *, timeout: _RedirectResponse())
+    redir = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/public"},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert redir.status == "success"
+    assert "GATE-QUERY-SECRET" not in redir.content["redirect_location"]
+    assert "CF-GATE-SECRET-VALUE" not in redir.content["text"]
+
+    # C03/C16: a gate value stored in a non-secret metadata field is still redacted everywhere
+    # (JSON body, text body, and redirect Location).
+    credential_catalog.save_catalog(
+        CredentialCatalog(
+            credentials={
+                "gitea_plain_gate": CatalogCredential(
+                    display_name="Gitea Plain Gate",
+                    purpose="Team gate stored as metadata text.",
+                    fields={
+                        "gate_header": CatalogCredentialField(
+                            kind="text",
+                            visibility="metadata",
+                            value="GATE-PLAIN-VALUE",
+                        ),
+                    },
+                )
+            }
+        ),
+        scope=TEST_TEAM_SCOPE,
+    )
+    plain_gate = AccountLinkV1(
+        link_id="account_link_team_gitea_plain_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="gitea_plain_gate",
+        injections=(_header("X-Gate-Token", field="gate_header"),),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    _capture_requests(monkeypatch, b'{"echo": "GATE-PLAIN-VALUE"}')
+    plain_json = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/json"},
+        context=_linked_context(None, gate_link=plain_gate),
+    )
+    assert plain_json.status == "success"
+    assert plain_json.content["json"] == {"echo": "[REDACTED]"}
+    assert "GATE-PLAIN-VALUE" not in json.dumps(plain_json.content)
+
+    class _PlainTextResponse(_JsonResponse):
+        def __init__(self) -> None:
+            super().__init__(b"echoed GATE-PLAIN-VALUE in text", status=200)
+            self.headers = _JsonHeaders({"Content-Type": "text/plain"})
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", lambda _req, *, timeout: _PlainTextResponse())
+    plain_text = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/text"},
+        context=_linked_context(None, gate_link=plain_gate),
+    )
+    assert plain_text.status == "success"
+    assert "GATE-PLAIN-VALUE" not in plain_text.content["text"]
+    assert "[REDACTED]" in plain_text.content["text"]
+
+    class _PlainRedirectResponse(_JsonResponse):
+        def __init__(self) -> None:
+            super().__init__(b"moved GATE-PLAIN-VALUE", status=302)
+            self.headers = _JsonHeaders(
+                {"Content-Type": "text/plain", "Location": "https://other.example.com/?seen=GATE-PLAIN-VALUE"}
+            )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", lambda _req, *, timeout: _PlainRedirectResponse())
+    plain_redir = credential_catalog.api_request(
+        {"url": "https://gitea.example.com/api/v1/redirect"},
+        context=_linked_context(None, gate_link=plain_gate),
+    )
+    assert plain_redir.status == "success"
+    assert "GATE-PLAIN-VALUE" not in plain_redir.content["redirect_location"]
+    assert "GATE-PLAIN-VALUE" not in plain_redir.content["text"]
+    assert "[REDACTED]" in plain_redir.content["redirect_location"]
+
+
+def test_api_request_redacts_url_encoded_gate_and_account_secrets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: query/header secrets with +, /, =, or spaces are redacted in quote/quote_plus/lowercase forms."""
+
+    import io
+    from urllib import error as urllib_error
+    from urllib import parse as urllib_parse
+
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    acct_secret = "acct+sec/ret=1 2"
+    gate_secret = "gate+key/val=3 4"
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_OWNER_SCOPE,
+        token_env="ENC_ACCT_TOKEN",
+        token=acct_secret,
+        credential_key="enc_acct",
+    )
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="ENC_GATE_TOKEN",
+        token=gate_secret,
+        credential_key="enc_gate",
+    )
+    account = _link(_query("api_key"), credential_key="enc_acct", owner_kind=LinkOwnerKind.PERSON)
+    gate = AccountLinkV1(
+        link_id="account_link_team_enc_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="enc_gate",
+        injections=(_query("gate_key"),),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    encoded_forms = [
+        urllib_parse.quote_plus(acct_secret),
+        urllib_parse.quote(acct_secret, safe=""),
+        urllib_parse.quote(acct_secret),
+        urllib_parse.quote_plus(acct_secret).lower(),
+        urllib_parse.quote_plus(gate_secret),
+        urllib_parse.quote(gate_secret, safe=""),
+        urllib_parse.quote(gate_secret),
+        urllib_parse.quote_plus(gate_secret).lower(),
+    ]
+    # Note: lowercasing only the hex escapes preserves uppercase letters when present.
+    gate_lower_hex = urllib_parse.quote_plus(gate_secret).replace("%2B", "%2b").replace("%2F", "%2f").replace("%3D", "%3d")
+    acct_lower_hex = urllib_parse.quote(acct_secret, safe="").replace("%2B", "%2b").replace("%2F", "%2f").replace("%3D", "%3d").replace("%20", "%20")
+
+    # 1. HTTPError body echoing quote_plus, quote(safe=""), quote(), and lowercase percent-hex forms.
+    error_body = (
+        f"bad request: ?api_key={urllib_parse.quote_plus(acct_secret)}"
+        f"&alt={urllib_parse.quote(acct_secret, safe='')}"
+        f"&slash={urllib_parse.quote(acct_secret)}"
+        f"&low={acct_lower_hex}"
+        f"&gate_key={urllib_parse.quote_plus(gate_secret)}"
+        f"&gate_alt={urllib_parse.quote(gate_secret, safe='')}"
+        f"&gate_low={gate_lower_hex}"
+    ).encode("utf-8")
+
+    def raise_http_error(_req, *, timeout):
+        raise urllib_error.HTTPError(
+            "https://api.example.test/items",
+            400,
+            "Bad Request",
+            _JsonHeaders({"Content-Type": "text/plain"}),
+            io.BytesIO(error_body),
+        )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", raise_http_error)
+    err_resp = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(account, gate_link=gate),
+    )
+    assert err_resp.status == "success"
+    assert err_resp.content["http_status"] == 400
+    for forbidden in (acct_secret, gate_secret, gate_lower_hex, acct_lower_hex, *encoded_forms):
+        assert forbidden not in err_resp.content["text"]
+
+    # 2. 302 Redirect Location echoing URL-encoded query values.
+    class _EncodedRedirect(_JsonResponse):
+        def __init__(self) -> None:
+            super().__init__(b"moved", status=302)
+            self.headers = _JsonHeaders(
+                {
+                    "Content-Type": "text/plain",
+                    "Location": (
+                        f"https://other.example.com/login?"
+                        f"gate_key={urllib_parse.quote_plus(gate_secret)}&api_key={urllib_parse.quote(acct_secret, safe='')}"
+                    ),
+                }
+            )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", lambda _req, *, timeout: _EncodedRedirect())
+    redir = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(account, gate_link=gate),
+    )
+    assert redir.status == "success"
+    for forbidden in (acct_secret, gate_secret, *encoded_forms):
+        assert forbidden not in redir.content["redirect_location"]
+
+    # 3. URLError echoing URL-encoded query secret.
+    def raise_url_error(_req, *, timeout):
+        raise urllib_error.URLError(f"failed for ?gate_key={urllib_parse.quote_plus(gate_secret)}")
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", raise_url_error)
+    url_err = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(account, gate_link=gate),
+    )
+    assert url_err.status == "error"
+    assert urllib_parse.quote_plus(gate_secret) not in (url_err.error or "")
+    assert "[REDACTED]" in (url_err.error or "")
+
+
+def test_api_request_redacts_secrets_before_max_response_bytes_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: an agent-chosen max_response_bytes cutting mid-secret leaks zero characters of the secret."""
+
+    import io
+    from urllib import error as urllib_error
+    from urllib import parse as urllib_parse
+
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    gate_secret = "GATE+SUPER/SECRET=9876543210"
+    encoded_gate = urllib_parse.quote_plus(gate_secret)
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="CUT_GATE_SECRET",
+        token=gate_secret,
+        credential_key="cut_gate",
+    )
+    gate = AccountLinkV1(
+        link_id="account_link_team_cut_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="cut_gate",
+        injections=(_query("gate_key"),),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    class _StreamResponse:
+        def __init__(self, body: bytes, *, status: int = 200, content_type: str = "text/plain") -> None:
+            self.status = self.code = status
+            self.headers = _JsonHeaders({"Content-Type": content_type})
+            self._stream = io.BytesIO(body)
+
+        def read(self, limit: int = -1) -> bytes:
+            return self._stream.read(limit)
+
+        def getcode(self) -> int:
+            return self.status
+
+        def close(self) -> None:
+            self._stream.close()
+
+    # Probe every single byte cut offset across both raw and URL-encoded echoed secrets.
+    prefix = "echo="
+    for echoed in (gate_secret, encoded_gate):
+        body = f"{prefix}{echoed} trailing".encode("utf-8")
+        for cut in range(len(prefix), len(prefix) + len(echoed) + 2):
+            monkeypatch.setattr(
+                credential_catalog,
+                "_send_api_request",
+                lambda _req, *, timeout, payload=body: _StreamResponse(payload),
+            )
+            res = credential_catalog.api_request(
+                {"url": "https://api.example.test/items", "max_response_bytes": cut},
+                context=_linked_context(None, gate_link=gate),
+            )
+            assert res.status == "success"
+            assert res.content["truncated"] is True
+            text = res.content["text"]
+            assert text.startswith(prefix)
+            remainder = text[len(prefix) :]
+            if cut == len(prefix):
+                assert remainder == ""
+            else:
+                # Never leaks even a single character of the secret; emits [REDACTED] and stops at the cut.
+                assert remainder.startswith("[REDACTED]")
+                assert not any(echoed[:n] in remainder for n in range(1, len(echoed) + 1) if echoed[:n] not in "[REDACTED]")
+
+    # Repeated long secret where redacting the first shrinks the text: the second secret must not be pulled in.
+    long_secret = "S" * 50
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="CUT_GATE_SECRET",
+        token=long_secret,
+        credential_key="cut_gate",
+    )
+    repeated_body = f"AAAA{long_secret}BBBB{long_secret}CCCC".encode("utf-8")
+    monkeypatch.setattr(
+        credential_catalog,
+        "_send_api_request",
+        lambda _req, *, timeout: _StreamResponse(repeated_body),
+    )
+    rep_res = credential_catalog.api_request(
+        {"url": "https://api.example.test/items", "max_response_bytes": 20},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert rep_res.status == "success"
+    assert rep_res.content["truncated"] is True
+    assert rep_res.content["text"] == "AAAA[REDACTED]"
+    assert "S" not in rep_res.content["text"]
+
+    # Also applies to HTTPError bodies cut mid-secret.
+    err_body = f"bad ?gate_key={long_secret} end".encode("utf-8")
+
+    def fail_http(_req, *, timeout):
+        raise urllib_error.HTTPError(
+            "https://api.example.test/items",
+            502,
+            "Bad Gateway",
+            _JsonHeaders({"Content-Type": "text/plain"}),
+            io.BytesIO(err_body),
+        )
+
+    monkeypatch.setattr(credential_catalog, "_send_api_request", fail_http)
+    err_cut = credential_catalog.api_request(
+        {"url": "https://api.example.test/items", "max_response_bytes": 18},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert err_cut.status == "success"
+    assert err_cut.content["http_status"] == 502
+    assert err_cut.content["truncated"] is True
+    assert err_cut.content["text"] == "bad ?gate_key=[REDACTED]"
+    assert "S" not in err_cut.content["text"]
+
+
+def test_api_request_refuses_agent_supplied_gate_header_query_and_injection_collisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    _save_linked_credential(tmp_path, monkeypatch, scope=TEST_OWNER_SCOPE, token="ACCT-SECRET")
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="GATE_HEADER_SECRET",
+        token="GATE-SECRET",
+        credential_key="example_gate",
+    )
+    _refuse_network(monkeypatch)
+    gate = AccountLinkV1(
+        link_id="account_link_team_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="example_gate",
+        injections=(_header("CF-Access-Client-Secret"), _query("gate_key")),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    bad_header = credential_catalog.api_request(
+        {"url": "https://api.example.test/items", "headers": {"cf-access-client-secret": "spoofed"}},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert bad_header.status == "error"
+    assert bad_header.content["error_code"] == "api_request_header_reserved"
+    assert bad_header.content["headers"] == ["cf-access-client-secret"]
+    assert "team gate credential" in (bad_header.error or "")
+
+    bad_query = credential_catalog.api_request(
+        {"url": "https://api.example.test/items?gate_key=spoofed"},
+        context=_linked_context(None, gate_link=gate),
+    )
+    assert bad_query.status == "error"
+    assert bad_query.content["error_code"] == "api_request_query_reserved"
+    assert bad_query.content["query_params"] == ["gate_key"]
+    assert "team gate credential" in (bad_query.error or "")
+
+    header_clash = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(_link(_header("cf-access-client-secret")), gate_link=gate),
+    )
+    assert header_clash.status == "error"
+    assert header_clash.content["error_code"] == "api_request_injection_collision"
+    assert header_clash.content["headers"] == ["cf-access-client-secret"]
+
+    query_clash = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(_link(_query("gate_key")), gate_link=gate),
+    )
+    assert query_clash.status == "error"
+    assert query_clash.content["error_code"] == "api_request_injection_collision"
+    assert query_clash.content["query_params"] == ["gate_key"]
+
+
 @pytest.mark.parametrize(
     "request_params",
     [
@@ -1600,6 +2106,171 @@ def test_api_request_uses_the_catalog_of_the_links_owner(
     assert result.status == "success"
     expected = "PERSON-SECRET" if owner_kind is LinkOwnerKind.PERSON else "TEAM-SECRET"
     assert dict(sent[0].header_items())["X-api-key"] == expected
+
+
+def test_api_request_redacts_json_escaped_slash_and_go_html_escaped_secrets_before_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F10 + F11: JSON-escaped (\", \\), PHP (\\/), and Go (\\u0026/\\u003c/\\u003e) secrets are redacted before truncation."""
+
+    import io
+
+    from custom_messages.contracts.access_v2 import LinkPurpose
+
+    acct_secret = 'acct"with\\slash/and&<tag>end'
+    gate_secret = "gate/part&<html_go>secret"
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_OWNER_SCOPE,
+        token_env="JSON_ESC_ACCT",
+        token=acct_secret,
+        credential_key="json_esc_acct",
+    )
+    _save_linked_credential(
+        tmp_path,
+        monkeypatch,
+        scope=TEST_TEAM_SCOPE,
+        token_env="JSON_ESC_GATE",
+        token=gate_secret,
+        credential_key="json_esc_gate",
+    )
+    acct_link = _link(_header("X-API-Key"), credential_key="json_esc_acct")
+    gate_link = AccountLinkV1(
+        link_id="account_link_team_json_esc_gate",
+        team_id=TEST_TEAM_ID,
+        tool_id="http:example",
+        owner_kind=LinkOwnerKind.TEAM,
+        owner_id=TEST_TEAM_ID,
+        purpose=LinkPurpose.GATE,
+        credential_key="json_esc_gate",
+        injections=(_header("X-Gate-Key"),),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=TEST_CANONICAL_USER_ID),
+        created_at_utc=LINK_CREATED_AT,
+    )
+
+    class _StreamJsonResponse:
+        def __init__(self, body: bytes) -> None:
+            self.status = self.code = 200
+            self.headers = _JsonHeaders({"Content-Type": "application/json"})
+            self._stream = io.BytesIO(body)
+
+        def read(self, limit: int = -1) -> bytes:
+            return self._stream.read(limit)
+
+        def getcode(self) -> int:
+            return self.status
+
+        def close(self) -> None:
+            self._stream.close()
+
+    # Standard JSON-escaped account secret, PHP slash-escaped, and Go HTML-escaped gate secret.
+    std_acct = json.dumps(acct_secret)[1:-1]
+    php_gate = json.dumps(gate_secret)[1:-1].replace("/", r"\/")
+    go_gate = (
+        json.dumps(gate_secret)[1:-1]
+        .replace("&", r"\u0026")
+        .replace("<", r"\u003c")
+        .replace(">", r"\u003e")
+    )
+    go_php_gate = php_gate.replace("&", r"\u0026").replace("<", r"\u003c").replace(">", r"\u003e")
+
+    # 1. Non-truncated valid JSON response containing escaped secrets.
+    full_json_body = (
+        '{"a":"' + std_acct + '","g1":"' + php_gate + '","g2":"' + go_gate + '"}'
+    ).encode("utf-8")
+    monkeypatch.setattr(
+        credential_catalog,
+        "_send_api_request",
+        lambda _req, *, timeout: _StreamJsonResponse(full_json_body),
+    )
+    full_res = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(acct_link, gate_link=gate_link),
+    )
+    assert full_res.status == "success"
+    dumped = json.dumps(full_res.content["json"])
+    for forbidden in ("acct", "slash", "html_go", "gate/part"):
+        assert forbidden not in dumped
+
+    # 2. Truncated JSON response cutting across each escaped form: zero secret characters leak.
+    for escaped_form in (std_acct, php_gate, go_gate, go_php_gate):
+        prefix = '{"echo":"'
+        body = (prefix + escaped_form + '","more":"padding"}').encode("utf-8")
+        cut = len(prefix) + 8
+        monkeypatch.setattr(
+            credential_catalog,
+            "_send_api_request",
+            lambda _req, *, timeout, payload=body: _StreamJsonResponse(payload),
+        )
+        res = credential_catalog.api_request(
+            {"url": "https://api.example.test/items", "max_response_bytes": cut},
+            context=_linked_context(acct_link, gate_link=gate_link),
+        )
+        assert res.status == "success"
+        assert res.content["truncated"] is True
+        text = res.content["text"]
+        assert text == prefix + "[REDACTED]"
+        assert "acct" not in text and "gate" not in text
+
+
+def test_api_request_sends_default_browser_user_agent_when_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from secure_tool_broker.defaults import DEFAULT_API_REQUEST_USER_AGENT
+
+    expected_default = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
+    )
+    assert DEFAULT_API_REQUEST_USER_AGENT == expected_default
+    _save_linked_credential(tmp_path, monkeypatch)
+    sent = _capture_requests(monkeypatch)
+
+    result = credential_catalog.api_request(
+        {"url": "https://api.example.test/items"},
+        context=_linked_context(_link(_header("X-API-Key"))),
+    )
+    assert result.status == "success"
+    headers = {key.lower(): value for key, value in sent[0].header_items()}
+    assert headers["user-agent"] == expected_default
+
+    # Also applies when no ToolContext is passed at all.
+    result_no_ctx = credential_catalog.api_request({"url": "https://api.example.test/public"})
+    assert result_no_ctx.status == "success"
+    headers_no_ctx = {key.lower(): value for key, value in sent[1].header_items()}
+    assert headers_no_ctx["user-agent"] == expected_default
+
+
+@pytest.mark.parametrize(
+    ("header_name", "header_value"),
+    [("User-Agent", "ExplicitAgent/1.0"), ("user-agent", "LowerAgent/1.0")],
+)
+def test_api_request_keeps_agent_supplied_user_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    header_name: str,
+    header_value: str,
+) -> None:
+    _save_linked_credential(tmp_path, monkeypatch)
+    sent = _capture_requests(monkeypatch)
+    context = ToolContext(
+        canonical_user_id="usr_alice",
+        team_id="team_ua",
+        principal_type="user",
+        account_link=_link(_header("X-API-Key")),
+    )
+
+    result = credential_catalog.api_request(
+        {"url": "https://api.example.test/items", "headers": {header_name: header_value}},
+        context=context,
+    )
+
+    assert result.status == "success"
+    headers = {key.lower(): value for key, value in sent[0].header_items()}
+    assert headers["user-agent"] == header_value
 
 
 def _fake_openshell(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict[str, str]]]:

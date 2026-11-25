@@ -118,7 +118,7 @@ async def test_the_gateway_deletes_a_removed_persons_credentials(world, deletabl
     assert load_catalog(scope=CredentialOwnerScope.user("user-1")).credentials == {}
     assert list(deletable_sealbox.values()) == ["team-secret"]
     assert set(load_catalog(scope=CredentialOwnerScope.team(TEST_TEAM)).credentials)
-    assert len(store.list_links(TEST_TEAM)) == 2  # the gateway revokes links; the broker only deletes secrets
+    assert len(store.list_links(TEST_TEAM, purpose=None)) == 2  # the gateway revokes links; the broker only deletes secrets
 
 
 # -- sign-ins and the private credentials folder (real file-based store) -----------------

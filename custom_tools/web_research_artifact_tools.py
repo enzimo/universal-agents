@@ -38,6 +38,7 @@ from custom_tools import file_access
 from custom_tools.broker_web_requests import (
     REASON_ACCESS_DENIED,
     BrokerWebRequestError,
+    credential_setup_hint,
     is_missing_key,
     send_web_request,
 )
@@ -227,13 +228,17 @@ _MISSING_KEY_HINTS = [
 def _broker_failure_fields(exc: BrokerWebRequestError, *, stage: str) -> Dict[str, Any]:
     """Failure fields for a request the broker refused or could not send."""
 
-    if is_missing_key(exc):
+    setup_hint = credential_setup_hint(exc)
+    if setup_hint is not None:
+        hints = [setup_hint, "use exa_search or searxng until the credential is linked"]
+    elif is_missing_key(exc):
         hints = _MISSING_KEY_HINTS
     elif exc.reason_code == REASON_ACCESS_DENIED:
         hints = [f"ask the person, or an administrator, for access to {BRAVE_TOOL_ID}", "use searxng instead"]
     else:
         hints = ["retry shortly", "try a different search provider"]
-    failure_stage = "authentication" if is_missing_key(exc) or exc.reason_code == REASON_ACCESS_DENIED else stage
+    auth_failure = setup_hint is not None or is_missing_key(exc) or exc.reason_code == REASON_ACCESS_DENIED
+    failure_stage = "authentication" if auth_failure else stage
     return {
         "failure_stage": failure_stage,
         "failure_reason": exc.reason_code,
