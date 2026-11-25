@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from nats.errors import NoRespondersError
 from nats.js.errors import APIError
 
 from custom_messages.wire.encoding import b64url
@@ -821,3 +822,150 @@ def test_extract_old_envelope_summary_extracts_task_preview_and_person_ids() -> 
     assert summary.request_preview.endswith("…")
     assert len(summary.request_preview) <= 240
     assert extract_old_envelope_summary(b"not json") is None
+
+
+# -- C14, C15, C16, C17 fixes --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c14_non_full_nats_error_stops_after_transient_retries_without_wpi_or_ack(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C14: NoRespondersError (not 10077) retries briefly without +WPI, leaves message unacked, and logs failure."""
+
+    live_host, conn = make_host()
+    js = conn.jetstream()
+    for _ in range(10):
+        js.fail_on.append((".dlq.raw.", NoRespondersError()))
+    setter = DeadLetterSetter(
+        live_host,
+        release="0.10.0",
+        ack_wait_seconds=0.2,
+        initial_retry_seconds=0.01,
+        max_retry_seconds=0.05,
+        transient_retries=2,
+    )
+    delivery = FakeDelivery(
+        data=b"bad",
+        subject="ua.v1.team_example.lead-host-1.work.agent.researcher-2.8",
+        stream_seq=19,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await asyncio.wait_for(
+            setter.set_aside_and_ack(delivery, reason="malformed", team=TEAM),
+            timeout=1.0,
+        )
+
+    assert result is None
+    assert delivery.ack_calls == 0
+    assert delivery.in_progress_calls == 0
+    failed_logs = [r for r in caplog.records if "event=protocol1_dlq_set_aside_failed" in r.getMessage()]
+    full_logs = [r for r in caplog.records if "event=protocol1_dlq_stream_full_holding" in r.getMessage()]
+    assert len(failed_logs) == 1
+    assert "error_type=NoRespondersError" in failed_logs[0].getMessage()
+    assert full_logs == []
+
+    # Transient non-full error once, then succeeds within the retry window without +WPI.
+    js.fail_on.clear()
+    js.fail_on.append((".dlq.raw.", TimeoutError("brief hiccup")))
+    delivery2 = FakeDelivery(data=b"bad2", subject="s", stream_seq=20)
+    res2 = await setter.set_aside_and_ack(delivery2, reason="malformed", team=TEAM)
+    assert res2 is not None
+    assert delivery2.ack_calls == 1
+    assert delivery2.in_progress_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_c15_one_failing_stream_does_not_stop_sweeping_remaining_streams(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C15: STREAM.INFO timing out on the first stream logs stream_failed and still sweeps the second stream."""
+
+    live_host, conn = make_host()
+    setter = DeadLetterSetter(live_host, release="0.10.0")
+    broken_stream = "UA1_PART_team_example~0"
+    healthy_stream = "UA1_POOL_WORK_team_example"
+    conn.streams[healthy_stream] = {}
+    conn.messages[healthy_stream] = {
+        1: {"subject": "ua.v1.team_example.lead-host-1.work.pool.worker", "data": b"stranded", "time": "2026-10-22T04:30:00Z"},
+    }
+    conn.consumers[healthy_stream] = [
+        {
+            "name": "pool~team_example~worker",
+            "config": {"filter_subject": "ua.v1.team_example.*.work.pool.worker", "max_deliver": 5},
+            "delivered": {"stream_seq": 1},
+            "ack_floor": {"stream_seq": 0},
+            "num_ack_pending": 0,
+        },
+    ]
+
+    orig_request = conn.request
+
+    async def flaky_request(subject: str, payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        if subject == f"$JS.API.STREAM.INFO.{broken_stream}":
+            raise TimeoutError("stream info timed out")
+        return await orig_request(subject, payload, timeout=timeout)
+
+    conn.request = flaky_request  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.WARNING):
+        summary = await sweep_exhausted_streams(conn, [broken_stream, healthy_stream], setter, team=TEAM)
+
+    assert summary.streams_failed == 1
+    assert summary.streams_checked == 1
+    assert summary.messages_swept == 1
+    assert summary.stopped_full is False
+    assert conn.messages[healthy_stream] == {}
+    failed_logs = [r for r in caplog.records if "event=protocol1_dlq_sweep_stream_failed" in r.getMessage()]
+    assert len(failed_logs) == 1
+    assert broken_stream in failed_logs[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_c16_background_hold_error_is_logged_and_timestamp_fallback_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C16: Non-retryable errors inside DeadLetterHoldTracker._run are logged; timestamp fallback warns."""
+
+    live_host, _conn = make_host()
+    setter = DeadLetterSetter(live_host, release="0.10.0")
+    tracker = DeadLetterHoldTracker(setter)
+    delivery = FakeDelivery(data=b"bad", subject="s", stream="UA1_PART_team_example~0", stream_seq=3)
+
+    # Asking for an unserved team raises DeadLetterError inside background _run.
+    with caplog.at_level(logging.WARNING):
+        task = tracker.hold(delivery, reason="malformed", team="unserved_team")
+        result = await task
+
+    assert result is None
+    assert tracker.active_count == 0
+    assert delivery.ack_calls == 0
+    assert any("event=protocol1_dlq_set_aside_failed" in r.getMessage() for r in caplog.records)
+
+    # Unparseable $JS.ACK reply logs warning before falling back to metadata.timestamp.
+    caplog.clear()
+    bad_ack = FakeDelivery(data=b"x", subject="s", stream_seq=4, ack_version=2)
+    bad_ack.reply = "$JS.ACK.corrupt.not_enough_tokens"
+    with caplog.at_level(logging.WARNING):
+        ts_ns = message_stored_timestamp_ns(bad_ack)
+    assert ts_ns > 0
+    assert any("event=protocol1_dlq_ack_timestamp_fallback" in r.getMessage() for r in caplog.records)
+
+
+def test_c17_departure_matching_walks_past_4096_json_nodes_and_deep_nesting() -> None:
+    """C17: Protocol 1 body with >4,096 JSON nodes and >32 nesting levels still matches departing person_ref."""
+
+    # > 4,096 list items before the departing person's person_ref.
+    wide_items: list[Any] = [0] * 5000
+    wide_items.append({"person": "pref_alice"})
+    wide_frame = json.dumps({"protocol": "1.0-pre", "body": {"items": wide_items}}).encode("utf-8")
+    assert raw_copy_names_person(wide_frame, person_ref="pref_alice") is True
+    assert raw_copy_names_person(wide_frame, person_ref="pref_bob") is False
+
+    # Nested 45 levels deep (> old 32-level cap).
+    nested: Any = "pref_alice"
+    for _ in range(45):
+        nested = {"inner": nested}
+    deep_frame = json.dumps({"protocol": "1.0-pre", "body": nested}).encode("utf-8")
+    assert raw_copy_names_person(deep_frame, person_ref="pref_alice") is True

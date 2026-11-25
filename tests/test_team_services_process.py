@@ -336,6 +336,104 @@ async def test_f9_lock_lost_stops_partition_maintenance_and_upkeep_before_drain(
 
 
 @pytest.mark.asyncio
+async def test_lock_lost_stops_family_background_runners_before_drain(monkeypatch) -> None:
+    """OperationFamily.run (e.g. DeadLetterService.run) starts on serve and cancels immediately on LockLost."""
+
+    serving = asyncio.Event()
+    trigger_loss = asyncio.Event()
+    allow_drain_finish = asyncio.Event()
+    observations: dict[str, Any] = {"runner_started": False, "runner_stopped": False}
+
+    class _Lock:
+        instance = "inst-runner"
+
+        async def acquire(self, _stop: asyncio.Event) -> bool:
+            return True
+
+        async def keep(self, _stop: asyncio.Event) -> None:
+            await trigger_loss.wait()
+            raise LockLost("lock lost")
+
+        async def release(self) -> None:
+            return None
+
+    class _Sub:
+        async def unsubscribe(self) -> None:
+            return None
+
+    class _Live:
+        identity = SimpleNamespace(installation="install_one")
+        trust = SimpleNamespace()
+
+        async def serve(self, *_args: Any, **_kwargs: Any) -> _Sub:
+            return _Sub()
+
+        async def drain(self) -> None:
+            observations["runner_stopped_during_drain"] = observations["runner_stopped"]
+            await allow_drain_finish.wait()
+
+    class _FakePartitions:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def ensure_unowned_assigned(self) -> None:
+            return None
+
+        async def maintain(self) -> None:
+            return None
+
+        async def run(self, stop_event: asyncio.Event) -> None:
+            await stop_event.wait()
+
+    async def keep_up(stop_event: asyncio.Event, *, drained: Any = None) -> None:
+        await stop_event.wait()
+
+    async def family_runner(stop_event: asyncio.Event) -> None:
+        observations["runner_started"] = True
+        try:
+            await stop_event.wait()
+        finally:
+            observations["runner_stopped"] = True
+
+    live = _Live()
+    host = SimpleNamespace(
+        start=AsyncMock(return_value=live),
+        nc=SimpleNamespace(flush=AsyncMock()),
+        clock=lambda: NOW,
+        logger=logging.getLogger("test"),
+        take_newest_certificate=AsyncMock(),
+        refresh_trust=AsyncMock(),
+        records=object(),
+        publish_liveness=AsyncMock(),
+        layout=None,
+        keep_up=keep_up,
+    )
+    monkeypatch.setattr(process, "SingleInstanceLock", SimpleNamespace(on_connection=lambda *_args: _Lock()))
+    monkeypatch.setattr(process, "SessionService", lambda *_args: _sessions())
+    monkeypatch.setattr(process, "PartitionService", _FakePartitions)
+    monkeypatch.setattr(process, "mark_serving", lambda *_args: serving.set())
+
+    stop = asyncio.Event()
+    family = OperationFamily({"team.delete_person_data": _answer}, run=family_runner)
+    served = asyncio.create_task(process.serve_team(host, "team_one", stop, [family]))  # type: ignore[arg-type]
+    await asyncio.wait_for(serving.wait(), timeout=5)
+    for _ in range(50):
+        if observations["runner_started"]:
+            break
+        await asyncio.sleep(0.01)
+    assert observations["runner_started"] is True
+    trigger_loss.set()
+    for _ in range(100):
+        if "runner_stopped_during_drain" in observations or served.done():
+            break
+        await asyncio.sleep(0.01)
+    assert observations.get("runner_stopped_during_drain") is True
+    allow_drain_finish.set()
+    with pytest.raises(LockLost):
+        await asyncio.wait_for(served, timeout=5)
+
+
+@pytest.mark.asyncio
 async def test_c01_family_prepare_runs_before_serving_svc_team(monkeypatch) -> None:
     """C01: OperationFamily.prepare (e.g. retrying pending blob deletes) finishes before live.serve subscribes."""
 

@@ -88,8 +88,8 @@ PEER_REVOCATIONS_NAK_DELAY_SECONDS: Final[float] = 60.0
 
 # Safe limits for best-effort inspection of untrusted raw message bytes.
 _MAX_UNTRUSTED_PARSE_BYTES: Final = MAX_FRAME_BYTES * 2
-_MAX_WALK_DEPTH: Final = 32
-_MAX_WALK_NODES: Final = 4096
+# Any JSON document up to _MAX_UNTRUSTED_PARSE_BYTES has at most half that many values; cap >= bytes covers all valid inputs (C17).
+_MAX_WALK_NODES: Final = _MAX_UNTRUSTED_PARSE_BYTES
 _MAX_REQUEST_PREVIEW_CHARS: Final = 240
 
 _COPY_ID_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
@@ -185,13 +185,14 @@ class StreamSweepReport:
 
 @dataclass(frozen=True)
 class SweepSummary:
-    """Aggregated outcome of sweeping a set of streams."""
+    """Aggregated outcome of sweeping a set of streams (``streams_checked`` counts completed streams; ``streams_failed`` counts per-stream failures)."""
 
     streams_checked: int
     consumers_checked: int
     messages_swept: int
     stopped_full: bool
     duration_ms: float
+    streams_failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -329,17 +330,25 @@ def message_stored_timestamp_ns(message: Any) -> int:
     """Extract the exact JetStream stored timestamp (UTC nanoseconds) from a delivered ``Msg``."""
 
     reply = getattr(message, "reply", None)
+    parse_error: Optional[Exception] = None
     if isinstance(reply, str) and reply.startswith("$JS.ACK."):
         try:
             tokens = Msg.Metadata._get_metadata_fields(reply)
             # JetStream v1 ack replies have 9 tokens (timestamp at index 7); v2 replies have 11+ (Msg.Ack.Timestamp == 9).
             ts_index = 7 if len(tokens) == 9 else Msg.Ack.Timestamp
             return int(tokens[ts_index])
-        except Exception:
-            pass
+        except Exception as exc:
+            parse_error = exc
     metadata = getattr(message, "metadata", None)
     timestamp = getattr(metadata, "timestamp", None)
     if timestamp is not None:
+        _LOGGER.warning(
+            "Falling back to microsecond metadata.timestamp for copy-id derivation because the $JS.ACK "
+            "reply timestamp could not be read. event=protocol1_dlq_ack_timestamp_fallback stream=%s seq=%s error=%s",
+            getattr(metadata, "stream", "-"),
+            getattr(getattr(metadata, "sequence", None), "stream", "-"),
+            parse_error or "missing_or_non_js_ack_reply",
+        )
         return stored_timestamp_ns(timestamp)
     raise ValueError("JetStream message carries neither a $JS.ACK reply timestamp nor metadata.timestamp")
 
@@ -587,6 +596,17 @@ async def hold_with_in_progress(
 # -- DeadLetterSetter & DeadLetterHoldTracker ----------------------------------------------------
 
 
+class _SetAsideTransientExhausted(Exception):
+    """Internal signal that non-full NATS publish retries ran out inside the current ack_wait."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+_TRANSIENT_PUBLISH_ERRORS: Final = (NatsError, APIError, TimeoutError, asyncio.TimeoutError)
+
+
 class DeadLetterSetter:
     """Write raw copies and signed ``dlq.notice`` frames to ``UA1_DLQ_<team>`` (A1, A2, A3)."""
 
@@ -599,6 +619,7 @@ class DeadLetterSetter:
         initial_retry_seconds: float = 1.0,
         max_retry_seconds: float = 30.0,
         publish_timeout_seconds: float = 5.0,
+        transient_retries: int = 2,
         logger: logging.Logger = _LOGGER,
     ) -> None:
         self.host = host
@@ -607,6 +628,7 @@ class DeadLetterSetter:
         self.initial_retry_seconds = initial_retry_seconds
         self.max_retry_seconds = max_retry_seconds
         self.publish_timeout_seconds = publish_timeout_seconds
+        self.transient_retries = max(0, int(transient_retries))
         self.logger = logger
 
     def resolve_notice_team(self, team: Optional[str]) -> str:
@@ -706,6 +728,51 @@ class DeadLetterSetter:
             notice_message_id=str(frame["message_id"]),
         )
 
+    async def _attempt_set_aside_with_transient_retries(
+        self,
+        *,
+        holder: list[Any],
+        raw_bytes: bytes,
+        reason: str,
+        original_subject: str,
+        original_stream: str,
+        original_seq: int,
+        stored_ns: int,
+        team: Optional[str],
+        pointer: Optional[str],
+        raw_stored_in_hold: bool,
+        on_raw_stored: Callable[[], None],
+        effective_ack_wait: float,
+        stop: Optional[asyncio.Event],
+    ) -> SetAsideResult:
+        deliveries = max(1, int(holder[0].metadata.num_delivered))
+        retry_deadline = time.monotonic() + max(0.0, effective_ack_wait * 0.5)
+        for retry_index in range(self.transient_retries + 1):
+            try:
+                return await self.set_aside(
+                    raw_bytes=raw_bytes,
+                    reason=reason,
+                    original_subject=original_subject,
+                    original_stream=original_stream,
+                    original_stream_sequence=original_seq,
+                    deliveries=deliveries,
+                    stored_at=stored_ns,
+                    team=team,
+                    pointer=pointer,
+                    skip_raw_publish=raw_stored_in_hold,
+                    on_raw_stored=on_raw_stored,
+                )
+            except DeadLetterStreamFull:
+                raise
+            except _TRANSIENT_PUBLISH_ERRORS as exc:
+                remaining = retry_deadline - time.monotonic()
+                if retry_index >= self.transient_retries or remaining <= 0:
+                    raise _SetAsideTransientExhausted(exc) from exc
+                pause = min(0.25, remaining / 2.0, self.initial_retry_seconds * (2 ** retry_index))
+                if await _sleep_or_stop(max(0.0, pause), stop):
+                    raise _SetAsideTransientExhausted(exc) from exc
+        raise AssertionError("unreachable")  # pragma: no cover
+
     async def set_aside_and_ack(
         self,
         message: Any,
@@ -727,32 +794,33 @@ class DeadLetterSetter:
         raw_bytes = bytes(message.data)
         original_subject = str(message.subject)
         raw_stored_in_hold = False
+        effective_ack_wait = ack_wait_seconds if ack_wait_seconds is not None else self.ack_wait_seconds
 
         def mark_raw_stored() -> None:
             nonlocal raw_stored_in_hold
             raw_stored_in_hold = True
 
         async def attempt_store() -> SetAsideResult:
-            current = holder[0]
-            deliveries = max(1, int(current.metadata.num_delivered))
-            return await self.set_aside(
+            return await self._attempt_set_aside_with_transient_retries(
+                holder=holder,
                 raw_bytes=raw_bytes,
                 reason=reason,
                 original_subject=original_subject,
                 original_stream=original_stream,
-                original_stream_sequence=original_seq,
-                deliveries=deliveries,
-                stored_at=stored_ns,
+                original_seq=original_seq,
+                stored_ns=stored_ns,
                 team=team,
                 pointer=pointer,
-                skip_raw_publish=raw_stored_in_hold,
+                raw_stored_in_hold=raw_stored_in_hold,
                 on_raw_stored=mark_raw_stored,
+                effective_ack_wait=effective_ack_wait,
+                stop=stop,
             )
 
         def log_holding(exc: Exception) -> None:
             claims = extract_unverified_claims(raw_bytes)
             self.logger.warning(
-                "Dead-letter set-aside could not store yet; holding message with +WPI. "
+                "Dead-letter stream is full; holding message with +WPI until room returns. "
                 "event=protocol1_dlq_stream_full_holding stream=%s seq=%s subject=%s reason=%s "
                 "claimed_kind=%s claimed_message_id=%s error=%s",
                 original_stream,
@@ -764,17 +832,31 @@ class DeadLetterSetter:
                 exc,
             )
 
-        result = await hold_with_in_progress(
-            lambda: (holder[0],),
-            attempt_store,
-            ack_wait_seconds=ack_wait_seconds if ack_wait_seconds is not None else self.ack_wait_seconds,
-            initial_retry_seconds=self.initial_retry_seconds,
-            max_retry_seconds=self.max_retry_seconds,
-            retryable=lambda exc: isinstance(exc, (DeadLetterStreamFull, NatsError, APIError, TimeoutError, asyncio.TimeoutError)),
-            on_first_failure=log_holding,
-            stop=stop,
-            logger=self.logger,
-        )
+        try:
+            result = await hold_with_in_progress(
+                lambda: (holder[0],),
+                attempt_store,
+                ack_wait_seconds=effective_ack_wait,
+                initial_retry_seconds=self.initial_retry_seconds,
+                max_retry_seconds=self.max_retry_seconds,
+                retryable=lambda exc: isinstance(exc, DeadLetterStreamFull),
+                on_first_failure=log_holding,
+                stop=stop,
+                logger=self.logger,
+            )
+        except _SetAsideTransientExhausted as exhausted:
+            # Leave the message unacknowledged (no +WPI) so deliveries count and the CRIT-1 sweep can recover it (C14).
+            self.logger.warning(
+                "Dead-letter set-aside failed after transient retries; leaving message unacknowledged for redelivery/sweep. "
+                "event=protocol1_dlq_set_aside_failed stream=%s seq=%s subject=%s reason=%s error_type=%s error=%s",
+                original_stream,
+                original_seq,
+                original_subject,
+                reason,
+                type(exhausted.cause).__name__,
+                exhausted.cause,
+            )
+            return None
         if result is None:
             return None
         await holder[0].ack()
@@ -837,6 +919,18 @@ class DeadLetterHoldTracker:
                     ack_wait_seconds=ack_wait_seconds,
                     message_holder=holder,
                 )
+            except Exception as exc:
+                self._setter.logger.error(
+                    "Background dead-letter set-aside failed unexpectedly; leaving message unacknowledged. "
+                    "event=protocol1_dlq_set_aside_failed stream=%s seq=%s reason=%s error_type=%s error=%s",
+                    key[0],
+                    key[1],
+                    reason,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                return None
             finally:
                 current = self._held.get(key)
                 if current is not None and current.holder is holder:
@@ -1182,22 +1276,37 @@ async def sweep_exhausted_streams(
 
     started = time.monotonic()
     streams_checked = 0
+    streams_failed = 0
     consumers_checked = 0
     messages_swept = 0
     stopped_full = False
     for stream in streams:
         if stop is not None and stop.is_set():
             break
-        report = await sweep_exhausted_stream(
-            nc,
-            stream,
-            setter,
-            team=team,
-            stop=stop,
-            logged_stranded=logged_stranded,
-            timeout=timeout,
-            logger=logger,
-        )
+        try:
+            report = await sweep_exhausted_stream(
+                nc,
+                stream,
+                setter,
+                team=team,
+                stop=stop,
+                logged_stranded=logged_stranded,
+                timeout=timeout,
+                logger=logger,
+            )
+        except DeadLetterStreamFull:
+            stopped_full = True
+            break
+        except Exception as exc:
+            streams_failed += 1
+            logger.warning(
+                "Could not sweep stream for exhausted deliveries; continuing with remaining streams. "
+                "event=protocol1_dlq_sweep_stream_failed stream=%s error_type=%s error=%s",
+                stream,
+                type(exc).__name__,
+                exc,
+            )
+            continue
         streams_checked += 1
         consumers_checked += report.consumers_checked
         messages_swept += report.messages_swept
@@ -1210,6 +1319,7 @@ async def sweep_exhausted_streams(
         messages_swept=messages_swept,
         stopped_full=stopped_full,
         duration_ms=(time.monotonic() - started) * 1000.0,
+        streams_failed=streams_failed,
     )
 
 
@@ -1284,17 +1394,24 @@ def _child_values(value: Any) -> Sequence[Any]:
 def _contains_any_string(root: Any, targets: frozenset[str]) -> bool:
     if not targets:
         return False
-    stack: list[tuple[Any, int]] = [(root, 0)]
+    stack: list[Any] = [root]
     visited = 0
-    while stack and visited < _MAX_WALK_NODES:
-        value, depth = stack.pop()
+    while stack:
+        if visited >= _MAX_WALK_NODES:
+            _LOGGER.warning(
+                "Departure JSON walk reached node cap (%s); treating copy as naming the departing person "
+                "so personal content is not retained. event=protocol1_dlq_departure_walk_cap_reached nodes=%s",
+                _MAX_WALK_NODES,
+                visited,
+            )
+            return True
+        value = stack.pop()
         visited += 1
         if isinstance(value, str):
             if value in targets:
                 return True
             continue
-        if depth < _MAX_WALK_DEPTH:
-            stack.extend((child, depth + 1) for child in _child_values(value))
+        stack.extend(_child_values(value))
     return False
 
 

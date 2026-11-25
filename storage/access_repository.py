@@ -435,6 +435,25 @@ class AccessRepository:
                 changed_at TEXT NOT NULL,
                 PRIMARY KEY (team_id, subject)
             )""")
+            # Local JetStream dead-letter reporting state for protocol 1 UA1_DLQ_<team> (C02, C10):
+            # per-(team, issuer_runtime, copy_id) receipts committed atomically with access_notices,
+            # and per-stream recovery scan cursors. Both are local to this installation's JetStream
+            # broker and never travel in a team transfer.
+            conn.execute("""CREATE TABLE IF NOT EXISTS protocol1_dlq_reported_notices (
+                team_id TEXT NOT NULL, issuer_runtime TEXT NOT NULL, copy_id TEXT NOT NULL,
+                notice_id TEXT NOT NULL, reported_at TEXT NOT NULL,
+                PRIMARY KEY (team_id, issuer_runtime, copy_id)
+            )""")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS protocol1_dlq_reported_notices_reported "
+                "ON protocol1_dlq_reported_notices(team_id, reported_at)"
+            )
+            conn.execute("""CREATE TABLE IF NOT EXISTS protocol1_dlq_scan_cursors (
+                team_id TEXT NOT NULL, stream_name TEXT NOT NULL,
+                last_scanned_seq BIGINT NOT NULL, stream_created TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (team_id, stream_name)
+            )""")
             conn.commit()
         self._approval_id_column()
         self._one_active_link_per_owner()
@@ -2105,6 +2124,143 @@ class AccessRepository:
             )
             conn.commit()
         return bool(cursor.rowcount > 0)
+
+    # -- protocol 1 dead-letter reporting receipts and scan cursors (C02, C10) ---
+    # Local JetStream reporting state only; never exported or imported by team transfer.
+
+    @staticmethod
+    def _dlq_ts(value: datetime) -> str:
+        utc = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        return utc.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def dlq_reported_copy_keys(
+        self, team_id: str, keys: Iterable[tuple[str, str]]
+    ) -> set[tuple[str, str]]:
+        """Return the subset of ``(issuer_runtime, copy_id)`` already recorded as reported for ``team_id``."""
+
+        unique_keys = list(dict.fromkeys((str(runtime), str(copy_id)) for runtime, copy_id in keys))
+        if not unique_keys:
+            return set()
+        p = self.dialect.bind
+        found: set[tuple[str, str]] = set()
+        with self._connect() as conn:
+            for runtime, copy_id in unique_keys:
+                row = conn.execute(
+                    f"SELECT 1 FROM protocol1_dlq_reported_notices "
+                    f"WHERE team_id = {p} AND issuer_runtime = {p} AND copy_id = {p} LIMIT 1",
+                    (team_id, runtime, copy_id),
+                ).fetchone()
+                if row is not None:
+                    found.add((runtime, copy_id))
+        return found
+
+    def record_dlq_notice_report(
+        self,
+        team_id: str,
+        notice: AccessNoticeV1,
+        receipts: Iterable[tuple[str, str]],
+        *,
+        reported_at_utc: datetime,
+    ) -> tuple[bool, int]:
+        """Atomically store ``notice`` and its per-copy receipts in one write transaction (C02, C10).
+
+        Returns ``(notice_created, receipts_inserted)``. If every receipt in ``receipts`` was
+        already recorded by an earlier pass, neither ``access_notices`` nor receipts are written
+        and ``(False, 0)`` is returned.
+        """
+
+        unique_receipts = list(dict.fromkeys((str(runtime), str(copy_id)) for runtime, copy_id in receipts))
+        if not unique_receipts:
+            return False, 0
+        p = self.dialect.bind
+        ts = self._dlq_ts(reported_at_utc)
+        with self._connect() as conn:
+            conn.begin_write()
+            missing: list[tuple[str, str]] = []
+            for runtime, copy_id in unique_receipts:
+                row = conn.execute(
+                    f"SELECT 1 FROM protocol1_dlq_reported_notices "
+                    f"WHERE team_id = {p} AND issuer_runtime = {p} AND copy_id = {p} LIMIT 1",
+                    (team_id, runtime, copy_id),
+                ).fetchone()
+                if row is None:
+                    missing.append((runtime, copy_id))
+            if not missing:
+                conn.commit()
+                return False, 0
+            notice_cursor = conn.execute(
+                f"INSERT INTO access_notices(notice_id, team_id, payload_json, created_at) VALUES ({p},{p},{p},{p}) "
+                "ON CONFLICT(notice_id) DO NOTHING",
+                (notice.notice_id, notice.team_id, notice.model_dump_json(), _utc(notice.created_at_utc)),
+            )
+            receipts_inserted = 0
+            for runtime, copy_id in missing:
+                rc = conn.execute(
+                    f"INSERT INTO protocol1_dlq_reported_notices("
+                    f"team_id, issuer_runtime, copy_id, notice_id, reported_at"
+                    f") VALUES ({p},{p},{p},{p},{p}) "
+                    "ON CONFLICT(team_id, issuer_runtime, copy_id) DO NOTHING",
+                    (team_id, runtime, copy_id, notice.notice_id, ts),
+                )
+                if rc.rowcount and rc.rowcount > 0:
+                    receipts_inserted += int(rc.rowcount)
+            conn.commit()
+        return bool(notice_cursor.rowcount and notice_cursor.rowcount > 0), receipts_inserted
+
+    def prune_dlq_reported_notices(self, team_id: str, *, before_utc: datetime) -> int:
+        """Delete reporting receipts older than ``before_utc`` (kept at least ``UA1_DLQ`` max_age_seconds)."""
+
+        p = self.dialect.bind
+        cutoff = self._dlq_ts(before_utc)
+        with self._connect() as conn:
+            conn.begin_write()
+            cursor = conn.execute(
+                f"DELETE FROM protocol1_dlq_reported_notices WHERE team_id = {p} AND reported_at < {p}",
+                (team_id, cutoff),
+            )
+            conn.commit()
+        return int(cursor.rowcount or 0)
+
+    def get_dlq_scan_cursor(self, team_id: str, stream_name: str) -> tuple[int, str]:
+        """Read ``(last_scanned_seq, stream_created)`` for ``(team_id, stream_name)``, defaulting to ``(0, '')``."""
+
+        p = self.dialect.bind
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT last_scanned_seq, stream_created FROM protocol1_dlq_scan_cursors "
+                f"WHERE team_id = {p} AND stream_name = {p}",
+                (team_id, stream_name),
+            ).fetchone()
+        if row is None:
+            return 0, ""
+        return int(row[0]), str(row[1] or "")
+
+    def set_dlq_scan_cursor(
+        self,
+        team_id: str,
+        stream_name: str,
+        last_scanned_seq: int,
+        *,
+        stream_created: str = "",
+        updated_at_utc: datetime,
+    ) -> None:
+        """Persist the highest scanned sequence for ``(team_id, stream_name)`` (C10)."""
+
+        p = self.dialect.bind
+        ts = self._dlq_ts(updated_at_utc)
+        with self._connect() as conn:
+            conn.begin_write()
+            conn.execute(
+                f"INSERT INTO protocol1_dlq_scan_cursors("
+                f"team_id, stream_name, last_scanned_seq, stream_created, updated_at"
+                f") VALUES ({p},{p},{p},{p},{p}) "
+                "ON CONFLICT(team_id, stream_name) DO UPDATE SET "
+                "last_scanned_seq = excluded.last_scanned_seq, "
+                "stream_created = excluded.stream_created, "
+                "updated_at = excluded.updated_at",
+                (team_id, stream_name, int(last_scanned_seq), str(stream_created), ts),
+            )
+            conn.commit()
 
     def _visible_notices(
         self, conn: Any, team_id: str, *, person_id: str, roles: tuple[str, ...]
