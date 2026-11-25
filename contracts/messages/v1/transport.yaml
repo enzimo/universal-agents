@@ -145,8 +145,8 @@ nats_account:
 # outbox and send it again until it expires, then report it as failed, and a full dead-letter
 # stream makes the receiver hold the refused message with in-progress acknowledgements and try
 # again, so nothing set aside is dropped to make room. A held message whose receiver stops
-# until its deliveries run out is removed unread at its stream's age limit; the sweep that
-# finds such messages is step 4's (README, "Dead letters").
+# until its deliveries run out is found by the exhausted-delivery sweep and set aside as
+# delivery_limit with a notice (README, "Dead letters").
 queues:
   max_bytes_setting: transport.queues.max_bytes                # one byte limit per size kind
   max_messages_per_subject_setting: transport.queues.max_messages_per_subject   # the partition streams' cap per stored subject
@@ -341,7 +341,9 @@ consumers:
 # which already decides which hosts serve which teams, partitions and pools, and holds the
 # account's signing key, so its JetStream grants name every stream of the account rather than
 # a line per team and partition. The withdrawal role finds a queued task in its own team's
-# streams by its task id, and deletes it by its stream sequence; no other role may. A task's
+# streams by its task id, deletes it by its stream sequence, and sweeps messages whose
+# consumers ran out of deliveries (inspecting stream info to skip empty streams and listing
+# consumers to compute each consumer's cutoff sequence); no other role may. A task's
 # copy does not name the agent, pool or edge it went to, so withdrawal searches each of the
 # team's partition streams, its pool stream and its edge stream, never its own inbox's stream,
 # where the tasks' copies wait. Only per-team streams, so neither grant reaches another team's
@@ -369,10 +371,12 @@ pool_controller:
 # account information, for its storage check.
 size_check:
   role: gateway
-# The dead-letter custody role finds a raw copy by its subject (the last message for
-# ua.v1.<team>.<notice sender>.dlq.raw.<copy id>), reads it, and deletes it by the sequence that
-# read returns; it deletes the raw copies that name a departed person the same way (README, "Dead
-# letters"). Only per-team streams, so the grant reaches no other team's copies.
+# The dead-letter custody role inspects its team's dead-letter stream info, finds a raw copy
+# by its subject (the last message for ua.v1.<team>.<notice sender>.dlq.raw.<copy id>),
+# reads it, and deletes it by the sequence that read returns; it deletes raw copies that
+# name a departed person or have been orphaned without a notice, and scans notices below its
+# consumer's cutoff after crashes (README, "Dead letters"). Only per-team streams, so the
+# grant reaches no other team's copies.
 dead_letter_custody:
   role: team_services
   streams: ["UA1_DLQ_{team}"]

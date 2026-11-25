@@ -1364,30 +1364,6 @@ class AgentStatusReplyNotAllowed(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
-class BlobsDeletePersonBody(WireModel):
-    "Remove a departed person's blob ownership records and immediately delete every blob left with no remaining owner."
-
-    request_id: RecordId
-    person: PersonRef
-
-
-class BlobsDeletePersonReplyOk(WireModel):
-    outcome: Literal['ok']
-    owners_removed: Count
-    blobs_deleted: Count
-    blobs_kept: Count
-
-
-class BlobsDeletePersonReplyNotAllowed(WireModel):
-    outcome: Literal['not_allowed']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
-class BlobsDeletePersonReplyRuntimeError(WireModel):
-    outcome: Literal['runtime_error']
-    message: Union[ShortText, MISSING] = Field(default=MISSING)
-
-
 class BlobsRegisterBodyOwnerRequest(WireModel):
     type: Literal['request']
     request_id: RecordId
@@ -8876,6 +8852,42 @@ class TasksSteerReplyNotAllowed(WireModel):
     message: Union[ShortText, MISSING] = Field(default=MISSING)
 
 
+class TeamDeletePersonDataBody(WireModel):
+    "Delete a departed person's team-held data: remove their blob ownership records, delete every blob left with no remaining owner, and delete every raw dead-letter copy naming them."
+
+    request_id: RecordId
+    person: PersonRef
+
+
+class TeamDeletePersonDataReplyOk(WireModel):
+    outcome: Literal['ok']
+    owners_removed: Count
+    blobs_deleted: Count
+    blobs_kept: Count
+    dlq_copies_deleted: Count
+    dlq_copies_kept: Count
+
+
+class TeamDeletePersonDataReplyRetryLater(WireModel):
+    outcome: Literal['retry_later']
+    owners_removed: Count
+    blobs_deleted: Count
+    blobs_kept: Count
+    dlq_copies_deleted: Count
+    dlq_copies_kept: Count
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class TeamDeletePersonDataReplyNotAllowed(WireModel):
+    outcome: Literal['not_allowed']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
+class TeamDeletePersonDataReplyRuntimeError(WireModel):
+    outcome: Literal['runtime_error']
+    message: Union[ShortText, MISSING] = Field(default=MISSING)
+
+
 class ToolSetupRequestBodySetupSignIn(WireModel):
     type: Literal['sign_in']
     owner: Literal['person']
@@ -9076,8 +9088,6 @@ AgentResumeBodyAdapter = TypeAdapter(AgentResumeBody)
 AgentResumeReplyAdapter = TypeAdapter(Annotated[Union[AgentResumeReplyOk, AgentResumeReplyAgentExiting, AgentResumeReplyNotAllowed], Field(discriminator='outcome')])
 AgentStatusBodyAdapter = TypeAdapter(AgentStatusBody)
 AgentStatusReplyAdapter = TypeAdapter(Annotated[Union[AgentStatusReplyOk, AgentStatusReplyNotAllowed], Field(discriminator='outcome')])
-BlobsDeletePersonBodyAdapter = TypeAdapter(BlobsDeletePersonBody)
-BlobsDeletePersonReplyAdapter = TypeAdapter(Annotated[Union[BlobsDeletePersonReplyOk, BlobsDeletePersonReplyNotAllowed, BlobsDeletePersonReplyRuntimeError], Field(discriminator='outcome')])
 BlobsRegisterBodyAdapter = TypeAdapter(BlobsRegisterBody)
 BlobsRegisterReplyAdapter = TypeAdapter(Annotated[Union[BlobsRegisterReplyOk, BlobsRegisterReplyNotAllowed, BlobsRegisterReplyRuntimeError], Field(discriminator='outcome')])
 CredentialFormRequestBodyAdapter = TypeAdapter(CredentialFormRequestBody)
@@ -9290,6 +9300,8 @@ TasksRemoveBodyAdapter = TypeAdapter(TasksRemoveBody)
 TasksRemoveReplyAdapter = TypeAdapter(Annotated[Union[TasksRemoveReplyOk, TasksRemoveReplyQueueChanged, TasksRemoveReplyNotFound, TasksRemoveReplyNotAllowed, TasksRemoveReplyRuntimeError], Field(discriminator='outcome')])
 TasksSteerBodyAdapter = TypeAdapter(TasksSteerBody)
 TasksSteerReplyAdapter = TypeAdapter(Annotated[Union[TasksSteerReplyOk, TasksSteerReplyNotStarted, TasksSteerReplyRequestFinished, TasksSteerReplyFeatureOff, TasksSteerReplyNotAllowed], Field(discriminator='outcome')])
+TeamDeletePersonDataBodyAdapter = TypeAdapter(TeamDeletePersonDataBody)
+TeamDeletePersonDataReplyAdapter = TypeAdapter(Annotated[Union[TeamDeletePersonDataReplyOk, TeamDeletePersonDataReplyRetryLater, TeamDeletePersonDataReplyNotAllowed, TeamDeletePersonDataReplyRuntimeError], Field(discriminator='outcome')])
 ToolSetupRequestBodyAdapter = TypeAdapter(ToolSetupRequestBody)
 ToolSetupResultBodyAdapter = TypeAdapter(ToolSetupResultBody)
 TopicsFindThreadsBodyAdapter = TypeAdapter(TopicsFindThreadsBody)

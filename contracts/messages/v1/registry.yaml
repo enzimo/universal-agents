@@ -151,9 +151,10 @@ covered_record_kinds: [memory_fact, knowledge_page, schedule, objective, heartbe
 # every other final outcome under the operation's key, but not these, so a retry with the
 # same key is decided again (README, "Stored outcomes"): not_started, steering while its
 # request still waits to start; record_busy, a file or sign-in another request is writing;
-# runtime_error, a failure that changed nothing; waiting, a staged change the person has
-# not decided yet.
-retry_outcomes: [not_started, record_busy, runtime_error, waiting]
+# retry_later, a bounded scan such as team.delete_person_data reached its time budget while
+# background cleanup continues; runtime_error, a failure that changed nothing; waiting, a
+# staged change the person has not decided yet.
+retry_outcomes: [not_started, record_busy, retry_later, runtime_error, waiting]
 # Roles that hold NATS permissions. Agent roles for topology are in team-topologies.yaml.
 host_roles:
   gateway: talks to people through channels and the web
@@ -2580,14 +2581,14 @@ kinds:
     wakes_model: never
     rendering: none
 
-  blobs.delete_person:
-    description: Remove a departed person's blob ownership records and immediately delete every blob left with no remaining owner.
+  team.delete_person_data:
+    description: "Delete a departed person's team-held data: remove their blob ownership records, delete every blob left with no remaining owner, and delete every raw dead-letter copy naming them."
     class: request_reply
     address: svc.team
-    body: bodies/blobs.delete_person.schema.json
+    body: bodies/team.delete_person_data.schema.json
     reply:
-      body: bodies/blobs.delete_person.reply.schema.json
-      errors: [not_allowed, runtime_error]
+      body: bodies/team.delete_person_data.reply.schema.json
+      errors: [retry_later, not_allowed, runtime_error]
     senders: [gateway, lead_host]
     receivers: [team_services]
     expiry_seconds: 30

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/team.delete_person_data.reply.schema.json",
+  "title": "team.delete_person_data reply",
+  "description": "Counts of removed blob ownership records, deleted and kept blobs, and deleted and kept raw dead-letter copies; returns retry_later with partial dead-letter counts when a bounded scan reaches its time budget.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "ok"
+        },
+        "owners_removed": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "blobs_deleted": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "blobs_kept": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "dlq_copies_deleted": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "dlq_copies_kept": {
+          "$ref": "../common.schema.json#/$defs/count"
+        }
+      },
+      "required": [
+        "outcome",
+        "owners_removed",
+        "blobs_deleted",
+        "blobs_kept",
+        "dlq_copies_deleted",
+        "dlq_copies_kept"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "retry_later"
+        },
+        "owners_removed": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "blobs_deleted": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "blobs_kept": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "dlq_copies_deleted": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "dlq_copies_kept": {
+          "$ref": "../common.schema.json#/$defs/count"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome",
+        "owners_removed",
+        "blobs_deleted",
+        "blobs_kept",
+        "dlq_copies_deleted",
+        "dlq_copies_kept"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "not_allowed"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "outcome": {
+          "const": "runtime_error"
+        },
+        "message": {
+          "$ref": "../common.schema.json#/$defs/short_text"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

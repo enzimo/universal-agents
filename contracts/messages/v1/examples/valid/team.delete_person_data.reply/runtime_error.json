@@ -1,7 +1,7 @@
 {
   "protocol": "1.0-pre",
-  "kind": "blobs.delete_person.reply",
-  "message_id": "01928f3a-7b2c-7e12-8000-000000000e12",
+  "kind": "team.delete_person_data.reply",
+  "message_id": "01928f3a-7b2c-7e14-8000-000000000e14",
   "issuer": {
     "installation": "install_example",
     "team": "team_example",
@@ -22,13 +22,11 @@
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
-    "outcome": "ok",
-    "owners_removed": 3,
-    "blobs_deleted": 2,
-    "blobs_kept": 1
+    "outcome": "runtime_error",
+    "message": "The team services could not finish deleting the departed person's team-held data."
   },
   "causation_id": "01928f3a-7b2c-7e10-8000-000000000e10",
-  "idempotency_key": "blobs.delete_person.reply:5SHPrlydGH3VmHm4vNuErF1qdoIQnv8f6vXJVFgqtLQ",
-  "body_digest": "waxtjyswraGBbjKT0dLk0MrVot_y4RivF2EGi6c8BjA",
-  "signature": "rQsh6oRptm5nNI-SsBI-Iy2BHdcz225ZcsSx-2EWcREFDN0J0tqw7CXkC5V-c9N6iyMosRwlebxNsj8mZHmDCA"
+  "idempotency_key": "team.delete_person_data.reply:GrfBFilVVnigSJW3BQFsiHstQCnWuqjjH7tkavGqP4Y",
+  "body_digest": "ldUNclkFVIbcFgBmFg4iaN67FisKbl83PCVG1Q4NFLg",
+  "signature": "OnPC9Fa3utBDn_wyWVSsqZk0YEUGElwTskob06lR-yNCByretEVv4UsGYlTGr-6WR-2NacpUpCHcb0wLgFeLBw"
 }

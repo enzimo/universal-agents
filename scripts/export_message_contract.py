@@ -2323,11 +2323,31 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     grants.setdefault(transport["size_check"]["role"], set()).update(SIZE_CHECK_GRANTS)
     controller = transport["pool_controller"]
     grants.setdefault(controller["role"], set()).add(f"$JS.API.CONSUMER.INFO.{controller['stream']}.*")
-    # Withdrawal and dead-letter custody read a message by its sequence and delete it there.
-    for key in ("withdrawal", "dead_letter_custody"):
-        custody = transport[key]
-        grants.setdefault(custody["role"], set()).update(
-            f"$JS.API.STREAM.MSG.{action}.{stream}" for stream in custody["streams"] for action in ("GET", "DELETE"))
+    # Withdrawal reads and deletes messages by sequence, and sweeps exhausted deliveries by
+    # inspecting stream info (skipping empty streams) and listing consumers.
+    withdrawal = transport["withdrawal"]
+    grants.setdefault(withdrawal["role"], set()).update(
+        subject
+        for stream in withdrawal["streams"]
+        for subject in (
+            f"$JS.API.STREAM.INFO.{stream}",
+            f"$JS.API.STREAM.MSG.GET.{stream}",
+            f"$JS.API.STREAM.MSG.DELETE.{stream}",
+            f"$JS.API.CONSUMER.LIST.{stream}",
+        )
+    )
+    # Dead-letter custody inspects stream info, reads raw copies and notices by sequence,
+    # and deletes raw copies on departure or orphan cleanup.
+    dlq_custody = transport["dead_letter_custody"]
+    grants.setdefault(dlq_custody["role"], set()).update(
+        subject
+        for stream in dlq_custody["streams"]
+        for subject in (
+            f"$JS.API.STREAM.INFO.{stream}",
+            f"$JS.API.STREAM.MSG.GET.{stream}",
+            f"$JS.API.STREAM.MSG.DELETE.{stream}",
+        )
+    )
     return grants
 
 

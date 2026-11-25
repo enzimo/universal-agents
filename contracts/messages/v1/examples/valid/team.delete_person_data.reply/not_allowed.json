@@ -1,6 +1,6 @@
 {
   "protocol": "1.0-pre",
-  "kind": "blobs.delete_person.reply",
+  "kind": "team.delete_person_data.reply",
   "message_id": "01928f3a-7b2c-7e13-8000-000000000e13",
   "issuer": {
     "installation": "install_example",
@@ -23,10 +23,10 @@
   "algorithm": "ed25519",
   "body": {
     "outcome": "not_allowed",
-    "message": "The person is still active, or the sender is not authorized to delete a departed person's blobs."
+    "message": "The person is still active, or the sender is not authorized to delete a departed person's team-held data."
   },
   "causation_id": "01928f3a-7b2c-7e10-8000-000000000e10",
-  "idempotency_key": "blobs.delete_person.reply:5SHPrlydGH3VmHm4vNuErF1qdoIQnv8f6vXJVFgqtLQ",
-  "body_digest": "aBIVcFJEiIEh3Fhyy96GnQVvG3zfyvUxxhGwrp0G6N4",
-  "signature": "lZx4vKBgQJd7D5GB62wEM1cPWmXy4WsYakW2xj_fwrzWkdSoF-kbYueGGk_h49I2aUFqaOucrILjwF_WVhjMAQ"
+  "idempotency_key": "team.delete_person_data.reply:GrfBFilVVnigSJW3BQFsiHstQCnWuqjjH7tkavGqP4Y",
+  "body_digest": "QHkFRvq5jAHBLoMiuXyKnEncObWLjHTtA0fxILmzYhI",
+  "signature": "1jSI_vD4SqNi0C9fHviVEe9BE1AFcimQxLOLWY5doHfAKn3cpS7ypGhAV6LYMLwOWD4ZsXgAekbYu50MACHNCQ"
 }

@@ -9,7 +9,7 @@ PROTOCOL = '1.0-pre'
 # The digest of the contract these files were generated from, which a host compares with a
 # peer's while the label is a pre-release (README, "Versions"). Generated files are not
 # contract sources, so naming it here does not change it.
-CONTRACT_SHA256 = '17c1f2ffb3b77d6bd80af9c86f004fa26b37e1359029b5d3232b2bec9cc8f1cc'
+CONTRACT_SHA256 = 'eb9dc52ccf59d2f90907519f635cd3e90398d45f87ced84750e717595b7966e0'
 SIGNING_DOMAIN = 'universal-agents/message-frame/v1'
 STATE_SIGNING_DOMAIN = 'universal-agents/state-record/v1'
 AUTHORITY_TOKEN_DOMAIN = 'universal-agents/authority-token/v1'
@@ -39,7 +39,7 @@ VERIFICATION_REFUSALS = ('too_large', 'malformed', 'unknown_key', 'bad_signature
 TEMPORARY_REFUSALS = frozenset(['revocations_not_current'])
 CHANGE_REFUSALS = ('changed_since_read', 'change_conflict', 'request_closed', 'needs_person_decision', 'record_busy')
 COVERED_RECORD_KINDS = ('memory_fact', 'knowledge_page', 'schedule', 'objective', 'heartbeat_item', 'file', 'staged_change')
-RETRY_OUTCOMES = frozenset(['not_started', 'record_busy', 'runtime_error', 'waiting'])
+RETRY_OUTCOMES = frozenset(['not_started', 'record_busy', 'retry_later', 'runtime_error', 'waiting'])
 HOST_ROLES = ('gateway', 'lead_host', 'worker_host', 'team_services', 'edge_adapter', 'installation_authority', 'scheduler')
 TOPOLOGIES = {'hub_and_spoke': {'lead': ('down', 'person', 'out'), 'worker': ('up',)}, 'same_type_peers': {'lead': ('down', 'person', 'out'), 'worker': ('up', 'sideways')}, 'all_peers': {'lead': ('down', 'person', 'out', 'sideways'), 'worker': ('up', 'sideways')}, 'nested': {'lead': ('down', 'person', 'out'), 'worker': ('up', 'down')}}
 REQUESTER_KINDS = frozenset(['task.probe'])
@@ -306,35 +306,6 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'level': None}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'agent_type': None, 'is_lead': None, 'paused': None, 'executing': None, 'has_capacity': None, 'accepting_work': None, 'exiting': None, 'queued': None, 'waiting': None, 'deferred': None, 'current_task_id': None, 'current_task_age_seconds': None, 'context': {'properties': {'window_tokens': None, 'estimated_tokens': None, 'fill_per_mille': None, 'pressure': None}}, 'tool_call_budget_per_mille': None, 'tool_result_budget_per_mille': None, 'tools': {'items': None}, 'skills': {'items': None}, 'findings': {'items': {'properties': {'finding_id': None, 'severity': None, 'title': None, 'summary': None, 'action': None, 'source': None, 'since': None, 'details': None}}}, 'diagnostic_json': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
-        verification='standard',
-    ),
-    'blobs.delete_person': KindSpec(
-        name='blobs.delete_person',
-        delivery_class='request_reply',
-        addresses={'team_services': 'svc.team'},
-        copies=(),
-        idempotency=('/issuer/runtime', '/body/request_id'),
-        body_model=models.BlobsDeletePersonBodyAdapter,
-        reply_model=models.BlobsDeletePersonReplyAdapter,
-        reply_errors=('not_allowed', 'runtime_error'),
-        senders=('gateway', 'lead_host'),
-        senders_by_target={},
-        receivers=('team_services',),
-        expiry_seconds=30,
-        authority='optional',
-        authority_by_target={},
-        authority_binding=(TokenBinding(type='command', at='/body/request_id', senders=('gateway',)),),
-        body_rules=(),
-        execution_slot=False,
-        accepted_while_paused=True,
-        priority='high',
-        routing='team',
-        topology_edges=('none',),
-        ledger='none',
-        wakes_model='never',
-        rendering='none',
-        body_shape={'properties': {'request_id': None, 'person': None}},
-        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'owners_removed': None, 'blobs_deleted': None, 'blobs_kept': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'blobs.register': KindSpec(
@@ -3728,6 +3699,35 @@ KINDS: dict[str, KindSpec] = {
         rendering='none',
         body_shape={'properties': {'steer_id': None, 'task_id': None, 'text': None, 'attachments': {'items': {'properties': {'attachment_id': None, 'blob': {'properties': {'sha256': None, 'size': None, 'media_type': None, 'name': None}}, 'kind': None, 'caption': None}}}, 'replied_message': {'properties': {'author': None, 'author_name': None, 'text': None, 'shortened': None, 'quoted_text': None, 'sent_at': None}}}},
         reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'state': None, 'holds_sent': None, 'duplicate': None}}, 'not_started': {'properties': {'outcome': None, 'message': None}}, 'request_finished': {'properties': {'outcome': None, 'message': None}}, 'feature_off': {'properties': {'outcome': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}}},
+        verification='standard',
+    ),
+    'team.delete_person_data': KindSpec(
+        name='team.delete_person_data',
+        delivery_class='request_reply',
+        addresses={'team_services': 'svc.team'},
+        copies=(),
+        idempotency=('/issuer/runtime', '/body/request_id'),
+        body_model=models.TeamDeletePersonDataBodyAdapter,
+        reply_model=models.TeamDeletePersonDataReplyAdapter,
+        reply_errors=('retry_later', 'not_allowed', 'runtime_error'),
+        senders=('gateway', 'lead_host'),
+        senders_by_target={},
+        receivers=('team_services',),
+        expiry_seconds=30,
+        authority='optional',
+        authority_by_target={},
+        authority_binding=(TokenBinding(type='command', at='/body/request_id', senders=('gateway',)),),
+        body_rules=(),
+        execution_slot=False,
+        accepted_while_paused=True,
+        priority='high',
+        routing='team',
+        topology_edges=('none',),
+        ledger='none',
+        wakes_model='never',
+        rendering='none',
+        body_shape={'properties': {'request_id': None, 'person': None}},
+        reply_shape={'one_of': 'outcome', 'variants': {'ok': {'properties': {'outcome': None, 'owners_removed': None, 'blobs_deleted': None, 'blobs_kept': None, 'dlq_copies_deleted': None, 'dlq_copies_kept': None}}, 'retry_later': {'properties': {'outcome': None, 'owners_removed': None, 'blobs_deleted': None, 'blobs_kept': None, 'dlq_copies_deleted': None, 'dlq_copies_kept': None, 'message': None}}, 'not_allowed': {'properties': {'outcome': None, 'message': None}}, 'runtime_error': {'properties': {'outcome': None, 'message': None}}}},
         verification='standard',
     ),
     'tool.setup.request': KindSpec(

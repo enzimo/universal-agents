@@ -385,6 +385,7 @@ def test_outcomes_that_ask_for_a_retry_are_not_stored() -> None:
     assert kinds.RETRY_OUTCOMES == frozenset(REGISTRY["retry_outcomes"])
     assert "not_started" in kinds.KINDS["tasks.steer"].reply_errors and "not_started" in kinds.RETRY_OUTCOMES
     assert "waiting" in kinds.KINDS["staged_changes.apply"].reply_errors and "waiting" in kinds.RETRY_OUTCOMES
+    assert "retry_later" in kinds.KINDS["team.delete_person_data"].reply_errors and "retry_later" in kinds.RETRY_OUTCOMES
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
     registry["retry_outcomes"].append("waiting")
     with pytest.raises(EXPORT.ContractError, match="retry_outcomes lists distinct snake_case names"):
@@ -966,10 +967,15 @@ def test_the_team_services_withdraw_from_every_partition_of_each_team_they_serve
                               partitions=every_partition(("team_a", "team_b"), count), installation="install_example")
     publish = set(host_permissions(role_permissions("team_services"), placement)["publish"])
     for team in ("team_a", "team_b"):
-        for action in ("GET", "DELETE"):
-            streams = {subject.rsplit(".", 1)[-1] for subject in publish
-                       if subject.startswith(f"$JS.API.STREAM.MSG.{action}.UA1_PART_{team}~")}
-            assert streams == {f"UA1_PART_{team}~{number}" for number in range(count)}
+        expected = {f"UA1_PART_{team}~{number}" for number in range(count)}
+        for prefix in (
+            f"$JS.API.STREAM.MSG.GET.UA1_PART_{team}~",
+            f"$JS.API.STREAM.MSG.DELETE.UA1_PART_{team}~",
+            f"$JS.API.STREAM.INFO.UA1_PART_{team}~",
+            f"$JS.API.CONSUMER.LIST.UA1_PART_{team}~",
+        ):
+            streams = {subject.rsplit(".", 1)[-1] for subject in publish if subject.startswith(prefix)}
+            assert streams == expected, (team, prefix)
     assert every_partition(("team_a",), 3) == {"team_a": (0, 1, 2)}
     with pytest.raises(ValueError, match="partition count"):
         every_partition(("team_a",), kinds.MAX_PARTITION_COUNT + 1)
@@ -1043,9 +1049,14 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
             assert not {subject for subject in publish if "{team}" in subject and subject.startswith("$JS.")}
         elif role == "team_services":
             # Their own team's streams only: no grant reaches another team's streams, or their own inbox's stream.
-            streams = ("UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}", "UA1_DLQ_{team}")
+            withdrawal_streams = ("UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}")
+            streams = (*withdrawal_streams, "UA1_DLQ_{team}")
             assert deletes == creates == {f"$JS.API.STREAM.MSG.DELETE.{stream}" for stream in streams}
             assert reads == {f"$JS.API.STREAM.MSG.GET.{stream}" for stream in streams}
+            consumer_lists = {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.LIST.")}
+            assert consumer_lists == {f"$JS.API.CONSUMER.LIST.{stream}" for stream in withdrawal_streams}
+            stream_infos = {subject for subject in publish if subject.startswith("$JS.API.STREAM.INFO.")}
+            assert stream_infos == {f"$JS.API.STREAM.INFO.{stream}" for stream in streams}
         else:
             assert not creates and not reads, role
     for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
@@ -1172,10 +1183,14 @@ def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
     services = json.loads((CONTRACT / "generated" / "permissions" / "team_services.json").read_text(encoding="utf-8"))
     buckets = EXPORT.key_value_grants(TRANSPORT)["team_services"] | EXPORT.object_store_grants(TRANSPORT)["team_services"]
     consumers = {subject.split(".")[-1] if not subject.startswith("$JS.ACK.") else subject.split(".")[3]
-                 for subject in services["publish"] if subject.startswith(("$JS.API.CONSUMER.", "$JS.ACK."))
+                 for subject in services["publish"]
+                 if subject.startswith(("$JS.API.CONSUMER.INFO.", "$JS.API.CONSUMER.MSG.NEXT.", "$JS.ACK."))
                  and subject not in buckets}
     # Their inbox's copies and their team's dead-letter notices (README, "Dead letters").
     assert consumers == {TRANSPORT["consumers"]["team_services"]["name"], TRANSPORT["consumers"]["dead_letters"]["name"]}
+    listed_streams = {subject.removeprefix("$JS.API.CONSUMER.LIST.")
+                      for subject in services["publish"] if subject.startswith("$JS.API.CONSUMER.LIST.")}
+    assert listed_streams == set(TRANSPORT["withdrawal"]["streams"])
 
 
 def test_asyncapi_describes_both_operations_for_every_kind_and_destination() -> None:
@@ -1965,7 +1980,7 @@ def test_a_kind_that_starts_carrying_a_blob_needs_its_receivers_to_read() -> Non
 
 
 def test_blob_index_operations_match_their_senders_authority_and_models() -> None:
-    """CR-3 and A4: blobs.register and blobs.delete_person live on svc.team with generated wire models."""
+    """CR-3, A4 and C06: blobs.register and unified team.delete_person_data live on svc.team with generated wire models."""
 
     register = REGISTRY["kinds"]["blobs.register"]
     assert register["address"] == "svc.team"
@@ -1975,7 +1990,10 @@ def test_blob_index_operations_match_their_senders_authority_and_models() -> Non
     assert register["idempotency"] == ["/issuer/runtime", "/body/request_id"]
     assert set(register["reply"]["errors"]) == {"not_allowed", "runtime_error"}
 
-    delete_person = REGISTRY["kinds"]["blobs.delete_person"]
+    assert "blobs.delete_person" not in REGISTRY["kinds"]
+    assert "blobs.delete_person" not in kinds.KINDS
+
+    delete_person = REGISTRY["kinds"]["team.delete_person_data"]
     assert delete_person["address"] == "svc.team"
     assert set(delete_person["senders"]) == {"gateway", "lead_host"}
     assert delete_person["receivers"] == ["team_services"]
@@ -1984,12 +2002,21 @@ def test_blob_index_operations_match_their_senders_authority_and_models() -> Non
         "type": "command", "at": "/body/request_id", "senders": ["gateway"],
     }
     assert delete_person["idempotency"] == ["/issuer/runtime", "/body/request_id"]
-    assert set(delete_person["reply"]["errors"]) == {"not_allowed", "runtime_error"}
+    assert set(delete_person["reply"]["errors"]) == {"retry_later", "not_allowed", "runtime_error"}
 
     assert kinds.KINDS["blobs.register"].body_model is models.BlobsRegisterBodyAdapter
     assert kinds.KINDS["blobs.register"].reply_model is models.BlobsRegisterReplyAdapter
-    assert kinds.KINDS["blobs.delete_person"].body_model is models.BlobsDeletePersonBodyAdapter
-    assert kinds.KINDS["blobs.delete_person"].reply_model is models.BlobsDeletePersonReplyAdapter
+    assert kinds.KINDS["team.delete_person_data"].body_model is models.TeamDeletePersonDataBodyAdapter
+    assert kinds.KINDS["team.delete_person_data"].reply_model is models.TeamDeletePersonDataReplyAdapter
+    retry_reply = models.TeamDeletePersonDataReplyAdapter.validate_python({
+        "outcome": "retry_later",
+        "owners_removed": 1,
+        "blobs_deleted": 1,
+        "blobs_kept": 0,
+        "dlq_copies_deleted": 5,
+        "dlq_copies_kept": 20,
+    })
+    assert retry_reply.outcome == "retry_later" and retry_reply.dlq_copies_deleted == 5
 
 
 def test_only_the_team_services_read_their_teams_dead_letters() -> None:
@@ -2002,6 +2029,7 @@ def test_only_the_team_services_read_their_teams_dead_letters() -> None:
         if role == "team_services":
             assert set(reads) == {"$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.dlq~{team}",
                                   "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_{team}.dlq~{team}", "$JS.ACK.UA1_DLQ_{team}.dlq~{team}.>",
+                                  "$JS.API.STREAM.INFO.UA1_DLQ_{team}",
                                   "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
         elif role == TRANSPORT["topology_owner"]:
             # Its grants name every stream of the account, this one included, which is how it could read

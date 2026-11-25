@@ -1033,10 +1033,10 @@ installation authority serves exactly one team (`single_team_roles` in `transpor
 owner decision of 2026-11-17): the authority grants those roles only with one team, and a
 machine that works for several teams runs one runtime per team. A host that owns all 96 partitions
 of its team beside 10 worker pools needs about 46 KB with the longest ids. The team services
-own no partitions, but they read and delete in every partition stream of their team
-("Filling the templates"): about 23 KB at 96 partitions. That sets the largest partition
-count an installation may choose (`partitions.max_count`): the largest multiple of 32 at
-which both still fit, at most 128 partitions.
+own no partitions, but they inspect stream info, list consumers, read and delete in every
+partition stream of their team ("Filling the templates"): about 39 KB at 96 partitions. That
+sets the largest partition count an installation may choose (`partitions.max_count`): the
+largest multiple of 32 at which both still fit, at most 128 partitions.
 
 The gateway stays installation-wide, so its credential grows with the teams it serves and
 their routes (its edges): 1,265 bytes of permission JSON for each team and 466 more for each
@@ -1097,8 +1097,9 @@ and `worker_host` templates with `owned_partitions` only):
   runs and each edge it serves, with `{team}` set to that partition's, pool's or edge's own
   team. No template names an agent. The team services own no partitions: for them
   `{partition}` is every partition of their team, 0 to the installation's count minus 1
-  (`custom_messages.wire.partitions.every_partition`), because they withdraw queued work from
-  every partition stream ("Withdrawing queued work");
+  (`custom_messages.wire.partitions.every_partition`), because they withdraw queued work and
+  sweep exhausted deliveries from every partition stream ("Withdrawing queued work", "Dead
+  letters");
 - any other subject with `{team}` is repeated for each team the host serves: one for every
   role in `single_team_roles`, and every team its certificate names for the gateway and the
   installation authority;
@@ -1907,7 +1908,7 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
   or PostgreSQL blob ownership index (`storage.blob_index_repository`, `team_services.blobs`)
   recording every owner of each `{team}~{sha256}` object and delete an object only when no
   owner remains: when the last owner's retention (`agent.blob_retention_days`, default 7)
-  ends, or at once when the last owner departs (via `blobs.delete_person` on `svc.team`,
+  ends, or at once when the last owner departs (via `team.delete_person_data` on `svc.team`,
   called by the gateway and manager on person disable/remove and checked on upkeep). Writers
   register ownership with `blobs.register` on `svc.team`: the team services serialize
   ownership registration against expiration and departure deletion under one lock, verify
@@ -2028,7 +2029,9 @@ clock tolerance, and the stream settings, rollups off among them.
 
 ## Dead letters
 
-A receiver that sets a message aside picks a copy id at random (256 bits, written as 64 lowercase hexadecimal characters). It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in the team's `UA1_DLQ_<team>` for 30 days. The installation authority, whose installation traffic has no team, sends notices about that traffic to a team its certificate serves; a certificate always serves at least one.
+A receiver that sets a message aside derives its copy id deterministically (256 bits, written as 64 lowercase hexadecimal characters) from a receiver-local secret (domain-separated SHA-256 of its private application key) and the set-aside message's `(stream, stream_sequence)` via HMAC-SHA256. No sender can compute the copy id, and a redelivery of the same message to the same receiver reuses the same copy id, so `max_msgs_per_subject: 1` replaces a half-finished raw copy instead of leaving an orphan. It keeps the exact bytes at `dlq.raw.<copy>` under its own runtime id, and sends a `dlq.notice` to its team's services, which tell administrators. Both wait in the team's `UA1_DLQ_<team>` for 30 days. The installation authority, whose installation traffic has no team, sends notices about that traffic to a team its certificate serves; a certificate always serves at least one.
+
+A deterministic per-receiver copy id does not cover cases where a different runtime finishes the set-aside: for example, when a receiver stores the raw copy, has the notice refused or crashes on its last delivery, and the sweep later sets the message aside under its own runtime id; when a pool message is redelivered to another worker runtime; or when a host replaces its application key during lost-key recovery. In those cases the earlier runtime's raw copy stays without a notice. During their periodic raw-copy scan, the team services check each raw copy older than a grace period (`max_deliveries * ack_wait_seconds` plus a margin) for its matching notice at `ua.v1.<team>.<runtime>.dlq.notice.<copy>` and delete any orphaned copy, logging its stream sequence, runtime and copy id.
 - **The notice holds identifiers only:**
   - the copy id, which its subject also names;
   - the reason: a verification refusal code, or `handler_failed`, `delivery_limit`, `upgrade_drain` or `upgrade_old_format` (below; the generator checks that the list names every refusal code except the temporary `revocations_not_current`, for which nothing is set aside);
@@ -2053,8 +2056,8 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
   queued work; it creates only the team services' consumer and an administrator's
   inspection consumers here, and reads or deletes single messages only when it removes a
   team or the old streams at an upgrade.
-- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the team services delete the raw copies that name that person: they read the team's raw copies subject by subject (`next_by_subj` on `ua.v1.<team>.*.dlq.raw.*`) and delete each one that names the person by the sequence that read returned. A protocol 1 copy names a person in an authority token or a person reference. An `upgrade_old_format` copy is no frame: it names a person in the old envelope's sender (`gateway_context.canonical_user_id`), which the team services already read to name the task in their notice, so they match it there. A copy they cannot read as either names nobody they can find, and leaves with the stream after 30 days.
-- **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one.
+- **People's content.** A raw copy can hold a person's message. Copies expire with the stream after 30 days. When a person departs, the gateway and manager call `team.delete_person_data` on `svc.team`, which removes the person's blob ownership records and deletes their unowned blobs and raw dead-letter copies in one operation: the team services scan the team's raw copies subject by subject (`next_by_subj` on `ua.v1.<team>.*.dlq.raw.*`) and delete each one that names the person by the sequence that read returned. To stay within the 30-second request expiry on a large stream, the scan runs under a bounded time budget; if the budget runs out, `team.delete_person_data` replies `retry_later` with partial counts and starts an immediate background continuation pass. A protocol 1 copy names a person in an authority token or a person reference. An `upgrade_old_format` copy is no frame: it names a person in the old envelope (`gateway_context.canonical_user_id`, `task_context.person_id`, or owner person id fields), which the team services already read to name the task in their notice, so they match it there. The notice watch also checks each newly fetched raw copy against departed standing and deletes matching copies straight away, and upkeep runs one shared raw-copy pass across all departed people alongside orphan cleanup. A copy they cannot read as either names nobody they can find, and leaves with the stream after 30 days.
+- **Retry keys** name the receiver's runtime and the copy id, so two receivers' notices never share one. The team services record reported notices durably per `(team, issuer runtime, copy id)` so restarts with changed batches or duplicate notices never repeat administrators' alerts.
 - **When the stream is full.** The dead-letter stream refuses new messages when it reaches
   its byte limit ("Stream sizes"), so no unread copy or notice is ever dropped to make room.
   A receiver acknowledges a refused message only after both its raw copy and its notice are
@@ -2064,14 +2067,32 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
   logging the message's ids once. A held message is not admitted, so it takes no execution
   slot. The gateway's size check warns administrators as the dead-letter stream fills, and
   says set-asides are refused while it is full.
-
-  Holding keeps a message only while its receiver runs. A receiver that stops while holding
+- **Sweep for exhausted deliveries.** Holding keeps a message only while its receiver runs. A receiver that stops while holding
   one gives the delivery back, and NATS delivers it again with one more delivery counted; a
-  message whose consumer's `max_deliveries` runs out this way is delivered no more. It then
-  stays in its own stream, delivered but neither acknowledged nor pending, unread, until
-  that stream's age limit removes it with no notice; the consumer's acknowledgement floor
-  passes it only once a later message is acknowledged. Finding such messages, and a final
-  delivery the receiver could not finish for another reason, is step 4's work.
+  message whose consumer's `max_deliveries` runs out this way (or whose final delivery fails
+  without a set-aside) is delivered no more and stays in its stream. To ensure such messages
+  are never dropped unread, a periodic sweep computes each consumer's exact cutoff sequence:
+  `cutoff_seq = consumer.delivered.stream_seq` when `consumer.num_ack_pending == 0`, else
+  `consumer.ack_floor.stream_seq`. Measured on `nats-server 2.15.1`, messages awaiting
+  acknowledgement, negatively acknowledged with a delay, or past `ack_wait_seconds` waiting
+  for redelivery all stay in `num_ack_pending` until `max_deliveries` is exhausted; every
+  message still stored on the consumer's filter subject with `1 <= seq <= cutoff_seq` has
+  exhausted its deliveries and is neither pending nor awaiting acknowledgement. The team
+  services sweep their team's partition streams (`UA1_PART_<team>~<partition>`), pool stream
+  (`UA1_POOL_WORK_<team>`), and edge stream (`UA1_EDGE_WORK_<team>`), skipping empty streams
+  via `STREAM.INFO` and consumers whose `cutoff_seq` is below the stream's `first_seq`; the
+  installation authority (topology owner) sweeps each served team's `UA1_TEAM_WORK_<team>`.
+  The sweep sets each stranded message aside as `delivery_limit` with a notice and deletes it
+  from the source stream by exact sequence (`STREAM.MSG.DELETE`) only after storage succeeds,
+  so repeated sweeps set each message aside once.
+
+  The team services' notice watch (`dlq~<team>`) protects its own deliveries the same way:
+  while reporting to both the Inbox store and chat fails, it pauses new fetches and holds the
+  fetched batch with `+WPI` so outages do not burn `dlq~<team>` deliveries, and it also runs
+  the `cutoff_seq` recovery scan over `UA1_DLQ_<team>` backed by the per-copy reported-notice
+  receipts to recover notices stranded by crash loops. Permanently invalid notices are
+  summarized in the administrators' notice with their subject runtime, copy id and refusal
+  code.
 - **Two upgrade reasons.** `upgrade_drain` and `upgrade_old_format` both come from upgrades
   but name different messages:
   - `upgrade_drain`: a protocol 1 frame that waited in a queue while the installation moved
@@ -2085,10 +2106,11 @@ A receiver that sets a message aside picks a copy id at random (256 bits, writte
     than an id's 64. The raw copy keeps the message's bytes, from which the team services
     name the task and the person's request it belonged to in their notice to
     administrators, with what to do (send it again). As for any set-aside, a raw copy is
-    kept only up to `max_frame_bytes`; for a larger old message the administrators' notice
-    can say only where it sat. Before it sets aside the old messages, the upgrade checks
-    that the dead-letter stream has room for all of them, and stops with a message saying
-    so if they do not fit.
+    kept only up to `max_frame_bytes`; for a larger old message the notice sets
+    `raw.stored: false` and can say only where it sat, and once the old stream is deleted at
+    the upgrade its content is lost rather than merely unnamed. Before it sets aside the old
+    messages, the upgrade checks that the dead-letter stream has room for all of them, and
+    stops with a message saying so if they do not fit.
 
 ## Versions
 
@@ -3246,6 +3268,9 @@ registry entry lists ("Idempotency keys").
     stored `not_started` would answer every later retry, and the guidance would be lost.
   - `record_busy`: another request is writing the file or sign-in; the reply says when
     to try again.
+  - `retry_later`: a bounded scan (such as `team.delete_person_data` on a large dead-letter
+    stream) reached its time budget while background cleanup continues; a retry with the same
+    key checks progress again.
   - `waiting`: `staged_changes.apply` while the person has not decided yet.
   - `runtime_error`: the receiver failed, and its transaction changed nothing.
 - **Fresh ids.** The ids in key parts (`request_id`, `steer_id` and the others) are made
