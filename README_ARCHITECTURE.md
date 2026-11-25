@@ -6541,12 +6541,15 @@ renamed secrets included). The authority:
   with an ever higher sequence, so a restored authority never writes a lower one), renews
   its own certificate at two thirds of its life and signs with the new one from then on,
   and once a day forgets old trust records and deletes from `UA1_CERTS` the certificates
-  receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). It also sweeps
-  each served team's `UA1_TEAM_WORK_<team>` stream (`sweep_delivery_limits`, fault-isolated
-  inside `upkeep`) for messages that exhausted `max_deliveries` without a set-aside, writing
-  each into `UA1_DLQ_<team>` as `delivery_limit` before removing it by sequence, and provides
-  `dead_letter_setter()` so installation-traffic (`_install`) dead-letter notices route to a
-  team its certificate serves. A failed
+  receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). It also creates
+  each team's `UA1_DLQ_ADVISORY_<team>` workqueue stream (capturing `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES`
+  for every work stream of the team) with its two disjoint pull consumers (`adv_team~<team>` for
+  team services and `adv_auth~<team>` for the authority), watches `adv_auth~<team>`
+  (`watch_delivery_advisories`) to set exhausted `UA1_TEAM_WORK_<team>` messages aside immediately
+  even on busy consumers, runs the idle-cutoff sweep backstop and `STREAM.INFO` `state.first_ts`
+  near-expiry Inbox check on `UA1_TEAM_WORK_<team>` (`sweep_delivery_limits`, fault-isolated
+  inside `upkeep`), and provides `dead_letter_setter()` so installation-traffic (`_install`)
+  dead-letter notices route to a team its certificate serves. A failed
   step is tried again a minute later, except the forgetting: it notes the day it ran
   before it starts, so after a failure it runs again the next day. Hosts read the
   authority's renewed certificate from `UA1_CERTS` when a reply names it, joining hosts
@@ -6878,13 +6881,23 @@ They serve the team's address (`svc.team`) and answer, so far:
   is full (JetStream `10077`), `set_aside_and_ack` (tracked per `(stream, seq)` in
   `DeadLetterHoldTracker`) holds the message with `+WPI` and re-publishes both raw copy
   and notice on each attempt until space returns; non-full publish errors do bounded
-  short retries and leave the message unacknowledged so deliveries count and the sweep
-  backstop can recover it. Messages that exhaust `max_deliveries` without a set-aside
-  are found by `sweep_exhausted_streams` using the exact cutoff
-  `delivered.stream_seq` when `num_ack_pending == 0`, else `ack_floor.stream_seq`
-  (`team_services` sweeps `UA1_PART_<team>~*`, `UA1_POOL_WORK_<team>`, and
-  `UA1_EDGE_WORK_<team>`; `installation_authority` sweeps `UA1_TEAM_WORK_<team>`).
-  `DeadLetterService` runs the notice watch on `dlq~<team>`, verifies each raw copy's
+  short retries and leave the message unacknowledged so deliveries count and exhaustion
+  handling can recover it. Messages that exhaust `max_deliveries` without a set-aside are
+  primarily caught by `DeliveryAdvisoryWatch` pulling JetStream's
+  `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.<stream>.<consumer>` advisories from each
+  team's `UA1_DLQ_ADVISORY_<team>` workqueue stream (`adv_team~<team>` in `DeadLetterService`
+  for partition, pool, and edge streams; `adv_auth~<team>` in `InstallationAuthority` for
+  `UA1_TEAM_WORK_<team>`): each advisory reads its named `(stream, stream_seq)` via
+  `STREAM.MSG.GET`, acks and does nothing if already gone, or sets aside as `delivery_limit`
+  (holding with `+WPI` while `UA1_DLQ_<team>` is full) and deletes the exact sequence even
+  while later messages remain in flight on a busy consumer. `sweep_exhausted_streams` stays as
+  the periodic idle-consumer cutoff backstop (`delivered.stream_seq` when `num_ack_pending == 0`,
+  else `ack_floor.stream_seq`) and checks `STREAM.INFO` `state.first_ts` on every non-empty
+  work stream, posting an idempotent administrators' Inbox notice (`queued_message_expiring`)
+  naming the stream and `first_seq` when the oldest stored message comes within 24 hours of
+  `max_age` (surfacing CRIT-1's no-pull case before JetStream drops it).
+  `DeadLetterService` runs both the notice watch on `dlq~<team>` and the advisory watch on
+  `adv_team~<team>`, verifies each raw copy's
   size and SHA-256, deletes copies naming already-departed people immediately, alerts
   administrators via Inbox (`AccessRepository.record_dlq_notice_report`, atomic with
   per-`(team_id, issuer_runtime, copy_id)` receipts in `protocol1_dlq_reported_notices`)

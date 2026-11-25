@@ -918,3 +918,233 @@ async def test_live_departure_deletion_including_old_format_copy_and_orphan_clea
         assert (await admin_js.get_last_msg(dlq_stream, res_bob_old.raw_subject)).data == bob_old
 
         assert lead.errors.empty() and worker.errors.empty() and services.errors.empty()
+
+
+@pytest.mark.nats
+@pytest.mark.asyncio
+async def test_live_f1_busy_consumer_max_deliveries_advisory_and_near_expiry_warning(
+    isolated_broker: Any,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """F1: On nats-server 2.15.1 under real generated operator-mode permissions:
+    1) A poison message exhausting max_deliveries on a BUSY consumer (later message held in flight so
+       ack_floor never passes it and consumer_cutoff_seq == 0) emits $JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES
+       in the stream's account, captured durably in UA1_DLQ_ADVISORY_<team>, and is set aside ONCE by
+       team_services (partition + pool) and by InstallationAuthority (UA1_TEAM_WORK) while in-flight
+       messages stay untouched;
+    2) Operator permissions isolate UA1_DLQ_ADVISORY_<team> consumers across roles and teams;
+    3) Near-expiry warning reads STREAM.INFO state.first_ts and tells administrators via Inbox naming
+       the stream and sequence when the oldest stored message is within the margin of max_age."""
+
+    from custom_messages.wire.queues import (
+        delivery_advisory_consumers,
+        delivery_advisory_stream_config,
+    )
+    from custom_transport.protocol1.dead_letters import (
+        consumer_cutoff_seq,
+        consumer_info,
+        dlq_advisory_authority_consumer_name,
+        dlq_advisory_stream_name,
+        dlq_advisory_team_consumer_name,
+    )
+
+    access, people = _access_and_people(tmp_path, name="f1_busy_ts.db")
+    chat = RecordingChatSender()
+
+    # -- Part 1: team_services handles MAX_DELIVERIES on a BUSY partition consumer under real JWTs --
+    async with AsyncExitStack() as stack:
+        admin = await connect(stack, isolated_broker, "admin")
+        lead = await connect(stack, isolated_broker, "lead")
+        worker = await connect(stack, isolated_broker, "worker")
+        services = await connect(stack, isolated_broker, "services")
+
+        admin_js = admin.nc.jetstream()
+        await create_topology(admin, ["researcher-2"])
+        part_stream = agent_stream("researcher-2")
+        inbox_consumer = consumer_name("agent_inbox", agent="researcher-2")
+
+        await admin_js.delete_consumer(part_stream, inbox_consumer)
+        inbox_cfg = consumer_config("agent_inbox", agent="researcher-2")
+        inbox_cfg.ack_wait = 10.0
+        inbox_cfg.max_deliver = 2
+        await admin_js.add_consumer(part_stream, config=inbox_cfg)
+        await _add_dlq_stream_and_consumer(admin_js, team=TEAM)
+
+        # Provision UA1_DLQ_ADVISORY_<team> and its two disjoint consumers from the contract!
+        adv_stream = dlq_advisory_stream_name(TEAM)
+        from nats.js.api import StreamConfig as NatsStreamConfig
+
+        adv_cfg = delivery_advisory_stream_config(TRANSPORT, TEAM, COUNT, queue_limits())
+        await admin_js.add_stream(config=NatsStreamConfig(**adv_cfg))
+        for adv_consumer in delivery_advisory_consumers(TRANSPORT, TEAM, COUNT):
+            await admin_js.add_consumer(adv_consumer.stream, config=ConsumerConfig(**adv_consumer.config))
+
+        # Verify operator-mode permissions isolation on UA1_DLQ_ADVISORY_<team>:
+        # worker cannot pull either advisory consumer; team_services cannot pull adv_auth~<team>.
+        await worker.publish_refused(
+            f"$JS.API.CONSUMER.MSG.NEXT.{adv_stream}.{dlq_advisory_team_consumer_name(TEAM)}", b'{"batch":1}'
+        )
+        await services.publish_refused(
+            f"$JS.API.CONSUMER.MSG.NEXT.{adv_stream}.{dlq_advisory_authority_consumer_name(TEAM)}", b'{"batch":1}'
+        )
+
+        # Publish poison seq 1 AND healthy seq 2; keep seq 2 IN FLIGHT (unacked) while seq 1 exhausts max_deliveries!
+        await lead.nc.jetstream().publish(f"ua.v1.{TEAM}.lead-host-1.work.agent.researcher-2", b"busy-poison-seq1")
+        await lead.nc.jetstream().publish(f"ua.v1.{TEAM}.lead-host-1.work.agent.researcher-2", b"busy-inflight-seq2")
+
+        part_sub = await worker.nc.jetstream().pull_subscribe_bind(inbox_consumer, stream=part_stream)
+        m1, m2 = await part_sub.fetch(2, timeout=2.0)
+        assert (m1.metadata.sequence.stream, m2.metadata.sequence.stream) == (1, 2)
+        await m1.nak()
+        (m1_again,) = await part_sub.fetch(1, timeout=2.0)
+        assert m1_again.metadata.sequence.stream == 1 and m1_again.metadata.num_delivered == 2
+        await m1_again.nak()
+        # Next pull on the busy consumer triggers JetStream's MAX_DELIVERIES advisory for seq 1 while seq 2 stays in flight!
+        with pytest.raises((TimeoutError, asyncio.TimeoutError, Exception)):
+            await part_sub.fetch(1, timeout=0.3)
+
+        # Confirm the consumer is busy (num_ack_pending >= 1, ack_floor == 0 -> cutoff_seq == 0):
+        # the idle cutoff sweep CANNOT sweep seq 1!
+        ci = await consumer_info(admin.nc, part_stream, inbox_consumer)
+        assert ci is not None and ci.num_ack_pending == 1 and consumer_cutoff_seq(ci) == 0
+
+        services_live = _live_host_on_client(services.nc, "team-services-1", "test-services-key-1", 2)
+        # NATS stamps stream messages with wall-clock UTC, while fixture trust records are pinned at fixtures.NOW.
+        clock_now = [datetime.now(timezone.utc)]
+        dlq_service = DeadLetterService(
+            team_id=TEAM,
+            live_fn=lambda: services_live,
+            access_repository=access,
+            people=people,
+            chat_sender=chat,
+            clock=lambda: clock_now[0],
+            report_quiet_seconds=0.0,
+            fetch_timeout_seconds=1.5,
+            near_expiry_margin_seconds=604_900.0,  # > 7d max_age so near-expiry check fires immediately for seq 1!
+        )
+
+        # Idle cutoff sweep sweeps 0 messages on the busy consumer, AND emits a near-expiry Inbox warning for seq 1!
+        sweep_before = await dlq_service.sweep_work_streams()
+        assert sweep_before.messages_swept == 0
+        assert any(item.stream == part_stream and item.first_seq == 1 for item in sweep_before.near_expiry)
+        expiring_notices = [
+            n for n, _ in access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))
+            if n.kind is AccessNoticeKind.QUEUED_MESSAGE_EXPIRING
+        ]
+        assert len(expiring_notices) == 1
+        assert part_stream in expiring_notices[0].summary and "1" in expiring_notices[0].summary
+
+        # Switch clock to fixture trust epoch for signed DLQ notice verification.
+        clock_now[0] = fixtures.NOW
+
+        # Now team_services' advisory watch pulls the captured MAX_DELIVERIES event under its real operator JWT!
+        assert await dlq_service.poll_advisories_once() == 1
+        # Seq 1 is gone from the work stream, while in-flight seq 2 is STILL untouched!
+        assert (await admin_js.stream_info(part_stream)).state.messages == 1
+        remaining = await get_stream_message(services.nc, part_stream, seq=2)
+        assert remaining is not None and remaining.data == b"busy-inflight-seq2"
+        # Advisory stream is now drained (workqueue acked) and a second poll sets aside 0.
+        assert (await admin_js.stream_info(adv_stream)).state.messages == 0
+        assert await dlq_service.poll_advisories_once() == 0
+
+        # Notice watch reports the set-aside poison message ONCE to administrators!
+        assert await dlq_service.poll_notices_once() == 1
+        set_aside_notices = [
+            n for n, _ in access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))
+            if n.kind is AccessNoticeKind.MESSAGES_SET_ASIDE
+        ]
+        assert len(set_aside_notices) == 1
+        assert part_stream in set_aside_notices[0].summary
+        assert "ran out of allowed deliveries" in set_aside_notices[0].summary
+        # Cleanly ack in-flight seq 2 to prove the consumer stayed completely healthy.
+        await m2.ack_sync()
+        assert (await admin_js.stream_info(part_stream)).state.messages == 0
+        assert lead.errors.empty() and worker.errors.empty() and services.errors.empty()
+
+    # -- Part 2: real InstallationAuthority with real operator-mode JWT handles busy UA1_TEAM_WORK advisory --
+    layout = InstanceLayout(tmp_path / "auth_f1_instance")
+    message_hosts.prepare_message_host_trust(layout, {}, partitions=COUNT)
+    auth_keys = load_authority_keys(layout)
+    auth_host_keys = load_host_keys(layout, AUTHORITY_RUNTIME)
+    real_inst = auth_keys.installation
+    auth_team = "team_auth_f1"
+
+    account: OperatorAccount = isolated_broker.account
+    auth_perms = host_permissions(
+        role_document("installation_authority"),
+        HostPlacement(
+            AUTHORITY_RUNTIME,
+            (auth_team,),
+            partitions={},
+            pools={auth_team: ()},
+            edges={auth_team: ()},
+            installation=real_inst,
+            peers=(),
+        ),
+    )
+    ts_runtime = "team-services-f1"
+    ts_perms = host_permissions(
+        role_document("team_services"),
+        HostPlacement(
+            ts_runtime,
+            (auth_team,),
+            partitions={auth_team: tuple(range(COUNT))},
+            pools={auth_team: ()},
+            edges={auth_team: ()},
+            installation=real_inst,
+            peers=(),
+        ),
+    )
+    auth_user = account.user(AUTHORITY_RUNTIME, auth_perms)
+    ts_user = account.user(ts_runtime, ts_perms)
+
+    authority = InstallationAuthority(
+        layout,
+        auth_keys,
+        auth_host_keys,
+        partitions=COUNT,
+        queues=queue_limits(),
+    )
+
+    async with AsyncExitStack() as stack:
+        auth_client = await _connect_runtime_login(stack, isolated_broker, AUTHORITY_RUNTIME, auth_user)
+        ts_client = await _connect_runtime_login(stack, isolated_broker, ts_runtime, ts_user)
+
+        # Real InstallationAuthority creates UA1_DLQ_ADVISORY_<auth_team> and both consumers automatically!
+        await authority.start(auth_client.nc, teams=[auth_team])
+
+        team_work_stream = f"UA1_TEAM_WORK_{auth_team}"
+        team_consumer = f"team~{auth_team}"
+        await ts_client.nc.jetstream().publish(
+            f"ua.v1.{auth_team}.{ts_runtime}.work.team",
+            b'{"poison":"team_work_busy_seq1"}',
+        )
+        await ts_client.nc.jetstream().publish(
+            f"ua.v1.{auth_team}.{ts_runtime}.work.team",
+            b'{"inflight":"team_work_busy_seq2"}',
+        )
+        max_deliver = int(TRANSPORT["consumers"]["team_services"]["max_deliveries"])
+        ts_work_sub = await ts_client.nc.jetstream().pull_subscribe_bind(team_consumer, stream=team_work_stream)
+        tw1, tw2 = await ts_work_sub.fetch(2, timeout=2.0)
+        assert (tw1.metadata.sequence.stream, tw2.metadata.sequence.stream) == (1, 2)
+        await tw1.nak()
+        for attempt in range(2, max_deliver + 1):
+            (retry_msg,) = await ts_work_sub.fetch(1, timeout=2.0)
+            assert retry_msg.metadata.sequence.stream == 1 and retry_msg.metadata.num_delivered == attempt
+            await retry_msg.nak()
+        with pytest.raises((TimeoutError, asyncio.TimeoutError, Exception)):
+            await ts_work_sub.fetch(1, timeout=0.3)
+
+        # Confirm busy consumer on UA1_TEAM_WORK (seq 2 still in flight -> cutoff == 0).
+        ci_tw = await consumer_info(auth_client.nc, team_work_stream, team_consumer)
+        assert ci_tw is not None and ci_tw.num_ack_pending == 1 and consumer_cutoff_seq(ci_tw) == 0
+        assert (await authority.sweep_delivery_limits()).messages_swept == 0
+
+        # Real InstallationAuthority pulls adv_auth~<auth_team> under its generated JWT and sets seq 1 aside ONCE!
+        assert await authority.poll_delivery_advisories_once() == 1
+        assert (await auth_client.nc.jetstream().stream_info(team_work_stream)).state.messages == 1
+        assert (await auth_client.nc.jetstream().stream_info(dlq_advisory_stream_name(auth_team))).state.messages == 0
+        assert await authority.poll_delivery_advisories_once() == 0
+        await tw2.ack_sync()
+        assert (await auth_client.nc.jetstream().stream_info(team_work_stream)).state.messages == 0
+        assert auth_client.errors.empty() and ts_client.errors.empty()

@@ -58,6 +58,16 @@ _OBJECT_STORE_STREAM_FIELDS = {
 }
 _CONSUMER_FIELDS = {"ack_wait_seconds": "ack_wait", "max_deliveries": "max_deliver", "ack": "ack_policy"}
 _FILLED_CONSUMER_FIELDS = {"stream", "name", "filter", "mode"}
+_ADVISORY_STREAM_FIELDS = {
+    "retention": "retention",
+    "storage": "storage",
+    "max_age_seconds": "max_age",
+    "max_bytes": "max_bytes",
+    "max_consumers": "max_consumers",
+    "discard": "discard",
+}
+_FILLED_ADVISORY_STREAM_FIELDS = {"stream", "subject_prefix", "consumers"}
+_FILLED_ADVISORY_CONSUMER_FIELDS = {"role", "name", "streams", "mode"}
 
 
 @dataclass(frozen=True)
@@ -248,6 +258,104 @@ def team_consumers(transport: Mapping[str, Any], team: str) -> tuple[QueueConsum
     _check_id(_TEAM_ID, team, "team id")
     return tuple(_consumer(spec, team=team) for spec in transport["consumers"].values()
                  if _placeholders(spec["name"], spec["filter"], spec["stream"]) == {_TEAM})
+
+
+def delivery_advisory_max_bytes(transport: Mapping[str, Any]) -> int:
+    """Fixed byte limit of one team's delivery-exhaustion advisory stream, or 0 if absent."""
+
+    spec = transport.get("delivery_advisories")
+    if not isinstance(spec, Mapping):
+        return 0
+    return int(spec.get("max_bytes", 0))
+
+
+def delivery_advisory_stream_name(transport: Mapping[str, Any], team: str) -> str:
+    """Name of ``team``'s delivery-exhaustion advisory stream (``UA1_DLQ_ADVISORY_<team>``)."""
+
+    _check_id(_TEAM_ID, team, "team id")
+    return _fill(str(transport["delivery_advisories"]["stream"]), team=team)
+
+
+def delivery_advisory_subjects(
+    transport: Mapping[str, Any],
+    team: str,
+    count: int,
+    stream_templates: Optional[Iterable[str]] = None,
+) -> list[str]:
+    """Exact ``$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.<stream>.*`` subjects for ``team``'s work streams."""
+
+    _check_id(_TEAM_ID, team, "team id")
+    numbers = range(check_partition_count(count))
+    spec = transport["delivery_advisories"]
+    prefix = str(spec["subject_prefix"])
+    if stream_templates is None:
+        templates = [template for consumer in spec["consumers"].values() for template in consumer["streams"]]
+    else:
+        templates = list(stream_templates)
+    subjects: list[str] = []
+    for template in templates:
+        if "{" + _PARTITION + "}" in template:
+            for partition in numbers:
+                stream_name = _fill(template, team=team, partition=partition)
+                subjects.append(f"{prefix}.{stream_name}.*")
+        else:
+            stream_name = _fill(template, team=team)
+            subjects.append(f"{prefix}.{stream_name}.*")
+    return subjects
+
+
+def delivery_advisory_stream_config(
+    transport: Mapping[str, Any],
+    team: str,
+    count: int,
+    limits: QueueLimits,
+) -> dict[str, Any]:
+    """NATS ``StreamConfig`` dictionary for ``team``'s delivery-exhaustion advisory workqueue stream."""
+
+    _check_id(_TEAM_ID, team, "team id")
+    spec = transport["delivery_advisories"]
+    unknown = set(spec) - set(_ADVISORY_STREAM_FIELDS) - _FILLED_ADVISORY_STREAM_FIELDS
+    if unknown:
+        raise ValueError(f"delivery_advisories has contract fields this version cannot apply: {sorted(unknown)}")
+    return {
+        "name": delivery_advisory_stream_name(transport, team),
+        "subjects": delivery_advisory_subjects(transport, team, count),
+        **{_ADVISORY_STREAM_FIELDS[field]: value for field, value in spec.items() if field in _ADVISORY_STREAM_FIELDS},
+        "num_replicas": limits.replicas,
+    }
+
+
+def delivery_advisory_consumers(
+    transport: Mapping[str, Any],
+    team: str,
+    count: int,
+) -> tuple[QueueConsumer, ...]:
+    """Disjoint pull consumers on ``team``'s delivery-exhaustion advisory stream (team services + authority)."""
+
+    _check_id(_TEAM_ID, team, "team id")
+    spec = transport["delivery_advisories"]
+    stream_name = delivery_advisory_stream_name(transport, team)
+    consumers: list[QueueConsumer] = []
+    for entry in spec["consumers"].values():
+        unknown = set(entry) - set(_CONSUMER_FIELDS) - _FILLED_ADVISORY_CONSUMER_FIELDS
+        if unknown or entry["mode"] != "pull":
+            raise ValueError(
+                f"advisory consumer {entry['name']} has contract settings this version cannot apply: "
+                f"{sorted(unknown) or entry['mode']}"
+            )
+        name = _fill(str(entry["name"]), team=team)
+        subjects = delivery_advisory_subjects(transport, team, count, entry["streams"])
+        config: dict[str, Any] = {
+            "name": name,
+            "durable_name": name,
+            **{_CONSUMER_FIELDS[field]: value for field, value in entry.items() if field in _CONSUMER_FIELDS},
+        }
+        if len(subjects) == 1:
+            config["filter_subject"] = subjects[0]
+        else:
+            config["filter_subjects"] = subjects
+        consumers.append(QueueConsumer(stream_name, config))
+    return tuple(consumers)
 
 
 def agent_consumers(transport: Mapping[str, Any], team: str, agent: str, count: int) -> tuple[QueueConsumer, ...]:

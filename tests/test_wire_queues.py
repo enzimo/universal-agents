@@ -21,6 +21,11 @@ from custom_messages.wire.queues import (
     QueueLimits,
     agent_consumers,
     consumer_agent,
+    delivery_advisory_consumers,
+    delivery_advisory_max_bytes,
+    delivery_advisory_stream_config,
+    delivery_advisory_stream_name,
+    delivery_advisory_subjects,
     object_store_stream_config,
     object_store_streams,
     queue_stream_config,
@@ -272,3 +277,43 @@ def test_object_store_streams_and_config_carry_contract_bounds_and_refuse_unknow
     mutated["object_store_stream"]["max_msgs"] = 500
     with pytest.raises(ValueError, match=r"object_store_stream has contract fields .*\['max_msgs'\]"):
         object_store_stream_config(mutated, blobs_stream, LIMITS)
+
+
+def test_delivery_advisory_stream_and_disjoint_consumers_cover_every_work_stream() -> None:
+    """F1: Per-team workqueue advisory stream lists every work stream and splits cleanly across team_services and authority."""
+
+    assert delivery_advisory_stream_name(TRANSPORT, "team_a") == "UA1_DLQ_ADVISORY_team_a"
+    assert delivery_advisory_max_bytes(TRANSPORT) == 1048576
+
+    cfg = delivery_advisory_stream_config(TRANSPORT, "team_a", 4, LIMITS)
+    assert cfg["name"] == "UA1_DLQ_ADVISORY_team_a"
+    assert cfg["retention"] == "workqueue"
+    assert cfg["discard"] == "new"
+    assert cfg["max_age"] == 604860
+    assert cfg["max_bytes"] == 1048576
+    assert cfg["num_replicas"] == 3
+    prefix = "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES"
+    expected_team_subjects = [
+        *(f"{prefix}.UA1_PART_team_a~{idx}.*" for idx in range(4)),
+        f"{prefix}.UA1_POOL_WORK_team_a.*",
+        f"{prefix}.UA1_EDGE_WORK_team_a.*",
+    ]
+    expected_auth_subject = f"{prefix}.UA1_TEAM_WORK_team_a.*"
+    expected_subjects = [*expected_team_subjects, expected_auth_subject]
+    assert set(cfg["subjects"]) == set(expected_subjects)
+    assert len(cfg["subjects"]) == len(expected_subjects)
+    StreamConfig(**cfg).as_dict()
+
+    consumers = {c.name: c for c in delivery_advisory_consumers(TRANSPORT, "team_a", 4)}
+    assert set(consumers) == {"adv_team~team_a", "adv_auth~team_a"}
+    ts_consumer = consumers["adv_team~team_a"]
+    auth_consumer = consumers["adv_auth~team_a"]
+    assert ts_consumer.stream == auth_consumer.stream == "UA1_DLQ_ADVISORY_team_a"
+    assert ts_consumer.config["filter_subjects"] == expected_team_subjects
+    assert "filter_subject" not in ts_consumer.config
+    assert auth_consumer.config["filter_subject"] == expected_auth_subject
+    assert "filter_subjects" not in auth_consumer.config
+    assert set(ts_consumer.config["filter_subjects"]).isdisjoint({auth_consumer.config["filter_subject"]})
+    assert set(delivery_advisory_subjects(TRANSPORT, "team_a", 4)) == set(expected_subjects)
+    for consumer in consumers.values():
+        ConsumerConfig(**consumer.config).as_dict()

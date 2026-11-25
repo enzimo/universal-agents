@@ -47,7 +47,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from nats.aio.msg import Msg
 from nats.errors import Error as NatsError
-from nats.js.errors import APIError
+from nats.errors import TimeoutError as NatsTimeoutError
+from nats.js.errors import APIError, NotFoundError
 from pydantic import TypeAdapter, ValidationError
 
 from custom_messages.wire.encoding import b64url
@@ -85,6 +86,13 @@ DLQ_REASONS: Final[frozenset[str]] = (
 
 # Minimum negative-ack delay for peer-installation revocations_not_current (README "Who sent it").
 PEER_REVOCATIONS_NAK_DELAY_SECONDS: Final[float] = 60.0
+
+# JetStream MAX_DELIVERIES advisory constants and near-expiry warning defaults (F1).
+MAX_DELIVERIES_ADVISORY_TYPE: Final = "io.nats.jetstream.advisory.v1.max_deliver"
+MAX_DELIVERIES_ADVISORY_PREFIX: Final = "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES"
+DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS: Final[float] = 86_400.0
+DEFAULT_ADVISORY_ACK_WAIT_SECONDS: Final[float] = 60.0
+ADVISORY_WATCH_BATCH: Final = 64
 
 # Safe limits for best-effort inspection of untrusted raw message bytes.
 _MAX_UNTRUSTED_PARSE_BYTES: Final = MAX_FRAME_BYTES * 2
@@ -137,13 +145,40 @@ class SetAsideResult:
 
 @dataclass(frozen=True)
 class StreamRange:
-    """Message count and sequence bounds reported by ``$JS.API.STREAM.INFO.<stream>``."""
+    """Message count, sequence bounds, oldest timestamp, and age limit from ``$JS.API.STREAM.INFO.<stream>``."""
 
     name: str
     messages: int
     first_seq: int
     last_seq: int
     created: str = ""
+    first_ts: str = ""
+    max_age_ns: int = 0
+
+
+@dataclass(frozen=True)
+class NearExpiryMessage:
+    """Oldest stored message in a work stream that is within the warning margin of ``max_age`` (F1)."""
+
+    stream: str
+    first_seq: int
+    first_ts: str
+    age_seconds: float
+    max_age_seconds: float
+    remaining_seconds: float
+    messages: int
+
+
+@dataclass(frozen=True)
+class DeliveryExhaustedAdvisory:
+    """Parsed ``$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES`` event captured from JetStream (F1)."""
+
+    stream: str
+    consumer: str
+    stream_seq: int
+    deliveries: int
+    advisory_id: str = ""
+    timestamp: str = ""
 
 
 @dataclass(frozen=True)
@@ -173,13 +208,14 @@ class StoredStreamMessage:
 
 @dataclass(frozen=True)
 class StreamSweepReport:
-    """Outcome of sweeping one stream for exhausted deliveries."""
+    """Outcome of sweeping one stream for exhausted deliveries (plus any near-expiry warning)."""
 
     stream: str
     consumers_checked: int
     messages_swept: int
     stopped_full: bool
     duration_ms: float
+    near_expiry: Optional[NearExpiryMessage] = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +228,7 @@ class SweepSummary:
     stopped_full: bool
     duration_ms: float
     streams_failed: int = 0
+    near_expiry: tuple[NearExpiryMessage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -251,6 +288,27 @@ def dlq_notice_consumer_name(team: str) -> str:
 
     _validate_id(_TEAM_ADAPTER, team, "team id")
     return f"dlq~{team}"
+
+
+def dlq_advisory_stream_name(team: str) -> str:
+    """The per-team delivery-exhaustion advisory stream name ``UA1_DLQ_ADVISORY_<team>``."""
+
+    _validate_id(_TEAM_ADAPTER, team, "team id")
+    return f"UA1_DLQ_ADVISORY_{team}"
+
+
+def dlq_advisory_team_consumer_name(team: str) -> str:
+    """The team services' durable advisory consumer name ``adv_team~<team>``."""
+
+    _validate_id(_TEAM_ADAPTER, team, "team id")
+    return f"adv_team~{team}"
+
+
+def dlq_advisory_authority_consumer_name(team: str) -> str:
+    """The installation authority's durable advisory consumer name ``adv_auth~<team>``."""
+
+    _validate_id(_TEAM_ADAPTER, team, "team id")
+    return f"adv_auth~{team}"
 
 
 def parse_dlq_raw_subject(subject: str, team: str) -> Optional[tuple[str, str]]:
@@ -978,7 +1036,7 @@ def _raise_if_api_error(subject: str, data: Mapping[str, Any]) -> None:
 
 
 async def stream_info(nc: Any, stream: str, *, timeout: float = 5.0) -> Optional[StreamRange]:
-    """Read stream message count and sequence range via ``$JS.API.STREAM.INFO.<stream>``; ``None`` if absent."""
+    """Read stream message count, sequence range, oldest timestamp, and ``max_age`` via ``$JS.API.STREAM.INFO.<stream>``; ``None`` if absent."""
 
     subject = f"$JS.API.STREAM.INFO.{stream}"
     data = await _js_api_json(nc, subject, timeout=timeout)
@@ -986,12 +1044,15 @@ async def stream_info(nc: Any, stream: str, *, timeout: float = 5.0) -> Optional
         return None
     _raise_if_api_error(subject, data)
     state = data.get("state") or {}
+    config = data.get("config") or {}
     return StreamRange(
         name=stream,
         messages=int(state.get("messages", 0)),
         first_seq=int(state.get("first_seq", 0)),
         last_seq=int(state.get("last_seq", 0)),
         created=str(data.get("created", "")),
+        first_ts=str(state.get("first_ts", "")),
+        max_age_ns=int(config.get("max_age", 0) or 0),
     )
 
 
@@ -1044,12 +1105,16 @@ async def consumer_info(nc: Any, stream: str, consumer: str, *, timeout: float =
 
 
 def consumer_cutoff_seq(consumer: ConsumerCutoff) -> int:
-    """Exact race-free sequence cutoff for exhausted deliveries (CRIT-1, verified on nats-server 2.15.1).
+    """Safe idle-consumer backstop cutoff for exhausted deliveries (CRIT-1, verified on nats-server 2.15.1).
 
     Messages awaiting ack, negatively acknowledged with a delay, or past ``ack_wait`` waiting for
     redelivery all stay in ``num_ack_pending`` until ``max_deliver`` is exhausted. Every message
     still stored on a workqueue consumer's filter subject with ``1 <= seq <= cutoff_seq`` has
-    exhausted its deliveries.
+    exhausted its deliveries and is not in flight.
+
+    Note: while later messages stay in flight on a busy consumer (``num_ack_pending > 0``),
+    ``ack_floor.stream_seq`` cannot advance past an earlier exhausted message; primary exhaustion
+    detection on busy consumers comes from ``UA1_DLQ_ADVISORY_<team>`` (``DeliveryAdvisoryWatch``).
     """
 
     if consumer.num_ack_pending == 0:
@@ -1124,6 +1189,128 @@ async def delete_stream_message(nc: Any, stream: str, seq: int, *, timeout: floa
     return bool(data.get("success", False))
 
 
+def _format_duration_short(seconds: float) -> str:
+    whole = max(0, int(round(seconds)))
+    if whole < 60:
+        return f"{whole}s"
+    if whole < 3600:
+        mins, secs = divmod(whole, 60)
+        return f"{mins}m {secs}s" if secs else f"{mins}m"
+    hours, rem = divmod(whole, 3600)
+    mins = rem // 60
+    if hours < 48:
+        return f"{hours}h {mins}m" if mins else f"{hours}h"
+    days, rem_hours = divmod(hours, 24)
+    return f"{days}d {rem_hours}h" if rem_hours else f"{days}d"
+
+
+def check_stream_near_expiry(
+    info: StreamRange,
+    *,
+    now: datetime,
+    margin_seconds: float = DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS,
+) -> Optional[NearExpiryMessage]:
+    """Return a ``NearExpiryMessage`` when ``info.first_ts`` is within ``margin_seconds`` of ``max_age`` (F1)."""
+
+    if info.messages <= 0 or info.first_seq <= 0 or not info.first_ts or info.max_age_ns <= 0 or margin_seconds <= 0:
+        return None
+    try:
+        first_ts_ns = stored_timestamp_ns(info.first_ts)
+    except (ValueError, TypeError):
+        return None
+    # Ignore Go's zero timestamp ("0001-01-01T00:00:00Z") or anything before epoch.
+    if first_ts_ns <= 0:
+        return None
+    now_ns = stored_timestamp_ns(now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc))
+    max_age_seconds = info.max_age_ns / 1_000_000_000.0
+    age_seconds = max(0.0, (now_ns - first_ts_ns) / 1_000_000_000.0)
+    remaining_seconds = max_age_seconds - age_seconds
+    if remaining_seconds > margin_seconds:
+        return None
+    return NearExpiryMessage(
+        stream=info.name,
+        first_seq=info.first_seq,
+        first_ts=info.first_ts,
+        age_seconds=age_seconds,
+        max_age_seconds=max_age_seconds,
+        remaining_seconds=max(0.0, remaining_seconds),
+        messages=info.messages,
+    )
+
+
+def format_near_expiry_notice(team_id: str, item: NearExpiryMessage) -> tuple[str, str, str]:
+    """Build deterministic ``(notice_id, title, summary)`` for an administrator Inbox near-expiry warning (F1)."""
+
+    key = f"{team_id}\x00{item.stream}\x00{item.first_seq}\x00{item.first_ts}".encode("utf-8")
+    notice_id = f"p1_near_expiry:{hashlib.sha256(key).hexdigest()[:40]}"
+    title = f"Queued message in {item.stream} (sequence {item.first_seq}) is nearing expiry"
+    remaining = _format_duration_short(item.remaining_seconds)
+    max_age = _format_duration_short(item.max_age_seconds)
+    summary = (
+        f"The oldest stored message in NATS stream {item.stream} (sequence {item.first_seq}, stored at "
+        f"{item.first_ts}; {item.messages} message(s) waiting) has about {remaining} left before the stream's "
+        f"{max_age} age limit drops it. A consumer may be stopped, stuck with work in flight, or left without "
+        "any receiver pulling after its last delivery lapsed. Check the team's hosts, receiver logs, and "
+        f"consumers on {item.stream} before JetStream expires the message."
+    )
+    return notice_id[:120], title[:400], summary[:4000]
+
+
+async def _set_aside_and_delete_stored(
+    nc: Any,
+    *,
+    stored: StoredStreamMessage,
+    deliveries: int,
+    setter: DeadLetterSetter,
+    team: str,
+    timeout: float = 5.0,
+) -> SetAsideResult:
+    """Set ``stored`` aside as ``delivery_limit`` in ``UA1_DLQ_<team>`` and then delete its exact sequence."""
+
+    result = await setter.set_aside(
+        raw_bytes=stored.data,
+        reason="delivery_limit",
+        original_subject=stored.subject,
+        original_stream=stored.stream,
+        original_stream_sequence=stored.seq,
+        deliveries=max(1, deliveries),
+        stored_at=stored.stored_at_ns,
+        team=team,
+    )
+    await delete_stream_message(nc, stored.stream, stored.seq, timeout=timeout)
+    return result
+
+
+async def set_aside_stored_exhausted_message(
+    nc: Any,
+    *,
+    stream: str,
+    seq: int,
+    deliveries: int,
+    setter: DeadLetterSetter,
+    team: str,
+    timeout: float = 5.0,
+) -> bool:
+    """Fetch exact ``seq`` from ``stream`` via ``STREAM.MSG.GET``, set aside as ``delivery_limit``, and delete it.
+
+    Returns ``True`` when the message existed and was set aside and deleted, or ``False`` if ``seq`` was
+    already gone. Raises ``DeadLetterStreamFull`` if ``UA1_DLQ_<team>`` is full (leaving ``seq`` intact).
+    """
+
+    stored = await get_stream_message(nc, stream, seq=seq, timeout=timeout)
+    if stored is None or stored.seq != seq:
+        return False
+    await _set_aside_and_delete_stored(
+        nc,
+        stored=stored,
+        deliveries=deliveries,
+        setter=setter,
+        team=team,
+        timeout=timeout,
+    )
+    return True
+
+
 async def sweep_exhausted_stream(
     nc: Any,
     stream: str,
@@ -1132,10 +1319,12 @@ async def sweep_exhausted_stream(
     team: str,
     stop: Optional[asyncio.Event] = None,
     logged_stranded: Optional[set[tuple[str, int]]] = None,
+    now: Optional[datetime] = None,
+    near_expiry_margin_seconds: float = DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS,
     timeout: float = 5.0,
     logger: logging.Logger = _LOGGER,
 ) -> StreamSweepReport:
-    """Sweep one protocol 1 workqueue stream for messages that exhausted ``max_deliveries`` (A4, CRIT-1, C08)."""
+    """Sweep one protocol 1 workqueue stream for exhausted deliveries (idle-cutoff backstop + near-expiry check, A4/F1)."""
 
     started = time.monotonic()
     info = await stream_info(nc, stream, timeout=timeout)
@@ -1172,6 +1361,29 @@ async def sweep_exhausted_stream(
             stopped_full = True
             break
 
+    # Re-read STREAM.INFO only when we actually deleted messages so swept messages never trigger a stale warning.
+    check_info: Optional[StreamRange] = info
+    if messages_swept > 0 and (stop is None or not stop.is_set()):
+        check_info = await stream_info(nc, stream, timeout=timeout)
+    moment = now if now is not None else datetime.now(timezone.utc)
+    near_expiry = (
+        check_stream_near_expiry(check_info, now=moment, margin_seconds=near_expiry_margin_seconds)
+        if check_info is not None
+        else None
+    )
+    if near_expiry is not None:
+        logger.warning(
+            "Oldest stored message in work stream is nearing max_age. "
+            "event=protocol1_dlq_stream_near_expiry stream=%s first_seq=%s first_ts=%s "
+            "remaining_seconds=%.1f max_age_seconds=%.1f messages=%s",
+            near_expiry.stream,
+            near_expiry.first_seq,
+            near_expiry.first_ts,
+            near_expiry.remaining_seconds,
+            near_expiry.max_age_seconds,
+            near_expiry.messages,
+        )
+
     duration_ms = (time.monotonic() - started) * 1000.0
     if messages_swept > 0 or stopped_full:
         logger.warning(
@@ -1191,7 +1403,14 @@ async def sweep_exhausted_stream(
             consumers_checked,
             duration_ms,
         )
-    return StreamSweepReport(stream, consumers_checked, messages_swept, stopped_full, duration_ms)
+    return StreamSweepReport(
+        stream,
+        consumers_checked,
+        messages_swept,
+        stopped_full,
+        duration_ms,
+        near_expiry=near_expiry,
+    )
 
 
 def _record_full_sweep(
@@ -1239,22 +1458,19 @@ async def _sweep_consumer_range(
         if stored is None or stored.seq > cutoff_seq:
             return swept, False
         try:
-            await setter.set_aside(
-                raw_bytes=stored.data,
-                reason="delivery_limit",
-                original_subject=stored.subject,
-                original_stream=stream,
-                original_stream_sequence=stored.seq,
+            await _set_aside_and_delete_stored(
+                nc,
+                stored=stored,
                 deliveries=max(1, consumer.max_deliver),
-                stored_at=stored.stored_at_ns,
+                setter=setter,
                 team=team,
+                timeout=timeout,
             )
         except DeadLetterStreamFull:
             _record_full_sweep(stream, stored.seq, consumer.name, logged_stranded, logger)
             return swept, True
         if logged_stranded is not None:
             logged_stranded.discard((stream, stored.seq))
-        await delete_stream_message(nc, stream, stored.seq, timeout=timeout)
         swept += 1
         next_seq = stored.seq + 1
     return swept, False
@@ -1268,10 +1484,12 @@ async def sweep_exhausted_streams(
     team: str,
     stop: Optional[asyncio.Event] = None,
     logged_stranded: Optional[set[tuple[str, int]]] = None,
+    now: Optional[datetime] = None,
+    near_expiry_margin_seconds: float = DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS,
     timeout: float = 5.0,
     logger: logging.Logger = _LOGGER,
 ) -> SweepSummary:
-    """Sweep ``streams`` in order for exhausted deliveries, stopping early if ``UA1_DLQ_<team>`` is full."""
+    """Sweep ``streams`` in order for exhausted deliveries and near-expiry messages, stopping early if ``UA1_DLQ_<team>`` is full."""
 
     started = time.monotonic()
     streams_checked = 0
@@ -1279,6 +1497,7 @@ async def sweep_exhausted_streams(
     consumers_checked = 0
     messages_swept = 0
     stopped_full = False
+    near_expiry: list[NearExpiryMessage] = []
     for stream in streams:
         if stop is not None and stop.is_set():
             break
@@ -1290,6 +1509,8 @@ async def sweep_exhausted_streams(
                 team=team,
                 stop=stop,
                 logged_stranded=logged_stranded,
+                now=now,
+                near_expiry_margin_seconds=near_expiry_margin_seconds,
                 timeout=timeout,
                 logger=logger,
             )
@@ -1309,6 +1530,8 @@ async def sweep_exhausted_streams(
         streams_checked += 1
         consumers_checked += report.consumers_checked
         messages_swept += report.messages_swept
+        if report.near_expiry is not None:
+            near_expiry.append(report.near_expiry)
         if report.stopped_full:
             stopped_full = True
             break
@@ -1319,7 +1542,272 @@ async def sweep_exhausted_streams(
         stopped_full=stopped_full,
         duration_ms=(time.monotonic() - started) * 1000.0,
         streams_failed=streams_failed,
+        near_expiry=tuple(near_expiry),
     )
+
+
+# -- Durable MAX_DELIVERIES advisory parser and watch (F1) ---------------------------------------
+
+
+def parse_max_deliveries_advisory(
+    raw_bytes: bytes,
+    *,
+    subject: Optional[str] = None,
+    allowed_streams: Optional[Collection[str]] = None,
+) -> Optional[DeliveryExhaustedAdvisory]:
+    """Parse and validate a JetStream ``MAX_DELIVERIES`` advisory payload; ``None`` if invalid or out of scope."""
+
+    doc = _safe_parse_json_object(raw_bytes)
+    if doc is None or doc.get("type") != MAX_DELIVERIES_ADVISORY_TYPE:
+        return None
+    stream = doc.get("stream")
+    consumer = doc.get("consumer")
+    stream_seq = doc.get("stream_seq")
+    deliveries = doc.get("deliveries")
+    if not isinstance(stream, str) or not stream or not isinstance(consumer, str) or not consumer:
+        return None
+    if isinstance(stream_seq, bool) or not isinstance(stream_seq, int) or stream_seq < 1:
+        return None
+    if isinstance(deliveries, bool) or not isinstance(deliveries, int) or deliveries < 1:
+        return None
+    if subject is not None and subject != f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{stream}.{consumer}":
+        return None
+    if allowed_streams is not None and stream not in allowed_streams:
+        return None
+    advisory_id = doc.get("id")
+    timestamp = doc.get("timestamp")
+    return DeliveryExhaustedAdvisory(
+        stream=stream,
+        consumer=consumer,
+        stream_seq=stream_seq,
+        deliveries=deliveries,
+        advisory_id=advisory_id if isinstance(advisory_id, str) else "",
+        timestamp=timestamp if isinstance(timestamp, str) else "",
+    )
+
+
+async def handle_max_deliveries_advisory_message(
+    nc: Any,
+    msg: Any,
+    setter: DeadLetterSetter,
+    *,
+    team: str,
+    allowed_streams: Collection[str],
+    ack_wait_seconds: float = DEFAULT_ADVISORY_ACK_WAIT_SECONDS,
+    initial_retry_seconds: float = 1.0,
+    max_retry_seconds: float = 30.0,
+    stop: Optional[asyncio.Event] = None,
+    timeout: float = 5.0,
+    logger: logging.Logger = _LOGGER,
+) -> bool:
+    """Process one captured ``MAX_DELIVERIES`` advisory from ``UA1_DLQ_ADVISORY_<team>`` (F1).
+
+    Reads the named ``(stream, stream_seq)`` via ``STREAM.MSG.GET``: if the message is already
+    gone, acknowledges the advisory and returns ``False``; otherwise sets it aside as
+    ``delivery_limit``, deletes its exact sequence, and acknowledges the advisory. Holds the
+    advisory with ``+WPI`` while ``UA1_DLQ_<team>`` is full (``DeadLetterStreamFull``).
+    """
+
+    subject = str(getattr(msg, "subject", ""))
+    advisory = parse_max_deliveries_advisory(
+        bytes(msg.data), subject=subject or None, allowed_streams=allowed_streams
+    )
+    if advisory is None:
+        logger.warning(
+            "Ignoring invalid or out-of-scope delivery-exhaustion advisory. "
+            "event=protocol1_dlq_advisory_ignored team=%s subject=%s",
+            team,
+            subject[:200],
+        )
+        await msg.ack()
+        return False
+
+    async def attempt() -> bool:
+        return await set_aside_stored_exhausted_message(
+            nc,
+            stream=advisory.stream,
+            seq=advisory.stream_seq,
+            deliveries=advisory.deliveries,
+            setter=setter,
+            team=team,
+            timeout=timeout,
+        )
+
+    def log_full(exc: Exception) -> None:
+        logger.warning(
+            "Dead-letter stream is full while handling MAX_DELIVERIES advisory; holding advisory with +WPI. "
+            "event=protocol1_dlq_advisory_holding team=%s stream=%s seq=%s consumer=%s error=%s",
+            team,
+            advisory.stream,
+            advisory.stream_seq,
+            advisory.consumer,
+            exc,
+        )
+
+    outcome = await hold_with_in_progress(
+        lambda: (msg,),
+        attempt,
+        ack_wait_seconds=ack_wait_seconds,
+        initial_retry_seconds=initial_retry_seconds,
+        max_retry_seconds=max_retry_seconds,
+        retryable=lambda exc: isinstance(exc, DeadLetterStreamFull),
+        on_first_failure=log_full,
+        stop=stop,
+        logger=logger,
+    )
+    if outcome is None:
+        return False
+    await msg.ack()
+    if outcome:
+        logger.warning(
+            "Set aside exhausted message from MAX_DELIVERIES advisory. "
+            "event=protocol1_dlq_advisory_set_aside team=%s stream=%s seq=%s consumer=%s deliveries=%s",
+            team,
+            advisory.stream,
+            advisory.stream_seq,
+            advisory.consumer,
+            advisory.deliveries,
+        )
+    else:
+        logger.debug(
+            "MAX_DELIVERIES advisory referenced a message already gone from its stream; acknowledged. "
+            "event=protocol1_dlq_advisory_already_gone team=%s stream=%s seq=%s consumer=%s",
+            team,
+            advisory.stream,
+            advisory.stream_seq,
+            advisory.consumer,
+        )
+    return bool(outcome)
+
+
+class DeliveryAdvisoryWatch:
+    """Pull consumer watch over ``UA1_DLQ_ADVISORY_<team>`` for one role (team services or authority, F1)."""
+
+    def __init__(
+        self,
+        *,
+        team: str,
+        consumer: str,
+        live_fn: Callable[[], Optional[LiveHost]],
+        allowed_streams_fn: Callable[[LiveHost], Collection[str]],
+        fetch_timeout_seconds: float = 2.0,
+        ack_wait_seconds: float = DEFAULT_ADVISORY_ACK_WAIT_SECONDS,
+        initial_retry_seconds: float = 1.0,
+        max_retry_seconds: float = 30.0,
+        api_timeout_seconds: float = 5.0,
+        logger: logging.Logger = _LOGGER,
+    ) -> None:
+        self._team = team
+        self._stream = dlq_advisory_stream_name(team)
+        self._consumer = consumer
+        self._live_fn = live_fn
+        self._allowed_streams_fn = allowed_streams_fn
+        self._fetch_timeout_seconds = max(0.05, float(fetch_timeout_seconds))
+        self._ack_wait_seconds = max(0.05, float(ack_wait_seconds))
+        self._initial_retry_seconds = max(0.01, float(initial_retry_seconds))
+        self._max_retry_seconds = max(self._initial_retry_seconds, float(max_retry_seconds))
+        self._api_timeout_seconds = max(0.2, float(api_timeout_seconds))
+        self._logger = logger
+        self._pull_sub: Any = None
+        self._missing_logged = False
+
+    async def _ensure_sub(self, live: LiveHost) -> Any:
+        if self._pull_sub is not None:
+            return self._pull_sub
+        try:
+            self._pull_sub = await bind_pull_consumer(
+                live.nc, stream=self._stream, consumer=self._consumer
+            )
+            self._missing_logged = False
+            return self._pull_sub
+        except NotFoundError:
+            if not self._missing_logged:
+                self._logger.info(
+                    "Delivery-exhaustion advisory consumer is not created yet; waiting for topology setup. "
+                    "event=protocol1_dlq_advisory_consumer_missing stream=%s consumer=%s",
+                    self._stream,
+                    self._consumer,
+                )
+                self._missing_logged = True
+            return None
+
+    async def poll_once(self, *, stop: Optional[asyncio.Event] = None) -> int:
+        """Pull up to ``ADVISORY_WATCH_BATCH`` advisories and set aside each still-stored message."""
+
+        live = self._live_fn()
+        if live is None:
+            return 0
+        sub = await self._ensure_sub(live)
+        if sub is None:
+            return 0
+        try:
+            messages = await sub.fetch(ADVISORY_WATCH_BATCH, timeout=self._fetch_timeout_seconds)
+        except (NatsTimeoutError, TimeoutError, asyncio.TimeoutError):
+            return 0
+        if not messages:
+            return 0
+
+        setter = DeadLetterSetter(live, logger=self._logger)
+        allowed = frozenset(self._allowed_streams_fn(live))
+        set_aside_count = 0
+        for msg in messages:
+            if stop is not None and stop.is_set():
+                break
+            try:
+                if await handle_max_deliveries_advisory_message(
+                    live.nc,
+                    msg,
+                    setter,
+                    team=self._team,
+                    allowed_streams=allowed,
+                    ack_wait_seconds=self._ack_wait_seconds,
+                    initial_retry_seconds=self._initial_retry_seconds,
+                    max_retry_seconds=self._max_retry_seconds,
+                    stop=stop,
+                    timeout=self._api_timeout_seconds,
+                    logger=self._logger,
+                ):
+                    set_aside_count += 1
+            except Exception as exc:
+                self._logger.warning(
+                    "Failed handling MAX_DELIVERIES advisory; leaving unacknowledged for redelivery. "
+                    "event=protocol1_dlq_advisory_handle_failed team=%s subject=%s error_type=%s error=%s",
+                    self._team,
+                    str(getattr(msg, "subject", ""))[:200],
+                    type(exc).__name__,
+                    exc,
+                )
+        return set_aside_count
+
+    async def run(self, stop: asyncio.Event) -> None:
+        """Continuously watch ``UA1_DLQ_ADVISORY_<team>`` until ``stop`` fires."""
+
+        while not stop.is_set():
+            try:
+                live = self._live_fn()
+                if live is None:
+                    if await _sleep_or_stop(min(1.0, self._max_retry_seconds), stop):
+                        return
+                    continue
+                sub = await self._ensure_sub(live)
+                if sub is None:
+                    if await _sleep_or_stop(min(5.0, self._max_retry_seconds), stop):
+                        return
+                    continue
+                await self.poll_once(stop=stop)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self._logger.exception(
+                    "Delivery-exhaustion advisory watch pass failed; retrying shortly. "
+                    "event=protocol1_dlq_advisory_watch_failed team=%s stream=%s consumer=%s",
+                    self._team,
+                    self._stream,
+                    self._consumer,
+                )
+                self._pull_sub = None
+                if await _sleep_or_stop(min(5.0, self._max_retry_seconds), stop):
+                    return
 
 
 # -- Departure matching (A6, C13) and legacy upgrade_old_format summary (A5) ---------------------
@@ -1506,11 +1994,17 @@ def extract_old_envelope_summary(data: bytes) -> Optional[OldEnvelopeSummary]:
     )
 
 
-async def bind_dlq_notice_consumer(nc: Any, *, stream: str, consumer: str) -> Any:
-    """Bind to an existing pull consumer on ``UA1_DLQ_<team>`` (ADR-019: pulled, never pushed)."""
+async def bind_pull_consumer(nc: Any, *, stream: str, consumer: str) -> Any:
+    """Bind to an existing JetStream pull consumer (ADR-019: pulled, never pushed)."""
 
     js = nc.jetstream()
     return await js.pull_subscribe_bind(consumer, stream=stream)
+
+
+async def bind_dlq_notice_consumer(nc: Any, *, stream: str, consumer: str) -> Any:
+    """Bind to an existing pull consumer on ``UA1_DLQ_<team>`` (ADR-019: pulled, never pushed)."""
+
+    return await bind_pull_consumer(nc, stream=stream, consumer=consumer)
 
 
 async def publish_jetstream_message(

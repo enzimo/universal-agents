@@ -27,10 +27,11 @@ import asyncio
 import base64
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1212,3 +1213,131 @@ async def test_c23_budgeted_raw_scan_resumes_across_passes_with_departed_set(tmp
     rep6 = await service.scan_raw_copies()
     assert rep6.copies_scanned == 1 and rep6.departed_deleted == 1
     assert seq_alice_1 not in nc.messages[dlq_stream]
+
+
+@pytest.mark.asyncio
+async def test_f1_team_services_advisory_watch_and_near_expiry_inbox_warning(tmp_path: Path) -> None:
+    """F1: DeadLetterService handles MAX_DELIVERIES advisories on busy consumers and posts idempotent
+    administrators' Inbox warnings when a work stream's oldest message nears max_age."""
+
+    from custom_transport.protocol1.dead_letters import (
+        MAX_DELIVERIES_ADVISORY_PREFIX,
+        MAX_DELIVERIES_ADVISORY_TYPE,
+        dlq_advisory_stream_name,
+        dlq_advisory_team_consumer_name,
+    )
+    from tests.test_protocol1_dead_letters import FakeDelivery
+
+    nc = DlqFakeNatsConnection()
+    ts_live, _worker_live = _make_hosts(nc)
+    access = AccessRepository(_storage(tmp_path))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,)))
+    people = PeopleDirectory(access, TEAM)
+    now = datetime(2026, 10, 29, 0, 0, 0, tzinfo=timezone.utc)
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        chat_sender=RecordingChatSender(),
+        clock=lambda: now,
+        near_expiry_margin_seconds=86_400.0,
+    )
+
+    part_stream = f"UA1_PART_{TEAM}~0"
+    max_age_ns = 604_860 * 1_000_000_000
+    nc.streams[part_stream] = {"created": "2026-10-20T00:00:00Z"}
+    nc.messages[part_stream] = {
+        1: {
+            "subject": f"ua.v1.{TEAM}.lead-host-1.work.agent.r1.0",
+            "data": b"poison-busy",
+            "time": "2026-10-22T12:00:00Z",
+        },
+        2: {
+            "subject": f"ua.v1.{TEAM}.lead-host-1.work.agent.r1.0",
+            "data": b"still-in-flight",
+            "time": "2026-10-22T12:05:00Z",
+        },
+    }
+    nc.consumers[part_stream] = [
+        {
+            "name": "agent~r1",
+            "config": {"filter_subject": f"ua.v1.{TEAM}.*.work.agent.r1.0", "max_deliver": 20},
+            "delivered": {"stream_seq": 2},
+            "ack_floor": {"stream_seq": 0},
+            "num_ack_pending": 1,  # busy consumer: cutoff is 0
+        }
+    ]
+
+    orig_req = nc.request
+
+    async def req_with_first_ts(subject: str, payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        resp = await orig_req(subject, payload, timeout=timeout)
+        if subject == f"$JS.API.STREAM.INFO.{part_stream}":
+            doc = json.loads(resp.data.decode("utf-8"))
+            msgs = nc.messages.get(part_stream, {})
+            if msgs:
+                doc["state"]["first_ts"] = msgs[min(msgs)]["time"]
+            doc["config"] = {"max_age": max_age_ns}
+            resp = SimpleNamespace(data=json.dumps(doc).encode("utf-8"))
+        return resp
+
+    nc.request = req_with_first_ts  # type: ignore[method-assign]
+
+    # 1. Idle cutoff sweep leaves busy consumer untouched, but emits ONE Inbox near-expiry notice naming stream & seq 1.
+    summary1 = await service.sweep_work_streams()
+    assert summary1.messages_swept == 0
+    assert len(summary1.near_expiry) == 1
+    assert summary1.near_expiry[0].stream == part_stream and summary1.near_expiry[0].first_seq == 1
+    notices = access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))
+    assert len(notices) == 1
+    warn_notice, _ = notices[0]
+    assert warn_notice.kind is AccessNoticeKind.QUEUED_MESSAGE_EXPIRING
+    assert part_stream in warn_notice.title and "1" in warn_notice.title
+    assert part_stream in warn_notice.summary and "1" in warn_notice.summary
+
+    # Repeat sweep does NOT duplicate the Inbox notice for the same (stream, first_seq, first_ts).
+    await service.sweep_work_streams()
+    assert len(access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))) == 1
+
+    # 2. Advisory watch receives MAX_DELIVERIES for seq 1, sets it aside and deletes seq 1 while keeping seq 2!
+    adv_payload = json.dumps(
+        {
+            "type": MAX_DELIVERIES_ADVISORY_TYPE,
+            "id": "adv-busy-1",
+            "timestamp": "2026-10-29T00:00:00Z",
+            "stream": part_stream,
+            "consumer": "agent~r1",
+            "stream_seq": 1,
+            "deliveries": 20,
+        }
+    ).encode("utf-8")
+    adv_msg = FakeDelivery(
+        data=adv_payload,
+        subject=f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{part_stream}.agent~r1",
+        stream=dlq_advisory_stream_name(TEAM),
+        stream_seq=1,
+    )
+    adv_sub = SimpleNamespace(fetch=AsyncMock(return_value=[adv_msg]))
+
+    async def _bind_adv(consumer: str, *, stream: str) -> Any:
+        assert (stream, consumer) == (dlq_advisory_stream_name(TEAM), dlq_advisory_team_consumer_name(TEAM))
+        return adv_sub
+
+    nc.jetstream().pull_subscribe_bind = _bind_adv  # type: ignore[attr-defined]
+
+    assert await service.poll_advisories_once() == 1
+    assert adv_msg.ack_calls == 1
+    assert set(nc.messages[part_stream]) == {2}
+    # Duplicate advisory for now-deleted seq 1 acks cleanly without publishing a second DLQ copy.
+    adv_msg_dup = FakeDelivery(
+        data=adv_payload,
+        subject=f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{part_stream}.agent~r1",
+        stream=dlq_advisory_stream_name(TEAM),
+        stream_seq=2,
+    )
+    adv_sub.fetch = AsyncMock(return_value=[adv_msg_dup])
+    published_before = len(nc.jetstream().published)
+    assert await service.poll_advisories_once() == 0
+    assert adv_msg_dup.ack_calls == 1
+    assert len(nc.jetstream().published) == published_before

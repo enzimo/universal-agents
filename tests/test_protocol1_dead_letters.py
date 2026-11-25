@@ -1033,3 +1033,223 @@ async def test_c18_held_set_aside_rewrites_raw_copy_after_orphan_cleanup() -> No
     assert notice_doc["body"]["raw"]["stored"] is True
     assert notice_doc["body"]["raw"]["size"] == len(final_raw)
     assert notice_doc["body"]["raw"]["sha256"] == b64url(hashlib.sha256(final_raw).digest())
+
+
+# -- F1: MAX_DELIVERIES advisories and near-expiry warnings --------------------------------------
+
+
+def test_f1_parse_max_deliveries_advisory_validates_payload_subject_and_scope() -> None:
+    from custom_transport.protocol1.dead_letters import (
+        MAX_DELIVERIES_ADVISORY_PREFIX,
+        MAX_DELIVERIES_ADVISORY_TYPE,
+        parse_max_deliveries_advisory,
+    )
+
+    stream = "UA1_PART_team_example~0"
+    consumer = "agent~researcher-2"
+    subject = f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{stream}.{consumer}"
+    payload = json.dumps(
+        {
+            "type": MAX_DELIVERIES_ADVISORY_TYPE,
+            "id": "adv-1",
+            "timestamp": "2026-10-22T05:00:00Z",
+            "stream": stream,
+            "consumer": consumer,
+            "stream_seq": 7,
+            "deliveries": 20,
+        }
+    ).encode("utf-8")
+
+    parsed = parse_max_deliveries_advisory(payload, subject=subject, allowed_streams={stream})
+    assert parsed is not None
+    assert (parsed.stream, parsed.consumer, parsed.stream_seq, parsed.deliveries) == (stream, consumer, 7, 20)
+
+    # Disallowed stream, subject mismatch, wrong type, invalid sequence, corrupt JSON all return None.
+    assert parse_max_deliveries_advisory(payload, subject=subject, allowed_streams={"UA1_POOL_WORK_team_example"}) is None
+    assert parse_max_deliveries_advisory(payload, subject=f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{stream}.other") is None
+    assert parse_max_deliveries_advisory(b"{not json", subject=subject) is None
+    bad_type = json.dumps({"type": "other", "stream": stream, "consumer": consumer, "stream_seq": 1, "deliveries": 1}).encode()
+    assert parse_max_deliveries_advisory(bad_type, subject=subject) is None
+    bad_seq = json.dumps({"type": MAX_DELIVERIES_ADVISORY_TYPE, "stream": stream, "consumer": consumer, "stream_seq": 0, "deliveries": 1}).encode()
+    assert parse_max_deliveries_advisory(bad_seq, subject=subject) is None
+
+
+@pytest.mark.asyncio
+async def test_f1_advisory_handler_sets_aside_deletes_handles_gone_and_holds_when_dlq_full(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from custom_transport.protocol1.dead_letters import (
+        MAX_DELIVERIES_ADVISORY_PREFIX,
+        MAX_DELIVERIES_ADVISORY_TYPE,
+        handle_max_deliveries_advisory_message,
+    )
+
+    live_host, conn = make_host()
+    setter = DeadLetterSetter(live_host, release="0.10.0")
+    stream = "UA1_PART_team_example~0"
+    consumer = "agent~researcher-2"
+    conn.streams[stream] = {}
+    conn.messages[stream] = {
+        1: {"subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2.0", "data": b"poison-1", "time": "2026-10-22T04:30:00Z"},
+        2: {"subject": "ua.v1.team_example.lead-host-1.work.agent.researcher-2.0", "data": b"in-flight-2", "time": "2026-10-22T04:31:00Z"},
+    }
+
+    def adv_delivery(seq: int, *, adv_stream: str = stream) -> FakeDelivery:
+        body = json.dumps(
+            {
+                "type": MAX_DELIVERIES_ADVISORY_TYPE,
+                "id": f"adv-{seq}",
+                "timestamp": "2026-10-22T05:00:00Z",
+                "stream": adv_stream,
+                "consumer": consumer,
+                "stream_seq": seq,
+                "deliveries": 20,
+            }
+        ).encode("utf-8")
+        return FakeDelivery(
+            data=body,
+            subject=f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{adv_stream}.{consumer}",
+            stream="UA1_DLQ_ADVISORY_team_example",
+            stream_seq=seq,
+        )
+
+    # 1. Present seq 1 is set aside as delivery_limit, deleted by exact seq (seq 2 untouched), and advisory acked.
+    d1 = adv_delivery(1)
+    assert await handle_max_deliveries_advisory_message(
+        conn, d1, setter, team=TEAM, allowed_streams={stream}, ack_wait_seconds=0.06, initial_retry_seconds=0.01
+    ) is True
+    assert d1.ack_calls == 1
+    assert set(conn.messages[stream]) == {2}
+    assert len(conn.jetstream().published) == 2
+
+    # 2. Already-gone seq 1 acks and does nothing (no extra DLQ publish).
+    d1_dup = adv_delivery(1)
+    assert await handle_max_deliveries_advisory_message(
+        conn, d1_dup, setter, team=TEAM, allowed_streams={stream}
+    ) is False
+    assert d1_dup.ack_calls == 1
+    assert len(conn.jetstream().published) == 2
+
+    # 3. Out-of-scope stream logs warning, acks, and does nothing.
+    d_other = adv_delivery(1, adv_stream="UA1_TEAM_WORK_team_example")
+    with caplog.at_level(logging.WARNING):
+        assert await handle_max_deliveries_advisory_message(
+            conn, d_other, setter, team=TEAM, allowed_streams={stream}
+        ) is False
+    assert d_other.ack_calls == 1
+    assert any("event=protocol1_dlq_advisory_ignored" in r.getMessage() for r in caplog.records)
+
+    # 4. Full DLQ holds advisory with +WPI, leaves seq 2 intact until room returns, then sets aside + deletes + acks.
+    conn.jetstream().fail_on.append((".dlq.raw.", APIError(code=400, err_code=JS_ERR_MAX_BYTES_EXCEEDED, description="full")))
+    conn.jetstream().fail_on.append((".dlq.raw.", APIError(code=400, err_code=JS_ERR_MAX_BYTES_EXCEEDED, description="full")))
+    d2 = adv_delivery(2)
+    assert await handle_max_deliveries_advisory_message(
+        conn,
+        d2,
+        setter,
+        team=TEAM,
+        allowed_streams={stream},
+        ack_wait_seconds=0.06,
+        initial_retry_seconds=0.01,
+        max_retry_seconds=0.02,
+    ) is True
+    assert d2.in_progress_calls >= 2
+    assert d2.ack_calls == 1
+    assert conn.messages[stream] == {}
+
+
+@pytest.mark.asyncio
+async def test_f1_sweep_near_expiry_detection_and_no_false_warning_when_swept() -> None:
+    from custom_transport.protocol1.dead_letters import (
+        StreamRange,
+        check_stream_near_expiry,
+        format_near_expiry_notice,
+        sweep_exhausted_stream,
+    )
+
+    now = datetime(2026, 10, 29, 0, 0, 0, tzinfo=timezone.utc)
+    max_age_ns = 604_860 * 1_000_000_000  # 7 days + 60s
+
+    # 6.5 days old -> 12h left -> within 24h margin!
+    old_info = StreamRange(
+        name="UA1_PART_team_example~0",
+        messages=2,
+        first_seq=11,
+        last_seq=12,
+        first_ts="2026-10-22T12:00:00Z",
+        max_age_ns=max_age_ns,
+    )
+    near = check_stream_near_expiry(old_info, now=now, margin_seconds=86_400.0)
+    assert near is not None
+    assert near.stream == "UA1_PART_team_example~0"
+    assert near.first_seq == 11
+    assert near.messages == 2
+    nid1, title, summary = format_near_expiry_notice(TEAM, near)
+    nid2, _, _ = format_near_expiry_notice(TEAM, near)
+    assert nid1 == nid2
+    assert "UA1_PART_team_example~0" in title and "11" in title
+    assert "UA1_PART_team_example~0" in summary and "11" in summary
+
+    # Fresh message (1h old) -> no warning; Go zero timestamp -> no warning.
+    fresh_info = StreamRange(
+        name="UA1_PART_team_example~0",
+        messages=1,
+        first_seq=12,
+        last_seq=12,
+        first_ts="2026-10-28T23:00:00Z",
+        max_age_ns=max_age_ns,
+    )
+    assert check_stream_near_expiry(fresh_info, now=now, margin_seconds=86_400.0) is None
+    zero_info = StreamRange(
+        name="UA1_PART_team_example~0",
+        messages=1,
+        first_seq=1,
+        last_seq=1,
+        first_ts="0001-01-01T00:00:00Z",
+        max_age_ns=max_age_ns,
+    )
+    assert check_stream_near_expiry(zero_info, now=now, margin_seconds=86_400.0) is None
+
+    # End-to-end through sweep_exhausted_stream: busy consumer cannot sweep seq 1 -> near_expiry reported;
+    # once consumer goes idle and sweep deletes seq 1 -> re-read sees empty stream -> no near_expiry warning!
+    live_host, conn = make_host()
+    setter = DeadLetterSetter(live_host, release="0.10.0")
+    stream = "UA1_PART_team_example~0"
+    conn.streams[stream] = {"max_age": max_age_ns}
+    conn.messages[stream] = {
+        1: {"subject": "ua.v1.team_example.lead-host-1.work.agent.r1.0", "data": b"stuck", "time": "2026-10-22T12:00:00Z"},
+    }
+    # Simulate STREAM.INFO including first_ts and config.max_age.
+    orig_req = conn.request
+
+    async def info_with_age(subject: str, payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        resp = await orig_req(subject, payload, timeout=timeout)
+        if subject == f"$JS.API.STREAM.INFO.{stream}":
+            doc = json.loads(resp.data.decode("utf-8"))
+            msgs = conn.messages.get(stream, {})
+            if msgs:
+                first_seq = min(msgs)
+                doc["state"]["first_ts"] = msgs[first_seq]["time"]
+            doc["config"] = {"max_age": max_age_ns}
+            resp = SimpleNamespace(data=json.dumps(doc).encode("utf-8"))
+        return resp
+
+    conn.request = info_with_age  # type: ignore[method-assign]
+    conn.consumers[stream] = [
+        {
+            "name": "agent~r1",
+            "config": {"filter_subject": "ua.v1.team_example.*.work.agent.r1.0", "max_deliver": 20},
+            "delivered": {"stream_seq": 1},
+            "ack_floor": {"stream_seq": 0},
+            "num_ack_pending": 1,  # busy / no-pull case -> cutoff is 0
+        }
+    ]
+    rep_busy = await sweep_exhausted_stream(conn, stream, setter, team=TEAM, now=now, near_expiry_margin_seconds=86_400.0)
+    assert rep_busy.messages_swept == 0
+    assert rep_busy.near_expiry is not None and rep_busy.near_expiry.first_seq == 1
+
+    # Once consumer becomes idle, sweep removes seq 1 and emits NO stale near_expiry warning.
+    conn.consumers[stream][0]["num_ack_pending"] = 0
+    rep_idle = await sweep_exhausted_stream(conn, stream, setter, team=TEAM, now=now, near_expiry_margin_seconds=86_400.0)
+    assert rep_idle.messages_swept == 1
+    assert rep_idle.near_expiry is None

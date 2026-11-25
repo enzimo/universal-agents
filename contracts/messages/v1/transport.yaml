@@ -381,6 +381,39 @@ dead_letter_custody:
   role: team_services
   streams: ["UA1_DLQ_{team}"]
 
+# Delivery-exhaustion advisories (README, "Dead letters"). NATS publishes
+# $JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.<stream>.<consumer> in the stream's account
+# whenever a consumer exhausts a message's max_deliveries. Capturing those events in a
+# per-team workqueue stream lets the team services (for partition, pool and edge streams)
+# and the installation authority (for UA1_TEAM_WORK_<team>) set exhausted messages aside
+# immediately even while later messages stay in flight on a busy consumer.
+delivery_advisories:
+  stream: UA1_DLQ_ADVISORY_{team}
+  subject_prefix: $JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES
+  retention: workqueue
+  storage: file
+  max_age_seconds: 604860     # at least the durable work streams' max_age_seconds
+  max_bytes: 1048576          # 1 MiB: advisories are ~250 bytes each (~4,000 events)
+  max_consumers: 16           # team_services, installation_authority, and inspection consumers
+  discard: new                # never drop unread exhaustion advisories
+  consumers:
+    team_services:
+      role: team_services
+      name: adv_team~{team}
+      streams: ["UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}"]
+      mode: pull
+      ack: explicit
+      ack_wait_seconds: 60
+      max_deliveries: 20
+    installation_authority:
+      role: installation_authority
+      name: adv_auth~{team}
+      streams: ["UA1_TEAM_WORK_{team}"]
+      mode: pull
+      ack: explicit
+      ack_wait_seconds: 60
+      max_deliveries: 20
+
 # Every bucket's stream (KV_<bucket>, subjects $KV.<bucket>.>) has these settings; the
 # topology owner creates it as a stream with them (README, "Key-value grants"). Client
 # libraries' bucket helpers allow rollup headers, and with them a writer of one key erases

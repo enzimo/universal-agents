@@ -56,9 +56,12 @@ from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.transport_codec import encode_envelope
 from custom_transport.protocol1.dead_letters import (
+    DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS,
     PEER_REVOCATIONS_NAK_DELAY_SECONDS,
     DeadLetterSetter,
+    DeliveryAdvisoryWatch,
     DurableRefusalAction,
+    NearExpiryMessage,
     OldEnvelopeSummary,
     StoredStreamMessage,
     SweepSummary,
@@ -67,6 +70,7 @@ from custom_transport.protocol1.dead_letters import (
     consumer_cutoff_seq,
     consumer_info,
     delete_stream_message,
+    dlq_advisory_team_consumer_name,
     dlq_notice_consumer_name,
     dlq_notice_subject,
     dlq_notice_wildcard_subject,
@@ -74,6 +78,7 @@ from custom_transport.protocol1.dead_letters import (
     dlq_raw_wildcard_subject,
     dlq_stream_name,
     extract_old_envelope_summary,
+    format_near_expiry_notice,
     get_stream_message,
     hold_with_in_progress,
     message_stored_timestamp_ns,
@@ -558,6 +563,7 @@ class DeadLetterService:
         orphan_grace_seconds: int = DEFAULT_ORPHAN_GRACE_SECONDS,
         receipt_retention_seconds: int = RECEIPT_RETENTION_SECONDS,
         scan_budget_seconds: float = DEFAULT_SCAN_BUDGET_SECONDS,
+        near_expiry_margin_seconds: float = DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS,
         api_timeout_seconds: float = 5.0,
     ) -> None:
         self._team_id = team_id
@@ -578,7 +584,20 @@ class DeadLetterService:
         self._orphan_grace_seconds = max(0, int(orphan_grace_seconds))
         self._receipt_retention_seconds = max(DLQ_MAX_AGE_SECONDS, int(receipt_retention_seconds))
         self._scan_budget_seconds = max(0.0, float(scan_budget_seconds))
+        self._near_expiry_margin_seconds = max(0.0, float(near_expiry_margin_seconds))
         self._api_timeout_seconds = max(0.2, float(api_timeout_seconds))
+        self._advisory_watch = DeliveryAdvisoryWatch(
+            team=team_id,
+            consumer=dlq_advisory_team_consumer_name(team_id),
+            live_fn=live_fn,
+            allowed_streams_fn=self.sweep_stream_names,
+            fetch_timeout_seconds=self._fetch_timeout_seconds,
+            ack_wait_seconds=self._ack_wait_seconds,
+            initial_retry_seconds=self._initial_retry_seconds,
+            max_retry_seconds=self._max_retry_seconds,
+            api_timeout_seconds=self._api_timeout_seconds,
+            logger=logger,
+        )
 
         self._last_reported_at: Optional[datetime] = None
         self._logged_stranded: set[tuple[str, int]] = set()
@@ -659,7 +678,20 @@ class DeadLetterService:
             receipts_pruned=pruned,
         )
 
+    async def poll_advisories_once(self, *, stop: Optional[asyncio.Event] = None) -> int:
+        """Pull captured ``MAX_DELIVERIES`` advisories from ``adv_team~<team>`` and set aside each stored message."""
+
+        return await self._advisory_watch.poll_once(stop=stop)
+
     async def run(self, stop: asyncio.Event) -> None:
+        """Run the ``dlq~<team>`` notice watch and ``adv_team~<team>`` advisory watch concurrently until ``stop`` fires."""
+
+        await asyncio.gather(
+            self._run_notice_watch(stop),
+            self._advisory_watch.run(stop),
+        )
+
+    async def _run_notice_watch(self, stop: asyncio.Event) -> None:
         """Run the ``dlq~<team>`` notice watch continuously until ``stop`` fires."""
 
         while not stop.is_set():
@@ -1447,12 +1479,48 @@ class DeadLetterService:
 
     # -- CRIT-1 sweep of team work streams (A4, C08, C15) --------------------------------------
 
+    async def _record_near_expiry_notice(self, item: NearExpiryMessage, *, now: datetime) -> bool:
+        """Store an idempotent administrator Inbox notice for a work stream nearing ``max_age`` (F1)."""
+
+        notice_id, title, summary = format_near_expiry_notice(self._team_id, item)
+        notice = AccessNoticeV1(
+            notice_id=notice_id,
+            team_id=self._team_id,
+            kind=AccessNoticeKind.QUEUED_MESSAGE_EXPIRING,
+            recipient_roles=(PERSON_ROLE_ADMIN,),
+            title=title,
+            summary=summary,
+            created_at_utc=now,
+        )
+        try:
+            created = await asyncio.to_thread(self._access.create_notice_if_absent, notice)
+        except Exception:
+            self._logger.exception(
+                "Could not store near-expiry Inbox notice for work stream. "
+                "event=protocol1_dlq_near_expiry_inbox_failed team=%s stream=%s first_seq=%s",
+                self._team_id,
+                item.stream,
+                item.first_seq,
+            )
+            return False
+        if created:
+            self._logger.warning(
+                "Told administrators about a queued message nearing expiry. "
+                "event=protocol1_dlq_near_expiry_notice team=%s notice_id=%s stream=%s first_seq=%s",
+                self._team_id,
+                notice_id,
+                item.stream,
+                item.first_seq,
+            )
+        return created
+
     async def sweep_work_streams(self, *, stop: Optional[asyncio.Event] = None) -> SweepSummary:
-        """Sweep partition, pool, and edge streams of this team for exhausted deliveries."""
+        """Sweep partition, pool, and edge streams of this team (idle backstop + near-expiry Inbox warning)."""
 
         live = self._require_live()
         setter = DeadLetterSetter(live, logger=self._logger)
         streams = self.sweep_stream_names(live)
+        now = _utc(self._clock())
         summary = await sweep_exhausted_streams(
             live.nc,
             streams,
@@ -1460,23 +1528,30 @@ class DeadLetterService:
             team=self._team_id,
             stop=stop,
             logged_stranded=self._logged_stranded,
+            now=now,
+            near_expiry_margin_seconds=self._near_expiry_margin_seconds,
             timeout=self._api_timeout_seconds,
             logger=self._logger,
         )
+        for item in summary.near_expiry:
+            if stop is not None and stop.is_set():
+                break
+            await self._record_near_expiry_notice(item, now=now)
         log_fn = (
             self._logger.warning
-            if (summary.messages_swept > 0 or summary.stopped_full or summary.streams_failed > 0)
+            if (summary.messages_swept > 0 or summary.stopped_full or summary.streams_failed > 0 or summary.near_expiry)
             else self._logger.debug
         )
         log_fn(
             "Completed team dead-letter sweep pass. event=protocol1_dlq_team_sweep_pass "
             "team=%s streams_checked=%s streams_failed=%s consumers_checked=%s "
-            "messages_swept=%s stopped_full=%s duration_ms=%.1f",
+            "messages_swept=%s near_expiry=%s stopped_full=%s duration_ms=%.1f",
             self._team_id,
             summary.streams_checked,
             summary.streams_failed,
             summary.consumers_checked,
             summary.messages_swept,
+            len(summary.near_expiry),
             summary.stopped_full,
             summary.duration_ms,
         )

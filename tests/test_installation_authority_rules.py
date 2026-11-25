@@ -530,6 +530,9 @@ def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, ca
         async def follow_placements(self, stop: asyncio.Event) -> None:
             await stop.wait()
 
+        async def watch_delivery_advisories(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
     with pytest.raises(SystemExit) as exited:
         _run_with(monkeypatch, tmp_path, Disconnecting())
     assert exited.value.code == 1
@@ -548,6 +551,9 @@ def test_the_process_exits_when_it_stops_following_placements(tmp_path: Path, mo
 
         async def follow_placements(self, stop: asyncio.Event) -> None:
             raise RuntimeError("the consumers could not be listed")
+
+        async def watch_delivery_advisories(self, stop: asyncio.Event) -> None:
+            await stop.wait()
 
     with pytest.raises(SystemExit) as exited:
         _run_with(monkeypatch, tmp_path, LosingPlacements())
@@ -2171,3 +2177,115 @@ async def test_authority_sweep_delivery_limits_and_install_dead_letter_routing(t
     assert len(calls) == 2
     await authority.upkeep(fixtures.NOW + timedelta(minutes=6))
     assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_f1_authority_advisory_watch_and_near_expiry_callback(tmp_path: Path) -> None:
+    """F1: Authority handles MAX_DELIVERIES advisories for UA1_TEAM_WORK_<team> on busy consumers
+    and invokes on_near_expiry when UA1_TEAM_WORK_<team>'s oldest message nears max_age."""
+
+    from custom_transport.protocol1.dead_letters import (
+        MAX_DELIVERIES_ADVISORY_PREFIX,
+        MAX_DELIVERIES_ADVISORY_TYPE,
+        dlq_advisory_authority_consumer_name,
+        dlq_advisory_stream_name,
+    )
+    from custom_transport.protocol1.identity import HostIdentity
+    from custom_transport.protocol1.live import LiveHost
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from tests import message_contract_support as fixtures
+    from tests.test_protocol1_dead_letters import FakeDelivery, FakeNatsConnection
+
+    warned: list[tuple[str, str, int]] = []
+    now = datetime(2026, 10, 29, 0, 0, 0, tzinfo=timezone.utc)
+
+    async def on_near(team: str, item: Any) -> None:
+        warned.append((team, item.stream, item.first_seq))
+
+    authority = authority_at(tmp_path, partitions=2)
+    authority._on_near_expiry = on_near
+    authority.clock = lambda: now
+    nc = FakeNatsConnection()
+    nc.is_closed = False  # type: ignore[attr-defined]
+    bundle = BootstrapBundle(
+        authority.installation,
+        ((authority.authority.key_id, authority.authority.public_key_text),),
+        partitions=2,
+    )
+    trust = authority._trust = PersistentTrustStore.open(
+        bundle, authority.layout.host_trust_dir(AUTHORITY_RUNTIME), fixtures.NOW
+    )
+    own_req = authority._own_request(("team_alpha",))
+    own_rec = authority.certificate_record(own_req, epoch=1, revocation_epoch=1, issued=fixtures.NOW)
+    trust.add(json.dumps(own_rec).encode("utf-8"), now=fixtures.NOW)
+    ident = HostIdentity(authority.host_keys, authority._held_certificate(own_rec))
+    live = LiveHost(nc, ident, trust, clock=lambda: fixtures.NOW)
+    authority.live = live
+    authority._nc = nc
+    authority._teams = ("team_alpha",)
+
+    stream = "UA1_TEAM_WORK_team_alpha"
+    max_age_ns = 604_860 * 1_000_000_000
+    nc.streams[stream] = {"created": "2026-10-20T00:00:00Z"}
+    nc.messages[stream] = {
+        1: {"subject": "ua.v1.team_alpha.lead-host-1.work.team", "data": b"poison-team-work", "time": "2026-10-22T12:00:00Z"},
+        2: {"subject": "ua.v1.team_alpha.lead-host-1.work.team", "data": b"inflight-team-work", "time": "2026-10-28T12:00:00Z"},
+    }
+    nc.consumers[stream] = [
+        {
+            "name": "team~team_alpha",
+            "config": {"filter_subject": "ua.v1.team_alpha.*.work.team", "max_deliver": 20},
+            "delivered": {"stream_seq": 2},
+            "ack_floor": {"stream_seq": 0},
+            "num_ack_pending": 1,
+        }
+    ]
+    orig_req = nc.request
+
+    async def req_with_age(subject: str, payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        resp = await orig_req(subject, payload, timeout=timeout)
+        if subject == f"$JS.API.STREAM.INFO.{stream}":
+            doc = json.loads(resp.data.decode("utf-8"))
+            msgs = nc.messages.get(stream, {})
+            if msgs:
+                doc["state"]["first_ts"] = msgs[min(msgs)]["time"]
+            doc["config"] = {"max_age": max_age_ns}
+            resp = SimpleNamespace(data=json.dumps(doc).encode("utf-8"))
+        return resp
+
+    nc.request = req_with_age  # type: ignore[method-assign]
+
+    # Sweep sees busy consumer (0 swept) and fires on_near_expiry for seq 1!
+    summary = await authority.sweep_delivery_limits()
+    assert summary.messages_swept == 0
+    assert warned == [("team_alpha", stream, 1)]
+
+    # Advisory watch sets aside seq 1 and deletes it while keeping seq 2 intact.
+    adv_payload = json.dumps(
+        {
+            "type": MAX_DELIVERIES_ADVISORY_TYPE,
+            "id": "adv-auth-1",
+            "timestamp": "2026-10-29T00:00:00Z",
+            "stream": stream,
+            "consumer": "team~team_alpha",
+            "stream_seq": 1,
+            "deliveries": 20,
+        }
+    ).encode("utf-8")
+    adv_msg = FakeDelivery(
+        data=adv_payload,
+        subject=f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{stream}.team~team_alpha",
+        stream=dlq_advisory_stream_name("team_alpha"),
+        stream_seq=1,
+    )
+    adv_sub = SimpleNamespace(fetch=AsyncMock(return_value=[adv_msg]))
+
+    async def fake_bind(durable: str, *, stream: str) -> Any:
+        assert stream == dlq_advisory_stream_name("team_alpha")
+        assert durable == dlq_advisory_authority_consumer_name("team_alpha")
+        return adv_sub
+
+    nc.jetstream().pull_subscribe_bind = fake_bind  # type: ignore[attr-defined]
+    assert await authority.poll_delivery_advisories_once() == 1
+    assert adv_msg.ack_calls == 1
+    assert set(nc.messages[stream]) == {2}

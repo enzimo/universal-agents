@@ -69,6 +69,9 @@ from custom_messages.wire.queues import (
     QueueStream,
     agent_consumers,
     consumer_agent,
+    delivery_advisory_consumers,
+    delivery_advisory_max_bytes,
+    delivery_advisory_stream_config,
     object_store_stream_config,
     object_store_streams,
     queue_stream_config,
@@ -125,7 +128,7 @@ REPLICAS_SETTING = "transport.replicas"
 # Metadata keys the server writes itself (_nats.level and others); never sent back.
 _SERVER_METADATA_PREFIX = "_nats."
 # Consumer settings the contract sets, compared to decide whether a consumer needs an update.
-_CONSUMER_FIELDS = ("filter_subject", "ack_wait", "max_deliver", "ack_policy")
+_CONSUMER_FIELDS = ("filter_subject", "filter_subjects", "ack_wait", "max_deliver", "ack_policy")
 # The most consumers one consumer list reply holds (nats-server's API list limit).
 CONSUMER_LIST_PAGE = 256
 _STORAGE = {"file": StorageType.FILE, "memory": StorageType.MEMORY}
@@ -311,7 +314,12 @@ class QueueTopology:
             await self._apply(change, pending=pending)
             pending -= change.reserve
         for team in teams:
-            for consumer in team_consumers(self._transport, team):
+            advisory = (
+                delivery_advisory_consumers(self._transport, team, self.partitions)
+                if "delivery_advisories" in self._transport
+                else ()
+            )
+            for consumer in (*team_consumers(self._transport, team), *advisory):
                 try:
                     await self._ensure_consumer(consumer)
                 except _SERVER_ERRORS as error:
@@ -337,6 +345,12 @@ class QueueTopology:
             if "max_msgs_per_subject" in changed and current is not None:
                 await self._check_cap(stream, current, int(config["max_msgs_per_subject"]))
             changes.append(StreamChange(stream.name, team, config, current, changed, setting=stream.setting))
+        if "delivery_advisories" in self._transport:
+            adv_config = delivery_advisory_stream_config(self._transport, team, self.partitions, self.limits)
+            adv_current = await self._current(adv_config["name"])
+            adv_changed = () if adv_current is None else _changed_fields(adv_config, adv_current)
+            if adv_current is None or adv_changed:
+                changes.append(StreamChange(adv_config["name"], team, adv_config, adv_current, adv_changed))
         return changes
 
     async def _object_store_changes(self) -> list[StreamChange]:
@@ -606,14 +620,14 @@ class QueueTopology:
                 f"max_file_store) or raise its account's limit. Nothing else was changed by this start's refused "
                 f"step; once NATS has the room, the next start finishes.")
         finishes = "finishes the team" if change.team is not None else "finishes the installation's streams"
+        setting = f" ({change.setting})" if change.setting else ""
         return StreamStorageRefused(
-            f"NATS has no room to set aside {_limit(change.config):,} bytes for {change.what} "
-            f"({change.setting}): {refused} {self._totals(change.team, room)}"
-            f"{self._bundled_room(room, room.used + pending * room.copies)} Lower "
-            f"{change.setting} or the other transport.queues.max_bytes entries, or give NATS more storage (free disk "
-            f"space and restart the instance, or an external server's max_file_store). If NATS started with less "
-            f"room than its streams had already set aside, it refuses every change, a lowered limit too, until it "
-            f"has more. The streams made so far stay; once the limits fit, the next start {finishes}.")
+            f"NATS has no room to set aside {_limit(change.config):,} bytes for {change.what}"
+            f"{setting}: {refused} {self._totals(change.team, room)}"
+            f"{self._bundled_room(room, room.used + pending * room.copies)} {_lower(change)}, or give NATS more "
+            f"storage (free disk space and restart the instance, or an external server's max_file_store). If NATS "
+            f"started with less room than its streams had already set aside, it refuses every change, a lowered limit "
+            f"too, until it has more. The streams made so far stay; once the limits fit, the next start {finishes}.")
 
     async def _cluster_storage_refusal(self, change: StreamChange, action: str,
                                        error: APIError) -> StreamStorageRefused:
@@ -691,8 +705,11 @@ class QueueTopology:
         """The most consumers one of the instance's streams takes: the contract's largest ``max_consumers``, buckets and object stores too."""
 
         streams = [int(spec.get("max_consumers", 0)) for spec in self._transport["streams"].values()]
+        advisories = self._transport.get("delivery_advisories")
+        advisory_consumers = int(advisories.get("max_consumers", 0)) if isinstance(advisories, Mapping) else 0
         return max([
             *streams,
+            advisory_consumers,
             int(self._transport["key_value_stream"].get("max_consumers", 0)),
             int(self._transport["object_store_stream"].get("max_consumers", 0)),
         ])
@@ -721,7 +738,7 @@ class QueueTopology:
         if team is None:
             return _first_upper(account)
         streams = team_queue_streams(self._transport, team, self.partitions)
-        total = streams_set_aside(streams, self.limits.max_bytes)
+        total = streams_set_aside(streams, self.limits.max_bytes) + delivery_advisory_max_bytes(self._transport)
         partition = self.limits.max_bytes["partition"]
         others = ", ".join(f"{stream.setting} {self.limits.max_bytes[stream.kind]:,}"
                            for stream in streams if stream.partition is None)
@@ -749,7 +766,8 @@ class QueueTopology:
         shared = len(self._transport["key_value"]) - team_buckets
         object_stores = len(self._transport["object_store"])
         store_noun = "object store" if object_stores == 1 else "object stores"
-        others = queue_streams_per_team(self._transport, self.partitions) - self.partitions
+        advisory = 1 if "delivery_advisories" in self._transport else 0
+        others = queue_streams_per_team(self._transport, self.partitions) - self.partitions + advisory
         return (f"A team needs {self.partitions + others + team_buckets:,} streams at partition count "
                 f"{self.partitions} ({self.partitions} partition streams, {others} more and {team_buckets} buckets), "
                 f"and the installation {shared} buckets and {object_stores} {store_noun} of its own.")

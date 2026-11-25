@@ -1186,8 +1186,12 @@ def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
                  for subject in services["publish"]
                  if subject.startswith(("$JS.API.CONSUMER.INFO.", "$JS.API.CONSUMER.MSG.NEXT.", "$JS.ACK."))
                  and subject not in buckets}
-    # Their inbox's copies and their team's dead-letter notices (README, "Dead letters").
-    assert consumers == {TRANSPORT["consumers"]["team_services"]["name"], TRANSPORT["consumers"]["dead_letters"]["name"]}
+    # Their inbox's copies, dead-letter notices, and delivery-limit advisories (README, "Dead letters").
+    assert consumers == {
+        TRANSPORT["consumers"]["team_services"]["name"],
+        TRANSPORT["consumers"]["dead_letters"]["name"],
+        TRANSPORT["delivery_advisories"]["consumers"]["team_services"]["name"],
+    }
     listed_streams = {subject.removeprefix("$JS.API.CONSUMER.LIST.")
                       for subject in services["publish"] if subject.startswith("$JS.API.CONSUMER.LIST.")}
     assert listed_streams == set(TRANSPORT["withdrawal"]["streams"])
@@ -2030,7 +2034,10 @@ def test_only_the_team_services_read_their_teams_dead_letters() -> None:
             assert set(reads) == {"$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.dlq~{team}",
                                   "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_{team}.dlq~{team}", "$JS.ACK.UA1_DLQ_{team}.dlq~{team}.>",
                                   "$JS.API.STREAM.INFO.UA1_DLQ_{team}",
-                                  "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
+                                  "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}",
+                                  "$JS.API.CONSUMER.INFO.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
+                                  "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
+                                  "$JS.ACK.UA1_DLQ_ADVISORY_{team}.adv_team~{team}.>"}
         elif role == TRANSPORT["topology_owner"]:
             # Its grants name every stream of the account, this one included, which is how it could read
             # the copies (README, "Dead letters"); none names this stream.
@@ -4135,3 +4142,57 @@ def test_asyncapi_accepts_complete_frames_and_references_reply_channel_messages(
             assert channel_name in document["channels"]
             for message in reply["messages"]:
                 assert message["$ref"].startswith(channel_path + "/messages/")
+
+
+def test_delivery_advisories_contract_rules_and_permissions() -> None:
+    """F1: transport.yaml delivery_advisories rules and generated per-role pull/ack permissions."""
+
+    adv = TRANSPORT["delivery_advisories"]
+    assert adv["stream"] == "UA1_DLQ_ADVISORY_{team}"
+    assert adv["subject_prefix"] == "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES"
+    assert adv["retention"] == "workqueue" and adv["discard"] == "new"
+    assert adv["max_age_seconds"] >= max(
+        TRANSPORT["streams"][s]["max_age_seconds"] for s in TRANSPORT["classes"]["durable"]["streams"]
+    )
+
+    ts_perms = json.loads((CONTRACT / "generated/permissions/team_services.json").read_text())["publish"]
+    auth_perms = json.loads((CONTRACT / "generated/permissions/installation_authority.json").read_text())["publish"]
+    worker_perms = json.loads((CONTRACT / "generated/permissions/worker_host.json").read_text())["publish"]
+    for grant in (
+        "$JS.API.CONSUMER.INFO.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
+        "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
+        "$JS.ACK.UA1_DLQ_ADVISORY_{team}.adv_team~{team}.>",
+    ):
+        assert grant in ts_perms
+        assert grant not in worker_perms
+    # Installation authority pulls adv_auth~{team} via account-wide TOPOLOGY_OWNER_GRANTS (no per-team $JS.* lines).
+    for grant in (
+        "$JS.API.CONSUMER.INFO.*.*",
+        "$JS.API.CONSUMER.MSG.NEXT.*.*",
+        "$JS.ACK.*.*.>",
+    ):
+        assert grant in auth_perms
+        assert grant not in ts_perms
+        assert grant not in worker_perms
+    for grant in (
+        "$JS.API.CONSUMER.INFO.UA1_DLQ_ADVISORY_{team}.adv_auth~{team}",
+        "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_ADVISORY_{team}.adv_auth~{team}",
+        "$JS.ACK.UA1_DLQ_ADVISORY_{team}.adv_auth~{team}.>",
+    ):
+        assert grant not in ts_perms
+        assert grant not in worker_perms
+
+    registry = EXPORT.load_yaml("registry.yaml")
+    for change, problem in (
+        (lambda t: t["delivery_advisories"].update(retention="limits"), "retention is workqueue"),
+        (lambda t: t["delivery_advisories"].update(discard="old"), "discard is new"),
+        (lambda t: t["delivery_advisories"].update(max_age_seconds=60), "at least the durable work streams"),
+        (lambda t: t["delivery_advisories"]["consumers"]["installation_authority"]["streams"].append("UA1_POOL_WORK_{team}"),
+         "must be disjoint"),
+        (lambda t: t["delivery_advisories"]["consumers"]["team_services"]["streams"].remove("UA1_EDGE_WORK_{team}"),
+         "must cover every durable work stream"),
+    ):
+        mutated = copy.deepcopy(TRANSPORT)
+        change(mutated)
+        with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+            EXPORT.check_delivery_advisories(registry, mutated)
