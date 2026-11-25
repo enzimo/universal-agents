@@ -197,7 +197,7 @@ class GatewayAccessWorkflowPage:
             ):
                 continue
             can_decide = requests.may_decide(person, request)
-            view = self.access_inbox.review_view(requests, request, can_decide=can_decide)
+            view = self.access_inbox.review_view(requests, request, can_decide=can_decide, viewer_id=owner_id)
             reviews.append({**view, "step_id": step_id, "review_url": self.access_inbox.review_url(request_id)})
         return reviews
 

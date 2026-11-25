@@ -606,3 +606,225 @@ def test_work_handed_to_another_thread_does_not_join_a_decision_on_postgres(sett
         store.finish_request(request.model_copy(update={"status": AccessRequestStatus.GRANTED, "grant_ids": ("grant_undecided",)}))
 
     assert asyncio.run(read_elsewhere()).status.value == "active"
+
+
+def test_tool_removal_apply_together_and_revoke_links_for_tools_on_postgres(settings) -> None:
+    """F4: exercise apply_together(revoke_tool_ids=...) and revoke_links_for_tools on real PostgreSQL."""
+
+    from custom_messages.contracts.access_v2 import (
+        AccountSharing,
+        AccountSharingV1,
+        CredentialInjectionV1,
+        GrantKind,
+        GrantStatus,
+        InjectionPlacement,
+        LinkPurpose,
+        ToolSetupState,
+        ToolSetupStateV1,
+    )
+
+    store = AccessRepository(settings)
+    later = NOW + timedelta(minutes=5)
+    agent = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect")
+    worker = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/Worker")
+
+    def grant(
+        grant_id: str,
+        *,
+        tool_id: str,
+        kind: GrantKind = GrantKind.ACCESS,
+        target_kind: TargetKind = TargetKind.TOOL,
+        status: GrantStatus = GrantStatus.ACTIVE,
+        subject: SubjectRefV1 = agent,
+    ) -> GrantV1:
+        return GrantV1(
+            grant_id=grant_id,
+            team_id=TEAM,
+            kind=kind,
+            subject=subject,
+            target=TargetRefV1(kind=target_kind, id=tool_id),
+            level=AccessLevel.FULL if kind is GrantKind.BLOCK else AccessLevel.READ,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            status=status,
+            granted_by=OWNER,
+            created_at_utc=NOW,
+            for_person_id=PERSON if kind is GrantKind.ACCESS else None,
+        )
+
+    def link(
+        link_id: str,
+        *,
+        tool_id: str,
+        owner_kind: LinkOwnerKind,
+        owner_id: str,
+        purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+    ) -> AccountLinkV1:
+        injections = (
+            (CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="X-Gate", field="secret"),)
+            if purpose is LinkPurpose.GATE
+            else ()
+        )
+        return AccountLinkV1(
+            link_id=link_id,
+            team_id=TEAM,
+            tool_id=tool_id,
+            owner_kind=owner_kind,
+            owner_id=owner_id,
+            purpose=purpose,
+            credential_key=f"cred_{link_id}",
+            injections=injections,
+            status=AccountLinkStatus.ACTIVE,
+            created_by=OWNER,
+            created_at_utc=NOW,
+        )
+
+    def setup_state(person_id: str, tool_id: str) -> ToolSetupStateV1:
+        return ToolSetupStateV1(
+            team_id=TEAM,
+            person_id=person_id,
+            tool_id=tool_id,
+            state=ToolSetupState.READY,
+            how="team_link",
+            source="gateway",
+            checked_at_utc=NOW,
+            changed_at_utc=NOW,
+        )
+
+    # 1. apply_together(revoke_tool_ids=...) — grants, pending grants, blocks, links, setup states, account_sharing.
+    store.create(grant("g_pg_active", tool_id="http:api"))
+    store.create(grant("g_pg_pending", tool_id="http:api", status=GrantStatus.PENDING))
+    store.create(grant("b_pg_tool", tool_id="http:api", kind=GrantKind.BLOCK, subject=worker))
+    store.create(
+        grant("b_pg_op", tool_id="http:api#route:delete", kind=GrantKind.BLOCK, target_kind=TargetKind.OPERATION, subject=worker)
+    )
+    store.create(grant("g_pg_sibling", tool_id="http:api.v2"))
+    store.create(
+        grant(
+            "b_pg_sibling_op",
+            tool_id="http:api.v2#route:delete",
+            kind=GrantKind.BLOCK,
+            target_kind=TargetKind.OPERATION,
+            subject=worker,
+        )
+    )
+    store.create_link(link("l_pg_team", tool_id="http:api", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM))
+    store.create_link(link("l_pg_person", tool_id="http:api", owner_kind=LinkOwnerKind.PERSON, owner_id=PERSON))
+    store.create_link(
+        link("l_pg_gate", tool_id="http:api", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM, purpose=LinkPurpose.GATE)
+    )
+    store.create_link(link("l_pg_sibling", tool_id="http:api.v2", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM))
+    store.put_tool_setup_state(setup_state(PERSON, "http:api"))
+    store.put_tool_setup_state(setup_state(PERSON, "http:api.v2"))
+    for tool_id in ("http:api", "http:api.v2"):
+        store.set_account_sharing(
+            AccountSharingV1(
+                team_id=TEAM,
+                subject=tool_id,
+                sharing=AccountSharing.PRIVATE,
+                changed_by_person_id=OWNER.id,
+                changed_at_utc=NOW,
+            )
+        )
+
+    version_before = store.version(TEAM)
+    checked_grants: list[str] = []
+
+    def refuse_grants(live_grants: list[GrantV1]) -> None:
+        checked_grants.extend(item.grant_id for item in live_grants)
+        raise PermissionError("refused grants check")
+
+    with pytest.raises(PermissionError, match="refused grants check"):
+        store.apply_together(
+            TEAM,
+            revoke_tool_ids=("http:api",),
+            check_tool_removal_grants=refuse_grants,
+            actor=OWNER,
+            at=later,
+        )
+    assert set(checked_grants) == {"g_pg_active", "g_pg_pending", "b_pg_tool", "b_pg_op"}
+    assert store.version(TEAM) == version_before
+    assert store.get("g_pg_active").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+    assert store.get_link("l_pg_team").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+    assert store.account_sharing(TEAM, "http:api") is not None
+
+    checked_links: list[str] = []
+
+    def refuse_links(live_links: list[AccountLinkV1]) -> None:
+        checked_links.extend(item.link_id for item in live_links)
+        raise PermissionError("refused links check")
+
+    with pytest.raises(PermissionError, match="refused links check"):
+        store.apply_together(
+            TEAM,
+            revoke_tool_ids=("http:api",),
+            check_tool_removal_grants=lambda _grants: None,
+            check_tool_removal_links=refuse_links,
+            actor=OWNER,
+            at=later,
+        )
+    assert set(checked_links) == {"l_pg_team", "l_pg_person", "l_pg_gate"}
+    assert store.version(TEAM) == version_before
+    assert store.get("g_pg_active").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+    assert store.get_link("l_pg_gate").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+
+    store.apply_together(
+        TEAM,
+        revoke_tool_ids=("http:api",),
+        check_tool_removal_grants=lambda _grants: None,
+        check_tool_removal_links=lambda _links: None,
+        actor=OWNER,
+        at=later,
+    )
+    assert store.version(TEAM) == version_before + 1
+    for gid in ("g_pg_active", "g_pg_pending", "b_pg_tool", "b_pg_op"):
+        assert store.get(gid).status is GrantStatus.REVOKED  # type: ignore[union-attr]
+    assert store.get("g_pg_sibling").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+    assert store.get("b_pg_sibling_op").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+    for lid in ("l_pg_team", "l_pg_person", "l_pg_gate"):
+        assert store.get_link(lid).status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
+    assert store.get_link("l_pg_sibling").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+    assert [(s.person_id, s.tool_id) for s in store.tool_setup_states(TEAM)] == [(PERSON, "http:api.v2")]
+    assert store.account_sharing(TEAM, "http:api") is None
+    assert store.account_sharing(TEAM, "http:api.v2") is not None
+
+    # 2. revoke_links_for_tools — revokes grants, blocks, and links, clears setup states and account_sharing.
+    store.create(grant("g_pg_direct_active", tool_id="http:gitea"))
+    store.create(grant("g_pg_direct_pending", tool_id="http:gitea", status=GrantStatus.PENDING))
+    store.create(
+        grant(
+            "b_pg_direct_op",
+            tool_id="http:gitea#route:delete",
+            kind=GrantKind.BLOCK,
+            target_kind=TargetKind.OPERATION,
+            subject=worker,
+        )
+    )
+    store.create_link(link("l_pg_direct_acct", tool_id="http:gitea", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM))
+    store.create_link(
+        link("l_pg_direct_gate", tool_id="http:gitea", owner_kind=LinkOwnerKind.TEAM, owner_id=TEAM, purpose=LinkPurpose.GATE)
+    )
+    store.put_tool_setup_state(setup_state(PERSON, "http:gitea"))
+    store.set_account_sharing(
+        AccountSharingV1(
+            team_id=TEAM,
+            subject="http:gitea",
+            sharing=AccountSharing.PRIVATE,
+            changed_by_person_id=OWNER.id,
+            changed_at_utc=NOW,
+        )
+    )
+
+    version_before_direct = store.version(TEAM)
+    revoked_links = store.revoke_links_for_tools(TEAM, ("http:gitea",), actor=OWNER, at=later)
+    assert set(revoked_links) == {"l_pg_direct_acct", "l_pg_direct_gate"}
+    assert store.version(TEAM) == version_before_direct + 1
+    for gid in ("g_pg_direct_active", "g_pg_direct_pending", "b_pg_direct_op"):
+        assert store.get(gid).status is GrantStatus.REVOKED  # type: ignore[union-attr]
+    for lid in ("l_pg_direct_acct", "l_pg_direct_gate"):
+        assert store.get_link(lid).status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
+    assert [(s.person_id, s.tool_id) for s in store.tool_setup_states(TEAM)] == [(PERSON, "http:api.v2")]
+    assert store.account_sharing(TEAM, "http:gitea") is None
+    assert store.account_sharing(TEAM, "http:api.v2") is not None
+    # Idempotent second call does not bump version again.
+    assert store.revoke_links_for_tools(TEAM, ("http:gitea",), actor=OWNER, at=later) == []
+    assert store.version(TEAM) == version_before_direct + 1

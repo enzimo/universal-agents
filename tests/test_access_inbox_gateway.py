@@ -1368,5 +1368,203 @@ def test_tool_removal_inbox_redacts_other_peoples_records_for_non_admin_viewers(
             for hidden_id in ("g_member2_secret", "g_user_member2", "b_member2_private", "l_member2_secret", "member-2"):
                 assert hidden_id not in rows_text
                 assert hidden_id not in effect_text
+
+        # F1: viewer=None (omitted viewer_id) fails closed — overview stays visible, all detail rows are omitted.
+        stored_request = store.get_request(request_id)
+        assert stored_request is not None
+        anonymous_view = inbox.review_view(requests, stored_request, can_decide=False)
+        assert [row["item_id"] for row in anonymous_view["rows"]] == ["remove-0"]
+        assert len(anonymous_view["effect"]) == 1
+        assert "Remove web API tool Gitea (http:gitea)" in anonymous_view["effect"][0]
+        for detail_id in (
+            "g_member1",
+            "g_teamwide",
+            "g_member2_secret",
+            "g_user_member2",
+            "b_teamwide",
+            "b_member2_private",
+            "l_team",
+            "l_member1",
+            "l_member2_secret",
+        ):
+            assert detail_id not in "\n".join(row["text"] for row in anonymous_view["rows"])
+            assert detail_id not in "\n".join(anonymous_view["effect"])
+
+        # F1 & F2: malformed detail rows and cross-team records fail closed for non-admin viewers.
+        from custom_messages.contracts.access_v2 import ReviewItemV1
+
+        store.create(
+            GrantV1(
+                grant_id="g_other_team",
+                team_id="team-other",
+                kind=GrantKind.ACCESS,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"team-other/{LEAD}"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.READ,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id="member-1",
+            )
+        )
+        store.create_link(
+            AccountLinkV1(
+                link_id="l_other_team",
+                team_id="team-other",
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id="member-1",
+                purpose=LinkPurpose.ACCOUNT,
+                credential_key="cred_other_team",
+                status=AccountLinkStatus.ACTIVE,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="member-1"),
+                created_at_utc=now,
+            )
+        )
+        malformed_row = ReviewItemV1(
+            item_id="remove-0-link-99",
+            section="tool_removal",
+            text="Revoke active personal account link l_unparseable without colon",
+        )
+        other_team_grant_row = ReviewItemV1(
+            item_id="remove-0-grant-99",
+            section="tool_removal",
+            text="Revoke active grant g_other_team: TeamArchitect loses read access to Gitea (http:gitea).",
+        )
+        other_team_link_row = ReviewItemV1(
+            item_id="remove-0-link-98",
+            section="tool_removal",
+            text="Revoke active personal account link l_other_team: for member-1 on Gitea (http:gitea).",
+        )
+        assert GatewayAccessInbox._tool_removal_row_visible(requests, member1, malformed_row) is False
+        assert GatewayAccessInbox._tool_removal_row_visible(requests, member1, other_team_grant_row) is False
+        assert GatewayAccessInbox._tool_removal_row_visible(requests, member1, other_team_link_row) is False
+    finally:
+        inbox.close()
+
+
+def test_tool_removal_inbox_shows_own_link_when_person_id_contains_on(tmp_path: Path) -> None:
+    """F2: a non-admin viewer whose person_id contains ' on ' still sees her own link row in the Inbox."""
+
+    from access_catalog.instance_tools import write_instance_tool
+    from access_control.proposals import ACCESS_PROPOSAL_KIND, proposal_summary, with_tool_removal_baselines
+    from custom_messages.contracts.access_v2 import (
+        AccessProposalV1,
+        AccountLinkStatus,
+        AccountLinkV1,
+        LinkOwnerKind,
+        LinkPurpose,
+        ProposedHttpToolV1,
+        ProposedToolRemovalV1,
+        SubjectKind,
+        SubjectRefV1,
+    )
+
+    alice_id = "Alice on Call"
+    instance_root = tmp_path / "instance"
+    write_instance_tool(
+        instance_root,
+        ProposedHttpToolV1(
+            tool_id="http:gitea",
+            display_name="Gitea",
+            hosts=("gitea.example.com",),
+            uses_credential=True,
+        ),
+    )
+
+    storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
+    identity = Identity({"owner-1": "owner", alice_id: "member", "member-2": "member"})
+    sessions = {"conv-alice": session(alice_id, "conv-alice", "s-alice")}
+    manager = Manager()
+
+    async def emit(_event: Any) -> None:
+        return None
+
+    inbox = GatewayAccessInbox(
+        settings=GatewayAccessInboxSettings(
+            team_id=TEAM,
+            instance_name="test",
+            response_route="gateway-route",
+            lead_agent_type=LEAD,
+            inbox_url="https://ua.example/webchat",
+            instance_root=instance_root,
+            storage_settings=storage,
+            cedar_binary=str(BINARY),
+            authorization_enabled=True,
+        ),
+        memberships=MembershipRoles(identity),
+        manager_client=manager,
+        session_repository=SimpleNamespace(get_session_by_conversation_id=sessions.get),
+        proactive_session=lambda: session("owner-1", "conv-default", "s-default"),
+        emit_delivery_event=emit,
+    )
+    try:
+        requests = inbox.requests()
+        store = requests.service.store
+        now = datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc)
+        for link in (
+            AccountLinkV1(
+                link_id="l_alice_on_call",
+                team_id=TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id=alice_id,
+                purpose=LinkPurpose.ACCOUNT,
+                credential_key="cred_alice",
+                status=AccountLinkStatus.ACTIVE,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id=alice_id),
+                created_at_utc=now,
+            ),
+            AccountLinkV1(
+                link_id="l_member2_hidden",
+                team_id=TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id="member-2",
+                purpose=LinkPurpose.ACCOUNT,
+                credential_key="cred_m2",
+                status=AccountLinkStatus.ACTIVE,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="member-2"),
+                created_at_utc=now,
+            ),
+        ):
+            store.create_link(link)
+
+        alice = inbox.person(alice_id)
+        assert alice is not None
+        proposal = with_tool_removal_baselines(
+            AccessProposalV1(
+                title="Remove Gitea",
+                reason="Retired.",
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea"),),
+            ),
+            instance_root=instance_root,
+            catalog=requests.service.catalog,
+        )
+        compiled = inbox.proposals.compiler(requests).compile(proposal, person=alice, task_id="task-alice")
+        store.save_plan(TEAM, "chg_rm_on", ACCESS_PROPOSAL_KIND, compiled.digest, proposal.model_dump(mode="json"), at=now)
+        requests.submit_change(
+            requester=LEAD_AGENT,
+            person=alice,
+            proposal=ChangeProposalV1(
+                kind=ACCESS_PROPOSAL_KIND,
+                change_id="chg_rm_on",
+                plan_digest=compiled.digest,
+                title=proposal.title,
+                summary=proposal_summary(compiled.rows),
+                effect=tuple(row.text[:1000] for row in compiled.rows[:40]),
+                items=compiled.rows,
+            ),
+            reason=proposal.reason,
+            task_id="task-alice",
+            conversation_id="conv-alice",
+        )
+
+        [alice_view] = asyncio.run(inbox.inbox(alice_id))["reviews"]
+        rows_text = "\n".join(row["text"] for row in alice_view["rows"])
+        effect_text = "\n".join(alice_view["effect"])
+        assert "l_alice_on_call" in rows_text and "l_alice_on_call" in effect_text
+        assert "l_member2_hidden" not in rows_text and "l_member2_hidden" not in effect_text
     finally:
         inbox.close()

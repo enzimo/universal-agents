@@ -1412,9 +1412,9 @@ def test_tool_removal_rows_compiler_summary_bounded_text_and_80_row_cap(
     assert "b_tool" in by_id["remove-0-block-0"] and "tool block" in by_id["remove-0-block-0"]
     assert "b_op" in by_id["remove-0-block-1"] and "operation route:delete" in by_id["remove-0-block-1"]
     link_texts = [by_id[f"remove-0-link-{i}"] for i in range(3)]
-    assert any("l_team_acct" in text and "team account link" in text for text in link_texts)
-    assert any("l_person_acct" in text and "personal account link for alice" in text for text in link_texts)
-    assert any("l_team_gate" in text and "team gate credential link" in text for text in link_texts)
+    assert any("team account link l_team_acct: on Gitea (http:gitea)." in text for text in link_texts)
+    assert any("personal account link l_person_acct: for alice on Gitea (http:gitea)." in text for text in link_texts)
+    assert any("team gate credential link l_team_gate: on Gitea (http:gitea)." in text for text in link_texts)
     assert "l_revoked" not in " ".join(link_texts)
 
     # CLI overview row is compact (even with 300 commands), notes workspace files stay untouched, and notes no impact.
@@ -2689,11 +2689,121 @@ def test_f2_refuses_new_unreviewed_grants_blocks_or_links_added_after_submission
         assert "event=proposal_tool_removal_impact_changed" in caplog.text
         assert http_file.exists() and http_file.read_bytes() == original_bytes
         assert service.store.get("g_post_submit").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+        assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING  # type: ignore[union-attr]
         service.store.revoke("g_post_submit", actor=owner_ref, at=now)
 
-        # 2. New active credential link racing in AFTER file staging (inside apply_together lock) ->
-        # refused under DB write lock, link stays ACTIVE, and staged file is restored cleanly!
+        # 2. New active block added before approval -> refused before touching disk.
+        new_block = GrantV1(
+            grant_id="b_post_submit",
+            team_id=team,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/Worker"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="http:clean"),
+            level=AccessLevel.FULL,
+            granted_by=owner_ref,
+            created_at_utc=now,
+        )
+        service.store.create(new_block)
+        caplog.clear()
+        with pytest.raises(HandDownRefused, match="New access grants or restrictions were added"):
+            requests().decide(req_id, owner, AccessReviewChoice.APPROVE)
+        assert "event=proposal_tool_removal_impact_changed" in caplog.text
+        assert "b_post_submit" in caplog.text
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert service.store.get("b_post_submit").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+        assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING  # type: ignore[union-attr]
+        service.store.revoke("b_post_submit", actor=owner_ref, at=now)
+
+        # 3. New pending grant added before approval -> refused before touching disk.
+        new_pending = GrantV1(
+            grant_id="g_pending_post_submit",
+            team_id=team,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/Worker"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="http:clean"),
+            level=AccessLevel.READ,
+            status=GrantStatus.PENDING,
+            granted_by=owner_ref,
+            created_at_utc=now,
+        )
+        service.store.create(new_pending)
+        caplog.clear()
+        with pytest.raises(HandDownRefused, match="New access grants or restrictions were added"):
+            requests().decide(req_id, owner, AccessReviewChoice.APPROVE)
+        assert "event=proposal_tool_removal_impact_changed" in caplog.text
+        assert "g_pending_post_submit" in caplog.text
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert service.store.get("g_pending_post_submit").status is GrantStatus.PENDING  # type: ignore[union-attr]
+        assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING  # type: ignore[union-attr]
+        service.store.revoke("g_pending_post_submit", actor=owner_ref, at=now)
+
+        # 4. New active grant racing in AFTER file staging (inside apply_together lock) ->
+        # refused under DB write lock, DB state unchanged, and staged file restored cleanly.
         real_remove = proposals_mod.remove_proposed_tool_file
+        raced_grant = GrantV1(
+            grant_id="g_raced_in",
+            team_id=team,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="http:clean"),
+            level=AccessLevel.READ,
+            granted_by=owner_ref,
+            created_at_utc=now,
+        )
+        version_after_grant_race: dict[str, int] = {}
+
+        def inject_grant_after_staging(*args, **kwargs):
+            result = real_remove(*args, **kwargs)
+            assert not http_file.exists()
+            service.store.create(raced_grant)
+            version_after_grant_race["v"] = service.store.version(team)
+            return result
+
+        with monkeypatch.context() as race_ctx:
+            race_ctx.setattr(proposals_mod, "remove_proposed_tool_file", inject_grant_after_staging)
+            with pytest.raises(HandDownRefused, match="New access grants or restrictions were added"):
+                requests().decide(req_id, owner, AccessReviewChoice.APPROVE)
+
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert list(http_file.parent.glob(".removed-*.tmp")) == []
+        assert service.store.version(team) == version_after_grant_race["v"]
+        assert service.store.get("g_raced_in").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+        assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING  # type: ignore[union-attr]
+        service.store.revoke("g_raced_in", actor=owner_ref, at=now)
+
+        # 5. New active block racing in AFTER file staging (inside apply_together lock) ->
+        # refused under DB write lock, DB state unchanged, and staged file restored cleanly.
+        raced_block = GrantV1(
+            grant_id="b_raced_in",
+            team_id=team,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{team}/Worker"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="http:clean"),
+            level=AccessLevel.FULL,
+            granted_by=owner_ref,
+            created_at_utc=now,
+        )
+        version_after_block_race: dict[str, int] = {}
+
+        def inject_block_after_staging(*args, **kwargs):
+            result = real_remove(*args, **kwargs)
+            assert not http_file.exists()
+            service.store.create(raced_block)
+            version_after_block_race["v"] = service.store.version(team)
+            return result
+
+        with monkeypatch.context() as race_ctx:
+            race_ctx.setattr(proposals_mod, "remove_proposed_tool_file", inject_block_after_staging)
+            with pytest.raises(HandDownRefused, match="New access grants or restrictions were added"):
+                requests().decide(req_id, owner, AccessReviewChoice.APPROVE)
+
+        assert http_file.exists() and http_file.read_bytes() == original_bytes
+        assert list(http_file.parent.glob(".removed-*.tmp")) == []
+        assert service.store.version(team) == version_after_block_race["v"]
+        assert service.store.get("b_raced_in").status is GrantStatus.ACTIVE  # type: ignore[union-attr]
+        assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING  # type: ignore[union-attr]
+        service.store.revoke("b_raced_in", actor=owner_ref, at=now)
+
+        # 6. New active credential link racing in AFTER file staging (inside apply_together lock) ->
+        # refused under DB write lock, link stays ACTIVE, and staged file is restored cleanly!
         raced_link = AccountLinkV1(
             link_id="l_raced_in",
             team_id=team,
@@ -2705,11 +2815,13 @@ def test_f2_refuses_new_unreviewed_grants_blocks_or_links_added_after_submission
             created_by=owner_ref,
             created_at_utc=now,
         )
+        version_after_link_race: dict[str, int] = {}
 
         def inject_link_after_staging(*args, **kwargs):
             result = real_remove(*args, **kwargs)
             assert not http_file.exists()
             service.store.create_link(raced_link)
+            version_after_link_race["v"] = service.store.version(team)
             return result
 
         with monkeypatch.context() as race_ctx:
@@ -2719,8 +2831,94 @@ def test_f2_refuses_new_unreviewed_grants_blocks_or_links_added_after_submission
 
         assert http_file.exists() and http_file.read_bytes() == original_bytes
         assert list(http_file.parent.glob(".removed-*.tmp")) == []
+        assert service.store.version(team) == version_after_link_race["v"]
         assert service.store.get_link("l_raced_in").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
         assert service.store.get_request(req_id).status is AccessRequestStatus.WAITING  # type: ignore[union-attr]
+    finally:
+        world["cleanup"]()
+
+
+def test_link_row_parsing_and_approval_succeed_when_owner_id_contains_on_or_colon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2: link_id precedes free-form owner_id with ':' so ' on ' in owner_id never breaks impact locking."""
+
+    import asyncio
+
+    from strands.interrupt import InterruptException
+
+    from access_control.tool_removals import (
+        is_tool_removal_overview_row,
+        parse_tool_removal_row_target,
+        reviewed_removal_impact_ids,
+    )
+    from custom_agents import access_runtime
+    from custom_messages.contracts.access_v2 import AccessReviewChoice
+    from custom_tools.providers.access_proposals import propose_access_change
+    from tests.test_access_request_tools import Context
+
+    # Direct parser check with ' on ' and ':' inside owner_id, plus malformed detail rows.
+    world = _build_real_world(tmp_path, monkeypatch)
+    try:
+        instance = world["instance"]
+        service = world["service"]
+        requests = world["requests"]
+        owner = world["owner"]
+        team = world["team"]
+
+        http_file = write_instance_tool(instance, _http_tool("http:oncall", "oncall.example.com"))
+        access_runtime._runtime_access.cache_clear()
+        now = service.clock()
+        tricky_owner = "Alice on Call: Primary"
+        personal_link = service.store.create_link(
+            AccountLinkV1(
+                link_id="l_alice_on_call",
+                team_id=team,
+                tool_id="http:oncall",
+                purpose=LinkPurpose.ACCOUNT,
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id=tricky_owner,
+                credential_key="cred-alice-on-call",
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id=tricky_owner),
+                created_at_utc=now,
+            )
+        )
+
+        ctx = Context("tooluse-f2-owner-on")
+        with pytest.raises(InterruptException):
+            asyncio.run(
+                propose_access_change(
+                    title="Remove On-Call Tool",
+                    reason="Decommissioned.",
+                    tool_context=ctx,
+                    tool_removals=[{"tool_id": "http:oncall"}],
+                )
+            )
+        req_id = ctx.raised[0]["access_request_id"]
+        waiting = service.store.get_request(req_id)
+        assert waiting is not None and waiting.change is not None
+        assert is_tool_removal_overview_row(waiting.change.items[0]) is True
+        link_rows = [item for item in waiting.change.items if item.item_id == "remove-0-link-0"]
+        assert len(link_rows) == 1
+        assert is_tool_removal_overview_row(link_rows[0]) is False
+        assert f"personal account link {personal_link.link_id}: for {tricky_owner} on " in link_rows[0].text
+        assert parse_tool_removal_row_target(link_rows[0]) == ("link", personal_link.link_id)
+        _, reviewed_links = reviewed_removal_impact_ids(waiting.change.items)
+        assert reviewed_links == frozenset({personal_link.link_id})
+        # Malformed detail row without ':' returns None rather than guessing.
+        malformed = ReviewItemV1(
+            item_id="remove-0-link-99",
+            section="tool_removal",
+            text="Revoke active personal account link l_bad on OnCall",
+        )
+        assert is_tool_removal_overview_row(malformed) is False
+        assert parse_tool_removal_row_target(malformed) is None
+
+        # Approval succeeds (not refused as unreviewed_links) and revokes the link.
+        decided = requests().decide(req_id, owner, AccessReviewChoice.APPROVE)
+        assert decided.status is AccessRequestStatus.GRANTED
+        assert not http_file.exists()
+        assert service.store.get_link(personal_link.link_id).status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
     finally:
         world["cleanup"]()
 

@@ -453,17 +453,21 @@ def _link_impact_rows(
     rows: list[ReviewItemV1] = []
     for link_index, link in enumerate(links):
         if link.purpose is LinkPurpose.GATE:
-            kind_words = "team gate credential link"
-        elif link.owner_kind is LinkOwnerKind.TEAM:
-            kind_words = "team account link"
-        else:
-            kind_words = f"personal account link for {link.owner_id}"
-        rows.append(
-            _review_row(
-                f"remove-{index}-link-{link_index}",
-                f"Revoke active {kind_words} {link.link_id} on {definition.display_name} ({definition.tool_id}).",
+            text = (
+                f"Revoke active team gate credential link {link.link_id}: "
+                f"on {definition.display_name} ({definition.tool_id})."
             )
-        )
+        elif link.owner_kind is LinkOwnerKind.TEAM:
+            text = (
+                f"Revoke active team account link {link.link_id}: "
+                f"on {definition.display_name} ({definition.tool_id})."
+            )
+        else:
+            text = (
+                f"Revoke active personal account link {link.link_id}: "
+                f"for {link.owner_id} on {definition.display_name} ({definition.tool_id})."
+            )
+        rows.append(_review_row(f"remove-{index}-link-{link_index}", text))
     return rows
 
 
@@ -503,11 +507,18 @@ def tool_removal_rows(
     ]
 
 
+_OVERVIEW_ROW_ID = re.compile(r"^remove-\d+(?:-hosts-\d+)?$")
 _IMPACT_ROW_ID = re.compile(r"^remove-\d+-(grant|block|link)-\d+$")
 
 
+def is_tool_removal_overview_row(item: ReviewItemV1) -> bool:
+    """Whether ``item`` is a public tool-removal overview or host-list continuation row."""
+
+    return item.section == "tool_removal" and _OVERVIEW_ROW_ID.match(item.item_id) is not None
+
+
 def parse_tool_removal_row_target(item: ReviewItemV1) -> tuple[str, str] | None:
-    """Extract ``(kind, record_id)`` from a ``tool_removal`` detail row, or ``None`` for overview/host rows."""
+    """Extract ``(kind, record_id)`` from a ``tool_removal`` detail row, or ``None`` if not parseable."""
 
     if item.section != "tool_removal":
         return None
@@ -515,17 +526,11 @@ def parse_tool_removal_row_target(item: ReviewItemV1) -> tuple[str, str] | None:
     if matched is None:
         return None
     kind = matched.group(1)
-    if kind in {"grant", "block"}:
-        head, sep, _ = item.text.partition(":")
-        if not sep:
-            return None
-        record_id = head.rsplit(" ", 1)[-1].strip()
-        return (kind, record_id) if record_id else None
-    head, sep, _ = item.text.partition(" on ")
+    head, sep, _ = item.text.partition(":")
     if not sep:
         return None
     record_id = head.rsplit(" ", 1)[-1].strip()
-    return ("link", record_id) if record_id else None
+    return (kind, record_id) if record_id else None
 
 
 def reviewed_removal_impact_ids(items: Iterable[ReviewItemV1]) -> tuple[frozenset[str], frozenset[str]]:
@@ -552,6 +557,7 @@ __all__ = [
     "check_tool_removal_conflicts",
     "grant_targets_tool",
     "is_live_grant",
+    "is_tool_removal_overview_row",
     "load_removable_tool_file",
     "parse_tool_removal_row_target",
     "reviewed_removal_impact_ids",

@@ -1221,7 +1221,7 @@ test("tool-removal rows render under Tool removals (not New tools or Tool change
       { item_id: "remove-0", section: "tool_removal", text: "Remove web API tool Gitea (http:gitea); hosts: gitea.example.com. Revokes 1 active grant, 1 active block, and 1 active credential link.", flags: [] },
       { item_id: "remove-0-grant-0", section: "tool_removal", text: "Revoke active grant g_1: TeamArchitect loses read-and-change access to Gitea (http:gitea) (until removed, for owner-1's work).", flags: [] },
       { item_id: "remove-0-block-0", section: "tool_removal", text: "Revoke active operation block b_1: Worker on Gitea (http:gitea, operation route:delete) (until removed).", flags: [] },
-      { item_id: "remove-0-link-0", section: "tool_removal", text: "Revoke active team gate credential link l_1 on Gitea (http:gitea).", flags: [] },
+      { item_id: "remove-0-link-0", section: "tool_removal", text: "Revoke active team gate credential link l_1: on Gitea (http:gitea).", flags: [] },
     ],
     choices: [{ choice: "approve", label: "Approve" }, { choice: "deny", label: "Deny" }],
   });
@@ -1235,7 +1235,7 @@ test("tool-removal rows render under Tool removals (not New tools or Tool change
   assert.match(texts[0], /Remove web API tool Gitea \(http:gitea\)/);
   assert.match(texts[1], /Revoke active grant g_1/);
   assert.match(texts[2], /Revoke active operation block b_1/);
-  assert.match(texts[3], /Revoke active team gate credential link l_1/);
+  assert.match(texts[3], /Revoke active team gate credential link l_1:/);
 
   const compact = renderReviewCard(document, proposal, { formatTime, compact: true });
   const compactSections = byClass(compact, "access-review-row-section").map(node => node.textContent);

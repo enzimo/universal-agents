@@ -62,7 +62,7 @@ from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import PersonPrincipal, agent_role_resolver
 from access_control.people import effective_roles, is_administrator
-from access_control.tool_removals import parse_tool_removal_row_target
+from access_control.tool_removals import is_tool_removal_overview_row, parse_tool_removal_row_target
 from access_control.inbox import StoredAccessInbox
 from access_control.requests import (
     ACCESS_PROPOSAL_CHANGE,
@@ -443,20 +443,32 @@ class GatewayAccessInbox:
         return f"{self._memberships.display_name(request.person_id)}'s work"
 
     @staticmethod
-    def _tool_removal_row_visible(requests: AccessRequests, viewer: PersonPrincipal, item: ReviewItemV1) -> bool:
-        """Apply ``access_map.py`` privacy rules to ``tool_removal`` detail rows for non-administrators."""
+    def _tool_removal_row_visible(
+        requests: AccessRequests, viewer: PersonPrincipal | None, item: ReviewItemV1
+    ) -> bool:
+        """Apply ``access_map.py`` privacy rules to ``tool_removal`` detail rows for non-administrators.
 
+        Overview and host-continuation rows remain visible; any detail or unrecognized
+        ``tool_removal`` row fails closed when ``viewer`` is missing, the row cannot
+        be parsed, or the referenced record is missing or belongs to another team.
+        """
+
+        if is_tool_removal_overview_row(item):
+            return True
+        if viewer is None:
+            return False
         parsed = parse_tool_removal_row_target(item)
         if parsed is None:
-            return True
+            return False
+        team_id = requests.service.team_id
         kind, record_id = parsed
         if kind == "link":
             link = requests.service.store.get_link(record_id)
-            if link is None:
+            if link is None or link.team_id != team_id:
                 return False
             return link.owner_kind is LinkOwnerKind.TEAM or link.owner_id == viewer.person_id
         grant = requests.service.store.get(record_id)
-        if grant is None:
+        if grant is None or grant.team_id != team_id:
             return False
         if grant.subject.kind is SubjectKind.USER:
             return grant.subject.id == viewer.person_id
@@ -467,7 +479,7 @@ class GatewayAccessInbox:
         cls, requests: AccessRequests, request: AccessRequestV1, viewer: PersonPrincipal | None
     ) -> list[ReviewItemV1]:
         assert request.change is not None
-        if viewer is None or is_administrator(viewer.roles):
+        if viewer is not None and is_administrator(viewer.roles):
             return list(request.change.items)
         return [
             item
@@ -533,8 +545,7 @@ class GatewayAccessInbox:
 
         if request.change is not None:
             if (
-                viewer is not None
-                and not is_administrator(viewer.roles)
+                (viewer is None or not is_administrator(viewer.roles))
                 and request.change.items
                 and any(item.section == "tool_removal" for item in request.change.items)
             ):
