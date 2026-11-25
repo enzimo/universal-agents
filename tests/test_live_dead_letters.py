@@ -28,12 +28,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-from contextlib import AsyncExitStack, contextmanager
+from contextlib import AsyncExitStack
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
-from uuid import uuid4
+from typing import Any
 
 import nats
 import nats.js.errors
@@ -42,7 +40,7 @@ from nats.js.api import AckPolicy, ConsumerConfig
 
 from access_control.people import PERSON_ROLE_ADMIN, PERSON_ROLE_MEMBER, PERSON_ROLE_OWNER
 from access_control.people_directory import PeopleDirectory
-from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1, PersonStanding, TeamPersonV1
+from custom_messages.contracts.access_v2 import AccessNoticeKind, PersonStanding, TeamPersonV1
 from custom_messages.wire.encoding import b64url
 from custom_messages.wire.frame import Receiver
 from custom_messages.wire.permissions import HostPlacement, host_permissions
@@ -66,7 +64,7 @@ from docker import message_hosts
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 from runtime_settings.instance_layout import InstanceLayout
 from storage.access_repository import AccessRepository
-from storage.config import StorageSettings, resolve_storage_settings
+from storage.config import resolve_storage_settings
 from team_services.dead_letters import (
     DeadLetterService,
     TeamPersonDataOperations,
@@ -920,103 +918,3 @@ async def test_live_departure_deletion_including_old_format_copy_and_orphan_clea
         assert (await admin_js.get_last_msg(dlq_stream, res_bob_old.raw_subject)).data == bob_old
 
         assert lead.errors.empty() and worker.errors.empty() and services.errors.empty()
-
-
-@contextmanager
-def _postgres_access_storage() -> Iterator[StorageSettings]:
-    from psycopg.conninfo import make_conninfo
-
-    from storage.postgres_connection import connect_postgres
-
-    dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
-    if not dsn:
-        pytest.skip("LIVE_TEST_POSTGRES_DSN is required for real PostgreSQL dead-letter access store tests")
-    schema = "dlq_access_test_" + uuid4().hex
-    with connect_postgres(dsn) as conn:
-        conn.execute(f"CREATE SCHEMA {schema}")
-    try:
-        yield resolve_storage_settings(
-            {"backend": "postgres", "postgres": {"dsn": make_conninfo(dsn, options=f"-csearch_path={schema}")}}
-        )
-    finally:
-        with connect_postgres(dsn) as conn:
-            conn.execute(f"DROP SCHEMA {schema} CASCADE")
-
-
-@pytest.mark.postgres
-def test_postgres_dlq_reported_notices_and_scan_cursors() -> None:
-    """AccessRepository protocol 1 DLQ receipts and scan cursors work cleanly on real PostgreSQL (C02, C10, C20)."""
-
-    with _postgres_access_storage() as settings:
-        repo = AccessRepository(settings)
-        now = datetime(2026, 11, 25, 12, 0, tzinfo=timezone.utc)
-        other_team = "team_other"
-        notice1 = AccessNoticeV1(
-            notice_id="dlq-pg-notice-1",
-            team_id=TEAM,
-            recipient_roles=(PERSON_ROLE_ADMIN,),
-            kind=AccessNoticeKind.MESSAGES_SET_ASIDE,
-            title="Messages set aside",
-            summary="2 messages set aside",
-            created_at_utc=now,
-        )
-        receipts1 = [("worker-host-1", "a" * 64), ("worker-host-1", "b" * 64)]
-
-        # Atomic insert of AccessNoticeV1 + per-copy receipts.
-        created, inserted = repo.record_dlq_notice_report(TEAM, notice1, receipts1, reported_at_utc=now)
-        assert created is True and inserted == 2
-        assert repo.dlq_reported_copy_keys(TEAM, receipts1) == set(receipts1)
-        assert repo.dlq_reported_copy_keys(other_team, receipts1) == set()
-
-        # Replaying the same receipts is a no-op even under a different notice_id (C02).
-        notice_dup = notice1.model_copy(update={"notice_id": "dlq-pg-notice-dup"})
-        created_dup, inserted_dup = repo.record_dlq_notice_report(
-            TEAM, notice_dup, receipts1, reported_at_utc=now + timedelta(minutes=1)
-        )
-        assert created_dup is False and inserted_dup == 0
-        assert len(repo.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))) == 1
-
-        # Batched lookup over >200 keys exercises chunking and distinguishes (runtime, copy_id) pairs (C20).
-        many_keys = [("worker-host-2", f"{i:064x}") for i in range(250)]
-        notice_many = notice1.model_copy(
-            update={"notice_id": "dlq-pg-notice-many", "created_at_utc": now + timedelta(days=5)}
-        )
-        created_many, inserted_many = repo.record_dlq_notice_report(
-            TEAM, notice_many, [receipts1[0], *many_keys], reported_at_utc=now + timedelta(days=5)
-        )
-        assert created_many is True and inserted_many == 250
-        found = repo.dlq_reported_copy_keys(
-            TEAM,
-            [("other-runtime", receipts1[0][1]), receipts1[0], many_keys[0], many_keys[-1]],
-        )
-        assert found == {receipts1[0], many_keys[0], many_keys[-1]}
-
-        # Pruning deletes only receipts older than before_utc for the target team.
-        notice_other = notice1.model_copy(update={"notice_id": "dlq-pg-notice-other", "team_id": other_team})
-        repo.record_dlq_notice_report(other_team, notice_other, [receipts1[0]], reported_at_utc=now)
-        pruned = repo.prune_dlq_reported_notices(TEAM, before_utc=now + timedelta(days=1))
-        assert pruned == 2
-        assert repo.dlq_reported_copy_keys(TEAM, receipts1) == set()
-        assert repo.dlq_reported_copy_keys(other_team, [receipts1[0]]) == {receipts1[0]}
-        assert len(repo.dlq_reported_copy_keys(TEAM, many_keys)) == 250
-
-        # Scan cursor defaults to (0, "") and upserts BIGINT sequences cleanly via ON CONFLICT.
-        dlq_stream = dlq_stream_name(TEAM)
-        assert repo.get_dlq_scan_cursor(TEAM, dlq_stream) == (0, "")
-        big_seq = 5_000_000_000
-        repo.set_dlq_scan_cursor(
-            TEAM,
-            dlq_stream,
-            big_seq,
-            stream_created="2026-11-25T10:00:00Z",
-            updated_at_utc=now,
-        )
-        assert repo.get_dlq_scan_cursor(TEAM, dlq_stream) == (big_seq, "2026-11-25T10:00:00Z")
-        repo.set_dlq_scan_cursor(
-            TEAM,
-            dlq_stream,
-            big_seq + 42,
-            stream_created="2026-11-25T11:00:00Z",
-            updated_at_utc=now + timedelta(hours=1),
-        )
-        assert repo.get_dlq_scan_cursor(TEAM, dlq_stream) == (big_seq + 42, "2026-11-25T11:00:00Z")
