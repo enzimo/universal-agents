@@ -586,11 +586,14 @@ class DeadLetterService:
         self._missing_consumer_logged = False
         self._pull_sub: Any = None
         self._pause_until: float = 0.0
-        # C20: bounded incremental raw-copy scan state (skip confirmed-paired copies unless departed set changes).
+        # C20 & C23: bounded incremental raw-copy scan state (skip confirmed-paired copies unless departed set changes;
+        # track in-progress departed re-walk targets so budget-paused passes resume instead of restarting at first_seq).
         self._raw_scan_stream_created: str = ""
         self._orphan_confirmed_seq: int = 0
         self._raw_scan_resume_seq: Optional[int] = None
+        self._raw_scan_saw_young: bool = False
         self._last_departed_targets: Optional[tuple[frozenset[str], frozenset[str]]] = None
+        self._departed_rewalk_targets: Optional[tuple[frozenset[str], frozenset[str]]] = None
         # C22: bounded in-memory set of notice ids already sent to chat while awaiting Inbox store recovery.
         self._chat_sent_notice_ids: dict[str, None] = {}
 
@@ -1489,6 +1492,9 @@ class DeadLetterService:
         ) or last_seq < self._orphan_confirmed_seq:
             self._orphan_confirmed_seq = 0
             self._raw_scan_resume_seq = None
+            self._raw_scan_saw_young = False
+            self._last_departed_targets = None
+            self._departed_rewalk_targets = None
         if stream_created:
             self._raw_scan_stream_created = stream_created
 
@@ -1499,13 +1505,30 @@ class DeadLetterService:
         departed_targets: tuple[frozenset[str], frozenset[str]],
     ) -> int:
         departed_refs, departed_ids = departed_targets
-        departed_changed = self._last_departed_targets != departed_targets
-        if departed_changed and (departed_refs or departed_ids):
+        has_departed = bool(departed_refs or departed_ids)
+        if has_departed and self._last_departed_targets != departed_targets:
+            if self._departed_rewalk_targets == departed_targets and self._raw_scan_resume_seq is not None:
+                return max(first_seq, self._raw_scan_resume_seq)
+            self._departed_rewalk_targets = departed_targets
             self._raw_scan_resume_seq = None
+            self._raw_scan_saw_young = False
             return first_seq
+        if self._departed_rewalk_targets is not None:
+            self._departed_rewalk_targets = None
+            self._raw_scan_resume_seq = None
+            self._raw_scan_saw_young = False
         if self._raw_scan_resume_seq is not None:
             return max(first_seq, self._raw_scan_resume_seq)
+        self._raw_scan_saw_young = False
         return max(first_seq, self._orphan_confirmed_seq + 1)
+
+    def _advance_orphan_confirmed_seq(self, seq: int, *, saw_young_copy: bool) -> None:
+        if not saw_young_copy and seq > self._orphan_confirmed_seq:
+            self._orphan_confirmed_seq = seq
+
+    def _pause_raw_copy_scan(self, next_seq: int, *, saw_young_copy: bool) -> None:
+        self._raw_scan_resume_seq = next_seq
+        self._raw_scan_saw_young = saw_young_copy
 
     async def _run_raw_copy_scan_loop(
         self,
@@ -1522,18 +1545,19 @@ class DeadLetterService:
         copies_scanned = 0
         departed_deleted = 0
         orphans_deleted = 0
-        saw_young_copy = False
+        saw_young_copy = self._raw_scan_saw_young
         next_seq = start_seq
         wildcard = dlq_raw_wildcard_subject(self._team_id)
 
         while next_seq <= last_seq:
             if stop is not None and stop.is_set():
-                self._raw_scan_resume_seq = next_seq
+                self._pause_raw_copy_scan(next_seq, saw_young_copy=saw_young_copy)
                 return copies_scanned, departed_deleted, orphans_deleted, True
             stored = await get_stream_message(
                 nc, self._dlq_stream, seq=next_seq, next_by_subj=wildcard, timeout=self._api_timeout_seconds
             )
             if stored is None:
+                self._advance_orphan_confirmed_seq(last_seq, saw_young_copy=saw_young_copy)
                 break
             copies_scanned += 1
             next_seq = stored.seq + 1
@@ -1549,21 +1573,23 @@ class DeadLetterService:
             orphans_deleted += int(outcome == "orphan")
             if outcome == "young":
                 saw_young_copy = True
-            elif not saw_young_copy and stored.seq > self._orphan_confirmed_seq:
-                self._orphan_confirmed_seq = stored.seq
+            else:
+                self._advance_orphan_confirmed_seq(stored.seq, saw_young_copy=saw_young_copy)
             if time.monotonic() >= deadline and next_seq <= last_seq:
-                self._raw_scan_resume_seq = next_seq
+                self._pause_raw_copy_scan(next_seq, saw_young_copy=saw_young_copy)
                 return copies_scanned, departed_deleted, orphans_deleted, True
         return copies_scanned, departed_deleted, orphans_deleted, False
 
     async def scan_raw_copies(self, *, stop: Optional[asyncio.Event] = None) -> RawCopyScanReport:
-        """Scan ``ua.v1.<team>.*.dlq.raw.*`` with a time budget, skipping already-confirmed paired copies (C20)."""
+        """Scan ``ua.v1.<team>.*.dlq.raw.*`` with a time budget, skipping already-confirmed paired copies (C20, C23)."""
 
         started = time.monotonic()
         live = self._require_live()
         info = await stream_info(live.nc, self._dlq_stream, timeout=self._api_timeout_seconds)
         if info is None or info.messages == 0:
             self._raw_scan_resume_seq = None
+            self._raw_scan_saw_young = False
+            self._departed_rewalk_targets = None
             return RawCopyScanReport(0, 0, 0, False, (time.monotonic() - started) * 1000.0)
 
         self._reset_raw_scan_if_stream_changed(info.created, info.last_seq)
@@ -1585,6 +1611,8 @@ class DeadLetterService:
         )
         if not budget_reached:
             self._raw_scan_resume_seq = None
+            self._raw_scan_saw_young = False
+            self._departed_rewalk_targets = None
             self._last_departed_targets = departed_targets
 
         duration_ms = (time.monotonic() - started) * 1000.0

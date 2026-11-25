@@ -1137,3 +1137,77 @@ async def test_c22_inbox_outage_with_chat_working_holds_and_avoids_duplicate_cha
     }
     assert await service.recover_exhausted_notices() == 0
     assert len(chat.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_c23_budgeted_raw_scan_resumes_across_passes_with_departed_set(tmp_path: Path) -> None:
+    """C23: A budget-paused raw-copy scan with a non-empty departed set resumes across passes to the end,
+    deletes the departed person's last copy and advances _orphan_confirmed_seq, does not re-walk once finished,
+    and restarts from first_seq only when the departed set changes again."""
+
+    nc = DlqFakeNatsConnection()
+    ts_live, _worker_live = _make_hosts(nc)
+    access = AccessRepository(_storage(tmp_path))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,)))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.ACTIVE))
+    access.record_person(_person(BOB_ID, BOB_REF, PersonStanding.DISABLED))
+    people = PeopleDirectory(access, TEAM)
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        chat_sender=RecordingChatSender(),
+        clock=lambda: NOW,
+        orphan_grace_seconds=600,
+        scan_budget_seconds=0.0,  # Ends each pass after 1 raw copy.
+    )
+
+    dlq_stream = dlq_stream_name(TEAM)
+    old_ts = (NOW - timedelta(seconds=1200)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    alice_copy = json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode()
+    bob_copy = json.dumps({"protocol": "1.0-pre", "authority": {"person": BOB_REF}, "body": {}}).encode()
+    seq_alice_1 = _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "a" * 64), alice_copy, stored_time=old_ts)
+    _store_in_stream(nc, dlq_stream, dlq_notice_subject(TEAM, "w1", "a" * 64), b"{}", stored_time=old_ts)
+    seq_orphan = _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "b" * 64), alice_copy, stored_time=old_ts)
+    seq_bob = _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "c" * 64), bob_copy, stored_time=old_ts)
+    _store_in_stream(nc, dlq_stream, dlq_notice_subject(TEAM, "w1", "c" * 64), b"{}", stored_time=old_ts)
+
+    # Pass 1 scans copy 1 (Alice paired) and pauses at resume_seq > seq_alice_1 with Bob's departed set in progress.
+    rep1 = await service.scan_raw_copies()
+    assert rep1.copies_scanned == 1 and rep1.budget_reached is True
+    assert rep1.departed_deleted == 0 and rep1.orphans_deleted == 0
+    assert service._orphan_confirmed_seq == seq_alice_1
+    assert service._raw_scan_resume_seq == seq_alice_1 + 1
+
+    # Pass 2 resumes at copy 2 (orphan) and deletes it.
+    rep2 = await service.scan_raw_copies()
+    assert rep2.copies_scanned == 1 and rep2.budget_reached is True
+    assert rep2.orphans_deleted == 1 and rep2.departed_deleted == 0
+    assert service._orphan_confirmed_seq == seq_orphan
+    assert seq_orphan not in nc.messages[dlq_stream]
+
+    # Pass 3 resumes at copy 3 (Bob's copy) and deletes it; trailing notice still sits at seq_bob + 1 so pass 3 hits budget.
+    rep3 = await service.scan_raw_copies()
+    assert rep3.copies_scanned == 1 and rep3.departed_deleted == 1
+    assert seq_bob not in nc.messages[dlq_stream]
+    assert service._orphan_confirmed_seq == seq_bob
+
+    # Pass 4 reaches the end of the stream and records the completed departed set.
+    rep4 = await service.scan_raw_copies()
+    assert rep4.copies_scanned == 0 and rep4.budget_reached is False
+    assert service._raw_scan_resume_seq is None
+    assert service._departed_rewalk_targets is None
+    assert service._last_departed_targets == (frozenset({BOB_REF}), frozenset({BOB_ID}))
+
+    # Pass 5 with the unchanged departed set does NOT restart a full re-walk!
+    nc.requests.clear()
+    rep5 = await service.scan_raw_copies()
+    assert rep5.copies_scanned == 0 and rep5.budget_reached is False
+    assert not any(subj == f"$JS.API.STREAM.MSG.GET.{dlq_stream}" for subj, _ in nc.requests)
+
+    # When Alice departs too (departed set changes), a new full re-walk starts from first_seq and deletes Alice's copy!
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    rep6 = await service.scan_raw_copies()
+    assert rep6.copies_scanned == 1 and rep6.departed_deleted == 1
+    assert seq_alice_1 not in nc.messages[dlq_stream]
