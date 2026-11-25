@@ -70,7 +70,7 @@ _WORK_EFFECT: Final = (
     "expires, so work waits and can fail."
 )
 _DEAD_LETTER_EFFECT: Final = (
-    "When it is full, set-asides are refused while full: receivers keep each message they would set aside "
+    "Set-asides are refused while full: receivers keep each message they would set aside "
     "(without taking an execution slot) and try again until room returns."
 )
 

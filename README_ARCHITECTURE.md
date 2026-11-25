@@ -6906,7 +6906,12 @@ They serve the team's address (`svc.team`) and answer, so far:
   per-`(team_id, issuer_runtime, copy_id)` receipts in `protocol1_dlq_reported_notices`
   and per-`(team_id, original_stream, original_stream_sequence, raw_sha256)` receipts in
   `protocol1_dlq_reported_originals` so cross-runtime duplicates never repeat alerts)
-  and the owner's configured chat (holding on Inbox outages without re-sending chat),
+  and the owner's configured chat (holding on Inbox+receipt store outages without re-sending
+  chat; a crash between committing Inbox+receipts and sending chat loses that batch's chat
+  copy while keeping the durable Inbox notice, and until step 6 moves gateway notifications
+  onto `person.notify` the live dead-letter tests prove administrator alerting through the
+  Inbox store only while `LegacyNatsChatNoticeSender` relies on the current startup user's
+  configured route),
   names the person (by `PeopleDirectory` display name or `"a person not in the team's records"`)
   and validated task/request ids for `upgrade_old_format` copies without quoting personal
   request text, recovers exhausted notices from `UA1_DLQ_<team>` using persisted scan

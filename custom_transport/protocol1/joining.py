@@ -65,7 +65,8 @@ from custom_transport.protocol1.replay import LiveReplayRecord
 from custom_transport.protocol1.trust_state import PersistentTrustStore
 from custom_transport.send_barrier import before_send
 
-# The installation authority's service id, which joins and renewals name as their audience.
+# The installation authority's runtime and service id, which joins, renewals, and authority notices name.
+AUTHORITY_RUNTIME = "authority"
 AUTHORITY_SERVICE_ID = "authority"
 _LOGGER = logging.getLogger(__name__)
 

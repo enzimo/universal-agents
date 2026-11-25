@@ -55,13 +55,14 @@ from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from default_values import TRANSPORT_DEFAULTS
+from custom_agents.instance_delivery_context import owner_route_from_config
+from custom_agents.stuck_work import ChatRoute
 from team_services.blobs import BlobOperations, BlobService
 from team_services.dead_letters import (
     DeadLetterService,
     LegacyNatsChatNoticeSender,
     TeamPersonDataOperations,
     TeamPersonDepartureService,
-    owner_chat_route_from_config,
 )
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
@@ -361,12 +362,16 @@ def team_operations(
             subject_prefix=config.transport.subject_prefix,
             user_queue_name=config.manager.response_queue_name,
         )
+        def _owner_chat_route() -> Optional[ChatRoute]:
+            found = owner_route_from_config(config, config.user.canonical_user_id)
+            return None if found is None else ChatRoute(routing_key=found[0], gateway_context=found[1])
+
         chat_sender = LegacyNatsChatNoticeSender(
             nc_fn=lambda: host.nc,
             mapper=mapper,
             people=people,
             owner_person_id=config.user.canonical_user_id,
-            route_fn=lambda: owner_chat_route_from_config(config),
+            route_fn=_owner_chat_route,
             logger=_LOGGER,
         )
         dead_letters = DeadLetterService(

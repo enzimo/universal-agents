@@ -328,7 +328,7 @@ async def test_live_poison_message_set_aside_watch_reports_and_fa8_crash_recover
         assert refused.value.code == "bad_signature"
 
         res1 = await setter.set_aside_and_ack(
-            msg1, reason=refused.value.code, team=TEAM, pointer=refused.value.known_at
+            msg1, reason=refused.value.code, team=TEAM, refusal=refused.value
         )
         assert res1 is not None and res1.raw_stored is True
         assert (await admin_js.stream_info(part_stream)).state.messages == 0
@@ -453,30 +453,76 @@ async def test_live_full_dlq_stream_holds_with_wpi_and_recovers_when_room_return
         )
 
         caplog.clear()
+        redelivered: list[Any] = []
+        stop_pull = asyncio.Event()
+
+        async def _pull_for_redeliveries() -> None:
+            while not stop_pull.is_set():
+                try:
+                    fetched = await sub.fetch(1, timeout=0.25)
+                except (nats.errors.TimeoutError, TimeoutError, asyncio.TimeoutError):
+                    continue
+                redelivered.extend(fetched)
+
         with caplog.at_level(logging.WARNING, logger="test.live_dlq_full_hold"):
+            pull_task = asyncio.create_task(_pull_for_redeliveries())
             hold_task = asyncio.create_task(
                 setter.set_aside_and_ack(msg, reason="malformed", team=TEAM)
             )
-            # Hold past >2 full ack_wait periods (ack_wait=1.0s) while UA1_DLQ stays full.
-            await asyncio.sleep(2.3)
-            assert not hold_task.done()
-            cinfo = await admin_js.consumer_info(part_stream, ctrl_consumer)
-            assert cinfo.num_ack_pending == 1
-            assert cinfo.num_redelivered == 0
-            assert cinfo.delivered.consumer_seq == 1
-            hold_logs = [r for r in caplog.records if "event=protocol1_dlq_stream_full_holding" in r.getMessage()]
-            assert len(hold_logs) == 1
+            try:
+                # Hold past >2 full ack_wait periods (ack_wait=1.0s) while UA1_DLQ stays full AND a pull loop runs (F5/EA-1).
+                await asyncio.sleep(2.3)
+                assert not hold_task.done()
+                assert redelivered == [], f"expected no redelivery while +WPI is active, got {len(redelivered)}"
+                cinfo = await admin_js.consumer_info(part_stream, ctrl_consumer)
+                assert cinfo.num_ack_pending == 1
+                assert cinfo.num_redelivered == 0
+                assert cinfo.delivered.consumer_seq == 1
+                hold_logs = [r for r in caplog.records if "event=protocol1_dlq_stream_full_holding" in r.getMessage()]
+                assert len(hold_logs) == 1
 
-            # Free room using real team_services delete permission!
-            for seq in filler_seqs:
-                assert await delete_stream_message(services.nc, dlq_stream, seq) is True
+                # Free room using real team_services delete permission!
+                for seq in filler_seqs:
+                    assert await delete_stream_message(services.nc, dlq_stream, seq) is True
 
-            result = await asyncio.wait_for(hold_task, timeout=3.0)
+                result = await asyncio.wait_for(hold_task, timeout=3.0)
+            finally:
+                stop_pull.set()
+                await pull_task
 
+        assert redelivered == []
         assert result is not None and result.raw_stored is True
         assert (await admin_js.stream_info(part_stream)).state.messages == 0
         cinfo_after = await admin_js.consumer_info(part_stream, ctrl_consumer)
         assert cinfo_after.num_ack_pending == 0 and cinfo_after.num_pending == 0
+
+        # F5/EA-1 control check: without +WPI, the exact same pull loop DOES observe a redelivery after ack_wait=1.0s.
+        await lead.nc.jetstream().publish(poison_subject, b"control payload without wpi")
+        (ctrl_first,) = await sub.fetch(1, timeout=2.0)
+        assert ctrl_first.metadata.num_delivered == 1
+        ctrl_redelivered: list[Any] = []
+        stop_ctrl_pull = asyncio.Event()
+
+        async def _pull_control() -> None:
+            while not stop_ctrl_pull.is_set() and not ctrl_redelivered:
+                try:
+                    fetched = await sub.fetch(1, timeout=0.25)
+                except (nats.errors.TimeoutError, TimeoutError, asyncio.TimeoutError):
+                    continue
+                ctrl_redelivered.extend(fetched)
+
+        ctrl_pull_task = asyncio.create_task(_pull_control())
+        try:
+            for _ in range(40):
+                if ctrl_redelivered:
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            stop_ctrl_pull.set()
+            await ctrl_pull_task
+        assert len(ctrl_redelivered) == 1
+        assert ctrl_redelivered[0].metadata.num_delivered == 2
+        await ctrl_redelivered[0].ack_sync()
 
         # Notice watch verifies the newly written raw copy and reports it to administrators.
         dlq_service = DeadLetterService(

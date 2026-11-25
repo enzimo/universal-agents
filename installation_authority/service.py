@@ -122,7 +122,7 @@ from custom_transport.protocol1.dead_letters import (
 from custom_transport.protocol1.mapping_check import PartitionMappingError, check_partition_mapping
 from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
 from custom_transport.protocol1.identity import HostIdentity
-from custom_transport.protocol1.joining import AUTHORITY_SERVICE_ID, HostProfile
+from custom_transport.protocol1.joining import AUTHORITY_RUNTIME as AUTHORITY_RUNTIME, AUTHORITY_SERVICE_ID, HostProfile
 from custom_transport.protocol1.live import LiveHost, ReplyWithAfterFlush, Unsupported, utc_now
 from custom_transport.protocol1.nats_jwt import NatsSigningKey, encode_user_jwt, user_credential_bytes
 from custom_transport.protocol1.nkeys import public_key_bytes
@@ -138,7 +138,6 @@ from installation_authority.revocation import LifetimeWaitRevoker, NatsRevoker, 
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
-AUTHORITY_RUNTIME = "authority"
 AUTHORITY_ROLE = "installation_authority"
 CERTIFICATE_LIFETIME = timedelta(days=30)
 # Plan 13B.3: certificates are renewed at two thirds of their life; the authority renews its own the same way.

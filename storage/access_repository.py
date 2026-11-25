@@ -2175,27 +2175,31 @@ class AccessRepository:
     def dlq_reported_original_keys(
         self, team_id: str, keys: Iterable[tuple[str, int, str]]
     ) -> dict[tuple[str, int, str], str]:
-        """Return ``{(original_stream, original_stream_sequence, raw_sha256): notice_id}`` already reported (F2)."""
+        """Return ``{(original_stream, original_stream_sequence, raw_sha256): notice_id}`` already reported (F2, C29)."""
 
         unique_keys = list(
             dict.fromkeys((str(stream), int(seq), str(sha)) for stream, seq, sha in keys if stream and sha)
         )
         if not unique_keys:
             return {}
-        requested = set(unique_keys)
         p = self.dialect.bind
         found: dict[tuple[str, int, str], str] = {}
-        chunk_size = 200
-        unique_digests = list(dict.fromkeys(sha for _, _, sha in unique_keys))
+        # Row-value VALUES subquery uses the full 4-column primary key in both SQLite and PostgreSQL;
+        # 100 rows * 4 parameters = 400 bind parameters per query, well within SQLite's 999 limit.
+        chunk_size = 100
+        row_tuple = f"({p},{p},{p},{p})"
         with self._connect() as conn:
-            for offset in range(0, len(unique_digests), chunk_size):
-                chunk = unique_digests[offset : offset + chunk_size]
-                placeholders = ",".join(p for _ in chunk)
+            for offset in range(0, len(unique_keys), chunk_size):
+                chunk = unique_keys[offset : offset + chunk_size]
+                values_sql = ",".join(row_tuple for _ in chunk)
+                params: list[Any] = []
+                for stream, seq, sha in chunk:
+                    params.extend((team_id, stream, seq, sha))
                 rows = conn.execute(
                     f"SELECT original_stream, original_stream_sequence, raw_sha256, notice_id "
                     f"FROM protocol1_dlq_reported_originals "
-                    f"WHERE team_id = {p} AND raw_sha256 IN ({placeholders})",
-                    (team_id, *chunk),
+                    f"WHERE (team_id, original_stream, original_stream_sequence, raw_sha256) IN (VALUES {values_sql})",
+                    tuple(params),
                 ).fetchall()
                 for row in rows:
                     triple = (
@@ -2203,8 +2207,7 @@ class AccessRepository:
                         int(row["original_stream_sequence"]),
                         str(row["raw_sha256"]),
                     )
-                    if triple in requested:
-                        found[triple] = str(row["notice_id"])
+                    found[triple] = str(row["notice_id"])
         return found
 
     def record_dlq_copy_aliases(

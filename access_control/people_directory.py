@@ -57,6 +57,7 @@ class PersonNow:
     roles: tuple[str, ...] = ()
     synced: bool = True
     display_name: str | None = None
+    person_ref: str | None = None
 
     @property
     def active(self) -> bool:
@@ -82,7 +83,13 @@ class PeopleDirectory:
         record = self.store.team_person(self.team_id, person_id)
         if record is None:
             return PersonNow(person_id, None, synced=self.synced())
-        return PersonNow(person_id, record.standing, tuple(record.roles), display_name=record.display_name)
+        return PersonNow(
+            person_id,
+            record.standing,
+            tuple(record.roles),
+            display_name=record.display_name,
+            person_ref=record.person_ref,
+        )
 
     def person_by_ref(self, person_ref: str) -> PersonNow | None:
         """The person a protocol 1 authority token names by reference (plan decision 64), or None if unknown."""
@@ -90,7 +97,13 @@ class PeopleDirectory:
         record = self.store.team_person_by_ref(self.team_id, person_ref)
         if record is None:
             return None
-        return PersonNow(record.person_id, record.standing, tuple(record.roles), display_name=record.display_name)
+        return PersonNow(
+            record.person_id,
+            record.standing,
+            tuple(record.roles),
+            display_name=record.display_name,
+            person_ref=record.person_ref,
+        )
 
     def person_ref(self, person_id: str) -> str | None:
         """The person's opaque reference, for naming them in protocol 1 replies; None if never recorded."""
@@ -103,7 +116,11 @@ class PeopleDirectory:
 
         return {
             record.person_id: PersonNow(
-                record.person_id, record.standing, tuple(record.roles), display_name=record.display_name
+                record.person_id,
+                record.standing,
+                tuple(record.roles),
+                display_name=record.display_name,
+                person_ref=record.person_ref,
             )
             for record in self.store.team_people(self.team_id)
         }

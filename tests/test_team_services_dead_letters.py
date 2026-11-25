@@ -1358,7 +1358,7 @@ async def test_c26_team_services_posts_near_expiry_inbox_warning_for_team_work_w
 
     nc = DlqFakeNatsConnection()
     ts_live, _worker_live = _make_hosts(nc)
-    ts_live.trust.store.partition_count = 1  # type: ignore[attr-defined]
+    ts_live.trust.store.partition_count = 1
     access = AccessRepository(_storage(tmp_path))
     access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,)))
     people = PeopleDirectory(access, TEAM)
@@ -1601,3 +1601,361 @@ async def test_f3_untrusted_text_blocked_in_invalid_subject_original_subject_old
     formatted_long = format_dlq_admin_notice(long_items, (), dlq_stream=dlq_stream_name(TEAM))
     assert len(formatted_long.text) <= 4000
     assert formatted_long.text.endswith("...")
+
+
+def test_c29_dlq_reported_original_keys_uses_full_primary_key_index(tmp_path: Path) -> None:
+    """C29: dlq_reported_original_keys queries by the full 4-column primary key via VALUES so SQLite never scans the team."""
+
+    import sqlite3
+
+    access = AccessRepository(_storage(tmp_path, "c29_pk.db"))
+    # Verify the exact SQL pattern executes with full 4-column PK index search in SQLite.
+    with sqlite3.connect(str(tmp_path / "c29_pk.db")) as con:
+        plan = con.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT original_stream, original_stream_sequence, raw_sha256, notice_id "
+            "FROM protocol1_dlq_reported_originals "
+            "WHERE (team_id, original_stream, original_stream_sequence, raw_sha256) IN (VALUES (?,?,?,?),(?,?,?,?))",
+            (TEAM, "S1", 1, "h1", TEAM, "S1", 2, "h2"),
+        ).fetchall()
+    plan_text = " ".join(str(row) for row in plan)
+    assert "team_id=? AND original_stream=? AND original_stream_sequence=? AND raw_sha256=?" in plan_text
+
+    # Verify >200 keys chunk cleanly across 100-row batches and find exact matches only.
+    from custom_messages.contracts.access_v2 import AccessNoticeV1
+
+    notice = AccessNoticeV1(
+        notice_id="p1_dlq:c29_batch",
+        team_id=TEAM,
+        kind=AccessNoticeKind.MESSAGES_SET_ASIDE,
+        recipient_roles=(PERSON_ROLE_ADMIN,),
+        title="t",
+        summary="s",
+        created_at_utc=NOW,
+    )
+    keys = [(f"UA1_PART_{TEAM}~0", i, f"{i:043d}") for i in range(1, 251)]
+    receipts = [("worker-1", f"{i:064x}") for i in range(1, 251)]
+    orig_map = dict(zip(receipts, keys))
+    created, inserted = access.record_dlq_notice_report(
+        TEAM, notice, receipts, original_keys=orig_map, reported_at_utc=NOW
+    )
+    assert created is True and inserted == 250
+    found = access.dlq_reported_original_keys(TEAM, [*keys, ("UA1_PART_team_example~0", 999, "missing")])
+    assert len(found) == 250
+    assert ("UA1_PART_team_example~0", 999, "missing") not in found
+
+
+@pytest.mark.asyncio
+async def test_c30_shared_authority_constant_people_snapshot_and_alias_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C30: AUTHORITY_RUNTIME is one shared constant; snapshot reuses PeopleDirectory.people(); alias failure logs warning."""
+
+    from custom_transport.protocol1.joining import AUTHORITY_RUNTIME as JOINING_AUTHORITY_RUNTIME
+    from installation_authority.service import AUTHORITY_RUNTIME as SERVICE_AUTHORITY_RUNTIME
+
+    assert SERVICE_AUTHORITY_RUNTIME is JOINING_AUTHORITY_RUNTIME
+
+    access = AccessRepository(_storage(tmp_path, "c30.db"))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,), display_name="Admin"))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED, display_name="Alice Gone"))
+    people = PeopleDirectory(access, TEAM)
+    nc = DlqFakeNatsConnection()
+    ts_live, _ = _make_hosts(nc)
+
+    test_logger = logging.getLogger("test.c30_alias_warning")
+    service = DeadLetterService(
+        team_id=TEAM, live_fn=lambda: ts_live, access_repository=access, people=people, logger=test_logger
+    )
+    refs, ids, by_id = service._people_directory_snapshot()
+    assert refs == frozenset({ALICE_REF})
+    assert ids == frozenset({ALICE_ID})
+    assert by_id[ADMIN_ID].display_name == "Admin"
+    assert by_id[ALICE_ID].person_ref == ALICE_REF
+
+    def _fail_aliases(*_args: Any, **_kwargs: Any) -> int:
+        raise RuntimeError("db temporarily locked")
+
+    access.record_dlq_copy_aliases = _fail_aliases  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING, logger="test.c30_alias_warning"):
+        await service._record_db_duplicate_aliases([("worker-2", "b" * 64, "notice-1")])
+    warnings = [r for r in caplog.records if "event=protocol1_dlq_duplicate_alias_store_failed" in r.getMessage()]
+    assert len(warnings) == 1
+    assert f"team={TEAM}" in warnings[0].getMessage()
+    assert "count=1" in warnings[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_f4_fa2_blob_delete_failure_still_scans_dlq_and_keeps_blob_retry(tmp_path: Path) -> None:
+    """F4 (FA-2): A failed blob delete still runs the DLQ raw-copy scan, combines all counts, and preserves blob retry."""
+
+    access = AccessRepository(_storage(tmp_path, "f4_fa2.db"))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    access.record_person(_person(BOB_ID, BOB_REF, PersonStanding.ACTIVE))
+    people = PeopleDirectory(access, TEAM)
+    nc = DlqFakeNatsConnection()
+    ts_live, _ = _make_hosts(nc)
+
+    dlq_stream = dlq_stream_name(TEAM)
+    _store_in_stream(
+        nc,
+        dlq_stream,
+        dlq_raw_subject(TEAM, "worker-host-1", "1" * 64),
+        json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode(),
+    )
+    _store_in_stream(
+        nc,
+        dlq_stream,
+        dlq_raw_subject(TEAM, "worker-host-1", "2" * 64),
+        json.dumps({"protocol": "1.0-pre", "authority": {"person": BOB_REF}, "body": {}}).encode(),
+    )
+
+    class _FailingBlobService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def delete_person(self, person_ref: str) -> PersonDeleteResult:
+            self.calls += 1
+            return PersonDeleteResult(
+                outcome="runtime_error",
+                owners_removed=3,
+                blobs_deleted=1,
+                blobs_kept=2,
+                message="1 blob(s) could not be deleted from OBJ_UA1_BLOBS and remain queued for retry.",
+            )
+
+    blobs = _FailingBlobService()
+    departure = TeamPersonDepartureService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        people=people,
+        blobs=blobs,  # type: ignore[arg-type]
+    )
+    reply = await departure.delete_person_data(ALICE_REF)
+    assert blobs.calls == 1
+    assert reply.outcome == "runtime_error"
+    assert reply.owners_removed == 3
+    assert reply.blobs_deleted == 1
+    assert reply.blobs_kept == 2
+    # DLQ scan STILL ran and deleted Alice's raw copy while keeping Bob's!
+    assert reply.dlq_copies_deleted == 1
+    assert reply.dlq_copies_kept == 1
+    assert 1 not in nc.messages[dlq_stream]
+    assert 2 in nc.messages[dlq_stream]
+
+
+@pytest.mark.asyncio
+async def test_f4_fa3_maintain_isolates_step_failures_and_runs_raw_scan_first(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F4 (FA-3): An error in recovery or sweep inside maintain() never skips departed raw-copy deletion or receipt pruning."""
+
+    access = AccessRepository(_storage(tmp_path, "f4_fa3.db"))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    people = PeopleDirectory(access, TEAM)
+    nc = DlqFakeNatsConnection()
+    ts_live, _ = _make_hosts(nc)
+
+    dlq_stream = dlq_stream_name(TEAM)
+    _store_in_stream(
+        nc,
+        dlq_stream,
+        dlq_raw_subject(TEAM, "worker-host-1", "a" * 64),
+        json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode(),
+    )
+    # Seed an expired receipt that pruning should remove even if sweep and recovery raise.
+    from custom_messages.contracts.access_v2 import AccessNoticeV1
+
+    old_time = NOW - timedelta(days=40)
+    old_notice = AccessNoticeV1(
+        notice_id="p1_dlq:old_prune_test",
+        team_id=TEAM,
+        kind=AccessNoticeKind.MESSAGES_SET_ASIDE,
+        recipient_roles=(PERSON_ROLE_ADMIN,),
+        title="old",
+        summary="old",
+        created_at_utc=old_time,
+    )
+    access.record_dlq_notice_report(TEAM, old_notice, [("worker-1", "b" * 64)], reported_at_utc=old_time)
+
+    test_logger = logging.getLogger("test.f4_fa3_maintain")
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        clock=lambda: NOW,
+        logger=test_logger,
+    )
+
+    async def _boom_sweep(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("sweep boom")
+
+    async def _boom_recover(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("recovery boom")
+
+    service.sweep_work_streams = _boom_sweep  # type: ignore[method-assign]
+    service.recover_exhausted_notices = _boom_recover  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.ERROR, logger="test.f4_fa3_maintain"):
+        report = await service.maintain()
+
+    assert report.raw_scan.departed_deleted == 1
+    assert 1 not in nc.messages[dlq_stream]
+    assert report.receipts_pruned == 1
+    assert report.sweep.streams_failed == 1
+    assert report.recovered_notices == 0
+    failed_events = [r.getMessage() for r in caplog.records if "event=protocol1_dlq_maintain_step_failed" in r.getMessage()]
+    assert any("step=sweep_work_streams" in msg for msg in failed_events)
+    assert any("step=recover_exhausted_notices" in msg for msg in failed_events)
+
+
+@pytest.mark.asyncio
+async def test_f6_departure_stop_never_starts_continuation_or_logs_finished(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F6: Stopping during initial departure scan starts no continuation; stopping during continuation logs stopped, not ok."""
+
+    access = AccessRepository(_storage(tmp_path, "f6.db"))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    people = PeopleDirectory(access, TEAM)
+    nc = DlqFakeNatsConnection()
+    ts_live, _ = _make_hosts(nc)
+
+    dlq_stream = dlq_stream_name(TEAM)
+    for idx in range(1, 5):
+        _store_in_stream(
+            nc,
+            dlq_stream,
+            dlq_raw_subject(TEAM, "worker-host-1", f"{idx:064x}"),
+            json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode(),
+        )
+
+    test_logger = logging.getLogger("test.f6_stop")
+    departure = TeamPersonDepartureService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        people=people,
+        delete_budget_seconds=10.0,
+        logger=test_logger,
+    )
+    # 1. Already stopping during initial scan -> does NOT start a continuation task.
+    departure._stopping = True
+    with caplog.at_level(logging.INFO, logger="test.f6_stop"):
+        reply = await departure.delete_person_data(ALICE_REF)
+    assert reply.outcome == "runtime_error"
+    assert departure.active_continuation_count() == 0
+    assert any("event=team_delete_person_data_stopped" in r.getMessage() for r in caplog.records)
+    assert not any("event=team_delete_person_data_retry_later" in r.getMessage() for r in caplog.records)
+
+    # 2. Stopping during _run_continuation logs continuation_stopped with next_seq, never continuation_ok.
+    caplog.clear()
+    from team_services.dead_letters import _DepartureRun
+
+    run = _DepartureRun(person_ref=ALICE_REF, person_id=ALICE_ID, next_seq=2)
+    with caplog.at_level(logging.INFO, logger="test.f6_stop"):
+        await departure._run_continuation(run)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("event=team_delete_person_data_continuation_stopped" in m and "next_seq=2" in m for m in messages)
+    assert not any("event=team_delete_person_data_continuation_ok" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_f8_con3_held_notice_rebuilds_departed_standing_before_delivery(tmp_path: Path) -> None:
+    """F8 (CON-3): If a person departs while a notice batch is held on an Inbox outage, delivery rebuilds text without naming them."""
+
+    access = AccessRepository(_storage(tmp_path, "f8_con3.db"))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,), display_name="Admin"))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.ACTIVE, display_name="Alice Active"))
+    people = PeopleDirectory(access, TEAM)
+    nc = DlqFakeNatsConnection()
+    ts_live, worker_live = _make_hosts(nc)
+    chat = RecordingChatSender()
+    chat.fail_count = 1
+
+    old_alice = json.dumps(
+        {
+            "msg_meta": {"gateway_context": {"canonical_user_id": ALICE_ID}, "msg_correlation_id": "req-hold-1"},
+            "msg_content": {"message_class": "Task", "task_id": "task-hold-1", "task_description": "secret"},
+        }
+    ).encode("utf-8")
+    _, delivery = await _emit_set_aside_into_dlq(
+        nc,
+        worker_live,
+        raw_bytes=old_alice,
+        reason="upgrade_old_format",
+        original_subject="ua.legacy.work.team_lead",
+        original_stream="UA_WORK",
+        original_seq=1,
+    )
+
+    real_record = access.record_dlq_notice_report
+    attempts = {"n": 0}
+
+    def _fail_first_then_depart(*args: Any, **kwargs: Any) -> tuple[bool, int]:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            # Alice departs while the batch is held!
+            access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED, display_name="Alice Active"))
+            raise RuntimeError("transient inbox outage")
+        return real_record(*args, **kwargs)
+
+    access.record_dlq_notice_report = _fail_first_then_depart  # type: ignore[method-assign]
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        chat_sender=chat,
+        clock=lambda: NOW,
+        report_quiet_seconds=0.0,
+        ack_wait_seconds=0.3,
+        initial_retry_seconds=0.02,
+        max_retry_seconds=0.05,
+    )
+    reported = await service.process_delivered_notices([delivery])
+    assert reported == 1
+    assert attempts["n"] == 2
+    notice = access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))[0][0]
+    for channel_text in (notice.summary, chat.sent[0]["text"]):
+        assert "Alice Active" not in channel_text
+        assert "task-hold-1" not in channel_text
+        assert "departed person" in channel_text
+    assert 1 not in nc.messages[dlq_stream_name(TEAM)]
+
+
+@pytest.mark.asyncio
+async def test_f8_crit3_departure_scan_breaks_when_stored_seq_exceeds_last_seq(tmp_path: Path) -> None:
+    """F8 (DI-1/CRIT-3): _scan_dlq_segment stops when next_by_subj returns a message appended past info.last_seq."""
+
+    access = AccessRepository(_storage(tmp_path, "f8_crit3.db"))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    people = PeopleDirectory(access, TEAM)
+    nc = DlqFakeNatsConnection()
+    ts_live, _ = _make_hosts(nc)
+
+    dlq_stream = dlq_stream_name(TEAM)
+    # Seq 1 is a notice (does not match raw wildcard); seq 2 will be appended AFTER stream_info reports last_seq=1.
+    _store_in_stream(nc, dlq_stream, dlq_notice_subject(TEAM, "worker-host-1", "1" * 64), b"{}")
+
+    orig_request = nc.request
+
+    async def _inject_after_info(subject: str, payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        resp = await orig_request(subject, payload, timeout=timeout)
+        if subject == f"$JS.API.STREAM.INFO.{dlq_stream}" and 2 not in nc.messages[dlq_stream]:
+            _store_in_stream(
+                nc,
+                dlq_stream,
+                dlq_raw_subject(TEAM, "worker-host-1", "2" * 64),
+                json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode(),
+            )
+        return resp
+
+    nc.request = _inject_after_info  # type: ignore[method-assign]
+    departure = TeamPersonDepartureService(team_id=TEAM, live_fn=lambda: ts_live, people=people)
+    reply = await departure.delete_person_data(ALICE_REF)
+    assert reply.outcome == "ok"
+    assert reply.dlq_copies_deleted == 0
+    assert reply.dlq_copies_kept == 0
+    # Seq 2 was past the snapshot bound info.last_seq=1, so the scan broke without reading past its bound.
+    assert 2 in nc.messages[dlq_stream]

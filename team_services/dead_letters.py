@@ -1,15 +1,19 @@
 """Team-services protocol 1 dead-letter watch, CRIT-1 sweep, orphan cleanup, and unified departure deletion.
 
 Implements step 4's team-services responsibilities (``contracts/messages/v1/README.md`` "Dead letters"):
-- **Notice watch (A5, C02, C03, C04, C05, C10):** pulls signed ``dlq.notice`` frames from
-  ``dlq~<team>`` on ``UA1_DLQ_<team>``, verifies each notice against the team's trust store,
+- **Notice watch (A5, C02, C03, C04, C05, C10, C22, F7):** pulls signed ``dlq.notice`` frames
+  from ``dlq~<team>`` on ``UA1_DLQ_<team>``, verifies each notice against the team's trust store,
   checks its raw copy's size and SHA-256, immediately deletes any newly fetched raw copy
   naming a departed person (never surfacing departed ``upgrade_old_format`` prompt text),
   summarizes permanently invalid notices, commits the administrators' ``AccessNoticeV1`` and
-  per-``(team_id, issuer_runtime, copy_id)`` receipts atomically in ``AccessRepository``, sends
-  one chat notice through the injectable ``ChatNoticeSender`` port (defaulting to a legacy
-  ``UserNotification`` envelope until step 6 moves it to ``person.notify``), and holds a batch
-  with ``+WPI`` whenever both Inbox and chat fail so outages never burn ``dlq~<team>`` deliveries.
+  per-``(team_id, issuer_runtime, copy_id)`` + per-original receipts atomically in
+  ``AccessRepository``, sends one chat notice through the injectable ``ChatNoticeSender`` port
+  (defaulting to a legacy ``UserNotification`` envelope until step 6 moves it to
+  ``person.notify``), and holds a batch with ``+WPI`` whenever storing the Inbox notice and
+  receipts fails so outages never burn ``dlq~<team>`` deliveries and recovery cannot duplicate
+  chat alerts. If the process crashes after committing the Inbox notice and receipts but before
+  the chat send completes, that batch's chat copy is lost (the Inbox notice is durable; a
+  per-notice chat-sent record is tracked as a follow-up).
 - **Recovery scan (C03, C10):** scans ``UA1_DLQ_<team>`` up to ``dlq~<team>``'s ``cutoff_seq``
   using persisted per-stream scan cursors and per-copy receipts to recover notices stranded by
   crash loops (resetting automatically if a recreated stream's sequence range starts over).
@@ -34,7 +38,7 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
@@ -44,7 +48,6 @@ from pydantic import TypeAdapter, ValidationError
 
 from access_control.people import PERSON_ROLE_ADMIN, is_administrator
 from access_control.people_directory import PeopleDirectory, PersonNow
-from custom_agents.instance_delivery_context import default_notification_gateway_context
 from custom_agents.stuck_work import ChatRoute
 from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1, PersonStanding
 from custom_messages.contracts.delivery_v1 import UserNotification
@@ -93,6 +96,7 @@ from custom_transport.protocol1.dead_letters import (
     sweep_exhausted_streams,
 )
 from custom_transport.protocol1.host_runtime import TEAM_SERVICES_RUNTIME
+from custom_transport.protocol1.joining import AUTHORITY_RUNTIME
 from custom_transport.protocol1.live import LiveHost, answer_headers
 from custom_transport.subjects import NatsSubjectMapper
 from storage.access_repository import AccessRepository
@@ -133,7 +137,6 @@ _DEPARTED_STANDINGS = frozenset({PersonStanding.DISABLED, PersonStanding.REMOVED
 _SHORT_TEXT_MAX = 500
 _INBOX_TITLE_MAX = 400
 _INBOX_SUMMARY_MAX = 4000
-_AUTHORITY_RUNTIME = "authority"
 _RUNTIME_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RuntimeId)
 
 _REASON_WORDS: Mapping[str, str] = {
@@ -162,7 +165,7 @@ _REASON_WORDS: Mapping[str, str] = {
 
 
 class _ReportingUnavailableError(RuntimeError):
-    """Internal signal that both Inbox and chat reporting failed for the current batch."""
+    """Internal signal that storing the Inbox notice and receipts failed for the current batch (C22, F7)."""
 
 
 class ChatNoticeSender(Protocol):
@@ -285,6 +288,8 @@ class _DepartureRun:
     dlq_copies_deleted: int = 0
     dlq_copies_kept: int = 0
     next_seq: int = 1
+    blob_failed: bool = False
+    blob_error: Optional[str] = None
     initial_done: asyncio.Event = None  # type: ignore[assignment]
     initial_reply: Optional[PersonDataDeleteReply] = None
     initial_error: Optional[Exception] = None
@@ -452,18 +457,6 @@ def format_dlq_admin_notice(
         title=_truncate_notice_text(f"{total} message(s) could not be handled and were set aside", _INBOX_TITLE_MAX),
         text=_truncate_notice_text(text, _INBOX_SUMMARY_MAX),
     )
-
-
-def owner_chat_route_from_config(config: Any) -> Optional[ChatRoute]:
-    """Build the owner's proactive ``ChatRoute`` directly from a loaded ``GatewayInstanceConfig``."""
-
-    route = str(config.manager.response_queue_name or "").strip()
-    if not route:
-        return None
-    context = default_notification_gateway_context(config)
-    if context.channel_name not in {"cli", "local"} and not context.chat_id:
-        return None
-    return ChatRoute(routing_key=route, gateway_context=context)
 
 
 class LegacyNatsChatNoticeSender:
@@ -665,23 +658,17 @@ class DeadLetterService:
         )
 
     def _people_directory_snapshot(self) -> tuple[frozenset[str], frozenset[str], dict[str, PersonNow]]:
-        records = self._people.store.team_people(self._team_id)
+        by_id = self._people.people()
         refs = frozenset(
-            rec.person_ref
-            for rec in records
-            if rec.standing in _DEPARTED_STANDINGS and rec.person_ref
+            person.person_ref
+            for person in by_id.values()
+            if person.standing in _DEPARTED_STANDINGS and person.person_ref
         )
         ids = frozenset(
-            rec.person_id
-            for rec in records
-            if rec.standing in _DEPARTED_STANDINGS and rec.person_id
+            person.person_id
+            for person in by_id.values()
+            if person.standing in _DEPARTED_STANDINGS and person.person_id
         )
-        by_id = {
-            rec.person_id: PersonNow(
-                rec.person_id, rec.standing, tuple(rec.roles), display_name=rec.display_name
-            )
-            for rec in records
-        }
         return refs, ids, by_id
 
     def _departed_person_targets(self) -> tuple[frozenset[str], frozenset[str]]:
@@ -698,15 +685,63 @@ class DeadLetterService:
     # -- lifecycle hooks -----------------------------------------------------------------------
 
     async def maintain(self) -> DeadLetterMaintenanceReport:
-        """Periodic upkeep: CRIT-1 sweep, DLQ notice recovery scan, shared raw-copy scan, and receipt pruning."""
+        """Periodic upkeep: raw-copy scan (departed/orphan), CRIT-1 sweep, notice recovery, and receipt pruning.
 
-        sweep = await self.sweep_work_streams()
-        recovered = await self.recover_exhausted_notices()
-        raw_scan = await self.scan_raw_copies()
-        cutoff = _utc(self._clock()) - timedelta(seconds=self._receipt_retention_seconds)
-        pruned = await asyncio.to_thread(
-            self._access.prune_dlq_reported_notices, self._team_id, before_utc=cutoff
-        )
+        Each step is isolated so an error in one step never skips departed-person raw-copy deletion
+        or receipt pruning (F4/FA-3).
+        """
+
+        try:
+            raw_scan = await self.scan_raw_copies()
+        except Exception as exc:
+            self._logger.exception(
+                "Dead-letter raw-copy maintenance step failed; continuing remaining upkeep steps. "
+                "event=protocol1_dlq_maintain_step_failed team=%s step=raw_copy_scan error_type=%s error=%s",
+                self._team_id,
+                type(exc).__name__,
+                exc,
+            )
+            raw_scan = RawCopyScanReport(0, 0, 0)
+
+        try:
+            sweep = await self.sweep_work_streams()
+        except Exception as exc:
+            self._logger.exception(
+                "Dead-letter work-stream sweep step failed; continuing remaining upkeep steps. "
+                "event=protocol1_dlq_maintain_step_failed team=%s step=sweep_work_streams error_type=%s error=%s",
+                self._team_id,
+                type(exc).__name__,
+                exc,
+            )
+            sweep = SweepSummary(0, 0, 0, False, 0.0, streams_failed=1)
+
+        try:
+            recovered = await self.recover_exhausted_notices()
+        except Exception as exc:
+            self._logger.exception(
+                "Dead-letter notice recovery step failed; continuing remaining upkeep steps. "
+                "event=protocol1_dlq_maintain_step_failed team=%s step=recover_exhausted_notices error_type=%s error=%s",
+                self._team_id,
+                type(exc).__name__,
+                exc,
+            )
+            recovered = 0
+
+        try:
+            cutoff = _utc(self._clock()) - timedelta(seconds=self._receipt_retention_seconds)
+            pruned = await asyncio.to_thread(
+                self._access.prune_dlq_reported_notices, self._team_id, before_utc=cutoff
+            )
+        except Exception as exc:
+            self._logger.exception(
+                "Dead-letter receipt pruning step failed. "
+                "event=protocol1_dlq_maintain_step_failed team=%s step=prune_receipts error_type=%s error=%s",
+                self._team_id,
+                type(exc).__name__,
+                exc,
+            )
+            pruned = 0
+
         return DeadLetterMaintenanceReport(
             sweep=sweep,
             recovered_notices=recovered,
@@ -977,7 +1012,7 @@ class DeadLetterService:
             return original_subject
         if original_subject.startswith(f"ua.v1.{self._team_id}."):
             return original_subject
-        if issuer_runtime == _AUTHORITY_RUNTIME and original_subject.startswith(f"ua.v1.{INSTALLATION_SCOPE}."):
+        if issuer_runtime == AUTHORITY_RUNTIME and original_subject.startswith(f"ua.v1.{INSTALLATION_SCOPE}."):
             return original_subject
         return "an unexpected subject"
 
@@ -1189,10 +1224,64 @@ class DeadLetterService:
                 reported_at_utc=_utc(self._clock()),
             )
         except Exception:
-            self._logger.debug(
-                "Could not store duplicate copy-id alias receipts; recovery will deduplicate by original key.",
+            self._logger.warning(
+                "Could not store duplicate copy-id alias receipts; recovery will deduplicate by original key. "
+                "event=protocol1_dlq_duplicate_alias_store_failed team=%s count=%s",
+                self._team_id,
+                len(aliases),
                 exc_info=True,
             )
+
+    async def _delete_raw_copy_best_effort(self, issuer_runtime: str, copy_id: str) -> None:
+        live = self._live_fn()
+        if live is None:
+            return
+        with contextlib.suppress(Exception):
+            raw_subj = dlq_raw_subject(self._team_id, issuer_runtime, copy_id)
+            stored = await get_stream_message(
+                live.nc, self._dlq_stream, last_by_subj=raw_subj, timeout=self._api_timeout_seconds
+            )
+            if stored is not None:
+                await delete_stream_message(
+                    live.nc, self._dlq_stream, stored.seq, timeout=self._api_timeout_seconds
+                )
+
+    async def _refresh_verified_item_for_delivery(
+        self,
+        item: _VerifiedNoticeItem,
+        *,
+        departed_ids: frozenset[str],
+        people_by_id: Mapping[str, PersonNow],
+    ) -> _VerifiedNoticeItem:
+        if item.reason != "upgrade_old_format" or item.old_envelope is None or not item.old_envelope.person_ids:
+            return item
+        if item.raw_status == "ok" and (item.old_envelope.person_ids & departed_ids):
+            await self._delete_raw_copy_best_effort(item.issuer_runtime, item.copy_id)
+            return replace(item, raw_status="departed_deleted", old_envelope=None, person_labels=())
+        labels = self._resolve_old_envelope_person_labels(
+            item.old_envelope.person_ids, departed_ids=departed_ids, people_by_id=people_by_id
+        )
+        return replace(item, person_labels=labels)
+
+    async def _refresh_verified_items_for_delivery(
+        self, verified_items: Sequence[_VerifiedNoticeItem]
+    ) -> list[_VerifiedNoticeItem]:
+        """Re-read departed standing before rendering a notice so a held batch never names a newly departed person (CON-3)."""
+
+        has_old_people = any(
+            item.reason == "upgrade_old_format" and item.old_envelope is not None and item.old_envelope.person_ids
+            for item in verified_items
+        )
+        if not has_old_people:
+            return list(verified_items)
+
+        _, departed_ids, people_by_id = await asyncio.to_thread(self._people_directory_snapshot)
+        return [
+            await self._refresh_verified_item_for_delivery(
+                item, departed_ids=departed_ids, people_by_id=people_by_id
+            )
+            for item in verified_items
+        ]
 
     async def _report_and_ack_batch(
         self,
@@ -1222,15 +1311,14 @@ class DeadLetterService:
             *((item.issuer_runtime, item.copy_id) for item in fresh_verified),
             *((item.subject_runtime, item.copy_id) for item in fresh_invalid),
         ]
-        formatted = format_dlq_admin_notice(
-            fresh_verified, fresh_invalid, dlq_stream=self._dlq_stream, waiting_after=waiting_after
-        )
         notice_id = _notice_id_for_receipts(self._team_id, receipt_keys)
 
         delivered = await self._deliver_holding_on_outage(
             ackable_messages=ackable_messages,
             notice_id=notice_id,
-            formatted=formatted,
+            verified_items=fresh_verified,
+            invalid_items=fresh_invalid,
+            waiting_after=waiting_after,
             receipt_keys=receipt_keys,
             original_keys=original_keys_map,
             alias_receipts=batch_aliases,
@@ -1266,7 +1354,9 @@ class DeadLetterService:
         *,
         ackable_messages: Sequence[Any],
         notice_id: str,
-        formatted: FormattedAdminNotice,
+        verified_items: Sequence[_VerifiedNoticeItem],
+        invalid_items: Sequence[_InvalidNoticeItem],
+        waiting_after: int = 0,
         receipt_keys: Sequence[tuple[str, str]],
         original_keys: Mapping[tuple[str, str], tuple[str, int, str]] | None = None,
         alias_receipts: Sequence[tuple[str, str]] = (),
@@ -1274,6 +1364,12 @@ class DeadLetterService:
     ) -> bool:
         async def attempt_deliver() -> bool:
             now = _utc(self._clock())
+            # CON-3: Rebuild departed standing and notice text on each delivery attempt so a held batch
+            # never surfaces a person who departed during an Inbox outage.
+            current_verified = await self._refresh_verified_items_for_delivery(verified_items)
+            formatted = format_dlq_admin_notice(
+                current_verified, invalid_items, dlq_stream=self._dlq_stream, waiting_after=waiting_after
+            )
             inbox_ok, inbox_created = await self._try_store_inbox_with_receipts(
                 notice_id,
                 formatted,
@@ -1649,12 +1745,12 @@ class DeadLetterService:
             *((item.issuer_runtime, item.copy_id) for item in fresh_verified),
             *((item.subject_runtime, item.copy_id) for item in fresh_invalid),
         ]
-        formatted = format_dlq_admin_notice(fresh_verified, fresh_invalid, dlq_stream=self._dlq_stream)
         notice_id = _notice_id_for_receipts(self._team_id, receipt_keys)
         delivered = await self._deliver_holding_on_outage(
             ackable_messages=(),
             notice_id=notice_id,
-            formatted=formatted,
+            verified_items=fresh_verified,
+            invalid_items=fresh_invalid,
             receipt_keys=receipt_keys,
             original_keys=original_keys_map,
             alias_receipts=batch_aliases,
@@ -1875,7 +1971,7 @@ class DeadLetterService:
             stored = await get_stream_message(
                 nc, self._dlq_stream, seq=next_seq, next_by_subj=wildcard, timeout=self._api_timeout_seconds
             )
-            if stored is None:
+            if stored is None or stored.seq > last_seq:
                 self._advance_orphan_confirmed_seq(last_seq, saw_young_copy=saw_young_copy)
                 break
             copies_scanned += 1
@@ -2102,6 +2198,18 @@ class TeamPersonDepartureService:
                 raise run.initial_error
             if run.initial_reply is not None:
                 return run.initial_reply
+        if run.blob_failed and self._blobs is not None and not self._stopping:
+            await self._run_blob_deletion(run)
+        if run.blob_failed:
+            return PersonDataDeleteReply(
+                outcome="runtime_error",
+                owners_removed=run.owners_removed,
+                blobs_deleted=run.blobs_deleted,
+                blobs_kept=run.blobs_kept,
+                dlq_copies_deleted=run.dlq_copies_deleted,
+                dlq_copies_kept=run.dlq_copies_kept,
+                message=run.blob_error or "Blob deletion failed and remains queued for retry.",
+            )
         return PersonDataDeleteReply(
             outcome="retry_later",
             owners_removed=run.owners_removed,
@@ -2112,21 +2220,72 @@ class TeamPersonDepartureService:
             message="Dead-letter raw-copy scan is still continuing in the background.",
         )
 
+    async def _run_blob_deletion(self, run: _DepartureRun) -> Optional[PersonDataDeleteReply]:
+        """Run blob deletion into ``run``; returns a ``not_allowed`` reply only if standing flipped back to active."""
+
+        if self._blobs is None:
+            return None
+        try:
+            blob_res = await self._blobs.delete_person(run.person_ref)
+        except Exception as exc:
+            run.blob_failed = True
+            run.blob_error = _short_message(f"Blob deletion failed: {exc}")
+            self._logger.exception(
+                "Departed-person blob deletion raised unexpectedly; continuing dead-letter raw-copy scan. "
+                "event=team_delete_person_data_blobs_failed team=%s person_id=%s",
+                self._team_id,
+                run.person_id,
+            )
+            return None
+        if blob_res.outcome == "not_allowed":
+            return PersonDataDeleteReply(outcome="not_allowed", message=blob_res.message)
+        run.owners_removed += blob_res.owners_removed
+        run.blobs_deleted += blob_res.blobs_deleted
+        run.blobs_kept = blob_res.blobs_kept
+        if blob_res.outcome != "ok":
+            run.blob_failed = True
+            run.blob_error = blob_res.message or "One or more blobs could not be deleted and remain queued for retry."
+        else:
+            run.blob_failed = False
+            run.blob_error = None
+        return None
+
     async def _execute_initial_run(self, run: _DepartureRun) -> PersonDataDeleteReply:
         keep_registered = False
         try:
-            if self._blobs is not None:
-                blob_res = await self._blobs.delete_person(run.person_ref)
-                if blob_res.outcome != "ok":
-                    reply = PersonDataDeleteReply(outcome=blob_res.outcome, message=blob_res.message)
-                    run.initial_reply = reply
-                    return reply
-                run.owners_removed = blob_res.owners_removed
-                run.blobs_deleted = blob_res.blobs_deleted
-                run.blobs_kept = blob_res.blobs_kept
+            refused = await self._run_blob_deletion(run)
+            if refused is not None:
+                run.initial_reply = refused
+                return refused
 
+            # F4/FA-2: Always run the dead-letter raw-copy scan even when blob deletion reported an error,
+            # preserving pending blob retries and returning combined counts.
             finished = await self._scan_dlq_segment(run, budget_seconds=self._delete_budget_seconds)
             if finished:
+                if run.blob_failed:
+                    reply = PersonDataDeleteReply(
+                        outcome="runtime_error",
+                        owners_removed=run.owners_removed,
+                        blobs_deleted=run.blobs_deleted,
+                        blobs_kept=run.blobs_kept,
+                        dlq_copies_deleted=run.dlq_copies_deleted,
+                        dlq_copies_kept=run.dlq_copies_kept,
+                        message=run.blob_error,
+                    )
+                    run.initial_reply = reply
+                    self._logger.warning(
+                        "Departed-person dead-letter scan finished, but blob deletion had errors queued for retry. "
+                        "event=team_delete_person_data_partial_blob_error team=%s person_id=%s "
+                        "owners_removed=%s blobs_deleted=%s blobs_kept=%s dlq_copies_deleted=%s dlq_copies_kept=%s",
+                        self._team_id,
+                        run.person_id,
+                        run.owners_removed,
+                        run.blobs_deleted,
+                        run.blobs_kept,
+                        run.dlq_copies_deleted,
+                        run.dlq_copies_kept,
+                    )
+                    return reply
                 reply = PersonDataDeleteReply(
                     outcome="ok",
                     owners_removed=run.owners_removed,
@@ -2150,24 +2309,58 @@ class TeamPersonDepartureService:
                 )
                 return reply
 
+            # F6: Never start a background continuation once team services is stopping.
+            if self._stopping:
+                reply = PersonDataDeleteReply(
+                    outcome="runtime_error",
+                    owners_removed=run.owners_removed,
+                    blobs_deleted=run.blobs_deleted,
+                    blobs_kept=run.blobs_kept,
+                    dlq_copies_deleted=run.dlq_copies_deleted,
+                    dlq_copies_kept=run.dlq_copies_kept,
+                    message="Team services stopped before departed-person deletion completed.",
+                )
+                run.initial_reply = reply
+                self._logger.warning(
+                    "Departed-person dead-letter scan stopped before finishing because team services is shutting down. "
+                    "event=team_delete_person_data_stopped team=%s person_id=%s next_seq=%s "
+                    "dlq_copies_deleted=%s dlq_copies_kept=%s",
+                    self._team_id,
+                    run.person_id,
+                    run.next_seq,
+                    run.dlq_copies_deleted,
+                    run.dlq_copies_kept,
+                )
+                return reply
+
             keep_registered = True
             run.continuation_task = asyncio.create_task(self._run_continuation(run))
+            outcome = "runtime_error" if run.blob_failed else "retry_later"
+            msg = (
+                f"{run.blob_error} Dead-letter raw-copy scan reached its time budget and continues in the background."
+                if run.blob_failed and run.blob_error
+                else "Dead-letter raw-copy scan reached its time budget and continues in the background."
+            )
             reply = PersonDataDeleteReply(
-                outcome="retry_later",
+                outcome=outcome,
                 owners_removed=run.owners_removed,
                 blobs_deleted=run.blobs_deleted,
                 blobs_kept=run.blobs_kept,
                 dlq_copies_deleted=run.dlq_copies_deleted,
                 dlq_copies_kept=run.dlq_copies_kept,
-                message="Dead-letter raw-copy scan reached its time budget and continues in the background.",
+                message=msg,
             )
             run.initial_reply = reply
             self._logger.warning(
                 "Departed-person dead-letter scan reached its time budget; continuing in background. "
-                "event=team_delete_person_data_retry_later team=%s person_id=%s "
-                "dlq_copies_deleted=%s dlq_copies_kept=%s next_seq=%s",
+                "event=team_delete_person_data_retry_later team=%s person_id=%s outcome=%s "
+                "owners_removed=%s blobs_deleted=%s blobs_kept=%s dlq_copies_deleted=%s dlq_copies_kept=%s next_seq=%s",
                 self._team_id,
                 run.person_id,
+                outcome,
+                run.owners_removed,
+                run.blobs_deleted,
+                run.blobs_kept,
                 run.dlq_copies_deleted,
                 run.dlq_copies_kept,
                 run.next_seq,
@@ -2215,7 +2408,7 @@ class TeamPersonDepartureService:
             stored = await get_stream_message(
                 live.nc, self._dlq_stream, seq=run.next_seq, next_by_subj=wildcard, timeout=self._api_timeout_seconds
             )
-            if stored is None:
+            if stored is None or stored.seq > info.last_seq:
                 break
             run.next_seq = stored.seq + 1
             await self._handle_dlq_copy_for_departure(live.nc, stored, run)
@@ -2226,16 +2419,28 @@ class TeamPersonDepartureService:
 
     async def _run_continuation(self, run: _DepartureRun) -> None:
         try:
-            await self._scan_dlq_segment(run, budget_seconds=None)
-            self._logger.info(
-                "Finished background departed-person dead-letter scan. "
-                "event=team_delete_person_data_continuation_ok team=%s person_id=%s "
-                "dlq_copies_deleted=%s dlq_copies_kept=%s",
-                self._team_id,
-                run.person_id,
-                run.dlq_copies_deleted,
-                run.dlq_copies_kept,
-            )
+            completed = await self._scan_dlq_segment(run, budget_seconds=None)
+            if completed:
+                self._logger.info(
+                    "Finished background departed-person dead-letter scan. "
+                    "event=team_delete_person_data_continuation_ok team=%s person_id=%s "
+                    "dlq_copies_deleted=%s dlq_copies_kept=%s",
+                    self._team_id,
+                    run.person_id,
+                    run.dlq_copies_deleted,
+                    run.dlq_copies_kept,
+                )
+            else:
+                self._logger.warning(
+                    "Background departed-person dead-letter scan stopped before reaching stream end. "
+                    "event=team_delete_person_data_continuation_stopped team=%s person_id=%s next_seq=%s "
+                    "dlq_copies_deleted=%s dlq_copies_kept=%s",
+                    self._team_id,
+                    run.person_id,
+                    run.next_seq,
+                    run.dlq_copies_deleted,
+                    run.dlq_copies_kept,
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2368,5 +2573,4 @@ __all__ = [
     "TeamPersonDataOperations",
     "TeamPersonDepartureService",
     "format_dlq_admin_notice",
-    "owner_chat_route_from_config",
 ]

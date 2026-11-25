@@ -518,10 +518,14 @@ def build_dlq_notice_body(
     original_stream: str,
     original_stream_sequence: int,
     deliveries: int,
-    pointer: Optional[str] = None,
+    refusal: Optional[FrameRefused] = None,
     release: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Build and schema-validate a ``dlq.notice`` body containing identifiers only (A1)."""
+    """Build and schema-validate a ``dlq.notice`` body containing identifiers only (A1, SEC-4).
+
+    The optional ``pointer`` is read strictly from ``refusal.known_at`` inside this module so an
+    arbitrary or unknown sender-chosen field path (such as ``refusal.at``) can never reach a notice.
+    """
 
     _validate_copy_id(copy_id)
     if reason in TEMPORARY_REFUSALS:
@@ -547,8 +551,9 @@ def build_dlq_notice_body(
     }
 
     if reason != "upgrade_old_format":
-        if pointer and _POINTER_PATTERN.fullmatch(pointer):
-            body["pointer"] = pointer
+        known_at = refusal.known_at if refusal is not None else None
+        if known_at and _POINTER_PATTERN.fullmatch(known_at):
+            body["pointer"] = known_at
         claims = extract_unverified_claims(raw_bytes)
         if claims:
             body["claimed"] = claims
@@ -735,7 +740,7 @@ class DeadLetterSetter:
         deliveries: int,
         stored_at: datetime | str | int,
         team: Optional[str] = None,
-        pointer: Optional[str] = None,
+        refusal: Optional[FrameRefused] = None,
         skip_raw_publish: bool = False,
         on_raw_stored: Optional[Callable[[], None]] = None,
     ) -> SetAsideResult:
@@ -758,7 +763,7 @@ class DeadLetterSetter:
             original_stream=original_stream,
             original_stream_sequence=original_stream_sequence,
             deliveries=deliveries,
-            pointer=pointer,
+            refusal=refusal,
             release=self.release,
         )
         audience = {
@@ -798,7 +803,7 @@ class DeadLetterSetter:
         original_seq: int,
         stored_ns: int,
         team: Optional[str],
-        pointer: Optional[str],
+        refusal: Optional[FrameRefused],
         effective_ack_wait: float,
         stop: Optional[asyncio.Event],
     ) -> SetAsideResult:
@@ -824,7 +829,7 @@ class DeadLetterSetter:
                     deliveries=deliveries,
                     stored_at=stored_ns,
                     team=team,
-                    pointer=pointer,
+                    refusal=refusal,
                     skip_raw_publish=raw_stored_in_attempt,
                     on_raw_stored=mark_raw_stored,
                 )
@@ -847,7 +852,7 @@ class DeadLetterSetter:
         *,
         reason: str,
         team: Optional[str] = None,
-        pointer: Optional[str] = None,
+        refusal: Optional[FrameRefused] = None,
         stop: Optional[asyncio.Event] = None,
         ack_wait_seconds: Optional[float] = None,
         message_holder: Optional[list[Any]] = None,
@@ -873,7 +878,7 @@ class DeadLetterSetter:
                 original_seq=original_seq,
                 stored_ns=stored_ns,
                 team=team,
-                pointer=pointer,
+                refusal=refusal,
                 effective_ack_wait=effective_ack_wait,
                 stop=stop,
             )
@@ -958,7 +963,7 @@ class DeadLetterHoldTracker:
         *,
         reason: str,
         team: Optional[str] = None,
-        pointer: Optional[str] = None,
+        refusal: Optional[FrameRefused] = None,
         stop: Optional[asyncio.Event] = None,
         ack_wait_seconds: Optional[float] = None,
     ) -> asyncio.Task[Optional[SetAsideResult]]:
@@ -978,7 +983,7 @@ class DeadLetterHoldTracker:
                     message,
                     reason=reason,
                     team=team,
-                    pointer=pointer,
+                    refusal=refusal,
                     stop=stop,
                     ack_wait_seconds=ack_wait_seconds,
                     message_holder=holder,
@@ -1921,10 +1926,7 @@ def _protocol1_frame_names_person(doc: Mapping[str, Any], target_refs: frozenset
         return False
     if _nested_str(doc, "authority", "person") in target_refs:
         return True
-    if not isinstance(doc.get("protocol"), str):
-        return False
-    body = doc.get("body")
-    return isinstance(body, Mapping) and _contains_any_string(body, target_refs)
+    return _contains_any_string(doc, target_refs)
 
 
 def _legacy_envelope_names_person(doc: Mapping[str, Any], target_ids: frozenset[str]) -> bool:
@@ -1933,6 +1935,39 @@ def _legacy_envelope_names_person(doc: Mapping[str, Any], target_ids: frozenset[
     if not isinstance(doc.get("msg_meta"), Mapping) and not isinstance(doc.get("msg_content"), Mapping):
         return False
     return bool(_old_envelope_person_ids(doc) & target_ids)
+
+
+_CLOSED_LEGACY_PERSON_ID_FIELDS: Final[tuple[str, ...]] = ("canonical_user_id", "person_id")
+
+
+def _unparsable_copy_names_person(
+    data: bytes, target_refs: frozenset[str], target_ids: frozenset[str]
+) -> bool:
+    """Fallback matcher when raw bytes fail JSON parsing (truncated, deeply nested, or malformed, F4/EA-3).
+
+    - ``person_ref`` values (opaque 128-bit random identifiers) are matched by substring.
+    - ``person_id`` values are matched ONLY field-anchored against the closed set of legacy
+      envelope person-id field names (``canonical_user_id``, ``person_id``), never as bare text.
+    """
+
+    if not data:
+        return False
+    text = data.decode("utf-8", errors="replace")
+    if target_refs and any(ref in text for ref in target_refs):
+        return True
+    if not target_ids:
+        return False
+    quoted_variants: list[str] = []
+    for pid in sorted(target_ids):
+        escaped_ascii = json.dumps(pid, ensure_ascii=True)
+        escaped_utf8 = json.dumps(pid, ensure_ascii=False)
+        quoted_variants.append(re.escape(escaped_ascii))
+        if escaped_utf8 != escaped_ascii:
+            quoted_variants.append(re.escape(escaped_utf8))
+    field_group = "|".join(_CLOSED_LEGACY_PERSON_ID_FIELDS)
+    value_group = "|".join(quoted_variants)
+    pattern = re.compile(rf'"(?:{field_group})"\s*:\s*(?:{value_group})')
+    return pattern.search(text) is not None
 
 
 def raw_copy_names_person(
@@ -1950,7 +1985,9 @@ def raw_copy_names_person(
       ``authority.person`` and any ``person_ref`` value inside ``body``.
     - Legacy ``MessageEnvelope`` objects (``msg_meta`` / ``msg_content``): only the closed set of
       person-id fields documented in ``contracts/messages/v1/README.md`` ("People's content", C13).
-    Unreadable bytes return ``False``.
+    - When JSON parsing fails (truncated, deeply nested, or corrupt bytes, F4/EA-3): matches
+      opaque ``person_ref`` tokens by substring and ``person_id`` values strictly field-anchored
+      over the closed legacy field names (``canonical_user_id``, ``person_id``).
     """
 
     target_refs = _merge_targets(person_ref, person_refs)
@@ -1959,7 +1996,7 @@ def raw_copy_names_person(
         return False
     doc = _safe_parse_json_object(data)
     if doc is None:
-        return False
+        return _unparsable_copy_names_person(data, target_refs, target_ids)
     return _protocol1_frame_names_person(doc, target_refs) or _legacy_envelope_names_person(doc, target_ids)
 
 

@@ -390,7 +390,7 @@ def test_build_dlq_notice_body_identifiers_pointer_oversized_and_upgrade_old_for
         original_stream="UA1_PART_team_example~8",
         original_stream_sequence=17,
         deliveries=2,
-        pointer=refused.known_at,
+        refusal=refused,
         release="0.10.0",
     )
     assert body["pointer"] == "/body"
@@ -440,7 +440,7 @@ def test_build_dlq_notice_body_identifiers_pointer_oversized_and_upgrade_old_for
         original_stream="UA_TEAM_EXAMPLE_WORK",
         original_stream_sequence=812,
         deliveries=0,
-        pointer="/body",
+        refusal=FrameRefused("invalid_body", "ignored", at="/body/x", known_at="/body"),
     )
     assert "claimed" not in old_body and "pointer" not in old_body
     assert extract_unverified_claims(b"\xff\xfe not utf8") == {}
@@ -476,7 +476,7 @@ async def test_setter_writes_verified_dlq_notice_and_handles_oversized_and_insta
         deliveries=1,
         stored_at=ts_ns,
         team=TEAM,
-        pointer="/signature",
+        refusal=FrameRefused("bad_signature", "bad sig", at="/signature/extra", known_at="/signature"),
     )
     assert result.raw_stored is True
     assert len(conn.jetstream().published) == 2
@@ -1303,7 +1303,7 @@ async def test_c28_advisory_watch_retries_unacked_on_transient_errors_past_20_de
             raise TimeoutError("transient MSG.GET timeout")
         return await orig_req(subject, req_payload, timeout=timeout)
 
-    conn.request = flaky_req  # type: ignore[method-assign]
+    conn.request = flaky_req  # type: ignore[method-assign,assignment]
 
     adv_first = FakeDelivery(
         data=payload,
@@ -1407,3 +1407,79 @@ def test_f3_dlq_notice_schema_and_old_envelope_identifier_validation() -> None:
     assert summary.task_id == "task_valid:99"
     assert summary.request_id == "req-good-123"
     assert summary.person_ids == frozenset({"alice"})
+
+
+def test_f4_ea3_unparsable_raw_copies_match_person_refs_and_field_anchored_ids_only() -> None:
+    """F4 (EA-3): Truncated or deeply nested raw copies match person_ref by substring and person_id strictly field-anchored."""
+
+    alice_ref = "p-0123456789abcdef0123456789abcdef"
+    bob_ref = "p-fedcba9876543210fedcba9876543210"
+
+    # 1. Truncated protocol 1 JSON containing person_ref matches.
+    truncated_p1 = f'{{"protocol":"1.0-pre","authority":{{"person":"{alice_ref}"}},"body":{{"prompt":"cut off'.encode()
+    assert raw_copy_names_person(truncated_p1, person_ref=alice_ref, person_id="alice") is True
+    assert raw_copy_names_person(truncated_p1, person_ref=bob_ref, person_id="bob") is False
+
+    # 2. Deeply nested JSON (both valid JSON without protocol and RecursionError-triggering depth) matches person_ref.
+    deep_nesting = (b'{"a":' * 2000) + f'"{alice_ref}"'.encode() + (b"}" * 2000)
+    assert raw_copy_names_person(deep_nesting, person_ref=alice_ref) is True
+    assert raw_copy_names_person(deep_nesting, person_ref=bob_ref) is False
+    too_deep = (b"[" * 25000) + f'"{alice_ref}"'.encode() + (b"]" * 25000)
+    assert raw_copy_names_person(too_deep, person_ref=alice_ref) is True
+    assert raw_copy_names_person(too_deep, person_ref=bob_ref) is False
+
+    # 3. Truncated legacy envelope containing field-anchored canonical_user_id or person_id matches.
+    truncated_legacy_cui = b'{"msg_meta":{"gateway_context":{"canonical_user_id" : "alice"}},"msg_content":{"text":"cut'
+    truncated_legacy_pid = b'{"msg_content":{"task_context":{"context":{"person_id":"alice"}}},"broken":['
+    assert raw_copy_names_person(truncated_legacy_cui, person_id="alice") is True
+    assert raw_copy_names_person(truncated_legacy_pid, person_id="alice") is True
+
+    # 4. Never a bare id search: display-name-like person_id in free text or partial id value does NOT match.
+    bare_mention = b'{"msg_content":{"task_description":"Please tell alice to review the draft"},"broken":['
+    prefix_collision = b'{"msg_meta":{"gateway_context":{"canonical_user_id":"alice-smith"}},"broken":['
+    other_field = b'{"msg_content":{"recipient_name":"alice"},"broken":['
+    assert raw_copy_names_person(bare_mention, person_id="alice") is False
+    assert raw_copy_names_person(prefix_collision, person_id="alice") is False
+    assert raw_copy_names_person(other_field, person_id="alice") is False
+
+    # 5. Unparsable binary garbage with no ref or field-anchored id returns False.
+    assert raw_copy_names_person(b"\xff\xfe\x00not json at all", person_ref=alice_ref, person_id="alice") is False
+
+
+def test_f8_sec4_build_dlq_notice_reads_only_known_at_from_frame_refused() -> None:
+    """F8 (SEC-4): Dead-letter notice builder accepts only FrameRefused and reads .known_at, ignoring .at."""
+
+    refused_with_unknown = FrameRefused(
+        "invalid_body",
+        "unexpected field",
+        at="/body/secret_sender_field_name",
+        known_at="/body",
+    )
+    body = build_dlq_notice_body(
+        copy_id="f" * 64,
+        reason="invalid_body",
+        raw_bytes=b"{}",
+        original_subject="ua.v1.team_example.lead-1.work.team",
+        original_stream="UA1_TEAM_WORK_team_example",
+        original_stream_sequence=5,
+        deliveries=1,
+        refusal=refused_with_unknown,
+        release="0.10.0",
+    )
+    assert body["pointer"] == "/body"
+    assert "secret_sender_field_name" not in json.dumps(body)
+
+    # When known_at is empty (unknown top-level field or whole-document refusal), no pointer is emitted.
+    refused_no_known = FrameRefused("malformed", "bad", at="/unknown_attacker_field", known_at="")
+    body2 = build_dlq_notice_body(
+        copy_id="f" * 64,
+        reason="malformed",
+        raw_bytes=b"{",
+        original_subject="ua.v1.team_example.lead-1.work.team",
+        original_stream="UA1_TEAM_WORK_team_example",
+        original_stream_sequence=6,
+        deliveries=1,
+        refusal=refused_no_known,
+        release="0.10.0",
+    )
+    assert "pointer" not in body2
