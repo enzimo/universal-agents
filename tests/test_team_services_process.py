@@ -336,7 +336,7 @@ async def test_f9_lock_lost_stops_partition_maintenance_and_upkeep_before_drain(
 
 
 @pytest.mark.asyncio
-async def test_lock_lost_stops_family_background_runners_before_drain(monkeypatch) -> None:
+async def test_lock_lost_stops_family_background_runners_before_drain(monkeypatch: pytest.MonkeyPatch) -> None:
     """OperationFamily.run (e.g. DeadLetterService.run) starts on serve and cancels immediately on LockLost."""
 
     serving = asyncio.Event()
