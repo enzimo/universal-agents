@@ -393,14 +393,16 @@ the services it started and refuses to start
 `event=installation_authority_start_refused` says why and what to do.
 
 Only part of the traffic is signed in 0.10: processes joining the installation;
-agent sessions; the commands the team services answer, such as memory, knowledge
-and topic commands; pausing, resuming or shutting down an agent, and asking it
-for its status or about a task; the notice that the team's skills changed; and
+agent sessions; the commands the team services answer, such as memory, knowledge,
+topic, blob registration, and person-data departure cleanup commands; pausing,
+resuming or shutting down an agent, and asking it
+for its status or about a task; the notice that the team's skills changed;
+protocol 1 dead-letter notices (`dlq.notice`); and
 the records of which agents and hosts are running. Everything else stays unsigned
 until a later release, including queued work and its results; stopping a
 delegated task; creating schedules and scheduled runs; the gateway's commands for
 cancelling or listing running work, for Objectives and for a person's standing; a
-lead's guidance to its workers; notices to people and agents; and dead letters.
+lead's guidance to its workers; notices to people and agents; and legacy 0.9 dead letters.
 These messages name their sender without proving it, so any process that holds
 the instance's NATS login could send them in another agent's name. People's
 requests, scheduled runs and those gateway commands also carry a signed statement

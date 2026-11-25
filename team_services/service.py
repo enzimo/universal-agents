@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Iterable, Mapping, Optional
 
 from custom_messages.wire.frame import VerifiedFrame
 from custom_transport.protocol1.live import Unsupported
@@ -23,7 +23,7 @@ from team_services.sessions import SessionService
 
 Handler = Callable[[VerifiedFrame], Awaitable[dict[str, Any]]]
 Upkeep = Callable[[], Awaitable[None]]
-BackgroundRunner = Callable[[asyncio.Event], Awaitable[None]]
+BackgroundRunner = Callable[[asyncio.Event], Coroutine[Any, Any, None]]
 
 
 @dataclass(frozen=True)

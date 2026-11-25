@@ -867,7 +867,7 @@ async def test_c05_legacy_chat_sender_envelope_reaches_gateway_manager_client_un
             response_route=response_route,
             initial_manager_id="lead-1",
         ),
-        id_generator=SimpleNamespace(new_id=lambda: "id-1"),  # type: ignore[arg-type]
+        id_generator=SimpleNamespace(new_id=lambda: "id-1"),
         logger=logging.getLogger("test"),
         on_unsolicited=on_unsolicited,
     )
@@ -876,6 +876,7 @@ async def test_c05_legacy_chat_sender_envelope_reaches_gateway_manager_client_un
     delivered = received[0]
     assert isinstance(delivered.msg_content, UserNotification)
     assert delivered.msg_content.reason == DEAD_LETTER_NOTICE_REASON
+    assert delivered.msg_meta is not None
     assert delivered.msg_meta.gateway_context is not None
     assert delivered.msg_meta.gateway_context.delivery_mode == "autonomous"
     assert delivered.msg_meta.gateway_context.chat_id == "chat-admin-1"

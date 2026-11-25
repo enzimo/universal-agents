@@ -162,6 +162,14 @@ async def _prepare(host: MessageHost) -> None:
     await host.refresh_trust()
 
 
+async def _cancel_tasks(tasks: Sequence[Optional[asyncio.Task[None]]]) -> None:
+    active = [task for task in tasks if task is not None]
+    for task in active:
+        task.cancel()
+    if active:
+        await asyncio.gather(*active, return_exceptions=True)
+
+
 async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock,
                               keeper: asyncio.Task[None], team: str, stop: asyncio.Event,
                               families: Sequence[OperationFamily],
@@ -229,10 +237,7 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
         # Stop background writers immediately before unsubscribing/draining so a deposed instance
         # cannot race the new lock holder during the up to 30s drain window (F9/FA-8/CR-7).
         stop.set()
-        bg_tasks = [task for task in (*runner_tasks, partition_task, maintenance, upkeep) if task is not None]
-        for task in bg_tasks:
-            task.cancel()
-        await asyncio.gather(*bg_tasks, return_exceptions=True)
+        await _cancel_tasks((*runner_tasks, partition_task, maintenance, upkeep))
         runner_tasks = []
         partition_task = maintenance = upkeep = None
         raise
@@ -246,16 +251,7 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
             # The upkeep ends and writes its last record (drained) even when unsubscribing failed, and before
             # the caller releases the lock, so it never overwrites the record of the instance that takes over.
             stop.set()
-            for task in runner_tasks:
-                task.cancel()
-            if runner_tasks:
-                await asyncio.gather(*runner_tasks, return_exceptions=True)
-            if partition_task is not None:
-                partition_task.cancel()
-                await asyncio.gather(partition_task, return_exceptions=True)
-            if maintenance is not None:
-                maintenance.cancel()
-                await asyncio.gather(maintenance, return_exceptions=True)
+            await _cancel_tasks((*runner_tasks, partition_task, maintenance))
             if upkeep is not None:
                 await upkeep
 

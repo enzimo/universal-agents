@@ -1004,7 +1004,7 @@ async def test_c18_held_set_aside_rewrites_raw_copy_after_orphan_cleanup() -> No
         await real_publish(subject, payload, timeout=timeout, headers=headers)
         stored_by_subject[subject] = payload
 
-    js.publish = stateful_publish  # type: ignore[method-assign]
+    js.publish = stateful_publish  # type: ignore[method-assign,assignment]
     setter = DeadLetterSetter(
         live_host,
         release="0.10.0",

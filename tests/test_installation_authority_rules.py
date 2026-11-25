@@ -2159,7 +2159,7 @@ async def test_authority_sweep_delivery_limits_and_install_dead_letter_routing(t
             raise RuntimeError("transient nats hiccup")
         return summary
 
-    authority.sweep_delivery_limits = fake_sweep  # type: ignore[method-assign]
+    authority.sweep_delivery_limits = fake_sweep  # type: ignore[method-assign,assignment]
     await authority.upkeep(fixtures.NOW)
     assert calls == ["sweep"]
     assert authority._dlq_swept_at is None  # failed step does not advance timestamp -> retries next minute!

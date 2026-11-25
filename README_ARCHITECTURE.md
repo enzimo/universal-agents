@@ -6310,7 +6310,8 @@ reuse it until it expires.
 | People's memory, knowledge, topics and schedule lists and controls (`svc.team`) | The gateway's task cancel and inventory, Objectives and a person's standing, as durable commands to the lead's control mailbox (decision 67) |
 | The Tasks page's lists and removals and the context dump setting, relayed to the agent | The other three commands of decision 67, the gateway's task progress, parent-task probe and thread guidance, on `.operational` (decision 68) |
 | Asking an agent (`agent.status`, `.pause`, `.resume`, `.exit`, `task.probe`): other agents, and the gateway for `agent.status` | A lead's guidance for delegated work, through the holder's control mailbox (decision 59) |
-| The `skills.changed` team event | Dead letters: today's stream and notices (decision 71) |
+| The `skills.changed` team event | Queued 0.9 dead letters (`<PREFIX>_DEAD_LETTER` and `custom_agents/dead_letter_watch.py`, kept until step 10 retires 0.9 queues) |
+| Protocol 1 dead letters (`UA1_DLQ_<team>`, `dlq.notice`, `team.delete_person_data`, CRIT-1 sweep) | |
 | Agent and host records: who is live, who leads, busy or idle | |
 
 The presence stream, the heartbeat broadcast, the broadcast subject and the gateway's
@@ -6540,7 +6541,12 @@ renamed secrets included). The authority:
   with an ever higher sequence, so a restored authority never writes a lower one), renews
   its own certificate at two thirds of its life and signs with the new one from then on,
   and once a day forgets old trust records and deletes from `UA1_CERTS` the certificates
-  receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). A failed
+  receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). It also sweeps
+  each served team's `UA1_TEAM_WORK_<team>` stream (`sweep_delivery_limits`, fault-isolated
+  inside `upkeep`) for messages that exhausted `max_deliveries` without a set-aside, writing
+  each into `UA1_DLQ_<team>` as `delivery_limit` before removing it by sequence, and provides
+  `dead_letter_setter()` so installation-traffic (`_install`) dead-letter notices route to a
+  team its certificate serves. A failed
   step is tried again a minute later, except the forgetting: it notes the day it ran
   before it starts, so after a failure it runs again the next day. Hosts read the
   authority's renewed certificate from `UA1_CERTS` when a reply names it, joining hosts
@@ -6836,8 +6842,8 @@ They serve the team's address (`svc.team`) and answer, so far:
   A Knowledge page command a 0.9 gateway queued before the upgrade
   (`ManagerKnowledgeCommand`) is a retired command like the memory one above: the lead
   tells the person it was not carried out;
-- the team's `UA1_BLOBS` object-store ownership index and lifecycle commands,
-  `blobs.register` and `blobs.delete_person` (`team_services.blobs`,
+- the team's `UA1_BLOBS` object-store ownership index and lifecycle command
+  `blobs.register` (`team_services.blobs`,
   `storage.blob_index_repository`, SQLite and PostgreSQL): writers register ownership
   of `{team}~{sha256}` objects in `OBJ_UA1_BLOBS` (written and verified directly via
   `custom_transport.protocol1.blobs` using ADR-20 subjects/metadata, 131,072-byte
@@ -6845,8 +6851,8 @@ They serve the team's address (`svc.team`) and answer, so far:
   `$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS` chunk reads without reader consumer-create
   grants). Ownership registration, retention expiration (`agent.blob_retention_days`,
   default 7, operator-only, exported in team transfer settings schema v16), and
-  immediate person-departure deletion (called from both
-  `assistant_gateway.application.person_lifecycle` and
+  immediate person-departure deletion (called via unified `team.delete_person_data`
+  below from both `assistant_gateway.application.person_lifecycle` and
   `custom_agents.person_departure_runtime` on disable/remove) are serialized under one
   lock in the single lock-holding `team_services` instance so reusing an existing blob
   cannot race last-owner deletion. Unowned blobs are queued durably in
@@ -6857,6 +6863,41 @@ They serve the team's address (`svc.team`) and answer, so far:
   backed by an orphan-chunk sweep that removes unreferenced chunks and chunks
   referenced only by `deleted: true` markers after `orphan_chunk_grace_seconds` plus
   clock tolerance;
+- protocol 1 dead letters and unified person-data departure cleanup
+  (`custom_transport.protocol1.dead_letters`, `team_services.dead_letters`,
+  `team.delete_person_data` on `svc.team`): every protocol 1 durable receiver sets aside
+  refused or failed messages through `DeadLetterSetter`, deriving an unguessable
+  deterministic `copy_id` via domain-separated HMAC-SHA256 from a receiver-local key
+  materialized from its application key plus `(stream, stream_sequence, stored_timestamp_ns)`
+  so redeliveries replace half-finished raw copies (`max_msgs_per_subject: 1`) without
+  leaving orphans and recreated streams reusing sequence 1 never collide with prior
+  receipts. Raw copies (`ua.v1.<team>.<runtime>.dlq.raw.<copy>`) are stored only up to
+  `max_frame_bytes` (otherwise `raw.stored: false`), followed by a signed `dlq.notice`
+  (`ua.v1.<team>.<runtime>.dlq.notice.<copy>`) carrying identifiers only, and the
+  original message is acknowledged only after both writes succeed. When `UA1_DLQ_<team>`
+  is full (JetStream `10077`), `set_aside_and_ack` (tracked per `(stream, seq)` in
+  `DeadLetterHoldTracker`) holds the message with `+WPI` and re-publishes both raw copy
+  and notice on each attempt until space returns; non-full publish errors do bounded
+  short retries and leave the message unacknowledged so deliveries count and the sweep
+  backstop can recover it. Messages that exhaust `max_deliveries` without a set-aside
+  are found by `sweep_exhausted_streams` using the exact cutoff
+  `delivered.stream_seq` when `num_ack_pending == 0`, else `ack_floor.stream_seq`
+  (`team_services` sweeps `UA1_PART_<team>~*`, `UA1_POOL_WORK_<team>`, and
+  `UA1_EDGE_WORK_<team>`; `installation_authority` sweeps `UA1_TEAM_WORK_<team>`).
+  `DeadLetterService` runs the notice watch on `dlq~<team>`, verifies each raw copy's
+  size and SHA-256, deletes copies naming already-departed people immediately, alerts
+  administrators via Inbox (`AccessRepository.record_dlq_notice_report`, atomic with
+  per-`(team_id, issuer_runtime, copy_id)` receipts in `protocol1_dlq_reported_notices`)
+  and the owner's configured chat (holding on Inbox outages without re-sending chat),
+  names the person and task id for `upgrade_old_format` copies without quoting personal
+  request text, recovers exhausted notices from `UA1_DLQ_<team>` using persisted scan
+  cursors (`protocol1_dlq_scan_cursors`; both tables are local JetStream reporting state
+  and never travel in a team transfer), and sweeps departed copies and aged orphaned raw
+  copies under a per-pass time budget tied to the departed set. Unified
+  `team.delete_person_data` (`TeamPersonDataOperations`, `TeamPersonDepartureService`)
+  removes both blob ownership and protocol 1 + `upgrade_old_format` dead-letter raw
+  copies naming the departed person under one operation with single-continuation
+  deduplication and `retry_later` overflow semantics;
 - the chat's topic commands, `topics.list_tags`, `.find_threads` and `.tag_thread`
   (`team_services.topics`), on the same conversation store. All requested tags and
   the reply commit in one transaction, with the retry key checked under the store's

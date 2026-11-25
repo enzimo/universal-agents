@@ -455,11 +455,12 @@ how much they take instead of a percentage; they are on the instance's disk.
 When a server does set a limit for the account, the percentage counts the
 bytes stored, not the space its streams set aside. Every stream sets its
 whole limit aside when it is created: each team's message streams about
-2.1 GiB at the default `transport.queues.max_bytes`, the installation's
+2.1 GiB at the default `transport.queues.max_bytes` (including 128 MiB for
+`UA1_DLQ_<team>` via `transport.queues.max_bytes.dead_letter`), the installation's
 temporary blob store (`OBJ_UA1_BLOBS`) 512 MiB by default
 (`transport.queues.max_bytes.blobs`, with blobs kept for
 `agent.blob_retention_days`, 7 days by default, or deleted immediately when
-their last owner departs), plus 64 MB for set-aside messages. Leave room for those.
+their last owner departs), plus 64 MB for legacy 0.9 set-aside messages. Leave room for those.
 
 The bundled NATS server takes as its room, each time the whole instance
 starts, three quarters of the free space on the disk that holds its store plus
@@ -495,7 +496,10 @@ percentage.
 Each of the team's message streams also has a limit of its own. When one
 holds `transport.queues.warn_at_percent` of its limit (80 by default), Status
 shows a problem naming the team, what the stream holds and the setting to
-raise, and administrators get one Inbox notice. The warning ends once the
+raise, and administrators get one Inbox notice. For a team's dead-letter
+stream (`UA1_DLQ_<team>`, sized by `transport.queues.max_bytes.dead_letter`),
+the warning explains that set-asides are refused while it is full and
+receivers hold refused messages until room returns. The warning ends once the
 stream falls 3 percentage points below that level.
 
 Administrators get a Status notice only when a check finds a problem the
