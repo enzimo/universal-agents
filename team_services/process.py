@@ -33,6 +33,10 @@ import signal
 from datetime import datetime
 from typing import Any, Callable, Optional, Sequence
 
+from access_catalog.catalog import CatalogSource
+from access_control.cedar import CedarAccessClient
+from access_control.decisions import AccessService
+from access_control.entities import agent_role_resolver
 from access_control.people_directory import PeopleDirectory
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.frame import Receiver
@@ -294,7 +298,8 @@ def team_operations(
     """The families of people's commands this process answers, on the team's database."""
 
     storage = config.manager_storage_settings
-    people = PeopleDirectory(AccessRepository(storage), config.manager.team_id)
+    access_repo = AccessRepository(storage)
+    people = PeopleDirectory(access_repo, config.manager.team_id)
     memory_store = create_pinned_memory_repository(storage, logger=_LOGGER)
     memory = MemoryOperations(memory_store, people, lead_memory_config(config), clock, _LOGGER)
     # The team's knowledge settings: agent types cannot override them.
@@ -310,6 +315,16 @@ def team_operations(
             clock=clock,
             logger=_LOGGER,
         )
+    merge_access: Optional[AccessService] = None
+    if config.authorization.enabled:
+        merge_access = AccessService(
+            store=access_repo,
+            catalog=CatalogSource(config.instance_root).current(),
+            cedar=CedarAccessClient(binary=config.authorization.cedar_binary_path),
+            team_id=config.manager.team_id,
+            agent_role_of=agent_role_resolver(config.manager.named_agent_type),
+            lead_agent_type=config.manager.named_agent_type,
+        )
     # With the knowledge base off no store is opened, and its commands are answered feature_off.
     knowledge_store = create_knowledge_repository(storage, logger=_LOGGER) if settings.enabled else None
     knowledge = KnowledgeOperations(
@@ -320,6 +335,8 @@ def team_operations(
         _LOGGER,
         personal_memory=memory_store,
         blobs=blob_service,
+        access_service=merge_access,
+        request_conflict_checks=config.agent.request_conflict_checks,
     )
     conversations = ConversationStore(db_path=storage.sqlite_path or "", storage_settings=storage, logger=_LOGGER,
                                       artifacts_dir=config.layout.conversation_artifacts_dir)

@@ -1567,6 +1567,8 @@ class UserGateway:
                 display_name=self.access_inbox.display_name,
                 enabled=config.agent.knowledge.enabled,
                 blobs=_knowledge_blobs(resolved_manager_runtime, team=config.manager.team_id),
+                max_body_chars=config.agent.knowledge.limits.max_body_chars,
+                max_note_chars=config.agent.knowledge.limits.max_note_chars,
             ),
             accounts=self.account_sharing,
             file_retention=self.stored_data.settings,

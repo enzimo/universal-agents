@@ -69,6 +69,7 @@ JS_ERR_MAX_BYTES_EXCEEDED: Final = 10077
 
 MAX_CAS_ATTEMPTS: Final = 3
 PAGE_ATTEMPTS: Final = 3
+MIN_CHUNK_BYTES: Final = 4096
 
 _NUID_PATTERN: Final = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SHA256_ADAPTER: Final = TypeAdapter(Sha256Digest)
@@ -248,7 +249,7 @@ class BlobOwner:
     """Owner headers recorded in ADR-20 metadata when writing a blob.
 
     Exactly one of ``request_id`` (a person's request) or ``agent_id`` (system work)
-    must be set. ``person_ref`` is optional for ``request_id`` work and forbidden for
+    must be set. ``person_ref`` is required for ``request_id`` work and forbidden for
     ``agent_id`` system work.
     """
 
@@ -263,6 +264,8 @@ class BlobOwner:
             raise ValueError("BlobOwner requires exactly one of request_id or agent_id")
         if self.request_id is not None:
             _validate_record_id(self.request_id, "blob request id")
+            if self.person_ref is None:
+                raise ValueError("BlobOwner with request_id requires person_ref")
         if self.agent_id is not None:
             _validate_agent_id(self.agent_id)
             if self.person_ref is not None:
@@ -479,8 +482,10 @@ def _parse_max_chunk_size(raw_options: Any) -> int:
     raw_size = raw_options.get("max_chunk_size")
     if raw_size is None:
         return default_chunk_bytes()
-    if not _is_non_negative_int(raw_size) or raw_size == 0:
-        raise BlobCorrupted(f"Blob metadata max_chunk_size is invalid: {raw_size!r}")
+    if not _is_non_negative_int(raw_size) or raw_size < MIN_CHUNK_BYTES:
+        raise BlobCorrupted(
+            f"Blob metadata max_chunk_size ({raw_size!r}) must be at least {MIN_CHUNK_BYTES} bytes."
+        )
     return int(raw_size)
 
 
@@ -511,6 +516,12 @@ def _validate_metadata_state(
         raise BlobCorrupted(f"Blob metadata digest {digest!r} does not match expected {expected_digest!r}.")
     if (size == 0) != (chunks == 0):
         raise BlobCorrupted(f"Blob {expected_name} size ({size}) and chunks ({chunks}) are inconsistent.")
+    if chunks > 1:
+        max_chunks = (size + MIN_CHUNK_BYTES - 1) // MIN_CHUNK_BYTES
+        if chunks > max_chunks:
+            raise BlobCorrupted(
+                f"Blob {expected_name} declares {chunks} chunks for {size} bytes, exceeding maximum {max_chunks}."
+            )
     return False, size, chunks, digest
 
 
@@ -753,8 +764,8 @@ def _validate_put_args(
         raise TypeError("owner must be a BlobOwner instance")
     validated_team = validate_team_id(team)
     size_per_chunk = default_chunk_bytes() if chunk_bytes is None else int(chunk_bytes)
-    if size_per_chunk <= 0:
-        raise ValueError(f"chunk_bytes must be positive, got {size_per_chunk}")
+    if size_per_chunk < MIN_CHUNK_BYTES:
+        raise ValueError(f"chunk_bytes must be at least {MIN_CHUNK_BYTES}, got {size_per_chunk}")
     grace_limit = (
         default_orphan_grace_seconds() / 2.0 if half_grace_seconds is None else float(half_grace_seconds)
     )
@@ -908,6 +919,10 @@ async def _read_verified_chunks(
                 f"Blob {metadata.name} returned unexpected chunk subject/sequence ({raw.subject!r}, {raw.seq!r})."
             )
         piece = raw.data or b""
+        if not piece:
+            raise BlobCorrupted(
+                f"Blob {metadata.name} chunk {index + 1} of {metadata.chunks} is empty (0 bytes)."
+            )
         new_len = len(buf) + len(piece)
         if max_bytes is not None and new_len > max_bytes:
             raise BlobTooLarge(f"Blob {metadata.name} exceeded limit of {max_bytes} bytes while reading chunks.")
@@ -980,6 +995,48 @@ async def purge_blob_chunks(js: Any, nuid: str) -> bool:
     return bool(await js.purge_stream(STREAM_NAME, subject=blob_chunk_subject(nuid)))
 
 
+async def _nuid_has_other_live_metadata(
+    js: Any,
+    nuid: str,
+    *,
+    exclude_meta_subject: Optional[str] = None,
+) -> bool:
+    """Return whether any other live (non-deleted) metadata entry in ``OBJ_UA1_BLOBS`` names ``nuid``."""
+
+    validated = validate_nuid(nuid)
+    meta_subjects = await list_stream_subjects(js, f"{META_SUBJECT_PREFIX}>")
+    for meta_subject in sorted(meta_subjects):
+        if exclude_meta_subject is not None and meta_subject == exclude_meta_subject:
+            continue
+        raw = await _read_raw_last_msg(js, meta_subject)
+        if raw is None:
+            continue
+        entry = _parse_metadata_entry(meta_subject, raw)
+        if entry.metadata is not None and not entry.metadata.deleted and entry.metadata.nuid == validated:
+            return True
+    return False
+
+
+async def purge_blob_chunks_if_unreferenced(
+    js: Any,
+    nuid: str,
+    *,
+    exclude_meta_subject: Optional[str] = None,
+) -> bool:
+    """Purge ``$O.UA1_BLOBS.C.<nuid>`` only if no other live metadata entry references ``nuid`` (F1)."""
+
+    if await _nuid_has_other_live_metadata(js, nuid, exclude_meta_subject=exclude_meta_subject):
+        _LOGGER.warning(
+            "Skipped purging blob chunks because another live metadata entry references the same nuid. "
+            "event=blob_purge_skipped_shared_nuid stream=%s nuid=%s excluded_meta=%s",
+            STREAM_NAME,
+            nuid,
+            exclude_meta_subject or "",
+        )
+        return False
+    return await purge_blob_chunks(js, nuid)
+
+
 async def purge_blob_metadata_keep_last(js: Any, team: str, sha256: str) -> bool:
     """Purge earlier metadata messages for ``{team}~{sha256}``, keeping the latest message."""
 
@@ -992,16 +1049,19 @@ async def _publish_delete_marker(
     meta_subject: str,
     name: str,
     metadata: BlobMetadata,
+    *,
+    expected_seq: Optional[int] = None,
 ) -> Any:
-    """Publish a ``deleted: true`` metadata marker guarded by CAS on ``metadata.seq``."""
+    """Publish a ``deleted: true`` metadata marker guarded by CAS on ``expected_seq`` (default ``metadata.seq``)."""
 
+    seq_to_expect = metadata.seq if expected_seq is None else expected_seq
     marker_bytes = json.dumps(metadata.as_deleted_payload(), separators=(",", ":")).encode("utf-8")
     try:
         return await _publish_checked(
             js,
             meta_subject,
             marker_bytes,
-            headers={Header.EXPECTED_LAST_SUBJECT_SEQUENCE: str(metadata.seq)},
+            headers={Header.EXPECTED_LAST_SUBJECT_SEQUENCE: str(seq_to_expect)},
         )
     except APIError as exc:
         if exc.err_code == JS_ERR_WRONG_LAST_SEQUENCE:
@@ -1009,6 +1069,45 @@ async def _publish_delete_marker(
                 f"Blob {name} metadata changed concurrently while writing deleted marker."
             ) from exc
         raise
+
+
+async def _reclaim_and_publish_delete_marker(
+    js: Any,
+    meta_subject: str,
+    name: str,
+    metadata: BlobMetadata,
+) -> Any:
+    """Reclaim space from this blob on a full store (10077) and publish its ``deleted: true`` marker (C09, F1, F4)."""
+
+    _LOGGER.warning(
+        "Blob store %s is full while writing deleted marker for %s; purging blob chunks and earlier "
+        "metadata to reclaim space before retrying marker publish. "
+        "event=blob_delete_store_full_reclaim stream=%s blob=%s nuid=%s seq=%d",
+        STREAM_NAME,
+        name,
+        STREAM_NAME,
+        name,
+        metadata.nuid,
+        metadata.seq,
+    )
+    await purge_blob_chunks_if_unreferenced(js, metadata.nuid, exclude_meta_subject=meta_subject)
+    await js.purge_stream(STREAM_NAME, subject=meta_subject, keep=1)
+    try:
+        return await _publish_delete_marker(js, meta_subject, name, metadata)
+    except BlobStoreFull:
+        _LOGGER.warning(
+            "Blob store %s remained full after chunk purge for %s; purging metadata subject (keep=0) "
+            "before publishing deleted marker at sequence 0. "
+            "event=blob_delete_store_full_purge_meta stream=%s blob=%s nuid=%s seq=%d",
+            STREAM_NAME,
+            name,
+            STREAM_NAME,
+            name,
+            metadata.nuid,
+            metadata.seq,
+        )
+        await js.purge_stream(STREAM_NAME, subject=meta_subject, keep=0)
+        return await _publish_delete_marker(js, meta_subject, name, metadata, expected_seq=0)
 
 
 async def delete_blob(
@@ -1020,7 +1119,7 @@ async def delete_blob(
     expected_nuid: Optional[str] = None,
     on_marker_written: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> BlobDeleteResult:
-    """Delete a blob: write ``deleted: true`` marker with CAS, purge chunks, purge old metadata keeping last.
+    """Delete a blob: write ``deleted: true`` marker with CAS, purge unreferenced chunks, purge old metadata.
 
     ``expected_seq`` and ``expected_nuid`` guard against deleting newly written metadata
     when retrying an interrupted delete or cleaning up unindexed metadata.
@@ -1028,11 +1127,12 @@ async def delete_blob(
     the deleted marker is published and before chunks are purged so callers can record
     the ``nuid`` durably for crash recovery.
 
-    When ``OBJ_UA1_BLOBS`` is at ``max_bytes`` (``discard: new``) and rejects the
-    ``deleted: true`` marker with ``BlobStoreFull`` (10077), this frees this blob's own
-    chunks and earlier metadata (``keep=1``) first and retries the CAS marker publish on
-    ``metadata.seq`` so retention expiry and immediate departure deletion can reclaim
-    space out of a full store (C09).
+    Before purging chunks, verifies no other live metadata entry in ``OBJ_UA1_BLOBS``
+    references the same ``nuid`` (F1). When ``OBJ_UA1_BLOBS`` is at ``max_bytes``
+    (``discard: new``) and rejects the ``deleted: true`` marker with ``BlobStoreFull``
+    (10077), frees this blob's unreferenced chunks and earlier metadata first, falling back
+    to purging the metadata subject (``keep=0``) and publishing the marker with
+    ``EXPECTED_LAST_SUBJECT_SEQUENCE: 0`` for small or empty blobs (C09, F4).
     """
 
     validated_team = validate_team_id(team)
@@ -1060,27 +1160,14 @@ async def delete_blob(
         try:
             ack = await _publish_delete_marker(js, meta_subject, name, metadata)
         except BlobStoreFull:
-            _LOGGER.warning(
-                "Blob store %s is full while writing deleted marker for %s; purging blob chunks and earlier "
-                "metadata to reclaim space before retrying marker publish. "
-                "event=blob_delete_store_full_reclaim stream=%s blob=%s nuid=%s seq=%d",
-                STREAM_NAME,
-                name,
-                STREAM_NAME,
-                name,
-                metadata.nuid,
-                metadata.seq,
-            )
-            await purge_blob_chunks(js, metadata.nuid)
-            await js.purge_stream(STREAM_NAME, subject=meta_subject, keep=1)
+            ack = await _reclaim_and_publish_delete_marker(js, meta_subject, name, metadata)
             chunks_purged = True
-            ack = await _publish_delete_marker(js, meta_subject, name, metadata)
         marker_seq = int(getattr(ack, "seq", 0) or 0)
         if on_marker_written is not None:
             await on_marker_written(metadata.nuid)
 
     if not chunks_purged:
-        await purge_blob_chunks(js, metadata.nuid)
+        await purge_blob_chunks_if_unreferenced(js, metadata.nuid, exclude_meta_subject=meta_subject)
     await js.purge_stream(STREAM_NAME, subject=meta_subject, keep=1)
     return BlobDeleteResult(
         deleted=True,
@@ -1213,6 +1300,7 @@ __all__ = [
     "JS_ERR_WRONG_LAST_SEQUENCE",
     "MAX_CAS_ATTEMPTS",
     "META_SUBJECT_PREFIX",
+    "MIN_CHUNK_BYTES",
     "PAGE_ATTEMPTS",
     "STREAM_NAME",
     "BlobConcurrentWrite",
@@ -1244,6 +1332,7 @@ __all__ = [
     "list_stream_subjects",
     "parse_blob_metadata",
     "purge_blob_chunks",
+    "purge_blob_chunks_if_unreferenced",
     "purge_blob_metadata_keep_last",
     "put_blob",
     "sha256_padded_digest",

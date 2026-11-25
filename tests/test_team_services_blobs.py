@@ -40,7 +40,7 @@ from custom_transport.protocol1.blobs import (
     stat_blob,
 )
 from storage.access_repository import AccessRepository
-from storage.blob_index_repository import BlobIndexRepository, BlobSizeMismatch
+from storage.blob_index_repository import BlobIndexRepository, BlobOwnerConflict, BlobSizeMismatch
 from storage.config import resolve_storage_settings
 from team_services.blobs import BlobOperations, BlobService
 from tests.test_protocol1_blobs import FakeJetStream
@@ -1088,3 +1088,365 @@ async def test_c11_departed_raced_upload_delete_is_crash_safe_and_handles_concur
     )
     assert res_retry.outcome == "ok" and res_retry.present is True
     assert await get_blob(js, TEAM, old_put.sha256) == payload2
+
+
+@pytest.mark.asyncio
+async def test_f1_team_services_refuses_to_purge_aliased_nuid_across_delete_paths(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """F1 (SEC-1): Cross-team NUID aliasing cannot erase victim chunks via register, delete_person, or retry."""
+
+    js = FakeJetStream()
+    clock = _Clock()
+    storage = _storage(tmp_path)
+    repo = BlobIndexRepository(storage)
+    people = _seed_people(storage, [_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED), _person(BOB_ID, BOB_REF)])
+    service = BlobService(repository=repo, people=people, js=js, team_id=TEAM, clock=clock)
+
+    victim_team = "team_victim"
+    victim_bytes = b"victim confidential bytes " * 40
+    victim_put = await put_blob(
+        js, victim_team, victim_bytes, BlobOwner(request_id="req_vic", person_ref=BOB_REF),
+        nuid_factory=lambda: "nuid_victim_shared",
+    )
+
+    # Attacker publishes forged metadata under TEAM referencing victim's nuid, attributed to departed Alice.
+    forged_bytes = b"forged attacker bytes"
+    forged_sha = sha256_unpadded(forged_bytes)
+    forged_name = blob_object_name(TEAM, forged_sha)
+    forged_meta = {
+        "name": forged_name,
+        "bucket": "UA1_BLOBS",
+        "nuid": victim_put.nuid,
+        "size": len(forged_bytes),
+        "chunks": 1,
+        "digest": f"SHA-256={forged_sha}=",
+        "headers": BlobOwner(request_id="req_atk", person_ref=ALICE_REF).to_headers(TEAM, forged_sha),
+        "options": {"max_chunk_size": 131_072},
+    }
+    await js.publish(blob_metadata_subject(forged_name), json.dumps(forged_meta).encode("utf-8"))
+
+    # Trigger departed-person raced-upload cleanup through blobs.register -> refuses AND leaves victim intact!
+    with caplog.at_level("WARNING"):
+        refused = await service.register(
+            sha256=forged_sha,
+            size=len(forged_bytes),
+            owner=BlobOwner(request_id="req_atk", person_ref=ALICE_REF),
+        )
+    assert refused.outcome == "not_allowed"
+    assert "event=blob_purge_skipped_shared_nuid" in caplog.text
+    assert await get_blob(js, victim_team, victim_put.sha256) == victim_bytes
+    with pytest.raises(BlobDeleted):
+        await get_blob(js, TEAM, forged_sha)
+
+
+@pytest.mark.asyncio
+async def test_f3_stale_sweep_snapshot_never_clobbers_concurrent_pending_delete_or_reupload(
+    tmp_path: Path,
+) -> None:
+    """F3 (CR-1): _cleanup_unindexed_entry skips when pending_delete exists, metadata moved, or person re-enabled."""
+
+    from custom_transport.protocol1.blobs import BlobMetadataEntry
+
+    js = FakeJetStream()
+    clock = _Clock()
+    storage = _storage(tmp_path)
+    repo = BlobIndexRepository(storage)
+    access = AccessRepository(storage)
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    people = PeopleDirectory(access, TEAM)
+    service = BlobService(repository=repo, people=people, js=js, team_id=TEAM, clock=clock)
+
+    payload = b"stale-snapshot-blob"
+    old_put = await put_blob(
+        js, TEAM, payload, BlobOwner(request_id="req_old", person_ref=ALICE_REF), nuid_factory=lambda: "nuid_stale_1"
+    )
+    stale_entry = BlobMetadataEntry(
+        subject=blob_metadata_subject(blob_object_name(TEAM, old_put.sha256)),
+        seq=old_put.seq,
+        timestamp=clock.now - timedelta(days=2),
+        team=TEAM,
+        sha256=old_put.sha256,
+        metadata=old_put.metadata,
+    )
+
+    # 1. If a concurrent delete_person queued a pending_delete, stale snapshot must abort without touching it.
+    repo.queue_pending_delete(
+        TEAM, old_put.sha256, requested_at_utc=clock.now, reason="person_departed", target_nuid="nuid_newer_2",
+        person_ref=ALICE_REF,
+    )
+    assert await service._cleanup_unindexed_entry(stale_entry, cutoff=clock.now - timedelta(days=1)) is False
+    still_pending = repo.get_pending_delete(TEAM, old_put.sha256)
+    assert still_pending is not None and still_pending.target_nuid == "nuid_newer_2"
+    repo.complete_pending_delete(TEAM, old_put.sha256)
+
+    # 2. If person was re-enabled before lock acquisition and blob is not too_old, abort cleanly.
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.ACTIVE))
+    fresh_entry = BlobMetadataEntry(
+        subject=stale_entry.subject,
+        seq=old_put.seq,
+        timestamp=clock.now,
+        team=TEAM,
+        sha256=old_put.sha256,
+        metadata=old_put.metadata,
+    )
+    assert await service._cleanup_unindexed_entry(fresh_entry, cutoff=clock.now - timedelta(days=1)) is False
+    assert await get_blob(js, TEAM, old_put.sha256) == payload
+
+    # 3. If metadata moved to a newer seq/nuid after snapshot was taken, abort without deleting newer upload.
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    await js.purge_stream("OBJ_UA1_BLOBS", subject=blob_chunk_subject("nuid_stale_1"))
+    new_put = await put_blob(
+        js, TEAM, payload, BlobOwner(request_id="req_new", person_ref=ALICE_REF), nuid_factory=lambda: "nuid_live_2"
+    )
+    assert new_put.seq != old_put.seq
+    assert await service._cleanup_unindexed_entry(stale_entry, cutoff=clock.now - timedelta(days=1)) is False
+    assert await get_blob(js, TEAM, old_put.sha256) == payload
+
+
+@pytest.mark.asyncio
+async def test_f4_full_store_batch_retries_small_blobs_and_maintain_retries_after_orphan_sweep(
+    tmp_path: Path,
+) -> None:
+    """F4 (FA-1): Multi-blob delete retries BlobStoreFull items once larger deletes or orphan sweep free space."""
+
+    js = FakeJetStream()
+    clock = _Clock()
+    storage = _storage(tmp_path)
+    repo = BlobIndexRepository(storage)
+    access = AccessRepository(storage)
+    access.record_person(_person(ALICE_ID, ALICE_REF))
+    people = PeopleDirectory(access, TEAM)
+    service = BlobService(repository=repo, people=people, js=js, team_id=TEAM, clock=clock)
+
+    small_bytes = b"tiny"
+    large_bytes = b"L" * 8000
+    small_ref = await service.put_and_register(
+        small_bytes, BlobOwner(request_id="req_s", person_ref=ALICE_REF), media_type="text/plain"
+    )
+    large_ref = await service.put_and_register(
+        large_bytes, BlobOwner(request_id="req_l", person_ref=ALICE_REF), media_type="text/plain"
+    )
+
+    # Lower max_bytes below current usage so deleting the small blob alone fails BlobStoreFull,
+    # while deleting the large blob frees 8 KB so the second pass deletes the small blob!
+    js.max_bytes = 2500
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    res = await service.delete_person(ALICE_REF)
+    assert res.outcome == "ok"
+    assert res.blobs_deleted == 2
+    assert repo.list_pending_deletes(TEAM) == ()
+    assert await stat_blob(js, TEAM, small_ref["sha256"]) is None or (await stat_blob(js, TEAM, small_ref["sha256"])).deleted  # type: ignore[union-attr]
+    with pytest.raises(BlobDeleted):
+        await get_blob(js, TEAM, large_ref["sha256"])
+
+    # Also test maintain() retrying pending deletes after sweep_orphan_chunks() frees space!
+    js2 = FakeJetStream(now=clock.now)
+    storage2 = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "m2.db")}})
+    repo2 = BlobIndexRepository(storage2)
+    people2 = _seed_people(storage2, [_person(BOB_ID, BOB_REF)])
+    service2 = BlobService(repository=repo2, people=people2, js=js2, team_id=TEAM, clock=clock)
+
+    await js2.publish(blob_chunk_subject("nuid_huge_orphan"), b"O" * 10_000)
+    bob_ref_blob = await service2.put_and_register(
+        b"x", BlobOwner(request_id="req_bob_tiny", person_ref=BOB_REF), media_type="text/plain"
+    )
+    repo2.remove_person_owners(TEAM, BOB_REF, clock.now)
+    js2.max_bytes = 2000  # Too full until orphan chunk is swept!
+    clock.advance(days=2)
+    report = await service2.maintain()
+    assert report.orphan_chunks_purged == 1
+    assert report.pending_deletes_completed == 1
+    assert repo2.list_pending_deletes(TEAM) == ()
+    assert await stat_blob(js2, TEAM, bob_ref_blob["sha256"]) is None or (await stat_blob(js2, TEAM, bob_ref_blob["sha256"])).deleted  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_f5_delete_person_drains_expired_single_person_and_unattributed_pending_deletes(
+    tmp_path: Path,
+) -> None:
+    """F5 (DI-1): remove_expired_owners preserves single-person person_ref and delete_person drains NULL pending rows."""
+
+    js = FakeJetStream()
+    clock = _Clock()
+    storage = _storage(tmp_path)
+    repo = BlobIndexRepository(storage)
+    access = AccessRepository(storage)
+    access.record_person(_person(ALICE_ID, ALICE_REF))
+    access.record_person(_person(BOB_ID, BOB_REF))
+    people = PeopleDirectory(access, TEAM)
+    service = BlobService(repository=repo, people=people, js=js, team_id=TEAM, retention_days=7, clock=clock)
+
+    alice_only = await service.put_and_register(
+        b"alice-expired-blob", BlobOwner(request_id="req_a1", person_ref=ALICE_REF), media_type="text/plain"
+    )
+    shared = await service.put_and_register(
+        b"alice-and-bob-expired", BlobOwner(request_id="req_a2", person_ref=ALICE_REF), media_type="text/plain"
+    )
+    await service.put_and_register(
+        b"alice-and-bob-expired", BlobOwner(request_id="req_b2", person_ref=BOB_REF), media_type="text/plain"
+    )
+
+    # Simulate expire_blobs failing after DB removal (pending_deletes queued, blobs still live in NATS).
+    clock.advance(days=8)
+    removed, unowned = repo.remove_expired_owners(TEAM, clock.now)
+    assert removed == 3 and set(unowned) == {alice_only["sha256"], shared["sha256"]}
+    # Single-person expired blob preserves ALICE_REF; multi-person expired blob has person_ref=None.
+    p_alice = repo.get_pending_delete(TEAM, alice_only["sha256"])
+    p_shared = repo.get_pending_delete(TEAM, shared["sha256"])
+    assert p_alice is not None and p_alice.person_ref == ALICE_REF
+    assert p_shared is not None and p_shared.person_ref is None
+
+    # Alice departs -> delete_person drains BOTH her attributed expired row AND unattributed pending rows!
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    del_res = await service.delete_person(ALICE_REF)
+    assert del_res.outcome == "ok" and del_res.blobs_deleted == 2
+    assert repo.list_pending_deletes(TEAM) == ()
+    with pytest.raises(BlobDeleted):
+        await get_blob(js, TEAM, alice_only["sha256"])
+    with pytest.raises(BlobDeleted):
+        await get_blob(js, TEAM, shared["sha256"])
+
+
+@pytest.mark.asyncio
+async def test_f8_blobs_register_refuses_request_owner_without_person(tmp_path: Path) -> None:
+    """F8 (SEC-5): owner.type == 'request' without person is refused at repo and BlobOperations."""
+
+    storage = _storage(tmp_path)
+    repo = BlobIndexRepository(storage)
+    people = _seed_people(storage, [_person(ALICE_ID, ALICE_REF)])
+    service = BlobService(repository=repo, people=people, js=FakeJetStream(), team_id=TEAM)
+    ops = BlobOperations(service, people)
+    sha = sha256_unpadded(b"no-person-request")
+
+    with pytest.raises(ValueError, match="person_ref"):
+        repo.register_owner(
+            team_id=TEAM, sha256=sha, owner_kind="request", owner_id="req_orphan",
+            person_ref=None, size_bytes=17, registered_at_utc=START, expires_at_utc=START + timedelta(days=7),
+        )
+
+    reply = await ops.handle_register(
+        _verified_frame(
+            "blobs.register",
+            {
+                "request_id": "reg_no_person",
+                "sha256": sha,
+                "size": 17,
+                "owner": {"type": "request", "request_id": "req_orphan"},
+            },
+        )
+    )
+    assert reply["outcome"] == "not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_f12_put_and_register_and_client_put_never_abandon_final_upload(tmp_path: Path) -> None:
+    """F12: Pre-check runs once, then each put_blob upload is followed by a register check (no abandoned final upload)."""
+
+    from custom_transport.protocol1.blobs import BlobConcurrentWrite
+    from custom_transport.protocol1.knowledge_blobs import ClientBlobStore
+
+    storage = _storage(tmp_path)
+    people = _seed_people(storage, [_person(ALICE_ID, ALICE_REF)])
+    js = FakeJetStream()
+    service = BlobService(repository=BlobIndexRepository(storage), people=people, js=js, team_id=TEAM)
+    owner = BlobOwner(request_id="req_f12", person_ref=ALICE_REF)
+    events: list[str] = []
+
+    async def always_absent_register(**_kw: Any) -> Any:
+        events.append("register")
+        js.messages.clear()  # Simulate concurrent deletion so every retry actually uploads fresh bytes.
+        from team_services.blobs import RegisterResult
+        return RegisterResult(outcome="ok", present=False)
+
+    service.register = always_absent_register  # type: ignore[method-assign]
+    real_publish = js.publish
+
+    async def track_publish(subject: str, data: bytes, *, headers: Optional[dict[str, str]] = None) -> Any:
+        if subject.startswith("$O.UA1_BLOBS.M."):
+            events.append("put_meta")
+        return await real_publish(subject, data, headers=headers)
+
+    js.publish = track_publish  # type: ignore[method-assign]
+    with pytest.raises(BlobConcurrentWrite):
+        await service.put_and_register(b"race-payload", owner, media_type="text/plain")
+    # Sequence must be: pre-check register, then (put_meta, register) * 3 — ending with register, never put!
+    assert events == ["register", "put_meta", "register", "put_meta", "register", "put_meta", "register"]
+
+    # Same invariant for ClientBlobStore.put!
+    client_events: list[str] = []
+    js2 = FakeJetStream()
+    real_publish2 = js2.publish
+
+    async def track_publish2(subject: str, data: bytes, *, headers: Optional[dict[str, str]] = None) -> Any:
+        if subject.startswith("$O.UA1_BLOBS.M."):
+            client_events.append("put_meta")
+        return await real_publish2(subject, data, headers=headers)
+
+    js2.publish = track_publish2  # type: ignore[method-assign]
+
+    async def client_register(_body: dict[str, Any]) -> dict[str, Any]:
+        client_events.append("register")
+        js2.messages.clear()  # Simulate concurrent deletion so every retry actually uploads fresh bytes.
+        return {"outcome": "ok", "present": False}
+
+    async def _get_js2() -> Any:
+        return js2
+
+    client = ClientBlobStore(get_js=_get_js2, team=TEAM, register=client_register, request_ids=lambda: "req_c")
+    with pytest.raises(BlobConcurrentWrite):
+        await client.put(b"race-payload-2", media_type="text/plain", owner=owner)
+    assert client_events == ["register", "put_meta", "register", "put_meta", "register", "put_meta", "register"]
+
+
+@pytest.mark.asyncio
+async def test_f16_f17_f18_prepare_cleans_departed_lock_rechecks_standing_and_rejects_owner_conflict(
+    tmp_path: Path,
+) -> None:
+    """F16 (prepare cleans departed), F17 (delete_person checks standing under lock), F18 (owner person conflict)."""
+
+    js = FakeJetStream()
+    clock = _Clock()
+    storage = _storage(tmp_path)
+    repo = BlobIndexRepository(storage)
+    access = AccessRepository(storage)
+    access.record_person(_person(ALICE_ID, ALICE_REF))
+    access.record_person(_person(BOB_ID, BOB_REF))
+    people = PeopleDirectory(access, TEAM)
+    service = BlobService(repository=repo, people=people, js=js, team_id=TEAM, clock=clock)
+
+    payload = b"f16-f17-f18-payload"
+    ref = await service.put_and_register(
+        payload, BlobOwner(request_id="req_shared_id", person_ref=ALICE_REF), media_type="text/plain"
+    )
+
+    # F18: Reusing the same (owner_kind, owner_id) for the same blob with a different person_ref is refused!
+    with pytest.raises(BlobOwnerConflict):
+        repo.register_owner(
+            team_id=TEAM, sha256=ref["sha256"], owner_kind="request", owner_id="req_shared_id",
+            person_ref=BOB_REF, size_bytes=len(payload), registered_at_utc=clock.now,
+            expires_at_utc=clock.now + timedelta(days=7),
+        )
+    conflict_reg = await service.register(
+        sha256=ref["sha256"],
+        size=len(payload),
+        owner=BlobOwner(request_id="req_shared_id", person_ref=BOB_REF),
+    )
+    assert conflict_reg.outcome == "not_allowed"
+
+    # F17: If Alice is disabled then re-enabled while delete_person waits on _lock, delete_person refuses!
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    async with service._lock:
+        del_task = asyncio.create_task(service.delete_person(ALICE_REF))
+        await asyncio.sleep(0.02)
+        access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.ACTIVE))
+    del_refused = await del_task
+    assert del_refused.outcome == "not_allowed"
+    assert await get_blob(js, TEAM, ref["sha256"]) == payload
+
+    # F16: If Alice departs while team_services is down, prepare() cleans up her indexed blobs immediately!
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    await service.prepare()
+    assert not repo.has_owners(TEAM, ref["sha256"])
+    with pytest.raises(BlobDeleted):
+        await get_blob(js, TEAM, ref["sha256"])

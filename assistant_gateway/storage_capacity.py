@@ -932,7 +932,8 @@ def space_finding(
         fix = (
             "Raise this account's JetStream limit in the NATS server's configuration, then restart the server. "
             "Leave room for what the streams set aside: each team's work and dead-letter streams set aside their "
-            "whole limits (transport.queues.max_bytes), and the set-aside stream 64 MB."
+            "whole limits (transport.queues.max_bytes), the blob store OBJ_UA1_BLOBS sets aside its limit "
+            "(transport.queues.max_bytes.blobs), and the set-aside stream 64 MB."
         )
     else:
         effect = (

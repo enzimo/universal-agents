@@ -1898,7 +1898,8 @@ request or answer over `long_text`, the files a result or notice carries, Knowle
   - the owner, exactly one of `UA-Blob-Request` (`record_id`: the person's request, the
     request id a root-task token names) and `UA-Blob-Agent` (`agent_id`: the agent, for
     system work);
-  - `UA-Blob-Person` (`person_ref`) when a person's work stored it, by reference only.
+  - `UA-Blob-Person` (`person_ref`), required whenever `UA-Blob-Request` is set (and absent
+    for `UA-Blob-Agent` system work), by reference only.
 
   The headers name the owner that stored the copy, the first one. Two requests of a team can
   carry the same bytes, and the second writer reuses the object without storing it again,

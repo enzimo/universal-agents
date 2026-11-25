@@ -252,9 +252,11 @@ def test_naming_and_owner_validation() -> None:
         with pytest.raises(ValueError):
             blob_object_name(TEAM, non_canonical)
 
-    # Owner validation matches contract and C08 (agent owner forbids person_ref).
+    # Owner validation matches contract, C08 (agent forbids person_ref), and F8 (request requires person_ref).
     with pytest.raises(ValueError):
         BlobOwner()
+    with pytest.raises(ValueError):
+        BlobOwner(request_id="req_1")
     with pytest.raises(ValueError):
         BlobOwner(request_id="req_1", agent_id="researcher-2")
     with pytest.raises(ValueError):
@@ -334,28 +336,75 @@ async def test_put_and_get_empty_blob_zero_chunks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_handles_zero_byte_chunk_payload_from_nats_py() -> None:
-    """C07: nats-py returns RawStreamMsg.data=None for 0-byte chunk messages."""
+async def test_get_rejects_zero_byte_chunks_and_excessive_chunk_counts_pre_download() -> None:
+    """F6: Reject 0-byte chunks for non-empty blobs and bound metadata.chunks pre-download."""
 
+    # 1. Single 0-byte chunk (nats-py RawStreamMsg.data=None) on a non-empty blob -> BlobCorrupted.
     js = FakeJetStream()
     content = b"hello"
     sha = sha256_unpadded(content)
     name = blob_object_name(TEAM, sha)
-    # Two chunks: 0-byte chunk followed by 5-byte chunk (valid per ADR-20 since readers assume no chunk size).
-    await js.publish(blob_chunk_subject("nuid_zero_chunk"), b"")
-    await js.publish(blob_chunk_subject("nuid_zero_chunk"), content)
-    meta = {
+    await js.publish(blob_chunk_subject("nuid_zero_single"), b"")
+    meta_single = {
         "name": name,
         "bucket": BUCKET_NAME,
-        "nuid": "nuid_zero_chunk",
+        "nuid": "nuid_zero_single",
         "size": len(content),
-        "chunks": 2,
+        "chunks": 1,
         "digest": f"SHA-256={sha}=",
         "headers": REQUEST_OWNER.to_headers(TEAM, sha),
         "options": {"max_chunk_size": 131_072},
     }
-    await js.publish(blob_metadata_subject(name), json.dumps(meta).encode())
-    assert await get_blob(js, TEAM, sha) == content
+    await js.publish(blob_metadata_subject(name), json.dumps(meta_single).encode())
+    with pytest.raises(BlobCorrupted, match="empty"):
+        await get_blob(js, TEAM, sha)
+
+    # 2. Multi-chunk with an empty chunk inside a valid chunk count (size=5000, chunks=2) -> BlobCorrupted.
+    big = b"a" * 5000
+    big_sha = sha256_unpadded(big)
+    big_name = blob_object_name(TEAM, big_sha)
+    await js.publish(blob_chunk_subject("nuid_zero_multi"), b"")
+    await js.publish(blob_chunk_subject("nuid_zero_multi"), big)
+    meta_multi = {
+        "name": big_name,
+        "bucket": BUCKET_NAME,
+        "nuid": "nuid_zero_multi",
+        "size": len(big),
+        "chunks": 2,
+        "digest": f"SHA-256={big_sha}=",
+        "headers": REQUEST_OWNER.to_headers(TEAM, big_sha),
+        "options": {"max_chunk_size": 4096},
+    }
+    await js.publish(blob_metadata_subject(big_name), json.dumps(meta_multi).encode())
+    with pytest.raises(BlobCorrupted, match="empty"):
+        await get_blob(js, TEAM, big_sha)
+
+    # 3. Excessive metadata.chunks (size=5, chunks=2001) is rejected pre-download with 0 chunk RPCs.
+    js_dos = FakeJetStream()
+    meta_dos = {
+        "name": name,
+        "bucket": BUCKET_NAME,
+        "nuid": "nuid_dos",
+        "size": len(content),
+        "chunks": 2001,
+        "digest": f"SHA-256={sha}=",
+        "headers": REQUEST_OWNER.to_headers(TEAM, sha),
+        "options": {"max_chunk_size": 131_072},
+    }
+    await js_dos.publish(blob_metadata_subject(name), json.dumps(meta_dos).encode())
+    js_dos.calls.clear()
+    with pytest.raises(BlobCorrupted, match="exceeding maximum"):
+        await get_blob(js_dos, TEAM, sha)
+    assert not any(c[0] == "get_msg" for c in js_dos.calls)
+
+    # 4. Tiny max_chunk_size (< MIN_CHUNK_BYTES) is rejected pre-download with 0 chunk RPCs.
+    js_tiny = FakeJetStream()
+    meta_tiny = {**meta_single, "options": {"max_chunk_size": 128}}
+    await js_tiny.publish(blob_metadata_subject(name), json.dumps(meta_tiny).encode())
+    js_tiny.calls.clear()
+    with pytest.raises(BlobCorrupted, match="max_chunk_size"):
+        await get_blob(js_tiny, TEAM, sha)
+    assert not any(c[0] == "get_msg" for c in js_tiny.calls)
 
 
 @pytest.mark.asyncio
@@ -435,14 +484,14 @@ async def test_get_enforces_max_bytes_during_chunk_download_against_lying_metada
 async def test_put_half_grace_abort_publishes_no_metadata_and_purges_nothing() -> None:
     js = FakeJetStream()
     times = iter([100.0, 100.0, 100.0 + 43_200.0])  # hits half-grace right before metadata publish
-    data = b"a" * 200
+    data = b"a" * 4096
     with pytest.raises(BlobWriteTimedOut):
         await put_blob(
             js,
             TEAM,
             data,
             REQUEST_OWNER,
-            chunk_bytes=200,
+            chunk_bytes=4096,
             clock=lambda: next(times),
             half_grace_seconds=43_200.0,
             nuid_factory=lambda: "nuid_aborted",
@@ -643,13 +692,29 @@ async def test_delete_blob_reclaims_space_when_store_is_at_max_bytes(caplog: pyt
     fresh = await put_blob(js, TEAM, b"q" * 1000, AGENT_OWNER, nuid_factory=lambda: "nuid_after_free")
     assert await get_blob(js, TEAM, fresh.sha256) == b"q" * 1000
 
-    # A 0-byte blob in a stream full of other live blobs cannot free enough room -> re-raises BlobStoreFull.
+    # F4: A 0-byte blob on a full stream purges its metadata subject (keep=0) and writes deleted:true at seq=0!
     js_zero = FakeJetStream()
     await put_blob(js_zero, TEAM, b"z" * 1000, AGENT_OWNER, nuid_factory=lambda: "nuid_other_live")
     empty_put = await put_blob(js_zero, TEAM, b"", REQUEST_OWNER, nuid_factory=lambda: "nuid_empty_full")
     js_zero.max_bytes = js_zero._current_bytes() + 10
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        empty_del = await delete_blob(js_zero, TEAM, empty_put.sha256)
+    assert empty_del.deleted is True and not empty_del.already_deleted
+    assert "event=blob_delete_store_full_purge_meta" in caplog.text
+    with pytest.raises(BlobDeleted):
+        await get_blob(js_zero, TEAM, empty_put.sha256)
+
+    # Lowered max_bytes below remaining live usage: even keep=0 cannot fit the marker -> metadata is purged
+    # (never left live with missing chunks!) and BlobStoreFull propagates for later retry.
+    js_lowered = FakeJetStream()
+    await put_blob(js_lowered, TEAM, b"y" * 2000, AGENT_OWNER, nuid_factory=lambda: "nuid_big_other")
+    small_put = await put_blob(js_lowered, TEAM, b"tiny", REQUEST_OWNER, nuid_factory=lambda: "nuid_tiny_lowered")
+    js_lowered.max_bytes = 500
     with pytest.raises(BlobStoreFull):
-        await delete_blob(js_zero, TEAM, empty_put.sha256)
+        await delete_blob(js_lowered, TEAM, small_put.sha256)
+    assert await stat_blob(js_lowered, TEAM, small_put.sha256) is None
+    assert not any(m.subject == blob_chunk_subject("nuid_tiny_lowered") for m in js_lowered.messages)
 
     # Concurrent metadata write after chunk reclaim still triggers CAS failure (BlobConcurrentWrite).
     js_race = FakeJetStream()
@@ -790,7 +855,68 @@ def test_parse_blob_metadata_rejects_malformed_fields_and_ignores_extra_nats_fie
         {**valid, "digest": "SHA-256=wrong="},
         {**valid, "deleted": True, "size": 1},
         {**valid, "headers": {HEADER_SHA256: [sha], HEADER_TEAM: [TEAM], HEADER_AGENT: ["a1"], HEADER_PERSON: ["p1"]}},
+        {**valid, "headers": {HEADER_SHA256: [sha], HEADER_TEAM: [TEAM], HEADER_REQUEST: ["req_1"]}},
+        {**valid, "chunks": 2},
+        {**valid, "options": {"max_chunk_size": 512}},
     ]
     for bad in bad_cases:
         with pytest.raises(BlobCorrupted):
             parse_blob_metadata(json.dumps(bad).encode(), expected_team=TEAM, expected_sha256=sha)
+
+
+@pytest.mark.asyncio
+async def test_f1_delete_blob_skips_chunk_purge_when_another_live_metadata_aliases_nuid(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """F1 (SEC-1): Cross-team or same-team forged metadata aliasing a live nuid cannot erase victim chunks."""
+
+    js = FakeJetStream()
+    victim_team = "team_victim"
+    attacker_team = "team_attacker"
+    victim_data = b"confidential victim blob bytes" * 50
+    victim_put = await put_blob(js, victim_team, victim_data, REQUEST_OWNER, nuid_factory=lambda: "nuid_victim_1")
+
+    # Attacker publishes forged metadata under attacker_team referencing victim's nuid.
+    forged_sha = sha256_unpadded(b"forged attacker payload")
+    forged_name = blob_object_name(attacker_team, forged_sha)
+    forged_meta = {
+        "name": forged_name,
+        "bucket": BUCKET_NAME,
+        "nuid": victim_put.nuid,
+        "size": len(b"forged attacker payload"),
+        "chunks": 1,
+        "digest": f"SHA-256={forged_sha}=",
+        "headers": AGENT_OWNER.to_headers(attacker_team, forged_sha),
+        "options": {"max_chunk_size": 131_072},
+    }
+    await js.publish(blob_metadata_subject(forged_name), json.dumps(forged_meta).encode())
+
+    # Normal delete of attacker's forged metadata marks it deleted WITHOUT purging victim's shared nuid!
+    with caplog.at_level("WARNING"):
+        del_res = await delete_blob(js, attacker_team, forged_sha)
+    assert del_res.deleted is True
+    assert "event=blob_purge_skipped_shared_nuid" in caplog.text
+    assert await get_blob(js, victim_team, victim_put.sha256) == victim_data
+    with pytest.raises(BlobDeleted):
+        await get_blob(js, attacker_team, forged_sha)
+
+    # Full-store reclaim path also refuses to purge shared chunks, still removing attacker metadata via keep=0.
+    forged_sha2 = sha256_unpadded(b"forged attacker payload 2")
+    forged_name2 = blob_object_name(attacker_team, forged_sha2)
+    forged_meta2 = {
+        **forged_meta,
+        "name": forged_name2,
+        "size": len(b"forged attacker payload 2"),
+        "digest": f"SHA-256={forged_sha2}=",
+        "headers": AGENT_OWNER.to_headers(attacker_team, forged_sha2),
+    }
+    await js.publish(blob_metadata_subject(forged_name2), json.dumps(forged_meta2).encode())
+    js.max_bytes = js._current_bytes() + 10
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        del_res2 = await delete_blob(js, attacker_team, forged_sha2)
+    assert del_res2.deleted is True
+    assert "event=blob_purge_skipped_shared_nuid" in caplog.text
+    assert await get_blob(js, victim_team, victim_put.sha256) == victim_data
+    with pytest.raises(BlobDeleted):
+        await get_blob(js, attacker_team, forged_sha2)

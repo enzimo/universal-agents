@@ -1441,7 +1441,8 @@ async def put_blob(writer: Client, team: str, content: bytes, request_id: str) -
     info = {"name": name, "bucket": "UA1_BLOBS", "nuid": nuid, "size": len(content), "chunks": len(chunks),
             "digest": "SHA-256=" + base64.urlsafe_b64encode(sha256).decode(),
             "headers": {"UA-Blob-SHA256": [base64.urlsafe_b64encode(sha256).decode().rstrip("=")],
-                        "UA-Blob-Team": [team], "UA-Blob-Request": [request_id]},
+                        "UA-Blob-Team": [team], "UA-Blob-Request": [request_id],
+                        "UA-Blob-Person": ["person_example"]},
             "options": {"max_chunk_size": size}}
     await js.publish(meta_subject, json.dumps(info).encode())
     return name

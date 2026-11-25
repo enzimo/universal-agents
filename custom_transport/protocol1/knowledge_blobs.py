@@ -147,16 +147,25 @@ class ClientBlobStore:
             else {"type": "agent", "agent_id": owner.agent_id}
         )
 
+        def _make_ref() -> dict[str, Any]:
+            ref: dict[str, Any] = {"sha256": sha256, "size": size, "media_type": media_type}
+            if name is not None:
+                ref["name"] = name
+            return ref
+
+        # Pre-check once before uploading so dedup hits and departed-person refusals avoid uploading bytes.
+        if await self._register_once(
+            sha256=sha256, size=size, reg_owner=reg_owner, person_ref=owner.person_ref
+        ):
+            return _make_ref()
+
         for _attempt in range(MAX_REGISTER_ATTEMPTS):
+            js = await self._get_js()
+            await put_blob(js, self._team, payload, owner)
             if await self._register_once(
                 sha256=sha256, size=size, reg_owner=reg_owner, person_ref=owner.person_ref
             ):
-                ref: dict[str, Any] = {"sha256": sha256, "size": size, "media_type": media_type}
-                if name is not None:
-                    ref["name"] = name
-                return ref
-            js = await self._get_js()
-            await put_blob(js, self._team, payload, owner)
+                return _make_ref()
 
         raise BlobConcurrentWrite(
             f"Blob {self._team}~{sha256} could not be registered after {MAX_REGISTER_ATTEMPTS} attempts."

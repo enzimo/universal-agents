@@ -57,7 +57,7 @@
       ]
     },
     "person": {
-      "description": "Opaque reference to the person whose work stored this blob (matching UA-Blob-Person); absent for system work.",
+      "description": "Opaque reference to the person whose work stored this blob (matching UA-Blob-Person); required when owner.type is request and absent for system work.",
       "$ref": "../common.schema.json#/$defs/person_ref"
     }
   },

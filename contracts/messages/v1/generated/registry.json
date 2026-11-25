@@ -566,6 +566,15 @@
               "is": "agent"
             }
           ]
+        },
+        {
+          "requires": "/body/person",
+          "when": [
+            {
+              "at": "/body/owner/type",
+              "is": "request"
+            }
+          ]
         }
       ],
       "class": "request_reply",

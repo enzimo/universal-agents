@@ -463,3 +463,57 @@ async def test_blob_transport_timeout_returns_503_and_refresh_guidance_after_sav
     assert write_payload["error"] == {"code": "runtime_error", "message": BLOB_WRITE_FAILED_TEXT}
     assert note_resp.status == 503
     assert note_payload["error"] == {"code": "runtime_error", "message": BLOB_CHANGE_REPLY_READ_FAILED_TEXT}
+
+
+@pytest.mark.asyncio
+async def test_f7_gateway_refuses_disabled_missing_title_and_over_limit_before_uploading_blobs(site) -> None:
+    """F7 (SEC-4): GatewayKnowledgePages refuses disabled, missing-title, and over-limit requests before uploading blobs."""
+
+    site.gateway.knowledge._max_body_chars = 40_000
+    site.gateway.knowledge._max_note_chars = 35_000
+    long_over_body = "b" * 40_001
+    long_over_note = "n" * 35_001
+    long_valid_body = "v" * 36_000
+
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        headers = await _signed_in(client)
+
+        # 1. Missing title on new page with long body -> refused before uploading any blob.
+        no_title = await client.post(
+            "/api/web-chat/knowledge/pages/team",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "title": "   ", "body": long_valid_body},
+        )
+        assert no_title.status == 400
+        assert (await no_title.json())["error"]["code"] == "invalid_request"
+
+        # 2. Body exceeding configured max_body_chars -> refused before uploading any blob.
+        over_body = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/save",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "base_revision": 2, "body": long_over_body},
+        )
+        assert over_body.status == 400
+        assert (await over_body.json())["error"]["code"] == "invalid_request"
+
+        # 3. Note exceeding configured max_note_chars -> refused before uploading any blob.
+        over_note = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/notes",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "note": long_over_note},
+        )
+        assert over_note.status == 400
+        assert (await over_note.json())["error"]["code"] == "invalid_request"
+
+        # 4. Knowledge disabled -> refused with knowledge_off (503) before uploading any blob.
+        site.gateway.knowledge._enabled = False
+        disabled_resp = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/save",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "base_revision": 2, "body": long_valid_body},
+        )
+        assert disabled_resp.status == 503
+        assert (await disabled_resp.json())["error"]["code"] == "knowledge_off"
+
+    assert site.blobs.objects == {}
+    assert site.team.calls == []

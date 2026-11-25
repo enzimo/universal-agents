@@ -2564,6 +2564,7 @@ kinds:
     body: bodies/blobs.register.schema.json
     body_rules:
       - {forbids: /body/person, when: [{at: /body/owner/type, is: agent}]}
+      - {requires: /body/person, when: [{at: /body/owner/type, is: request}]}
     reply:
       body: bodies/blobs.register.reply.schema.json
       errors: [not_allowed, runtime_error]

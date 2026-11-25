@@ -58,6 +58,10 @@ TEAM_MEMBER_LABEL = "A team member"
 SYSTEM_LABEL = "The system"
 AGENT_LABEL = "An agent"
 SIGN_IN_TEXT = "Sign in with a registered user account to use the Knowledge page."
+KNOWLEDGE_OFF_TEXT = (
+    "The knowledge base is turned off for this team (agent.knowledge.enabled). Ask an administrator to turn it on."
+)
+MISSING_TITLE_TEXT = "Give the new page a title."
 NOT_SENDABLE_TEXT = (
     "Nothing was sent because the request was not valid (a value is missing, too long or of the wrong kind). "
     "Check the fields and try again."
@@ -130,18 +134,45 @@ class GatewayKnowledgePages:
         display_name: Callable[[str], str],
         enabled: bool,
         blobs: BlobStore | None = None,
+        max_body_chars: int = 500_000,
+        max_note_chars: int = 50_000,
     ) -> None:
         self._team_commands = team_commands
         self._references = references
         self._display_name = display_name
         self._enabled = bool(enabled)
         self._blobs = blobs
+        self._max_body_chars = int(max_body_chars)
+        self._max_note_chars = int(max_note_chars)
 
     @property
     def enabled(self) -> bool:
         """Whether the team's knowledge base is on (``agent.knowledge.enabled``); the rail link shows only then."""
 
         return self._enabled
+
+    @staticmethod
+    def _check_text_limit(text: str | None, limit: int, label: str) -> None:
+        length = len(text or "")
+        if length > limit:
+            raise GatewayKnowledgeRefused(
+                "invalid_request",
+                f"{label} is {length:,} characters; at most {limit:,} are allowed.",
+            )
+
+    def _check_before_blobs(self, payload: KnowledgeCommandPayload) -> None:
+        """Refuse disabled or locally invalid requests before uploading blobs to ``OBJ_UA1_BLOBS`` (F7)."""
+
+        if not self._enabled:
+            raise GatewayKnowledgeRefused("knowledge_off", KNOWLEDGE_OFF_TEXT)
+        if payload.action is KnowledgeCommandAction.WRITE:
+            if not (payload.page or "").strip() and not (payload.title or "").strip():
+                raise GatewayKnowledgeRefused("invalid_request", MISSING_TITLE_TEXT)
+            self._check_text_limit(payload.body, self._max_body_chars, "Page text")
+        elif payload.action is KnowledgeCommandAction.ADD_NOTE:
+            self._check_text_limit(payload.note, self._max_note_chars, "Note text")
+        elif payload.action is KnowledgeCommandAction.PUBLISH_CONTRIBUTION and payload.edited:
+            self._check_text_limit(payload.body, self._max_body_chars, "Edited proposal text")
 
     async def run(
         self, context: GatewayRouteContextV1, payload: KnowledgeCommandPayload
@@ -151,6 +182,7 @@ class GatewayKnowledgePages:
         person_id = str(context.canonical_user_id or "").strip()
         if not person_id:
             raise PermissionError(SIGN_IN_TEXT)
+        self._check_before_blobs(payload)
         try:
             kind, body = knowledge_request(payload)
         except KnowledgeRequestNotSent as error:

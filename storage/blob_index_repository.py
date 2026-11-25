@@ -47,6 +47,10 @@ class BlobSizeMismatch(ValueError):
     """Raised when registering an owner with a byte size conflicting with indexed owners."""
 
 
+class BlobOwnerConflict(ValueError):
+    """Raised when reusing an existing owner key with a conflicting person reference."""
+
+
 @dataclass(frozen=True)
 class BlobOwnerRecord:
     """One active owner row in ``protocol1_blob_owners``."""
@@ -135,7 +139,7 @@ class BlobIndexRepository:
                 owner_kind TEXT NOT NULL,
                 owner_id TEXT NOT NULL,
                 person_ref TEXT,
-                size_bytes INTEGER NOT NULL,
+                size_bytes BIGINT NOT NULL,
                 registered_at_utc TEXT NOT NULL,
                 expires_at_utc TEXT NOT NULL,
                 PRIMARY KEY (team_id, sha256, owner_kind, owner_id)
@@ -187,6 +191,8 @@ class BlobIndexRepository:
 
         if owner_kind not in _VALID_OWNER_KINDS:
             raise ValueError(f"invalid blob owner_kind: {owner_kind!r}")
+        if owner_kind == "request" and person_ref is None:
+            raise ValueError("request blob owners must carry person_ref")
         if owner_kind == "agent" and person_ref is not None:
             raise ValueError("system agent blob owners cannot carry person_ref")
         if size_bytes < 0:
@@ -205,6 +211,20 @@ class BlobIndexRepository:
             if existing_size is not None and int(existing_size["size_bytes"]) != size_bytes:
                 raise BlobSizeMismatch(
                     f"Blob {team_id}~{sha256} is indexed with size {existing_size['size_bytes']}, not {size_bytes}."
+                )
+            existing_owner = conn.execute(
+                f"""SELECT person_ref FROM protocol1_blob_owners
+                    WHERE team_id = {p} AND sha256 = {p} AND owner_kind = {p} AND owner_id = {p}""",
+                (team_id, sha256, owner_kind, owner_id),
+            ).fetchone()
+            if (
+                existing_owner is not None
+                and existing_owner["person_ref"] is not None
+                and person_ref is not None
+                and str(existing_owner["person_ref"]) != person_ref
+            ):
+                raise BlobOwnerConflict(
+                    f"Blob owner ({owner_kind}, {owner_id}) for {team_id}~{sha256} already belongs to another person."
                 )
             conn.execute(
                 f"""INSERT INTO protocol1_blob_owners (
@@ -289,9 +309,18 @@ class BlobIndexRepository:
         return None if row is None else _row_to_pending(row)
 
     def list_pending_deletes(
-        self, team_id: str, *, person_ref: Optional[str] = None
+        self,
+        team_id: str,
+        *,
+        person_ref: Optional[str] = None,
+        include_unattributed: bool = False,
     ) -> tuple[PendingBlobDelete, ...]:
-        """List all pending delete rows for ``team_id`` (optionally filtered to one departed ``person_ref``)."""
+        """List pending delete rows for ``team_id`` (optionally filtered to one departed ``person_ref``).
+
+        When ``include_unattributed=True`` with a ``person_ref``, also includes rows whose
+        ``person_ref IS NULL`` (for example expired multi-owner blobs) so person-departure
+        cleanup drains every already-unowned blob that could have belonged to the departed person.
+        """
 
         p = self.dialect.bind
         with self._connect() as conn:
@@ -302,6 +331,14 @@ class BlobIndexRepository:
                         WHERE team_id = {p}
                         ORDER BY requested_at_utc, sha256""",
                     (team_id,),
+                ).fetchall()
+            elif include_unattributed:
+                rows = conn.execute(
+                    f"""SELECT team_id, sha256, target_nuid, requested_at_utc, reason, person_ref
+                        FROM protocol1_blob_pending_deletes
+                        WHERE team_id = {p} AND (person_ref = {p} OR person_ref IS NULL)
+                        ORDER BY requested_at_utc, sha256""",
+                    (team_id, person_ref),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -397,7 +434,7 @@ class BlobIndexRepository:
         with self._connect() as conn:
             conn.begin_write()
             affected_rows = conn.execute(
-                f"""SELECT DISTINCT sha256
+                f"""SELECT DISTINCT sha256, person_ref
                     FROM protocol1_blob_owners
                     WHERE team_id = {p} AND expires_at_utc <= {p}
                     ORDER BY sha256""",
@@ -407,7 +444,12 @@ class BlobIndexRepository:
                 conn.commit()
                 return 0, ()
 
-            affected = [str(row["sha256"]) for row in affected_rows]
+            persons_by_sha: dict[str, set[Optional[str]]] = {}
+            for row in affected_rows:
+                sha = str(row["sha256"])
+                pref = None if row["person_ref"] is None else str(row["person_ref"])
+                persons_by_sha.setdefault(sha, set()).add(pref)
+
             cursor = conn.execute(
                 f"DELETE FROM protocol1_blob_owners WHERE team_id = {p} AND expires_at_utc <= {p}",
                 (team_id, now_text),
@@ -415,19 +457,20 @@ class BlobIndexRepository:
             owners_removed = int(cursor.rowcount)
 
             unowned: list[str] = []
-            for sha256 in affected:
+            for sha256, prefs in persons_by_sha.items():
                 remaining = conn.execute(
                     f"SELECT 1 FROM protocol1_blob_owners WHERE team_id = {p} AND sha256 = {p} LIMIT 1",
                     (team_id, sha256),
                 ).fetchone()
                 if remaining is None:
                     unowned.append(sha256)
+                    only_person = next(iter(prefs)) if len(prefs) == 1 else None
                     conn.execute(
                         f"""INSERT INTO protocol1_blob_pending_deletes (
                             team_id, sha256, target_nuid, requested_at_utc, reason, person_ref
-                        ) VALUES ({p}, {p}, NULL, {p}, {p}, NULL)
+                        ) VALUES ({p}, {p}, NULL, {p}, {p}, {p})
                         ON CONFLICT(team_id, sha256) DO NOTHING""",
-                        (team_id, sha256, now_text, "expired"),
+                        (team_id, sha256, now_text, "expired", only_person),
                     )
             conn.commit()
         return owners_removed, tuple(unowned)
@@ -489,6 +532,7 @@ class BlobIndexRepository:
 
 __all__ = [
     "BlobIndexRepository",
+    "BlobOwnerConflict",
     "BlobOwnerKind",
     "BlobOwnerRecord",
     "BlobSizeMismatch",

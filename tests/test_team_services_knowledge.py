@@ -192,7 +192,8 @@ async def test_team_services_enforces_configured_and_ceiling_limits_after_blob_f
     note_reply = checked_reply("knowledge.add_note", await env.ops.handle(note_frame))
     assert note_reply["outcome"] == "invalid_request"
 
-    # Hard ceiling (50,001 chars on add_note) is refused by decode_request_body before KnowledgeService runs.
+    # Hard ceiling (50,001 chars on add_note) is refused by decode_request_body before KnowledgeService runs;
+    # configured limits (max_note_chars=34,000) are also enforced pre-download so oversized blobs are never fetched.
     ceiling_note_ref = await env.blob_service.put_and_register(
         ("c" * 50_001).encode("utf-8"), owner, media_type=TEXT_PLAIN_MEDIA_TYPE
     )
@@ -210,7 +211,27 @@ async def test_team_services_enforces_configured_and_ceiling_limits_after_blob_f
         request_id="req_ceiling_note",
     )
     ceiling_reply = checked_reply("knowledge.add_note", await env.ops.handle(ceiling_frame))
-    assert ceiling_reply["outcome"] == "invalid_request" and "50,000" in ceiling_reply["message"]
+    assert ceiling_reply["outcome"] == "invalid_request" and "34,000" in ceiling_reply["message"]
+
+    # F7: A 200 KB blob exceeds 35,000 * 4 bytes and is refused pre-download with ZERO chunk fetches!
+    huge_ref = {"sha256": sha256_unpadded(b"never-fetched"), "size": 200_000, "media_type": TEXT_PLAIN_MEDIA_TYPE}
+    env.js.calls.clear()
+    pre_refused_frame = stand_in_frame(
+        TEAM,
+        "knowledge.write",
+        {
+            "request_id": "req_pre_download_refused",
+            "space": "team",
+            "title": "Way Too Big",
+            "content": {"type": "blob", "ref": huge_ref},
+            "confirm_review": False,
+        },
+        person_ref=ALICE_REF,
+        request_id="req_pre_download_refused",
+    )
+    pre_refused = checked_reply("knowledge.write", await env.ops.handle(pre_refused_frame))
+    assert pre_refused["outcome"] == "invalid_request" and "35,000" in pre_refused["message"]
+    assert not any(c[0] == "get_msg" for c in env.js.calls)
 
 
 @pytest.mark.asyncio
@@ -252,17 +273,20 @@ async def test_knowledge_merge_handles_long_blob_text_for_system_and_personal_sp
         "confirm_review": False,
     }
 
+    curator_session = SimpleNamespace(agent="curator-inst-1", agent_type="KnowledgeCuratorAgent")
+
     # Person-bound agent CANNOT merge team pages (personal_space_unavailable).
     person_team_merge = _root_task_frame(
         "knowledge.merge", {**merge_body, "request_id": "req_merge_team_denied"},
-        person_ref=ALICE_REF, request_id="task_req_alice_1",
+        session=curator_session, person_ref=ALICE_REF, request_id="task_req_alice_1",
     )
     denied = checked_reply("knowledge.merge", await env.ops.handle(person_team_merge))
     assert denied["outcome"] == "personal_space_unavailable"
 
     # System curation run merges team pages and returns a contract-valid blob-backed page reply.
     sys_merge = _root_task_frame(
-        "knowledge.merge", merge_body, person_ref=None, schedule_id="sched_curator_team", request_id="task_req_sys_1"
+        "knowledge.merge", merge_body, session=curator_session, person_ref=None,
+        schedule_id="sched_curator_team", request_id="task_req_sys_1",
     )
     merged_reply = checked_reply("knowledge.merge", await env.ops.handle(sys_merge))
     assert merged_reply["outcome"] == "ok"
@@ -312,6 +336,7 @@ async def test_knowledge_merge_handles_long_blob_text_for_system_and_personal_sp
             "content": {"type": "blob", "ref": personal_ref},
             "confirm_review": False,
         },
+        session=curator_session,
         person_ref=ALICE_REF,
         request_id="task_req_alice_2",
         schedule_id="sched_curator_alice",
@@ -337,6 +362,7 @@ async def test_knowledge_merge_handles_long_blob_text_for_system_and_personal_sp
             "content": {"type": "blob", "ref": {"sha256": sha256_unpadded(b"missing"), "size": 7, "media_type": TEXT_PLAIN_MEDIA_TYPE}},
             "confirm_review": False,
         },
+        session=curator_session,
         person_ref=BOB_REF,
         request_id="task_req_bob_1",
     )
@@ -526,3 +552,353 @@ async def test_knowledge_merge_uses_session_agent_type_and_refuses_missing_or_ov
     ok_reply = checked_reply("knowledge.merge", await env.ops.handle(session_frame))
     assert ok_reply["outcome"] == "ok"
     assert ok_reply["page"]["updated_by"] == {"kind": "agent", "agent_type": "KnowledgeCuratorAgent"}
+
+
+@pytest.mark.asyncio
+async def test_f2_knowledge_merge_enforces_real_cedar_authorization_and_session(tmp_path: Path) -> None:
+    """F2 (SEC-2): knowledge.merge requires verified.session and real Cedar AccessService authorization."""
+
+    from access_catalog.catalog import CatalogSource
+    from access_control.cedar import CedarAccessClient
+    from access_control.decisions import AccessService
+    from access_control.entities import agent_role_resolver
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        GrantKind,
+        GrantLifetime,
+        GrantV1,
+        SubjectKind,
+        SubjectRefV1,
+        TargetKind,
+        TargetRefV1,
+    )
+
+    env = _setup(tmp_path)
+    access_service = AccessService(
+        store=env.access,
+        catalog=CatalogSource(None).current(),
+        cedar=CedarAccessClient(),
+        team_id=TEAM,
+        agent_role_of=agent_role_resolver("TeamArchitect"),
+        lead_agent_type="TeamArchitect",
+    )
+    env.ops._access_service = access_service
+
+    # Seed two team pages and two personal pages for Alice.
+    for space, title in (("team", "SrcT"), ("team", "DstT"), ("personal", "SrcP"), ("personal", "DstP")):
+        frame = stand_in_frame(
+            TEAM,
+            "knowledge.write",
+            {
+                "request_id": f"seed_{space}_{title.lower()}",
+                "space": space,
+                "title": title,
+                "content": {"type": "inline", "text": f"Body {title}"},
+                "confirm_review": False,
+            },
+            person_ref=ALICE_REF,
+            request_id=f"seed_{space}_{title.lower()}",
+        )
+        assert (await env.ops.handle(frame))["outcome"] == "ok"
+
+    def _merge_body(req_id: str, space: str, src: str, dst: str, *, content: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "request_id": req_id,
+            "space": space,
+            "page": src,
+            "seen_version": "1",
+            "into": dst,
+            "target_seen_version": "1",
+            "content": content or {"type": "inline", "text": "Merged text."},
+            "confirm_review": False,
+        }
+
+    # 1. Missing verified.session -> not_allowed (even with curator agent_id on issuer).
+    missing_sess = _root_task_frame(
+        "knowledge.merge",
+        _merge_body("req_no_sess", "team", "srct", "dstt"),
+        agent_id="KnowledgeCuratorAgent",
+        session=None,
+        person_ref=None,
+    )
+    assert checked_reply("knowledge.merge", await env.ops.handle(missing_sess))["outcome"] == "not_allowed"
+
+    # 2. Non-curator worker or TeamArchitect -> denied by real Cedar BEFORE fetching request blobs!
+    unfetched_blob = {"type": "blob", "ref": {"sha256": sha256_unpadded(b"never-fetch"), "size": 11, "media_type": TEXT_PLAIN_MEDIA_TYPE}}
+    for req_id, role, agent_type, pref in (
+        ("req_worker_team", "worker_host", "ResearchWorker", None),
+        ("req_worker_personal", "worker_host", "ResearchWorker", ALICE_REF),
+        ("req_lead_personal", "lead_host", "TeamArchitect", ALICE_REF),
+    ):
+        env.js.calls.clear()
+        frame = _root_task_frame(
+            "knowledge.merge",
+            _merge_body(req_id, "personal" if pref else "team", "srcp" if pref else "srct", "dstp" if pref else "dstt", content=unfetched_blob),
+            role=role,
+            agent_id="agent-1",
+            session=SimpleNamespace(agent="agent-1", agent_type=agent_type),
+            person_ref=pref,
+            request_id=f"work_{req_id}",
+        )
+        reply = checked_reply("knowledge.merge", await env.ops.handle(frame))
+        assert reply["outcome"] == "not_allowed", (agent_type, reply)
+        assert not any(c[0] == "get_msg" for c in env.js.calls)
+
+    # 3. KnowledgeCuratorAgent IS authorized by real Cedar for system team merge.
+    curator_team = _root_task_frame(
+        "knowledge.merge",
+        _merge_body("req_curator_team", "team", "srct", "dstt"),
+        agent_id="curator-1",
+        session=SimpleNamespace(agent="curator-1", agent_type="KnowledgeCuratorAgent"),
+        person_ref=None,
+        schedule_id="sched_team_curation",
+        request_id="work_curator_team",
+    )
+    assert checked_reply("knowledge.merge", await env.ops.handle(curator_team))["outcome"] == "ok"
+
+    # 4. A block on fn:knowledge_curation denies even KnowledgeCuratorAgent via real Cedar.
+    now = datetime.now(timezone.utc)
+    env.access.create(GrantV1(
+        grant_id="block-curation-alice",
+        team_id=TEAM,
+        kind=GrantKind.BLOCK,
+        subject=SubjectRefV1(kind=SubjectKind.USER, id="alice"),
+        target=TargetRefV1(kind=TargetKind.TOOL, id="fn:knowledge_curation"),
+        level=AccessLevel.WRITE,
+        lifetime=GrantLifetime.UNTIL_REVOKED,
+        granted_by=SubjectRefV1(kind=SubjectKind.USER, id="alice"),
+        created_at_utc=now,
+        reason="Alice disabled curation merges",
+    ))
+    curator_blocked = _root_task_frame(
+        "knowledge.merge",
+        _merge_body("req_curator_blocked", "personal", "srcp", "dstp"),
+        agent_id="curator-1",
+        session=SimpleNamespace(agent="curator-1", agent_type="KnowledgeCuratorAgent"),
+        person_ref=ALICE_REF,
+        schedule_id="sched_alice_curation",
+        request_id="work_curator_blocked",
+    )
+    assert checked_reply("knowledge.merge", await env.ops.handle(curator_blocked))["outcome"] == "not_allowed"
+
+    # 5. team_operations wires AccessService when authorization.enabled=True and None when False,
+    #    and forwards config.agent.request_conflict_checks (F10).
+    cfg = GatewayInstanceConfig.create(
+        instance_name="wire_auth",
+        instance_root=str(tmp_path / "inst_auth"),
+        team_id=TEAM,
+        timezone="UTC",
+        display_name="Wire Auth",
+        manager_agent_id="manager_1",
+        manager_storage_sqlite_path=str(tmp_path / "mgr_auth.db"),
+        state_storage_sqlite_path=str(tmp_path / "gw_auth.db"),
+        named_agent_type="TeamArchitect",
+    )
+    cfg.authorization.enabled = True
+    cfg.agent.request_conflict_checks = False
+    fams_on = team_operations(cfg, lambda: datetime.now(timezone.utc), js=FakeJetStream())
+    k_ops_on = next(f for f in fams_on if "knowledge.merge" in f.handlers).handlers["knowledge.merge"].__self__  # type: ignore[attr-defined]
+    assert k_ops_on._access_service is not None
+    assert k_ops_on._request_conflict_checks is False
+
+    cfg.authorization.enabled = False
+    fams_off = team_operations(cfg, lambda: datetime.now(timezone.utc), js=FakeJetStream())
+    k_ops_off = next(f for f in fams_off if "knowledge.merge" in f.handlers).handlers["knowledge.merge"].__self__  # type: ignore[attr-defined]
+    assert k_ops_off._access_service is None
+
+
+@pytest.mark.asyncio
+async def test_f9_f10_knowledge_merge_change_ledger_refusals_and_conflict_switch(tmp_path: Path) -> None:
+    """F9 & F10: knowledge.merge emits schema-valid change_conflict/needs_person_decision/request_closed/record_busy
+    and honors request_conflict_checks."""
+
+    from knowledge_base.records import KnowledgeError
+    from storage.change_ledger import RequestState, close_request, open_request
+
+    env = _setup(tmp_path)
+    curator_session = SimpleNamespace(agent="curator-1", agent_type="KnowledgeCuratorAgent")
+    now = datetime.now(timezone.utc)
+
+    # Seed two personal pages for Alice.
+    for title in ("Note One", "Note Two"):
+        frame = stand_in_frame(
+            TEAM,
+            "knowledge.write",
+            {
+                "request_id": f"seed_f9_{title.lower().replace(' ', '_')}",
+                "space": "personal",
+                "title": title,
+                "content": {"type": "inline", "text": f"Initial {title}."},
+                "confirm_review": False,
+            },
+            person_ref=ALICE_REF,
+            request_id=f"seed_f9_{title.lower().replace(' ', '_')}",
+        )
+        assert (await env.ops.handle(frame))["outcome"] == "ok"
+
+    # Admit non-scheduled request req_merge_run at the current ledger position, then let Alice edit Note Two
+    # while req_merge_run is running so rule (b) triggers change_conflict!
+    with env.repo._write() as conn:
+        open_request(
+            conn, env.repo._dialect, team_id=TEAM, request_id="req_merge_run",
+            person_id="alice", now=now,
+        )
+
+    edit_frame = stand_in_frame(
+        TEAM,
+        "knowledge.write",
+        {
+            "request_id": "alice_edit_note_two",
+            "space": "personal",
+            "page": "note-two",
+            "seen_version": "1",
+            "title": "Note Two",
+            "content": {"type": "inline", "text": "Alice updated Note Two concurrently."},
+            "confirm_review": False,
+        },
+        person_ref=ALICE_REF,
+        request_id="alice_edit_note_two",
+    )
+    assert (await env.ops.handle(edit_frame))["outcome"] == "ok"
+
+    # 1. First non-scheduled merge sees change_conflict with required case_id and text/plain blob_ref brief.
+    conflict_frame = _root_task_frame(
+        "knowledge.merge",
+        {
+            "request_id": "req_merge_conflict_1",
+            "space": "personal",
+            "page": "note-one",
+            "seen_version": "1",
+            "into": "note-two",
+            "target_seen_version": "2",
+            "content": {"type": "inline", "text": "Curator merged text."},
+            "confirm_review": False,
+        },
+        session=curator_session,
+        person_ref=ALICE_REF,
+        request_id="req_merge_run",
+        schedule_id=None,
+    )
+    conflict_reply = checked_reply("knowledge.merge", await env.ops.handle(conflict_frame))
+    assert conflict_reply["outcome"] == "change_conflict"
+    assert conflict_reply["case_id"]
+    assert conflict_reply["brief"]["media_type"] == TEXT_PLAIN_MEDIA_TYPE
+    brief_bytes = await env.blob_service.get(conflict_reply["brief"])
+    assert conflict_reply["case_id"] in brief_bytes.decode("utf-8")
+
+    # Idempotent retry of the same change_conflict command also returns a schema-valid reply with brief blob_ref!
+    conflict_retry = checked_reply("knowledge.merge", await env.ops.handle(conflict_frame))
+    assert conflict_retry["outcome"] == "change_conflict"
+    assert conflict_retry["case_id"] == conflict_reply["case_id"]
+    assert conflict_retry["brief"]["sha256"] == conflict_reply["brief"]["sha256"]
+
+    # 2. Second attempt under the same request overlaps body -> needs_person_decision with case_id.
+    overlap_frame = _root_task_frame(
+        "knowledge.merge",
+        {
+            "request_id": "req_merge_overlap_2",
+            "space": "personal",
+            "page": "note-one",
+            "seen_version": "1",
+            "into": "note-two",
+            "target_seen_version": "2",
+            "content": {"type": "inline", "text": "Curator merged text again."},
+            "confirm_review": False,
+        },
+        session=curator_session,
+        person_ref=ALICE_REF,
+        request_id="req_merge_run",
+        schedule_id=None,
+    )
+    needs_reply = checked_reply("knowledge.merge", await env.ops.handle(overlap_frame))
+    assert needs_reply["outcome"] == "needs_person_decision"
+    assert needs_reply["case_id"] == conflict_reply["case_id"]
+
+    # 3. Closed request -> request_closed with request_state.
+    with env.repo._write() as conn:
+        close_request(
+            conn, env.repo._dialect, team_id=TEAM, request_id="req_merge_closed",
+            person_id="alice", state=RequestState.STOPPED, now=now,
+        )
+    closed_frame = _root_task_frame(
+        "knowledge.merge",
+        {
+            "request_id": "req_merge_closed_1",
+            "space": "personal",
+            "page": "note-one",
+            "seen_version": "1",
+            "into": "note-two",
+            "target_seen_version": "2",
+            "content": {"type": "inline", "text": "Should be refused closed."},
+            "confirm_review": False,
+        },
+        session=curator_session,
+        person_ref=ALICE_REF,
+        request_id="req_merge_closed",
+        schedule_id=None,
+    )
+    closed_reply = checked_reply("knowledge.merge", await env.ops.handle(closed_frame))
+    assert closed_reply["outcome"] == "request_closed"
+    assert closed_reply["request_state"] == "stopped"
+
+    # 4. record_busy populates retry_at and optional claim and validates against the schema.
+    real_merge = env.ops._service.merge
+    claim = {
+        "claim_id": "claim_1",
+        "resource": "record:knowledge_page:personal:note-two",
+        "ends_at": "2026-11-24T19:00:00.000Z",
+        "whose": "same_person",
+        "notes_total": 1,
+    }
+
+    def _raise_busy(*_a: Any, **_kw: Any) -> Any:
+        raise KnowledgeError("record_busy", "Held by another claim.", {"retry_at": "2026-11-24T19:00:00.000Z", "claim": claim})
+
+    env.ops._service.merge = _raise_busy  # type: ignore[method-assign]
+    busy_reply = checked_reply(
+        "knowledge.merge",
+        await env.ops.handle(_root_task_frame(
+            "knowledge.merge",
+            {
+                "request_id": "req_merge_busy_1",
+                "space": "personal",
+                "page": "note-one",
+                "seen_version": "1",
+                "into": "note-two",
+                "target_seen_version": "2",
+                "content": {"type": "inline", "text": "Busy test."},
+                "confirm_review": False,
+            },
+            session=curator_session,
+            person_ref=ALICE_REF,
+            request_id="req_merge_run",
+        )),
+    )
+    assert busy_reply["outcome"] == "record_busy"
+    assert busy_reply["retry_at"] == "2026-11-24T19:00:00.000Z"
+    assert busy_reply["claim"] == claim
+    env.ops._service.merge = real_merge  # type: ignore[method-assign]
+
+    # 5. F10: With request_conflict_checks=False, the same non-scheduled personal merge succeeds!
+    env.ops._request_conflict_checks = False
+    ok_unchecked = checked_reply(
+        "knowledge.merge",
+        await env.ops.handle(_root_task_frame(
+            "knowledge.merge",
+            {
+                "request_id": "req_merge_unchecked_1",
+                "space": "personal",
+                "page": "note-one",
+                "seen_version": "1",
+                "into": "note-two",
+                "target_seen_version": "2",
+                "content": {"type": "inline", "text": "Merged with conflict checks disabled."},
+                "confirm_review": False,
+            },
+            session=curator_session,
+            person_ref=ALICE_REF,
+            request_id="req_merge_run",
+            schedule_id=None,
+        )),
+    )
+    assert ok_unchecked["outcome"] == "ok"

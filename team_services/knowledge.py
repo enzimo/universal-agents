@@ -36,12 +36,15 @@ They run on the team's database through ``knowledge_base.service``:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Iterable, Optional, cast
 
+from access_control.decisions import AccessService
+from access_control.entities import AGENT_ROLE_WORKER, AgentPrincipal, PersonPrincipal
 from access_control.knowledge_access import knowledge_command_access
 from access_control.people_directory import PeopleDirectory
 from custom_messages.contracts.control_v1 import KnowledgeCommandAction, KnowledgeCommandPayload
@@ -52,6 +55,7 @@ from custom_messages.wire.kinds import KINDS
 from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES
 from custom_transport.protocol1.blobs import BlobOwner, BlobStoreFull, BlobTooLarge
 from custom_transport.protocol1.knowledge_blobs import (
+    TEXT_PLAIN_MEDIA_TYPE,
     BlobStore,
     KnowledgeBlobUnavailable,
     TeamServicesBlobStore,
@@ -118,6 +122,7 @@ AGENT_FALLBACK_TYPE = "Agent"
 
 _OUTCOMES = {CODE_INVALID: "invalid_request", CODE_DISABLED: "feature_off", CODE_MERGED: "merged"}
 _LIST_ROWS = {"list": "pages", "list_contributions": "contributions", "history": "revisions"}
+_BRIEF_TEXT_KEY = "_brief_text"
 
 
 @dataclass(frozen=True)
@@ -198,6 +203,8 @@ class KnowledgeOperations:
         *,
         personal_memory: Any = None,
         blobs: Any = None,
+        access_service: Optional[AccessService] = None,
+        request_conflict_checks: bool = True,
     ) -> None:
         self._repository = repository
         self._people = people
@@ -205,6 +212,8 @@ class KnowledgeOperations:
         self._clock = clock
         self._logger = logger
         self._blobs: Optional[BlobStore] = _as_blob_store(blobs)
+        self._access_service = access_service
+        self._request_conflict_checks = bool(request_conflict_checks)
         self._service = (
             knowledge_service_for(repository, settings=settings, personal_memory=personal_memory, logger=logger)
             if repository is not None and settings.enabled else None
@@ -276,7 +285,13 @@ class KnowledgeOperations:
         resolved: _ResolvedActor,
     ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
         try:
-            decoded = await decode_request_body(action, raw_body, self._blobs)
+            decoded = await decode_request_body(
+                action,
+                raw_body,
+                self._blobs,
+                max_body_chars=self._settings.limits.max_body_chars,
+                max_note_chars=self._settings.limits.max_note_chars,
+            )
             return decoded, None
         except BlobTooLarge as exc:
             refusal = self._blob_too_large_refusal(action, exc)
@@ -292,6 +307,33 @@ class KnowledgeOperations:
             )
             return raw_body, _message_reply("runtime_error", _blob_failure_message(exc))
 
+    async def _fit_conflict_brief_reply(
+        self,
+        action: str,
+        resolved: _ResolvedActor,
+        reply: dict[str, Any],
+    ) -> dict[str, Any]:
+        brief_text = str(reply.get(_BRIEF_TEXT_KEY) or "")
+        assert resolved.blob_owner is not None
+        if self._blobs is None:
+            return _message_reply("runtime_error", BLOB_UNAVAILABLE_TEXT)
+        try:
+            ref = await self._blobs.put(
+                brief_text.encode("utf-8"),
+                media_type=TEXT_PLAIN_MEDIA_TYPE,
+                owner=resolved.blob_owner,
+            )
+        except Exception as exc:  # noqa: BLE001 - conflict refusal mutated nothing; return retryable runtime_error
+            self._logger.error(
+                "Could not store a change-conflict brief in UA1_BLOBS; nothing was changed. "
+                "event=team_knowledge_conflict_brief_blob_failed action=%s error_type=%s detail=%s",
+                action, type(exc).__name__, exc, exc_info=exc,
+            )
+            return _message_reply("runtime_error", _blob_failure_message(exc))
+        fitted = {key: value for key, value in reply.items() if key != _BRIEF_TEXT_KEY}
+        fitted["brief"] = ref
+        return fitted
+
     async def _fit_wire_reply(
         self,
         action: str,
@@ -299,6 +341,8 @@ class KnowledgeOperations:
         resolved: _ResolvedActor,
         reply: dict[str, Any],
     ) -> dict[str, Any]:
+        if reply.get("outcome") == "change_conflict" and _BRIEF_TEXT_KEY in reply:
+            return await self._fit_conflict_brief_reply(action, resolved, reply)
         if reply.get("outcome") != "ok":
             return reply
         assert resolved.blob_owner is not None
@@ -346,6 +390,53 @@ class KnowledgeOperations:
             check_gateway_access=True,
         )
 
+    def _check_merge_access(
+        self,
+        verified: VerifiedFrame,
+        *,
+        agent_id: str,
+        agent_type: str,
+        person: Optional[CommandPerson],
+        work_id: str,
+        schedule_id: Optional[str],
+    ) -> Optional[dict[str, Any]]:
+        if self._access_service is None:
+            return None
+        role = self._access_service.agent_role_of(agent_type)
+        job_schedule = schedule_id if (person is not None and role == AGENT_ROLE_WORKER and schedule_id) else None
+        principal = AgentPrincipal(
+            agent_id=agent_id,
+            agent_type=agent_type,
+            role=role,
+            team_id=self._people.team_id,
+            schedule_id=job_schedule,
+            work_id=work_id,
+        )
+        person_principal = (
+            PersonPrincipal(person.person_id, person.team_id, person.roles) if person is not None else None
+        )
+        resolution = self._access_service.catalog.resolve_function("merge_knowledge_pages", None)
+        decision = self._access_service.decide(
+            agent=principal,
+            person=person_principal,
+            resolution=resolution,
+            task_id=work_id,
+            consume=True,
+            hand_on_for_task=False,
+            operation_id=f"knowledge_merge:{verified.raw['idempotency_key']}",
+        )
+        if decision.allowed:
+            return None
+        self._logger.warning(
+            "Refused knowledge.merge because access was denied. event=team_knowledge_merge_denied "
+            "agent_id=%s agent_type=%s person=%s reason=%s",
+            agent_id,
+            agent_type,
+            person.person_id if person is not None else "",
+            decision.reason,
+        )
+        return _message_reply("not_allowed", decision.reason)
+
     def _resolve_merge_actor(self, verified: VerifiedFrame) -> _ResolvedActor:
         authority = verified.authority
         cert = verified.certificate
@@ -353,18 +444,29 @@ class KnowledgeOperations:
             return _ResolvedActor(refusal=_message_reply("not_allowed", "Only a lead or worker host may merge pages."))
         if authority is None or authority.token.bound_to.type != "root_task":
             return _ResolvedActor(refusal=_message_reply("not_allowed", "knowledge.merge requires a root_task token."))
-        bound = authority.token.bound_to
         session = verified.session
-        raw_agent = session.agent if session is not None else verified.frame.issuer.agent
-        if not isinstance(raw_agent, str) or not AGENT_ID.fits(raw_agent):
+        if session is None:
+            return _ResolvedActor(
+                refusal=_message_reply("not_allowed", "knowledge.merge requires a verified agent session.")
+            )
+        raw_agent = session.agent
+        raw_type = session.agent_type
+        if not isinstance(raw_agent, str) or not AGENT_ID.fits(raw_agent) or not isinstance(raw_type, str) or not raw_type.strip():
             return _ResolvedActor(
                 refusal=_message_reply("not_allowed", "knowledge.merge requires a valid agent identity.")
             )
+        bound = authority.token.bound_to
         agent_id = raw_agent
-        raw_type = session.agent_type if session is not None else agent_id
         agent_type = raw_type if _CONTRACT_AGENT_TYPE.fullmatch(raw_type) else AGENT_FALLBACK_TYPE
+        schedule_id = authority.token.schedule_id if isinstance(authority.token.schedule_id, str) else None
         person_ref = authority.token.person
         if not isinstance(person_ref, str):
+            denied = self._check_merge_access(
+                verified, agent_id=agent_id, agent_type=raw_type, person=None,
+                work_id=bound.request_id, schedule_id=schedule_id,
+            )
+            if denied is not None:
+                return _ResolvedActor(refusal=denied)
             actor = KnowledgeActor(
                 kind=ActorKind.AGENT,
                 actor_id=agent_id,
@@ -373,6 +475,7 @@ class KnowledgeOperations:
                 work_person_id="",
                 task_id=bound.id,
                 work_id=bound.request_id,
+                conflict_checks=self._request_conflict_checks,
             )
             return _ResolvedActor(
                 actor=actor,
@@ -381,27 +484,58 @@ class KnowledgeOperations:
                 blob_owner=BlobOwner(agent_id=agent_id),
                 check_gateway_access=False,
             )
+        return self._resolve_personal_merge_actor(
+            verified,
+            agent_id=agent_id,
+            raw_type=raw_type,
+            agent_type=agent_type,
+            person_ref=person_ref,
+            task_id=bound.id,
+            work_id=bound.request_id,
+            schedule_id=schedule_id,
+        )
+
+    def _resolve_personal_merge_actor(
+        self,
+        verified: VerifiedFrame,
+        *,
+        agent_id: str,
+        raw_type: str,
+        agent_type: str,
+        person_ref: str,
+        task_id: str,
+        work_id: str,
+        schedule_id: Optional[str],
+    ) -> _ResolvedActor:
         now = self._people.person_by_ref(person_ref)
         if now is None:
             return _ResolvedActor(refusal=_message_reply("not_allowed", "The command names a person this team does not know."))
         active_person = CommandPerson(now.person_id, self._people.team_id, now.roles) if (now.active and now.roles) else None
-        reason = "" if active_person is not None else f"The person is {now.describe()} in this team."
-        is_scheduled = isinstance(authority.token.schedule_id, str) and bool(authority.token.schedule_id)
+        if active_person is None:
+            return _ResolvedActor(refusal=_message_reply("not_allowed", f"The person is {now.describe()} in this team."))
+        denied = self._check_merge_access(
+            verified, agent_id=agent_id, agent_type=raw_type, person=active_person,
+            work_id=work_id, schedule_id=schedule_id,
+        )
+        if denied is not None:
+            return _ResolvedActor(refusal=denied)
+        is_scheduled = bool(schedule_id)
         actor = KnowledgeActor(
             kind=ActorKind.AGENT,
             actor_id=agent_id,
             team_id=self._people.team_id,
             agent_type=agent_type,
             work_person_id=now.person_id,
-            task_id=bound.id,
-            work_id=bound.request_id,
-            request_id="" if is_scheduled else bound.request_id,
+            task_id=task_id,
+            work_id=work_id,
+            request_id="" if is_scheduled else work_id,
+            conflict_checks=self._request_conflict_checks,
         )
         return _ResolvedActor(
             actor=actor,
-            person_check=PersonCheck(active_person, reason, now.person_id),
+            person_check=PersonCheck(active_person, "", now.person_id),
             outcome_person_id=now.person_id,
-            blob_owner=BlobOwner(request_id=bound.request_id, person_ref=person_ref),
+            blob_owner=BlobOwner(request_id=work_id, person_ref=person_ref),
             check_gateway_access=False,
         )
 
@@ -599,6 +733,11 @@ class KnowledgeOperations:
             details["review_flags"] = flags[:FLAGS_MAX]
             if len(flags) > FLAGS_MAX:
                 message = f"{MORE_FLAGS_TEXT.format(shown=FLAGS_MAX, total=len(flags))} {message}"
+        elif outcome in {"change_conflict", "needs_person_decision", "request_closed", "record_busy"}:
+            ledger = _ledger_refusal_details(outcome, error)
+            if ledger is None:
+                return _message_reply("runtime_error", RUNTIME_ERROR_TEXT)
+            details.update(ledger)
         return {**_message_reply(outcome, message), **details}
 
     def _flags_for(self, request: _Request, error: KnowledgeError, *, blocked: bool) -> list[dict[str, Any]]:
@@ -980,6 +1119,56 @@ def _paged(reply: dict[str, Any], key: str, offset: int, total: int) -> dict[str
 
 def _timestamp(stored: str) -> str:
     return format_timestamp(datetime.fromisoformat(str(stored).replace("Z", "+00:00")))
+
+
+def _busy_retry_at(raw: Any) -> Optional[str]:
+    if isinstance(raw, datetime):
+        return format_timestamp(raw)
+    if isinstance(raw, str) and raw.strip():
+        return format_timestamp(datetime.fromisoformat(raw.strip().replace("Z", "+00:00")))
+    return None
+
+
+def _change_conflict_details(error: KnowledgeError) -> Optional[dict[str, Any]]:
+    case_id = str(error.details.get("case_id") or "").strip()
+    brief = error.details.get("brief")
+    if not case_id or brief is None:
+        return None
+    if isinstance(brief, str):
+        return {"case_id": case_id, _BRIEF_TEXT_KEY: brief}
+    if isinstance(brief, dict):
+        return {"case_id": case_id, _BRIEF_TEXT_KEY: json.dumps(brief, ensure_ascii=False, indent=2, sort_keys=True)}
+    return None
+
+
+def _record_busy_details(error: KnowledgeError) -> Optional[dict[str, Any]]:
+    retry_at = _busy_retry_at(error.details.get("retry_at"))
+    if retry_at is None:
+        return None
+    result: dict[str, Any] = {"retry_at": retry_at}
+    claim = error.details.get("claim")
+    if isinstance(claim, dict):
+        result["claim"] = claim
+    return result
+
+
+def _optional_text_detail(error: KnowledgeError, key: str) -> dict[str, Any]:
+    value = str(error.details.get(key) or "").strip()
+    return {key: value} if value else {}
+
+
+def _ledger_refusal_details(outcome: str, error: KnowledgeError) -> Optional[dict[str, Any]]:
+    """Populate contract fields for change-ledger refusals (``change_conflict``, etc.), or ``None`` if invalid."""
+
+    if outcome == "change_conflict":
+        return _change_conflict_details(error)
+    if outcome == "needs_person_decision":
+        return _optional_text_detail(error, "case_id")
+    if outcome == "request_closed":
+        return _optional_text_detail(error, "request_state")
+    if outcome == "record_busy":
+        return _record_busy_details(error)
+    return {}
 
 
 def _message_reply(outcome: str, message: str) -> dict[str, Any]:

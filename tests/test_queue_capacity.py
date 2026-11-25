@@ -499,13 +499,21 @@ def test_the_gateway_lists_its_teams_streams_on_a_real_server_and_finds_the_full
             for team in (TEAM, OTHER):
                 for _ in range(9):  # about 88% of the 1 MiB limit
                     await js.publish(f"ua.v1.{team}.lead-host-1.work.pool.researchers", filler)
+            for idx in range(9):  # about 88% of the 1 MiB OBJ_UA1_BLOBS limit
+                await js.publish(f"$O.UA1_BLOBS.C.nuidcap{idx}", filler)
         finally:
             await nc.close()
         adapter = NatsTransportAdapter(config=NatsTransportConfig(servers=[url], storage="file"),
                                        mapper=NatsSubjectMapper(team_id=TEAM))
         await adapter.connect(reconcile_topology=True)  # the gateway's 0.9 streams too: none is listed
         try:
-            listed = await adapter.jetstream_streams(subject=f"{SUBJECT_ROOT}{TEAM}.>")
+            config = _config(tmp_path)
+            runtime = NatsGatewayManagerRuntime(
+                settings=NatsGatewayManagerRuntimeSettings.from_gateway_config(config),
+                adapter=adapter,
+            )
+            runtime._connected = True
+            listed = await runtime.team_streams(TEAM)
         finally:
             await adapter.close()
         assert listed is not None
@@ -518,9 +526,14 @@ def test_the_gateway_lists_its_teams_streams_on_a_real_server_and_finds_the_full
 
     assert listed.missing == ()
     assert {item.name for item in listed.streams} == {
-        stream.name for stream in team_queue_streams(transport(), TEAM, 1)}
+        *(stream.name for stream in team_queue_streams(transport(), TEAM, 1)),
+        BLOBS,
+    }
     pool = next(item for item in listed.streams if item.name == POOL)
     assert pool.max_bytes == MIB and pool.messages == 9 and 0.8 * MIB < pool.stored_bytes < MIB
-    [finding] = findings
-    assert finding.finding_id.startswith(f"queue_filling:{POOL}:")
-    assert finding.title == f"Team {TEAM}'s message stream for the worker pools is 88% full"
+    blobs_stream = next(item for item in listed.streams if item.name == BLOBS)
+    assert blobs_stream.max_bytes == MIB and blobs_stream.messages == 9 and 0.8 * MIB < blobs_stream.stored_bytes < MIB
+    by_prefix = {finding.finding_id.split(":")[1]: finding for finding in findings}
+    assert set(by_prefix) == {POOL, BLOBS}
+    assert by_prefix[POOL].title == f"Team {TEAM}'s message stream for the worker pools is 88% full"
+    assert "blob store" in by_prefix[BLOBS].title.lower() and "88% full" in by_prefix[BLOBS].title

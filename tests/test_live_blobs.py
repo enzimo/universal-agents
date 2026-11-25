@@ -60,7 +60,7 @@ from docker import message_hosts
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
 from runtime_settings.instance_layout import InstanceLayout
 from storage.access_repository import AccessRepository
-from storage.blob_index_repository import BlobIndexRepository
+from storage.blob_index_repository import BlobIndexRepository, BlobOwnerConflict, BlobSizeMismatch
 from storage.config import StorageSettings, resolve_storage_settings
 from team_services.blobs import BlobOperations, BlobService
 from tests.queue_limits_support import queue_limits
@@ -163,13 +163,39 @@ async def test_operator_mode_blob_permissions_tampered_digest_and_s2_enforcement
         assert deleted.deleted and not deleted.already_deleted
         with pytest.raises(BlobDeleted):
             await get_blob(edge_js, OP_TEAM, put_res.sha256)
+
+        # F1 (SEC-1) on live operator-mode NATS: forged metadata aliasing a live blob's nuid cannot purge victim chunks.
+        victim_bytes = b"live victim bytes protected from nuid aliasing"
+        victim_put = await put_blob(worker.nc.jetstream(), OP_TEAM, victim_bytes, owner)
+        alias_bytes = b"attacker alias metadata"
+        alias_sha = sha256_unpadded(alias_bytes)
+        alias_name = blob_object_name("team_other", alias_sha)
+        alias_meta = {
+            "name": alias_name,
+            "bucket": "UA1_BLOBS",
+            "nuid": victim_put.nuid,
+            "size": len(alias_bytes),
+            "chunks": 1,
+            "digest": f"SHA-256={alias_sha}=",
+            "headers": BlobOwner(agent_id="attacker-1").to_headers("team_other", alias_sha),
+            "options": {"max_chunk_size": 131_072},
+        }
+        await admin_js.publish(blob_metadata_subject(alias_name), json.dumps(alias_meta).encode("utf-8"))
+        alias_del = await delete_blob(services.nc.jetstream(), "team_other", alias_sha)
+        assert alias_del.deleted is True
+        assert await get_blob(edge_js, OP_TEAM, victim_put.sha256) == victim_bytes
+        with pytest.raises(BlobDeleted):
+            await get_blob(edge_js, "team_other", alias_sha)
+
         assert worker.errors.empty() and gateway.errors.empty() and edge.errors.empty() and services.errors.empty()
 
 
 @pytest.mark.nats
 @pytest.mark.asyncio
-async def test_obj_ua1_blobs_stream_bounds_full_refusal_and_delete_reclaim(tmp_path: Path, broker: str) -> None:  # noqa: F811
-    """InstallationAuthority enforces OBJ_UA1_BLOBS bounds (S4); full store refuses writes and reclaims on delete."""
+async def test_obj_ua1_blobs_stream_bounds_full_refusal_and_delete_reclaim(
+    tmp_path: Path, broker: str, caplog: pytest.LogCaptureFixture,  # noqa: F811
+) -> None:
+    """InstallationAuthority enforces OBJ_UA1_BLOBS bounds (S4); full store hits 10077 and reclaims on delete (C09/F4/F14)."""
 
     layout = InstanceLayout(tmp_path / "instance")
     message_hosts.prepare_message_host_trust(layout, {}, partitions=DEFAULT_PARTITION_COUNT)
@@ -181,6 +207,31 @@ async def test_obj_ua1_blobs_stream_bounds_full_refusal_and_delete_reclaim(tmp_p
         partitions=DEFAULT_PARTITION_COUNT,
         queues=_tight_queue_limits(blob_cap),
     )
+
+    async def _fill_until_slack_under_300(js: Any, owner: BlobOwner) -> int:
+        filler_idx = 0
+        for size in (20_000, 4_000, 1_000, 200):
+            while True:
+                filler_idx += 1
+                try:
+                    await put_blob(js, LIVE_TEAM, f"pad-{size}-{filler_idx}-".encode() + b"z" * size, owner)
+                except BlobStoreFull:
+                    break
+        # Close any remaining slack (< ~600 B) down below 300 bytes with tiny chunk messages.
+        for raw_size in (200, 80, 20, 1):
+            while True:
+                info_now = await js.stream_info(STREAM_NAME)
+                if info_now.config.max_bytes - info_now.state.bytes < 300:
+                    return int(info_now.config.max_bytes - info_now.state.bytes)
+                filler_idx += 1
+                try:
+                    await js.publish(blob_chunk_subject(f"padraw{filler_idx}"), b"p" * raw_size)
+                except nats.js.errors.APIError as exc:
+                    if exc.err_code == 10077:
+                        break
+                    raise
+        info_end = await js.stream_info(STREAM_NAME)
+        return int(info_end.config.max_bytes - info_end.state.bytes)
 
     async with AsyncExitStack() as stack:
         nc = await connect_plain(stack, broker, AUTHORITY_RUNTIME)
@@ -199,24 +250,38 @@ async def test_obj_ua1_blobs_stream_bounds_full_refusal_and_delete_reclaim(tmp_p
         res1 = await put_blob(js, LIVE_TEAM, first, owner)
         assert await get_blob(js, LIVE_TEAM, res1.sha256) == first
 
+        # Seed a 0-byte blob too so we test F4's keep=0 + expected_seq=0 full-store delete on live NATS!
+        empty_res = await put_blob(js, LIVE_TEAM, b"", owner)
+        assert await get_blob(js, LIVE_TEAM, empty_res.sha256) == b""
+
         # Second 600 KB blob exceeds 1 MiB cap -> BlobStoreFull without evicting first.
         second = random.Random(2).randbytes(600_000)
         with pytest.raises(BlobStoreFull):
             await put_blob(js, LIVE_TEAM, second, owner)
         assert await get_blob(js, LIVE_TEAM, res1.sha256) == first
 
-        # Fill remaining slack with small blobs until even a metadata publish would hit max_bytes.
-        filler_idx = 0
-        while True:
-            filler_idx += 1
-            try:
-                await put_blob(js, LIVE_TEAM, f"pad-{filler_idx}-".encode() + b"z" * 20_000, owner)
-            except BlobStoreFull:
-                break
+        # Step filler sizes down until remaining slack is strictly < 300 bytes so 10077 is guaranteed!
+        slack = await _fill_until_slack_under_300(js, owner)
+        assert slack < 300, f"expected slack < 300 bytes to force JetStream 10077, got {slack}"
 
-        # Deleting the first blob while the store is full reclaims chunks first and still writes the deleted marker.
-        del_res = await delete_blob(js, LIVE_TEAM, res1.sha256)
+        # F4 + F14: Deleting the 0-byte blob while slack < 300 hits 10077 -> reclaim -> keep=0 -> deleted:true!
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="custom_transport.protocol1.blobs"):
+            empty_del = await delete_blob(js, LIVE_TEAM, empty_res.sha256)
+        assert empty_del.deleted
+        assert "event=blob_delete_store_full_reclaim" in caplog.text
+        assert "event=blob_delete_store_full_purge_meta" in caplog.text
+        with pytest.raises(BlobDeleted):
+            await get_blob(js, LIVE_TEAM, empty_res.sha256)
+
+        # Refill slack < 300, then delete the 600 KB blob and prove it enters the 10077 reclaim branch!
+        slack2 = await _fill_until_slack_under_300(js, owner)
+        assert slack2 < 300
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="custom_transport.protocol1.blobs"):
+            del_res = await delete_blob(js, LIVE_TEAM, res1.sha256)
         assert del_res.deleted
+        assert "event=blob_delete_store_full_reclaim" in caplog.text
         with pytest.raises(BlobDeleted):
             await get_blob(js, LIVE_TEAM, res1.sha256)
 
@@ -377,23 +442,301 @@ async def test_live_multi_owner_retention_departure_deletion_fa6_sweep_and_cr3_r
         assert blob_chunk_subject(interrupted_meta.nuid) in sweep.purged_chunk_subjects
         assert await get_blob(js, LIVE_TEAM, live_ref["sha256"]) == live_bytes
 
-        # 4. CR-3 concurrent reuse (Dave) vs last-owner deletion (Eve departing) on the same bytes.
-        race_bytes = b"cr3 concurrent reuse vs deletion payload " * 300
-        race_ref = await client.put(
-            race_bytes, media_type=TEXT_PLAIN_MEDIA_TYPE, owner=BlobOwner(request_id="req_eve_race", person_ref=eve_ref)
+        # 4. F13: Deterministic live CR-3 race tests covering BOTH interleavings on real NATS.
+        # Interleaving A: Dave's reuse registration wins before Eve's remove_person_owners runs.
+        race_a_bytes = b"cr3 interleaving A reuse wins " * 300
+        race_a_ref = await client.put(
+            race_a_bytes, media_type=TEXT_PLAIN_MEDIA_TYPE, owner=BlobOwner(request_id="req_eve_a", person_ref=eve_ref)
         )
+        meta_a_before = await stat_blob(js, LIVE_TEAM, race_a_ref["sha256"])
+        assert meta_a_before is not None
         access.record_person(TeamPersonV1(
             team_id=LIVE_TEAM, person_id="eve", person_ref=eve_ref, standing=PersonStanding.DISABLED,
             roles=(), changed_at_utc=clock_state["now"],
         ))
-        dave_owner = BlobOwner(request_id="req_dave_race", person_ref=dave_ref)
-        reuse_ref, _del_res = await asyncio.gather(
-            client.put(race_bytes, media_type=TEXT_PLAIN_MEDIA_TYPE, owner=dave_owner),
-            service.delete_person(eve_ref),
+        reuse_a_ref = await client.put(
+            race_a_bytes, media_type=TEXT_PLAIN_MEDIA_TYPE, owner=BlobOwner(request_id="req_dave_a", person_ref=dave_ref)
         )
-        assert reuse_ref == race_ref
-        assert await get_blob(js, LIVE_TEAM, reuse_ref["sha256"]) == race_bytes
-        assert service._repository.has_owners(LIVE_TEAM, reuse_ref["sha256"])
+        del_a_res = await service.delete_person(eve_ref)
+        assert reuse_a_ref == race_a_ref
+        assert del_a_res.outcome == "ok" and del_a_res.owners_removed == 1 and del_a_res.blobs_deleted == 0 and del_a_res.blobs_kept == 1
+        meta_a_after = await stat_blob(js, LIVE_TEAM, race_a_ref["sha256"])
+        assert meta_a_after is not None and meta_a_after.nuid == meta_a_before.nuid
+        assert await get_blob(js, LIVE_TEAM, race_a_ref["sha256"]) == race_a_bytes
+
+        # Interleaving B: delete_person deletes while client.put races, forcing present=False -> fresh upload -> second register!
+        frank_ref = "p-FrankRef00000000000007"
+        access.record_person(TeamPersonV1(
+            team_id=LIVE_TEAM, person_id="frank", person_ref=frank_ref, standing=PersonStanding.ACTIVE,
+            roles=("member",), changed_at_utc=clock_state["now"],
+        ))
+        race_b_bytes = b"cr3 interleaving B delete wins then reupload " * 300
+        race_b_ref = await client.put(
+            race_b_bytes, media_type=TEXT_PLAIN_MEDIA_TYPE, owner=BlobOwner(request_id="req_frank_b", person_ref=frank_ref)
+        )
+        meta_b_before = await stat_blob(js, LIVE_TEAM, race_b_ref["sha256"])
+        assert meta_b_before is not None
+        access.record_person(TeamPersonV1(
+            team_id=LIVE_TEAM, person_id="frank", person_ref=frank_ref, standing=PersonStanding.DISABLED,
+            roles=(), changed_at_utc=clock_state["now"],
+        ))
+
+        reg_calls_b = 0
+        delete_started = asyncio.Event()
+        let_client_go = asyncio.Event()
+
+        async def _racing_register(body: dict[str, Any]) -> dict[str, Any]:
+            nonlocal reg_calls_b
+            reg_calls_b += 1
+            if reg_calls_b == 1:
+                # Hold client.put's initial register until delete_person holds _lock and finishes deletion!
+                delete_started.set()
+                await let_client_go.wait()
+            return await _register(body)
+
+        racing_client = ClientBlobStore(
+            get_js=lambda: _async_val(js), team=LIVE_TEAM, register=_racing_register, request_ids=_next_id
+        )
+
+        async def _run_delete_first() -> Any:
+            await delete_started.wait()
+            res = await service.delete_person(frank_ref)
+            let_client_go.set()
+            return res
+
+        reuse_b_ref, del_b_res = await asyncio.gather(
+            racing_client.put(
+                race_b_bytes, media_type=TEXT_PLAIN_MEDIA_TYPE, owner=BlobOwner(request_id="req_dave_b", person_ref=dave_ref)
+            ),
+            _run_delete_first(),
+        )
+        assert del_b_res.outcome == "ok" and del_b_res.owners_removed == 1 and del_b_res.blobs_deleted == 1 and del_b_res.blobs_kept == 0
+        assert reg_calls_b == 2  # initial pre-check got present=False, then fresh upload + second register succeeded!
+        assert reuse_b_ref == race_b_ref
+        meta_b_after = await stat_blob(js, LIVE_TEAM, race_b_ref["sha256"])
+        assert meta_b_after is not None and not meta_b_after.deleted and meta_b_after.nuid != meta_b_before.nuid
+        assert await get_blob(js, LIVE_TEAM, reuse_b_ref["sha256"]) == race_b_bytes
+        assert [o.person_ref for o in service._repository.list_owners(LIVE_TEAM, reuse_b_ref["sha256"])] == [dave_ref]
+
+
+@pytest.mark.nats
+@pytest.mark.asyncio
+async def test_live_end_to_end_person_departure_blob_deletion_and_startup_recovery(
+    tmp_path: Path, broker: str, monkeypatch: pytest.MonkeyPatch,  # noqa: F811
+) -> None:
+    """F15 (A4) & F21/F16: Real UserGateway + GatewayPersonLifecycle + team_services + tokenless lead_host over live NATS."""
+
+    from assistant_gateway import team_view
+    from assistant_gateway.config import GatewayInstanceConfig
+    from assistant_gateway.gateway import UserGateway
+    from assistant_gateway.message_host import gateway_profile
+    from assistant_gateway.nats_manager_runtime import NatsGatewayManagerRuntime
+    from assistant_gateway.store import GatewayStateStore
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.protocol1.joining import HostProfile
+    from team_services.process import TEAM_SERVICES_RUNTIME, serve_team, team_operations, team_services_profile
+    from tests.test_live_team_services import (
+        audience as team_services_audience,
+        host as start_host,
+        installation,
+        until_team_services_serve,
+    )
+
+    monkeypatch.setattr(team_view, "LEAD_START_SECONDS", 1.0)
+    manager_db, gateway_db = tmp_path / "manager.db", tmp_path / "gateway.db"
+    config = GatewayInstanceConfig.create(
+        instance_name="live_departure",
+        instance_root=str(tmp_path / "instance"),
+        team_id=LIVE_TEAM,
+        timezone="UTC",
+        display_name="Team Owner",
+        manager_agent_id="manager_live",
+        manager_storage_sqlite_path=str(manager_db),
+        state_storage_sqlite_path=str(gateway_db),
+        named_agent_type="TeamArchitect",
+    )
+    config.transport.nats_url = broker
+    config.transport.nats_servers = [broker]
+
+    owner_id = config.user.canonical_user_id
+    alice_id = "user_alice_live"
+    bob_id = "user_bob_live"
+    carol_id = "user_carol_live"
+    stale_id = "user_stale_live"
+    stale_ref = "p-StaleLive0000000000005"
+
+    # Seed gateway users before UserGateway boots so ownership_bootstrap publishes their canonical person_refs
+    # into the shared AccessRepository, matching real gateway + team_services operation.
+    gateway_store = GatewayStateStore(str(gateway_db))
+    for pid, dname, role in (
+        (alice_id, "Alice", "member"),
+        (bob_id, "Bob", "member"),
+        (carol_id, "Carol", "member"),
+    ):
+        gateway_store.create_gateway_user(
+            canonical_user_id=pid, display_name=dname, status="active", timezone="UTC",
+        )
+        gateway_store.create_team_membership(
+            canonical_user_id=pid, team_id=LIVE_TEAM, role=role, status="active",
+        )
+
+    lead_profile = HostProfile("lead-host-1", (LIVE_TEAM,), ("lead_host",))
+    worker_profile = HostProfile("worker-host-1", (LIVE_TEAM,), ("worker_host",))
+
+    async with AsyncExitStack() as stack:
+        await installation(
+            stack, broker, config.layout,
+            team_services_profile(LIVE_TEAM), gateway_profile(LIVE_TEAM), lead_profile, worker_profile,
+        )
+        # Construct UserGateway AFTER installation() prepares trust/bootstrap.json so its real MessageHost starts.
+        gateway = UserGateway(
+            config,
+            output_sink=None,
+            state_store=gateway_store,
+            manager_runtime=NatsGatewayManagerRuntime.for_gateway_service(config),
+        )
+        access = AccessRepository(config.manager_storage_settings)
+        people_dir = PeopleDirectory(access, LIVE_TEAM)
+        now = datetime.now(timezone.utc)
+        access.record_person(TeamPersonV1(
+            team_id=LIVE_TEAM, person_id=stale_id, person_ref=stale_ref,
+            standing=PersonStanding.DISABLED, roles=(), changed_at_utc=now,
+        ))
+        alice_ref = people_dir.person_ref(alice_id)
+        bob_ref = people_dir.person_ref(bob_id)
+        carol_ref = people_dir.person_ref(carol_id)
+        assert alice_ref and bob_ref and carol_ref
+
+        ts_nc = await connect_plain(stack, broker, TEAM_SERVICES_RUNTIME)
+        js = ts_nc.jetstream()
+
+        # F21 & F16: Seed a persisted pending delete AND a departed person's indexed owner BEFORE serve_team starts,
+        # proving live prepare() deletes both before svc.team serves!
+        repo = BlobIndexRepository(config.manager_storage_settings)
+        crashed_put = await put_blob(
+            js, LIVE_TEAM, b"pre-crash pending delete bytes",
+            BlobOwner(request_id="req_pre_crash", person_ref=stale_ref),
+        )
+        repo.queue_pending_delete(
+            LIVE_TEAM, crashed_put.sha256, requested_at_utc=now, reason="person_departed",
+            target_nuid=crashed_put.nuid, person_ref=stale_ref,
+        )
+        offline_departed_put = await put_blob(
+            js, LIVE_TEAM, b"offline departed person bytes",
+            BlobOwner(request_id="req_offline_dep", person_ref=stale_ref),
+        )
+        repo.register_owner(
+            team_id=LIVE_TEAM, sha256=offline_departed_put.sha256, owner_kind="request", owner_id="req_offline_dep",
+            person_ref=stale_ref, size_bytes=offline_departed_put.size, registered_at_utc=now,
+            expires_at_utc=now + timedelta(days=7),
+        )
+
+        stop = asyncio.Event()
+        ts_host = MessageHost(config.layout, team_services_profile(LIVE_TEAM), ts_nc)
+        serving = asyncio.create_task(
+            serve_team(ts_host, LIVE_TEAM, stop, team_operations(config, ts_host.clock, js=js))
+        )
+        try:
+            await until_team_services_serve(ts_host, serving)
+
+            # Startup prepare() already deleted both pre-crash and offline-departed blobs!
+            with pytest.raises(BlobDeleted):
+                await get_blob(js, LIVE_TEAM, crashed_put.sha256)
+            with pytest.raises(BlobDeleted):
+                await get_blob(js, LIVE_TEAM, offline_departed_put.sha256)
+            assert repo.list_pending_deletes(LIVE_TEAM) == ()
+            assert not repo.has_owners(LIVE_TEAM, offline_departed_put.sha256)
+
+            lead_host = await start_host(stack, broker, config.layout, lead_profile)
+            worker_host = await start_host(stack, broker, config.layout, worker_profile)
+
+            await gateway.connect(start_services=False)
+
+            # Upload and register blobs through real NATS blobs.register via lead_host!
+            assert lead_host.live is not None and worker_host.live is not None
+
+            async def _reg_via_nats(data: bytes, owner: BlobOwner, req_id: str) -> str:
+                put = await put_blob(js, LIVE_TEAM, data, owner)
+                body: dict[str, Any] = {
+                    "request_id": req_id,
+                    "sha256": put.sha256,
+                    "size": put.size,
+                    "owner": {"type": "request", "request_id": owner.request_id},
+                    "person": owner.person_ref,
+                }
+                reply = await lead_host.live.request(
+                    "blobs.register", body, team_services_audience(lead_host), team=LIVE_TEAM,
+                )
+                assert reply.raw["body"]["outcome"] == "ok" and reply.raw["body"]["present"] is True
+                return put.sha256
+
+            alice_only_sha = await _reg_via_nats(
+                b"alice exclusive live bytes", BlobOwner(request_id="req_al_1", person_ref=alice_ref), "reg_al_1"
+            )
+            shared_sha = await _reg_via_nats(
+                b"alice and bob shared live bytes", BlobOwner(request_id="req_al_sh", person_ref=alice_ref), "reg_al_sh"
+            )
+            await _reg_via_nats(
+                b"alice and bob shared live bytes", BlobOwner(request_id="req_bo_sh", person_ref=bob_ref), "reg_bo_sh"
+            )
+            carol_only_sha = await _reg_via_nats(
+                b"carol exclusive live bytes", BlobOwner(request_id="req_ca_1", person_ref=carol_ref), "reg_ca_1"
+            )
+
+            admin_actor = gateway._identity_service.resolve_user_by_id(owner_id)
+            assert admin_actor is not None
+            lifecycle = gateway._command_operations._person_lifecycle
+
+            # 1. Non-admin member attempting blobs.delete_person through gateway command token is refused!
+            non_admin_reply = await gateway._command_operations._team_commands.request(
+                "blobs.delete_person", {"person": alice_ref}, person_id=bob_id,
+            )
+            assert non_admin_reply["outcome"] == "not_allowed"
+
+            # 2. GatewayPersonLifecycle.set_enabled(..., enabled=False) sends real signed blobs.delete_person over NATS:
+            #    Alice's unshared blob is deleted immediately while Alice+Bob's shared blob stays readable!
+            await lifecycle.set_enabled(
+                actor=admin_actor, target=alice_id, enabled=False, channel_name="website", chat_scope="web-chat",
+            )
+            with pytest.raises(BlobDeleted):
+                await get_blob(js, LIVE_TEAM, alice_only_sha)
+            assert await get_blob(js, LIVE_TEAM, shared_sha) == b"alice and bob shared live bytes"
+
+            # 3. GatewayPersonLifecycle.remove(...) for Bob immediately deletes the now-unowned shared blob!
+            await lifecycle.remove(
+                actor=admin_actor, target=bob_id, channel_name="website", chat_scope="web-chat",
+            )
+            with pytest.raises(BlobDeleted):
+                await get_blob(js, LIVE_TEAM, shared_sha)
+
+            # 4. Tokenless worker_host cannot call blobs.delete_person over real NATS (sender role refused).
+            access.record_person(TeamPersonV1(
+                team_id=LIVE_TEAM, person_id=carol_id, person_ref=carol_ref,
+                standing=PersonStanding.DISABLED, roles=(), changed_at_utc=datetime.now(timezone.utc),
+            ))
+            from custom_transport.protocol1.live import RequestRefused
+            with pytest.raises(RequestRefused):
+                await worker_host.live.request(
+                    "blobs.delete_person", {"request_id": "del_worker_nope", "person": carol_ref},
+                    team_services_audience(worker_host), team=LIVE_TEAM,
+                )
+            assert await get_blob(js, LIVE_TEAM, carol_only_sha) == b"carol exclusive live bytes"
+
+            # 5. Tokenless lead_host MessageHost CAN call blobs.delete_person over real NATS and deletes Carol's blob!
+            lead_del = await lead_host.live.request(
+                "blobs.delete_person", {"request_id": "del_lead_ok", "person": carol_ref},
+                team_services_audience(lead_host), team=LIVE_TEAM,
+            )
+            assert lead_del.raw["body"] == {
+                "outcome": "ok", "owners_removed": 1, "blobs_deleted": 1, "blobs_kept": 0,
+            }
+            with pytest.raises(BlobDeleted):
+                await get_blob(js, LIVE_TEAM, carol_only_sha)
+        finally:
+            if gateway is not None:
+                await gateway.close()
+            stop.set()
+            await serving
 
 
 async def _async_val(value: Any) -> Any:
@@ -423,7 +766,7 @@ def _postgres_blob_storage() -> Iterator[StorageSettings]:
 
 @pytest.mark.postgres
 def test_postgres_blob_index_owners_retention_departure_and_pending_deletes() -> None:
-    """BlobIndexRepository works cleanly against a real PostgreSQL server."""
+    """BlobIndexRepository works cleanly against a real PostgreSQL server (F5, F11, F18, F21)."""
 
     with _postgres_blob_storage() as settings:
         repo = BlobIndexRepository(settings)
@@ -431,13 +774,45 @@ def test_postgres_blob_index_owners_retention_departure_and_pending_deletes() ->
             now = datetime(2026, 11, 24, 12, 0, tzinfo=timezone.utc)
             sha_shared = sha256_unpadded(b"pg-shared")
             sha_alice = sha256_unpadded(b"pg-alice")
+            sha_huge = sha256_unpadded(b"pg-huge-3gib")
             alice_ref = "p-PgAliceRef000000000001"
             bob_ref = "p-PgBobRef00000000000002"
 
-            repo.register_owner(
+            # F11: 64-bit BIGINT size_bytes (>= 2 GiB) succeeds on PostgreSQL without NumericValueOutOfRange.
+            three_gib = 3 * 1024 * 1024 * 1024
+            huge_rec = repo.register_owner(
+                team_id=LIVE_TEAM, sha256=sha_huge, owner_kind="agent", owner_id="curator-pg",
+                person_ref=None, size_bytes=three_gib, registered_at_utc=now, expires_at_utc=now + timedelta(days=7),
+            )
+            assert huge_rec.size_bytes == three_gib
+            assert [o.size_bytes for o in repo.list_owners(LIVE_TEAM, sha_huge)] == [three_gib]
+
+            # Upsert keeps the later expires_at_utc and rejects conflicting size or person_ref (F18, F21).
+            first_rec = repo.register_owner(
                 team_id=LIVE_TEAM, sha256=sha_shared, owner_kind="request", owner_id="req_1",
                 person_ref=alice_ref, size_bytes=9, registered_at_utc=now, expires_at_utc=now + timedelta(days=7),
             )
+            extended_rec = repo.register_owner(
+                team_id=LIVE_TEAM, sha256=sha_shared, owner_kind="request", owner_id="req_1",
+                person_ref=alice_ref, size_bytes=9, registered_at_utc=now, expires_at_utc=now + timedelta(days=12),
+            )
+            assert extended_rec.expires_at_utc == now + timedelta(days=12)
+            kept_later = repo.register_owner(
+                team_id=LIVE_TEAM, sha256=sha_shared, owner_kind="request", owner_id="req_1",
+                person_ref=alice_ref, size_bytes=9, registered_at_utc=now, expires_at_utc=first_rec.expires_at_utc,
+            )
+            assert kept_later.expires_at_utc == now + timedelta(days=12)
+            with pytest.raises(BlobSizeMismatch):
+                repo.register_owner(
+                    team_id=LIVE_TEAM, sha256=sha_shared, owner_kind="request", owner_id="req_size_bad",
+                    person_ref=bob_ref, size_bytes=999, registered_at_utc=now, expires_at_utc=now + timedelta(days=7),
+                )
+            with pytest.raises(BlobOwnerConflict):
+                repo.register_owner(
+                    team_id=LIVE_TEAM, sha256=sha_shared, owner_kind="request", owner_id="req_1",
+                    person_ref=bob_ref, size_bytes=9, registered_at_utc=now, expires_at_utc=now + timedelta(days=7),
+                )
+
             repo.register_owner(
                 team_id=LIVE_TEAM, sha256=sha_shared, owner_kind="request", owner_id="req_2",
                 person_ref=bob_ref, size_bytes=9, registered_at_utc=now, expires_at_utc=now + timedelta(days=10),
@@ -446,6 +821,7 @@ def test_postgres_blob_index_owners_retention_departure_and_pending_deletes() ->
                 team_id=LIVE_TEAM, sha256=sha_alice, owner_kind="request", owner_id="req_3",
                 person_ref=alice_ref, size_bytes=8, registered_at_utc=now, expires_at_utc=now + timedelta(days=7),
             )
+            assert [o.owner_id for o in repo.list_owners(LIVE_TEAM, sha_shared)] == ["req_1", "req_2"]
             assert set(repo.list_indexed_person_refs(LIVE_TEAM)) == {alice_ref, bob_ref}
 
             # Removing Alice leaves sha_alice unowned (queued for pending delete) and sha_shared kept for Bob.
@@ -456,20 +832,31 @@ def test_postgres_blob_index_owners_retention_departure_and_pending_deletes() ->
             assert not repo.has_owners(LIVE_TEAM, sha_alice)
             assert repo.has_owners(LIVE_TEAM, sha_shared)
 
-            pending = repo.list_pending_deletes(LIVE_TEAM)
-            assert len(pending) == 1 and pending[0].sha256 == sha_alice and pending[0].target_nuid is None
+            pending_alice = repo.list_pending_deletes(LIVE_TEAM, person_ref=alice_ref)
+            assert len(pending_alice) == 1 and pending_alice[0].sha256 == sha_alice and pending_alice[0].target_nuid is None
 
             repo.set_pending_delete_nuid(LIVE_TEAM, sha_alice, "nuidPg123456")
-            pending_with_nuid = repo.list_pending_deletes(LIVE_TEAM)
-            assert pending_with_nuid[0].target_nuid == "nuidPg123456"
-            repo.complete_pending_delete(LIVE_TEAM, sha_alice, expected_nuid="nuidPg123456")
+            # queue_pending_delete COALESCE preserves previously captured target_nuid!
+            coalesced = repo.queue_pending_delete(
+                LIVE_TEAM, sha_alice, requested_at_utc=now, reason="person_departed",
+                target_nuid="nuidPgDifferent", person_ref=alice_ref,
+            )
+            assert coalesced.target_nuid == "nuidPg123456"
+            assert repo.complete_pending_delete(LIVE_TEAM, sha_alice, expected_nuid="nuidPgWrong") is False
+            assert repo.complete_pending_delete(LIVE_TEAM, sha_alice, expected_nuid="nuidPg123456") is True
             assert repo.list_pending_deletes(LIVE_TEAM) == ()
 
-            # Retention expiry queues sha_shared once Bob's owner expires.
+            # Retention expiry queues sha_shared (preserving bob_ref) and sha_huge (person_ref=None);
+            # include_unattributed=True returns both for a departing person (F5).
             expired_count, expired_unowned = repo.remove_expired_owners(LIVE_TEAM, now + timedelta(days=11))
-            assert expired_count == 1
-            assert expired_unowned == (sha_shared,)
-            assert not repo.has_owners(LIVE_TEAM, sha_shared)
-            assert len(repo.list_pending_deletes(LIVE_TEAM)) == 1
+            assert expired_count == 2
+            assert set(expired_unowned) == {sha_shared, sha_huge}
+            p_shared = repo.get_pending_delete(LIVE_TEAM, sha_shared)
+            p_huge = repo.get_pending_delete(LIVE_TEAM, sha_huge)
+            assert p_shared is not None and p_shared.person_ref == bob_ref
+            assert p_huge is not None and p_huge.person_ref is None
+            assert {p.sha256 for p in repo.list_pending_deletes(LIVE_TEAM, person_ref=bob_ref, include_unattributed=True)} == {
+                sha_shared, sha_huge,
+            }
         finally:
             repo.close()

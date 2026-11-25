@@ -43,12 +43,13 @@ from custom_transport.protocol1.blobs import (
     BlobMetadata,
     BlobMetadataEntry,
     BlobOwner,
+    BlobStoreFull,
     check_chunks_present,
     default_clock_skew_seconds,
     default_orphan_grace_seconds,
     delete_blob,
     get_blob,
-    purge_blob_chunks,
+    purge_blob_chunks_if_unreferenced,
     purge_blob_metadata_keep_last,
     put_blob,
     sha256_unpadded,
@@ -58,7 +59,12 @@ from custom_transport.protocol1.blobs import (
     validate_team_id,
 )
 from default_values import AGENT_DEFAULTS
-from storage.blob_index_repository import BlobIndexRepository, BlobSizeMismatch, PendingBlobDelete
+from storage.blob_index_repository import (
+    BlobIndexRepository,
+    BlobOwnerConflict,
+    BlobSizeMismatch,
+    PendingBlobDelete,
+)
 from team_services.people import GATEWAY_ROLE, command_person
 from team_services.service import OperationFamily
 
@@ -161,9 +167,10 @@ class BlobService:
         self._repository.close()
 
     async def prepare(self) -> None:
-        """Finish pending deletes before ``svc.team`` subscribes to ``blobs.register`` (C01)."""
+        """Finish pending deletes and departed-person cleanup before ``svc.team`` subscribes (C01, F16)."""
 
         await self.retry_pending_deletes()
+        await self._cleanup_departed_indexed_people()
 
     # -- registration & in-process put/get ---------------------------------------------------
 
@@ -224,22 +231,28 @@ class BlobService:
         sha256 = sha256_unpadded(payload)
         size = len(payload)
 
-        for _attempt in range(MAX_PUT_REGISTER_ATTEMPTS):
+        def _make_ref() -> dict[str, Any]:
+            ref: dict[str, Any] = {"sha256": sha256, "size": size, "media_type": media_type}
+            if name is not None:
+                ref["name"] = name
+            return ref
+
+        async def _try_register() -> bool:
             result = await self.register(sha256=sha256, size=size, owner=owner)
             if result.outcome == "not_allowed":
                 raise PermissionError(result.message or "Blob registration was not allowed.")
             if result.outcome != "ok":
                 raise BlobError(result.message or "Blob registration failed.")
-            if result.present:
-                ref: dict[str, Any] = {
-                    "sha256": sha256,
-                    "size": size,
-                    "media_type": media_type,
-                }
-                if name is not None:
-                    ref["name"] = name
-                return ref
+            return result.present
+
+        # Pre-check once before uploading so dedup hits and departed-person refusals avoid uploading bytes (F12).
+        if await _try_register():
+            return _make_ref()
+
+        for _attempt in range(MAX_PUT_REGISTER_ATTEMPTS):
             await put_blob(self._js, self._team_id, payload, owner)
+            if await _try_register():
+                return _make_ref()
 
         raise BlobConcurrentWrite(
             f"Blob {self._team_id}~{sha256} could not be registered after {MAX_PUT_REGISTER_ATTEMPTS} attempts."
@@ -259,29 +272,29 @@ class BlobService:
     # -- immediate person-departure deletion -------------------------------------------------
 
     async def delete_person(self, person_ref: str) -> PersonDeleteResult:
-        """Remove a departed person's ownership rows and immediately delete unowned blobs (A4)."""
+        """Remove a departed person's ownership rows and immediately delete unowned blobs (A4, F5, F17)."""
 
-        person = await asyncio.to_thread(self._people.person_by_ref, person_ref)
-        if person is None:
-            return PersonDeleteResult(
-                outcome="not_allowed",
-                message="The person reference is not known in this team.",
-            )
-        if person.standing not in _DEPARTED_STANDINGS:
-            self._logger.warning(
-                "Refused blob deletion for a person who has not departed. "
-                "event=blob_delete_person_active_refused team=%s person_id=%s standing=%s",
-                self._team_id,
-                person.person_id,
-                person.describe(),
-            )
-            return PersonDeleteResult(
-                outcome="not_allowed",
-                message=f"Cannot delete blobs for a person whose standing is {person.describe()}.",
-            )
-
-        now = _utc(self._clock())
         async with self._lock:
+            person = await asyncio.to_thread(self._people.person_by_ref, person_ref)
+            if person is None:
+                return PersonDeleteResult(
+                    outcome="not_allowed",
+                    message="The person reference is not known in this team.",
+                )
+            if person.standing not in _DEPARTED_STANDINGS:
+                self._logger.warning(
+                    "Refused blob deletion for a person who has not departed. "
+                    "event=blob_delete_person_active_refused team=%s person_id=%s standing=%s",
+                    self._team_id,
+                    person.person_id,
+                    person.describe(),
+                )
+                return PersonDeleteResult(
+                    outcome="not_allowed",
+                    message=f"Cannot delete blobs for a person whose standing is {person.describe()}.",
+                )
+
+            now = _utc(self._clock())
             removal = await asyncio.to_thread(
                 self._repository.remove_person_owners,
                 self._team_id,
@@ -292,26 +305,16 @@ class BlobService:
                 self._repository.list_pending_deletes,
                 self._team_id,
                 person_ref=person_ref,
+                include_unattributed=True,
             )
 
-        # Combine newly unowned blobs and any prior failed departure deletes for idempotent retries.
+        # Combine newly unowned blobs, prior failed departure deletes, and unattributed pending deletes (F5).
         targets = sorted(set(removal.unowned_sha256s) | {item.sha256 for item in prior_pending})
-        blobs_deleted = 0
-        failed = 0
-        for sha256 in targets:
-            try:
-                async with self._lock:
-                    if await self._execute_pending_delete_locked(sha256):
-                        blobs_deleted += 1
-            except Exception:
-                failed += 1
-                self._logger.exception(
-                    "Could not delete a departed person's blob; kept queued for retry. "
-                    "event=blob_person_delete_failed team=%s person_id=%s sha256=%s",
-                    self._team_id,
-                    person.person_id,
-                    sha256,
-                )
+        blobs_deleted, failed = await self._run_pending_delete_batch(
+            targets,
+            log_event="blob_person_delete_failed",
+            log_detail=f" person_id={person.person_id}",
+        )
 
         if failed:
             return PersonDeleteResult(
@@ -342,29 +345,99 @@ class BlobService:
 
     # -- retention expiry, pending-delete recovery, and FA-6 sweep ---------------------------
 
-    async def retry_pending_deletes(self) -> int:
-        """Retry every queued pending delete, acquiring ``_lock`` per blob (C01, C07)."""
+    async def _run_pending_delete_pass(
+        self,
+        targets: list[str],
+        *,
+        log_event: str,
+        log_detail: str,
+    ) -> tuple[int, int, list[str]]:
+        """Run one pass over ``targets``, returning ``(deleted, failed, store_full_retries)``."""
 
-        pending = await asyncio.to_thread(self._repository.list_pending_deletes, self._team_id)
-        completed = 0
-        for item in pending:
+        deleted = 0
+        failed = 0
+        store_full: list[str] = []
+        for sha256 in targets:
             try:
                 async with self._lock:
-                    if await self._execute_pending_delete_locked(item.sha256):
-                        completed += 1
+                    if await self._execute_pending_delete_locked(sha256):
+                        deleted += 1
+            except BlobStoreFull:
+                store_full.append(sha256)
             except Exception:
+                failed += 1
                 self._logger.exception(
-                    "Could not finish a pending blob delete; keeping it queued for retry. "
-                    "event=blob_pending_delete_failed team=%s sha256=%s target_nuid=%s reason=%s",
+                    "Could not finish a pending blob delete; kept queued for retry. "
+                    "event=%s team=%s sha256=%s%s",
+                    log_event,
                     self._team_id,
-                    item.sha256,
-                    item.target_nuid,
-                    item.reason,
+                    sha256,
+                    log_detail,
                 )
+        return deleted, failed, store_full
+
+    async def _run_pending_delete_batch(
+        self,
+        targets: list[str] | tuple[str, ...],
+        *,
+        log_event: str,
+        log_detail: str = "",
+    ) -> tuple[int, int]:
+        """Execute pending deletes per-blob, retrying ``BlobStoreFull`` items whenever earlier deletes freed room."""
+
+        remaining = list(targets)
+        deleted = 0
+        failed = 0
+        while remaining:
+            pass_deleted, pass_failed, store_full = await self._run_pending_delete_pass(
+                remaining, log_event=log_event, log_detail=log_detail
+            )
+            deleted += pass_deleted
+            failed += pass_failed
+            if not store_full:
+                break
+            if pass_deleted == 0:
+                failed += len(store_full)
+                for sha256 in store_full:
+                    self._logger.error(
+                        "Could not delete blob because %s is full; kept queued for retry. "
+                        "event=%s stream=%s team=%s sha256=%s%s",
+                        STREAM_NAME,
+                        log_event,
+                        STREAM_NAME,
+                        self._team_id,
+                        sha256,
+                        log_detail,
+                    )
+                break
+            remaining = store_full
+        return deleted, failed
+
+    async def _cleanup_departed_indexed_people(self) -> int:
+        """Safety net: delete blobs for any departed person still holding indexed owner rows."""
+
+        departed_cleaned = 0
+        indexed_refs = await asyncio.to_thread(self._repository.list_indexed_person_refs, self._team_id)
+        for ref in indexed_refs:
+            person = await asyncio.to_thread(self._people.person_by_ref, ref)
+            if person is not None and person.standing in _DEPARTED_STANDINGS:
+                res = await self.delete_person(ref)
+                if res.outcome == "ok":
+                    departed_cleaned += 1
+        return departed_cleaned
+
+    async def retry_pending_deletes(self) -> int:
+        """Retry every queued pending delete, acquiring ``_lock`` per blob (C01, C07, F4)."""
+
+        pending = await asyncio.to_thread(self._repository.list_pending_deletes, self._team_id)
+        completed, _failed = await self._run_pending_delete_batch(
+            [item.sha256 for item in pending],
+            log_event="blob_pending_delete_failed",
+        )
         return completed
 
     async def expire_blobs(self) -> tuple[int, int]:
-        """Remove owners past ``expires_at_utc`` and delete blobs left with no owners (C07 per-blob lock)."""
+        """Remove owners past ``expires_at_utc`` and delete blobs left with no owners (C07, F4)."""
 
         now = _utc(self._clock())
         async with self._lock:
@@ -374,19 +447,10 @@ class BlobService:
                 now,
             )
 
-        deleted = 0
-        for sha256 in unowned:
-            try:
-                async with self._lock:
-                    if await self._execute_pending_delete_locked(sha256):
-                        deleted += 1
-            except Exception:
-                self._logger.exception(
-                    "Could not delete an expired blob; kept queued for retry. "
-                    "event=blob_expire_delete_failed team=%s sha256=%s",
-                    self._team_id,
-                    sha256,
-                )
+        deleted, _failed = await self._run_pending_delete_batch(
+            unowned,
+            log_event="blob_expire_delete_failed",
+        )
 
         if owners_removed or deleted:
             self._logger.info(
@@ -402,17 +466,7 @@ class BlobService:
         """Run startup/periodic maintenance: pending deletes, departed safety net, expiry, and FA-6 sweep."""
 
         pending_completed = await self.retry_pending_deletes()
-
-        # Safety net: catch any departed person whose departure happened while team_services was down.
-        departed_cleaned = 0
-        indexed_refs = await asyncio.to_thread(self._repository.list_indexed_person_refs, self._team_id)
-        for ref in indexed_refs:
-            person = await asyncio.to_thread(self._people.person_by_ref, ref)
-            if person is not None and person.standing in _DEPARTED_STANDINGS:
-                res = await self.delete_person(ref)
-                if res.outcome == "ok":
-                    departed_cleaned += 1
-
+        departed_cleaned = await self._cleanup_departed_indexed_people()
         expired_owners, expired_deleted = await self.expire_blobs()
 
         now = _utc(self._clock())
@@ -422,6 +476,8 @@ class BlobService:
             grace_seconds=self._orphan_grace_seconds,
             clock_skew_seconds=self._clock_skew_seconds,
         )
+        if sweep.purged_chunk_subjects:
+            pending_completed += await self.retry_pending_deletes()
         unindexed_deleted = await self._cleanup_unindexed_metadata(sweep.metadata_entries, now=now)
 
         return BlobMaintenanceReport(
@@ -477,6 +533,15 @@ class BlobService:
                 exc,
             )
             return RegisterResult(outcome="not_allowed", message=_short_message(str(exc)))
+        except BlobOwnerConflict as exc:
+            self._logger.warning(
+                "Refused blob registration with conflicting person on existing owner key. "
+                "event=blob_register_owner_conflict team=%s sha256=%s error=%s",
+                self._team_id,
+                sha256,
+                exc,
+            )
+            return RegisterResult(outcome="not_allowed", message=_short_message(str(exc)))
         return RegisterResult(outcome="ok", present=True, expires_at=record.expires_at_utc)
 
     async def _delete_departed_unindexed_if_needed_locked(self, sha256: str, meta: BlobMetadata) -> bool:
@@ -492,11 +557,11 @@ class BlobService:
         return True
 
     async def _queue_and_delete_departed_unindexed_locked(self, sha256: str, meta: BlobMetadata) -> bool:
-        """Queue a durable target_nuid pending delete before deleting an unindexed departed upload (C11)."""
+        """Queue a durable target_nuid pending delete before deleting a freshly verified departed upload (C11, F1, F3)."""
 
         existing = await asyncio.to_thread(self._repository.get_pending_delete, self._team_id, sha256)
         if existing is not None and existing.target_nuid is not None and existing.target_nuid != meta.nuid:
-            await purge_blob_chunks(self._js, existing.target_nuid)
+            await purge_blob_chunks_if_unreferenced(self._js, existing.target_nuid)
             await asyncio.to_thread(
                 self._repository.complete_pending_delete,
                 self._team_id,
@@ -576,7 +641,7 @@ class BlobService:
         meta: Optional[BlobMetadata],
     ) -> Optional[RegisterResult]:
         if meta is None:
-            await purge_blob_chunks(self._js, target_nuid)
+            await purge_blob_chunks_if_unreferenced(self._js, target_nuid)
             await asyncio.to_thread(
                 self._repository.complete_pending_delete,
                 self._team_id,
@@ -585,9 +650,9 @@ class BlobService:
             )
             return RegisterResult(outcome="ok", present=False)
         if meta.deleted:
-            await purge_blob_chunks(self._js, target_nuid)
+            await purge_blob_chunks_if_unreferenced(self._js, target_nuid)
             if meta.nuid != target_nuid:
-                await purge_blob_chunks(self._js, meta.nuid)
+                await purge_blob_chunks_if_unreferenced(self._js, meta.nuid)
             await purge_blob_metadata_keep_last(self._js, self._team_id, sha256)
             await asyncio.to_thread(
                 self._repository.complete_pending_delete,
@@ -601,7 +666,7 @@ class BlobService:
             return RegisterResult(outcome="ok", present=False)
         # Newer live metadata exists under a fresh nuid: purge the old nuid's chunks and complete
         # its pending delete immediately (C10), then let normal validation evaluate the live blob.
-        await purge_blob_chunks(self._js, target_nuid)
+        await purge_blob_chunks_if_unreferenced(self._js, target_nuid)
         await asyncio.to_thread(
             self._repository.complete_pending_delete,
             self._team_id,
@@ -620,7 +685,7 @@ class BlobService:
             await asyncio.to_thread(self._repository.complete_pending_delete, self._team_id, sha256)
             return RegisterResult(outcome="ok", present=False)
         if meta.deleted:
-            await purge_blob_chunks(self._js, meta.nuid)
+            await purge_blob_chunks_if_unreferenced(self._js, meta.nuid)
             await purge_blob_metadata_keep_last(self._js, self._team_id, sha256)
             await asyncio.to_thread(self._repository.complete_pending_delete, self._team_id, sha256)
             return RegisterResult(outcome="ok", present=False)
@@ -648,7 +713,7 @@ class BlobService:
             if pending.target_nuid is not None:
                 meta = await self._safe_stat(sha256)
                 if meta is None or meta.deleted or meta.nuid != pending.target_nuid:
-                    await purge_blob_chunks(self._js, pending.target_nuid)
+                    await purge_blob_chunks_if_unreferenced(self._js, pending.target_nuid)
             await asyncio.to_thread(
                 self._repository.complete_pending_delete,
                 self._team_id,
@@ -679,8 +744,8 @@ class BlobService:
     ) -> bool:
         if meta is None or meta.nuid != target_nuid:
             # Either already absent, or a new upload replaced metadata with a fresh nuid:
-            # purge only the old target_nuid's chunks and never touch newer live metadata.
-            await purge_blob_chunks(self._js, target_nuid)
+            # purge only the old target_nuid's chunks (if unreferenced) and never touch newer live metadata.
+            await purge_blob_chunks_if_unreferenced(self._js, target_nuid)
             await asyncio.to_thread(
                 self._repository.complete_pending_delete,
                 self._team_id,
@@ -706,10 +771,10 @@ class BlobService:
             )
         except BlobConcurrentWrite:
             # Another writer moved the metadata subject after we read meta.seq. Every new upload uses
-            # a fresh nuid, so re-read and purge target_nuid's chunks if it is no longer live.
+            # a fresh nuid, so re-read and purge target_nuid's chunks if no live metadata references it.
             latest = await self._safe_stat(sha256)
             if latest is None or latest.deleted or latest.nuid != target_nuid:
-                await purge_blob_chunks(self._js, target_nuid)
+                await purge_blob_chunks_if_unreferenced(self._js, target_nuid)
                 if latest is not None and latest.deleted and latest.nuid == target_nuid:
                     await purge_blob_metadata_keep_last(self._js, self._team_id, sha256)
                 await asyncio.to_thread(
@@ -763,40 +828,55 @@ class BlobService:
             or entry.metadata.deleted
         ):
             return False
-        departed = (
+        pre_departed = (
             entry.metadata.person_ref is not None
             and await self._is_person_departed(entry.metadata.person_ref)
         )
         too_old = entry.timestamp is not None and _utc(entry.timestamp) < cutoff
-        if not departed and not too_old:
+        if not pre_departed and not too_old:
             return False
 
         async with self._lock:
-            if await asyncio.to_thread(self._repository.has_owners, self._team_id, entry.sha256):
-                return False
-            try:
-                if departed:
-                    return await self._queue_and_delete_departed_unindexed_locked(entry.sha256, entry.metadata)
-                res = await delete_blob(
-                    self._js,
-                    self._team_id,
-                    entry.sha256,
-                    expected_seq=entry.seq,
-                    expected_nuid=entry.metadata.nuid,
-                )
-                return res.deleted
-            except BlobConcurrentWrite:
-                return False
-            except Exception:
-                self._logger.exception(
-                    "Could not delete unindexed live blob during maintenance. "
-                    "event=blob_unindexed_cleanup_failed team=%s sha256=%s seq=%d nuid=%s",
-                    self._team_id,
-                    entry.sha256,
-                    entry.seq,
-                    entry.metadata.nuid,
-                )
-                return False
+            return await self._cleanup_unindexed_entry_locked(
+                entry.sha256, entry.seq, entry.metadata.nuid, too_old=too_old
+            )
+
+    async def _cleanup_unindexed_entry_locked(
+        self, sha256: str, expected_seq: int, expected_nuid: str, *, too_old: bool
+    ) -> bool:
+        if await asyncio.to_thread(self._repository.has_owners, self._team_id, sha256):
+            return False
+        if await asyncio.to_thread(self._repository.get_pending_delete, self._team_id, sha256) is not None:
+            return False
+        latest = await self._safe_stat(sha256)
+        if latest is None or latest.deleted or latest.seq != expected_seq or latest.nuid != expected_nuid:
+            return False
+        departed = latest.person_ref is not None and await self._is_person_departed(latest.person_ref)
+        if not departed and not too_old:
+            return False
+        try:
+            if departed:
+                return await self._queue_and_delete_departed_unindexed_locked(sha256, latest)
+            res = await delete_blob(
+                self._js,
+                self._team_id,
+                sha256,
+                expected_seq=latest.seq,
+                expected_nuid=latest.nuid,
+            )
+            return res.deleted
+        except BlobConcurrentWrite:
+            return False
+        except Exception:
+            self._logger.exception(
+                "Could not delete unindexed live blob during maintenance. "
+                "event=blob_unindexed_cleanup_failed team=%s sha256=%s seq=%d nuid=%s",
+                self._team_id,
+                sha256,
+                expected_seq,
+                expected_nuid,
+            )
+            return False
 
 
 class BlobOperations:
