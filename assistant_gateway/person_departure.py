@@ -48,11 +48,11 @@ from assistant_gateway.application.identity_service import GatewayIdentityServic
 from assistant_gateway.application.manager_commands import GatewayManagerCommandService
 from assistant_gateway.application.person_lifecycle import (
     ForgottenRecords,
-    GatewayPersonBlobs,
     GatewayPersonLifecycle,
     GatewayPersonLifecycleSettings,
+    GatewayPersonTeamData,
     HeldPersonData,
-    PersonBlobDeletionResult,
+    PersonTeamDataDeletionResult,
 )
 from assistant_gateway.application.ports import GatewayClock, GatewayPersonSchedules, GatewaySecureBroker
 from assistant_gateway.application.team_commands import (
@@ -293,8 +293,8 @@ class GatewayPersonDeparture:
 
 
 
-class GatewayTeamBlobs:
-    """``GatewayPersonBlobs`` over ``GatewayTeamCommandService`` (``blobs.delete_person``)."""
+class GatewayTeamData:
+    """``GatewayPersonTeamData`` over ``GatewayTeamCommandService`` (``team.delete_person_data``)."""
 
     def __init__(
         self,
@@ -307,56 +307,75 @@ class GatewayTeamBlobs:
         self._references = references
         self._logger = logger_
 
-    async def delete_person_blobs(
+    async def delete_person_data(
         self, person_id: str, *, actor_person_id: str
-    ) -> PersonBlobDeletionResult:
+    ) -> PersonTeamDataDeletionResult:
         try:
             target_ref = await asyncio.to_thread(self._references.person_ref, person_id)
         except PersonCopyNotCurrent as exc:
             self._logger.warning(
-                "Could not refresh a departing person's copy before deleting their blobs. "
-                "event=person_blobs_target_copy_stale person_id=%s error=%s",
+                "Could not refresh a departing person's copy before deleting their team data. "
+                "event=person_team_data_target_copy_stale person_id=%s error=%s",
                 person_id,
                 exc,
             )
-            return PersonBlobDeletionResult(
-                problem="Their temporary blob storage could not be cleared yet because the team's people copy could not be updated."
+            return PersonTeamDataDeletionResult(
+                problem="Their temporary blob storage and set-aside message copies could not be cleared yet "
+                "because the team's people copy could not be updated."
             )
         if target_ref is None:
-            return PersonBlobDeletionResult()
+            return PersonTeamDataDeletionResult()
         try:
             reply = await self._team_commands.request(
-                "blobs.delete_person",
+                "team.delete_person_data",
                 {"person": target_ref},
                 person_id=actor_person_id,
             )
         except (TeamServicesUnavailable, TeamCommandRefused) as exc:
             self._logger.warning(
-                "Team services could not delete a departed person's blobs right now; upkeep will retry. "
-                "event=person_blobs_delete_unavailable person_id=%s error=%s",
+                "Team services could not delete a departed person's team data right now; upkeep will retry. "
+                "event=person_team_data_delete_unavailable person_id=%s error=%s",
                 person_id,
                 exc,
             )
-            return PersonBlobDeletionResult(
-                problem="Their temporary blob storage could not be cleared yet; the team services will retry automatically."
+            return PersonTeamDataDeletionResult(
+                problem="Their temporary blob storage and set-aside message copies could not be cleared yet; "
+                "the team services will retry automatically."
             )
-        if reply.get("outcome") != "ok":
-            message = str(reply.get("message") or reply.get("outcome") or "unknown error")
+        outcome = reply.get("outcome")
+        if outcome not in {"ok", "retry_later"}:
+            message = str(reply.get("message") or outcome or "unknown error")
             self._logger.warning(
-                "Team services refused or could not finish deleting a departed person's blobs. "
-                "event=person_blobs_delete_refused person_id=%s outcome=%s message=%s",
+                "Team services refused or could not finish deleting a departed person's team data. "
+                "event=person_team_data_delete_refused person_id=%s outcome=%s message=%s",
                 person_id,
-                reply.get("outcome"),
+                outcome,
                 message,
             )
-            return PersonBlobDeletionResult(
-                problem=f"Their temporary blob storage could not be cleared ({message})."
+            return PersonTeamDataDeletionResult(
+                problem=f"Their temporary blob storage and set-aside message copies could not be cleared ({message})."
             )
-        return PersonBlobDeletionResult(
+        result = PersonTeamDataDeletionResult(
             owners_removed=int(reply.get("owners_removed", 0)),
             blobs_deleted=int(reply.get("blobs_deleted", 0)),
             blobs_kept=int(reply.get("blobs_kept", 0)),
+            dlq_copies_deleted=int(reply.get("dlq_copies_deleted", 0)),
+            dlq_copies_kept=int(reply.get("dlq_copies_kept", 0)),
+            continuing_in_background=(outcome == "retry_later"),
         )
+        if outcome == "retry_later":
+            self._logger.info(
+                "Departed-person dead-letter scan is continuing in the background on team services. "
+                "event=person_team_data_delete_continuing person_id=%s owners_removed=%s blobs_deleted=%s "
+                "blobs_kept=%s dlq_copies_deleted=%s dlq_copies_kept=%s",
+                person_id,
+                result.owners_removed,
+                result.blobs_deleted,
+                result.blobs_kept,
+                result.dlq_copies_deleted,
+                result.dlq_copies_kept,
+            )
+        return result
 
 
 def build_gateway_person_lifecycle(
@@ -370,17 +389,17 @@ def build_gateway_person_lifecycle(
     person_schedules: GatewayPersonSchedules,
     clock: GatewayClock,
     personal_setup: GatewayPersonalSetup,
-    blobs: GatewayPersonBlobs | None = None,
+    team_data: GatewayPersonTeamData | None = None,
     team_commands: GatewayTeamCommandService | None = None,
     references: GatewayPersonReferences | None = None,
     logger: logging.Logger | None = None,
 ) -> GatewayPersonLifecycle:
-    """The person lifecycle for this gateway: its stores, the manager, the broker, team blobs, and per-person schedules."""
+    """The person lifecycle for this gateway: its stores, the manager, the broker, team data, and per-person schedules."""
 
     storage = config.manager_storage_settings
-    resolved_blobs = blobs
-    if resolved_blobs is None and team_commands is not None and references is not None:
-        resolved_blobs = GatewayTeamBlobs(
+    resolved_team_data = team_data
+    if resolved_team_data is None and team_commands is not None and references is not None:
+        resolved_team_data = GatewayTeamData(
             team_commands=team_commands,
             references=references,
             logger_=logger or globals()["logger"],
@@ -411,14 +430,14 @@ def build_gateway_person_lifecycle(
             team_id=config.gateway.team_id,
             personal_setup=personal_setup,
         ),
-        blobs=resolved_blobs,
+        team_data=resolved_team_data,
         logger=logger,
     )
 
 
 __all__ = [
     "GatewayPersonDeparture",
-    "GatewayTeamBlobs",
+    "GatewayTeamData",
     "build_gateway_person_lifecycle",
     "grant_concerns",
     "request_concerns",

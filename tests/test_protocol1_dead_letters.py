@@ -579,7 +579,7 @@ async def test_holding_while_full_sends_wpi_logs_once_and_acks_only_after_storag
     live_host, conn = make_host()
     js = conn.jetstream()
     full_err = APIError(code=500, err_code=JS_ERR_MAX_BYTES_EXCEEDED, description="maximum bytes exceeded")
-    # Fail raw once, then let raw succeed and fail notice twice to also prove raw isn't re-published in the same hold.
+    # Fail raw once, then let raw succeed and fail notice twice; C18 rewrites the same raw subject on each hold retry.
     js.fail_on.extend([
         (".dlq.raw.", full_err),
         (".dlq.notice.", full_err),
@@ -603,7 +603,8 @@ async def test_holding_while_full_sends_wpi_logs_once_and_acks_only_after_storag
     holding_logs = [r for r in caplog.records if "event=protocol1_dlq_stream_full_holding" in r.getMessage()]
     assert len(holding_logs) == 1
     raw_publishes = [s for s, _, _ in js.published if ".dlq.raw." in s]
-    assert len(raw_publishes) == 1
+    assert len(raw_publishes) == 3
+    assert set(raw_publishes) == {result.raw_subject}
 
 
 @pytest.mark.asyncio
@@ -798,17 +799,20 @@ def test_raw_copy_names_person_protocol1_and_negative_cases() -> None:
     assert raw_copy_names_person(b"\x80\x81not-json", person_ref="pref_alice", person_id="person-alice") is False
 
 
-def test_extract_old_envelope_summary_extracts_task_preview_and_person_ids() -> None:
+def test_extract_old_envelope_summary_extracts_identifiers_without_prompt_text() -> None:
+    """C21: OldEnvelopeSummary extracts identifiers only, never personal prompt/message text."""
+
     envelope = json.dumps(
         {
             "msg_meta": {
                 "root_task_id": "task-root-1",
+                "msg_correlation_id": "corr-99",
                 "gateway_context": {"canonical_user_id": "person-alice"},
             },
             "msg_content": {
                 "message_class": "Task",
                 "task_id": "task-42",
-                "task_description": "  Summarize   the weekly\nreport  " + ("x" * 300),
+                "task_description": "Private user prompt text that must never enter notices",
             },
         }
     ).encode("utf-8")
@@ -816,11 +820,9 @@ def test_extract_old_envelope_summary_extracts_task_preview_and_person_ids() -> 
     assert summary is not None
     assert summary.message_class == "Task"
     assert summary.task_id == "task-42"
+    assert summary.request_id == "corr-99"
     assert summary.person_ids == frozenset({"person-alice"})
-    assert summary.request_preview is not None
-    assert summary.request_preview.startswith("Summarize the weekly report ")
-    assert summary.request_preview.endswith("…")
-    assert len(summary.request_preview) <= 240
+    assert not hasattr(summary, "request_preview")
     assert extract_old_envelope_summary(b"not json") is None
 
 
@@ -969,3 +971,65 @@ def test_c17_departure_matching_walks_past_4096_json_nodes_and_deep_nesting() ->
         nested = {"inner": nested}
     deep_frame = json.dumps({"protocol": "1.0-pre", "body": nested}).encode("utf-8")
     assert raw_copy_names_person(deep_frame, person_ref="pref_alice") is True
+
+
+@pytest.mark.asyncio
+async def test_c18_held_set_aside_rewrites_raw_copy_after_orphan_cleanup() -> None:
+    """C18: Raw stored, notice refused as full, orphan scan deletes raw copy during hold, room returns ->
+    hold rewrites the raw copy before publishing the notice so the final raw copy matches size and SHA-256."""
+
+    live_host, conn = make_host()
+    js = conn.jetstream()
+    stored_by_subject: dict[str, bytes] = {}
+    full_state = {"notice_full_attempts": 2, "orphan_deleted": False}
+    real_publish = js.publish
+
+    async def stateful_publish(
+        subject: str,
+        payload: bytes,
+        *,
+        timeout: float = 5.0,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        if ".dlq.notice." in subject and full_state["notice_full_attempts"] > 0:
+            full_state["notice_full_attempts"] -= 1
+            if full_state["notice_full_attempts"] == 0 and not full_state["orphan_deleted"]:
+                # Simulate orphan upkeep scan running after 25 min grace while stream is full,
+                # deleting the raw copy that had no matching notice yet.
+                raw_subjs = [s for s in stored_by_subject if ".dlq.raw." in s]
+                assert len(raw_subjs) == 1
+                del stored_by_subject[raw_subjs[0]]
+                full_state["orphan_deleted"] = True
+            raise APIError(code=400, err_code=JS_ERR_MAX_BYTES_EXCEEDED, description="stream max bytes exceeded")
+        await real_publish(subject, payload, timeout=timeout, headers=headers)
+        stored_by_subject[subject] = payload
+
+    js.publish = stateful_publish  # type: ignore[method-assign]
+    setter = DeadLetterSetter(
+        live_host,
+        release="0.10.0",
+        ack_wait_seconds=0.06,
+        initial_retry_seconds=0.02,
+        max_retry_seconds=0.04,
+    )
+    raw_bytes = b'{"msg_content":{"message_class":"Task","task_id":"task-held-1"}}'
+    delivery = FakeDelivery(
+        data=raw_bytes,
+        subject="ua.v1.team_example.lead-host-1.work.agent.researcher-2.8",
+        stream="UA1_PART_team_example~8",
+        stream_seq=44,
+    )
+
+    result = await setter.set_aside_and_ack(delivery, reason="upgrade_old_format", team="team_example")
+    assert result is not None
+    assert full_state["orphan_deleted"] is True
+    assert delivery.ack_calls == 1
+    assert result.raw_subject in stored_by_subject
+    assert result.notice_subject in stored_by_subject
+
+    final_raw = stored_by_subject[result.raw_subject]
+    notice_doc = json.loads(stored_by_subject[result.notice_subject].decode("utf-8"))
+    assert final_raw == raw_bytes
+    assert notice_doc["body"]["raw"]["stored"] is True
+    assert notice_doc["body"]["raw"]["size"] == len(final_raw)
+    assert notice_doc["body"]["raw"]["sha256"] == b64url(hashlib.sha256(final_raw).digest())

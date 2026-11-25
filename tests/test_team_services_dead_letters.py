@@ -338,7 +338,10 @@ async def test_notice_watch_verifies_copies_handles_anomalies_and_deduplicates_a
     _, d_mismatch = await _emit_set_aside_into_dlq(nc, worker_live, raw_bytes=b"original", original_seq=3, corrupt_raw=True)
     _, d_oversized = await _emit_set_aside_into_dlq(nc, worker_live, raw_bytes=b"z" * (MAX_FRAME_BYTES + 5), reason="too_large", original_seq=4)
     old_env = json.dumps({
-        "msg_meta": {"gateway_context": {"canonical_user_id": ALICE_ID}},
+        "msg_meta": {
+            "msg_correlation_id": "req-old-9",
+            "gateway_context": {"canonical_user_id": ALICE_ID},
+        },
         "msg_content": {"message_class": "Task", "task_id": "task-old-9", "task_description": "Check quarterly budget"},
     }).encode("utf-8")
     _, d_old = await _emit_set_aside_into_dlq(nc, worker_live, raw_bytes=old_env, reason="upgrade_old_format", original_seq=5)
@@ -354,10 +357,14 @@ async def test_notice_watch_verifies_copies_handles_anomalies_and_deduplicates_a
     assert "raw copy is missing" in notice.summary
     assert "did not match the notice's size or SHA-256" in notice.summary
     assert "exceeded the frame limit" in notice.summary
+    # C21: Names the person, task id, and request id without copying personal prompt text into Inbox/chat.
+    assert f"for {ALICE_ID}" in notice.summary
     assert "task-old-9" in notice.summary
-    assert "Check quarterly budget" in notice.summary
-    assert "send any needed request again" in notice.summary
+    assert "req-old-9" in notice.summary
+    assert "Check quarterly budget" not in notice.summary
+    assert "ask the named person to send any needed request again" in notice.summary
     assert len(chat.sent) == 1 and chat.sent[0]["reason"] == DEAD_LETTER_NOTICE_REASON
+    assert "Check quarterly budget" not in chat.sent[0]["text"]
 
     # 2. Crash-before-ack with CHANGED batch [d_ok, d_missing, d_new]: only d_new is reported!
     _, d_new = await _emit_set_aside_into_dlq(nc, worker_live, raw_bytes=b"brand-new", original_seq=6)
@@ -774,26 +781,26 @@ async def test_c04_c06_c11_unified_delete_person_data_auth_counts_and_single_con
     assert len(blob_calls) == 1
     assert bounded.active_continuation_count() == 1
 
-    # Release continuation gate and wait for completion; next call reports final cumulative ok counts.
+    # Release continuation gate and wait for completion; entry is removed so a later departure scans fresh (C19).
     gate.set()
     for _ in range(100):
         if bounded.active_continuation_count() == 0:
             break
         await asyncio.sleep(0.01)
     assert bounded.active_continuation_count() == 0
+    # Continuation already deleted both of Alice's raw copies and left both of Bob's.
+    assert len(nc.messages[dlq_stream]) == 2
 
-    final = await bounded_ops.handle_delete_person_data(
+    # A new departure call after the continuation finishes starts fresh (re-runs blob deletion and DLQ scan).
+    fresh_after_finish = await bounded_ops.handle_delete_person_data(
         _verified_command("team.delete_person_data", {"request_id": "r7", "person": ALICE_REF}, roles=("lead_host",))
     )
-    assert final == {
-        "outcome": "ok",
-        "owners_removed": 2,
-        "blobs_deleted": 1,
-        "blobs_kept": 1,
-        "dlq_copies_deleted": 2,
-        "dlq_copies_kept": 2,
-    }
-    assert len(blob_calls) == 1  # Blob deletion ran once across the entire continuation lifecycle.
+    assert len(blob_calls) == 2
+    assert fresh_after_finish["outcome"] in {"ok", "retry_later"}
+    for _ in range(100):
+        if bounded.active_continuation_count() == 0:
+            break
+        await asyncio.sleep(0.01)
 
 
 # -- C05: LegacyNatsChatNoticeSender integration with real GatewayManagerClient ------------------
@@ -888,3 +895,245 @@ async def test_c05_legacy_chat_sender_envelope_reaches_gateway_manager_client_un
     # Demoted / inactive owner receives no chat alert.
     access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_MEMBER,)))
     assert await sender.send_notice(title="t", text="x", notice_id="p1_dlq:nonadmin", reason=DEAD_LETTER_NOTICE_REASON) is False
+
+
+# -- C19, C20, C22 fixes -------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c19_concurrent_departure_calls_coalesce_and_finished_continuation_resets(tmp_path: Path) -> None:
+    """C19: Concurrent gateway + manager calls coalesce onto one scan; finished/failed continuations do not stick."""
+
+    nc = DlqFakeNatsConnection()
+    ts_live, _worker_live = _make_hosts(nc)
+    access = AccessRepository(_storage(tmp_path))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,)))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
+    access.record_person(_person(BOB_ID, BOB_REF, PersonStanding.ACTIVE))
+    people = PeopleDirectory(access, TEAM)
+
+    dlq_stream = dlq_stream_name(TEAM)
+    _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "1" * 64), json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode())
+    _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "2" * 64), json.dumps({"protocol": "1.0-pre", "authority": {"person": BOB_REF}, "body": {}}).encode())
+
+    blob_started = asyncio.Event()
+    blob_release = asyncio.Event()
+    blob_calls: list[str] = []
+
+    class _SlowBlobs:
+        async def delete_person(self, person_ref: str) -> PersonDeleteResult:
+            blob_calls.append(person_ref)
+            blob_started.set()
+            await blob_release.wait()
+            return PersonDeleteResult(outcome="ok", owners_removed=1, blobs_deleted=1, blobs_kept=0)
+
+    departure = TeamPersonDepartureService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        people=people,
+        blobs=_SlowBlobs(),  # type: ignore[arg-type]
+        delete_budget_seconds=10.0,
+    )
+
+    # 1. Two concurrent calls for the same person coalesce into ONE blob delete and ONE DLQ scan!
+    task1 = asyncio.create_task(departure.delete_person_data(ALICE_REF))
+    await blob_started.wait()
+    task2 = asyncio.create_task(departure.delete_person_data(ALICE_REF))
+    await asyncio.sleep(0.01)
+    blob_release.set()
+    r1, r2 = await asyncio.gather(task1, task2)
+    assert len(blob_calls) == 1
+    assert r1 == r2
+    assert r1.outcome == "ok"
+    assert r1.dlq_copies_deleted == 1 and r1.dlq_copies_kept == 1
+
+    # 2. A later departure (e.g. Alice restored & disabled again with a new copy) runs fresh!
+    _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "3" * 64), json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode())
+    r3 = await departure.delete_person_data(ALICE_REF)
+    assert len(blob_calls) == 2
+    assert r3.outcome == "ok"
+    assert r3.dlq_copies_deleted == 1 and r3.dlq_copies_kept == 1
+
+    # 3. Failed background continuation removes its entry so the next call retries cleanly instead of sticking on error.
+    _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "4" * 64), json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode())
+    _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "5" * 64), json.dumps({"protocol": "1.0-pre", "authority": {"person": ALICE_REF}, "body": {}}).encode())
+    fail_second_get = {"fail": True}
+    orig_req = nc.request
+
+    async def flaky_req(subject: str, payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        if subject == f"$JS.API.STREAM.MSG.GET.{dlq_stream}" and fail_second_get["fail"]:
+            req = json.loads(payload.decode("utf-8")) if payload else {}
+            if int(req.get("seq", 1)) > 2:
+                fail_second_get["fail"] = False
+                raise RuntimeError("transient nats disconnect during continuation")
+        return await orig_req(subject, payload, timeout=timeout)
+
+    nc.request = flaky_req  # type: ignore[method-assign]
+    bounded = TeamPersonDepartureService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        people=people,
+        blobs=_SlowBlobs(),  # type: ignore[arg-type]
+        delete_budget_seconds=0.0,
+    )
+    r_retry = await bounded.delete_person_data(ALICE_REF)
+    assert r_retry.outcome == "retry_later"
+    for _ in range(100):
+        if bounded.active_continuation_count() == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert bounded.active_continuation_count() == 0
+    # Next call runs fresh (now with normal budget) and deletes remaining Alice copies!
+    bounded._delete_budget_seconds = 10.0
+    r_after_fail = await bounded.delete_person_data(ALICE_REF)
+    assert r_after_fail.outcome == "ok"
+    assert r_after_fail.dlq_copies_deleted == 2
+
+
+@pytest.mark.asyncio
+async def test_c20_incremental_raw_scan_skips_confirmed_pairs_and_batches_recovery_lookups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C20: scan_raw_copies skips confirmed paired copies on later passes, re-walks on departed changes without
+    re-checking notices, respects scan budget, and recover_exhausted_notices batches receipt lookups."""
+
+    nc = DlqFakeNatsConnection()
+    ts_live, worker_live = _make_hosts(nc)
+    access = AccessRepository(_storage(tmp_path))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,)))
+    access.record_person(_person(BOB_ID, BOB_REF, PersonStanding.ACTIVE))
+    people = PeopleDirectory(access, TEAM)
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        chat_sender=RecordingChatSender(),
+        clock=lambda: NOW,
+        orphan_grace_seconds=600,
+        scan_budget_seconds=10.0,
+    )
+
+    dlq_stream = dlq_stream_name(TEAM)
+    old_ts = (NOW - timedelta(seconds=1200)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    bob_copy = json.dumps({"protocol": "1.0-pre", "authority": {"person": BOB_REF}, "body": {}}).encode()
+    _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "a" * 64), bob_copy, stored_time=old_ts)
+    _store_in_stream(nc, dlq_stream, dlq_notice_subject(TEAM, "w1", "a" * 64), b"{}", stored_time=old_ts)
+    _store_in_stream(nc, dlq_stream, dlq_raw_subject(TEAM, "w1", "b" * 64), bob_copy, stored_time=old_ts)
+    _store_in_stream(nc, dlq_stream, dlq_notice_subject(TEAM, "w1", "b" * 64), b"{}", stored_time=old_ts)
+
+    # Pass 1 confirms both old paired copies.
+    rep1 = await service.scan_raw_copies()
+    assert rep1.copies_scanned == 2
+    assert rep1.orphans_deleted == 0
+
+    # Pass 2 with unchanged departed set does 0 raw copy reads and 0 notice lookups!
+    nc.requests.clear()
+    rep2 = await service.scan_raw_copies()
+    assert rep2.copies_scanned == 0
+    notice_gets = [
+        req for subj, req in nc.requests
+        if subj == f"$JS.API.STREAM.MSG.GET.{dlq_stream}" and isinstance(req, dict) and "last_by_subj" in req
+    ]
+    assert notice_gets == []
+
+    # When Bob departs, scan_raw_copies re-walks older copies to delete Bob's copies without re-checking notices.
+    access.record_person(_person(BOB_ID, BOB_REF, PersonStanding.DISABLED))
+    nc.requests.clear()
+    rep3 = await service.scan_raw_copies()
+    assert rep3.copies_scanned == 2
+    assert rep3.departed_deleted == 2
+    notice_gets_after_depart = [
+        req for subj, req in nc.requests
+        if subj == f"$JS.API.STREAM.MSG.GET.{dlq_stream}" and isinstance(req, dict) and "last_by_subj" in req
+    ]
+    assert notice_gets_after_depart == []
+
+    # Recovery scan batches dlq_reported_copy_keys into ONE DB lookup for a batch of 5 notices!
+    nc.messages[dlq_stream] = {}
+    for seq_idx in range(1, 6):
+        await _emit_set_aside_into_dlq(nc, worker_live, raw_bytes=f"msg-{seq_idx}".encode(), original_seq=seq_idx)
+    last_seq = max(nc.messages[dlq_stream])
+    consumer_name = dlq_notice_consumer_name(TEAM)
+    nc.consumer_info_map[(dlq_stream, consumer_name)] = {
+        "name": consumer_name,
+        "config": {"filter_subject": f"ua.v1.{TEAM}.*.dlq.notice.*", "max_deliver": 20},
+        "delivered": {"stream_seq": last_seq},
+        "ack_floor": {"stream_seq": 0},
+        "num_ack_pending": 0,
+    }
+    lookup_batches: list[int] = []
+    real_lookup = access.dlq_reported_copy_keys
+
+    def counting_lookup(team_id: str, keys: Any) -> set[tuple[str, str]]:
+        key_list = list(keys)
+        lookup_batches.append(len(key_list))
+        return real_lookup(team_id, key_list)
+
+    monkeypatch.setattr(access, "dlq_reported_copy_keys", counting_lookup)
+    assert await service.recover_exhausted_notices() == 5
+    # One batched lookup of 5 keys during collection + one batched lookup of 5 keys in _report_recovered_batch.
+    assert lookup_batches == [5, 5]
+
+
+@pytest.mark.asyncio
+async def test_c22_inbox_outage_with_chat_working_holds_and_avoids_duplicate_chat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C22: When Inbox store fails while chat works, batch holds with +WPI and does not resend chat on recovery."""
+
+    nc = DlqFakeNatsConnection()
+    ts_live, worker_live = _make_hosts(nc)
+    access = AccessRepository(_storage(tmp_path))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,)))
+    people = PeopleDirectory(access, TEAM)
+    chat = RecordingChatSender()
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        chat_sender=chat,
+        clock=lambda: NOW,
+        ack_wait_seconds=0.06,
+        initial_retry_seconds=0.02,
+        max_retry_seconds=0.04,
+    )
+
+    real_record = access.record_dlq_notice_report
+    db_failures = {"remaining": 2}
+
+    def flaky_record(*args: Any, **kwargs: Any) -> tuple[bool, int]:
+        if db_failures["remaining"] > 0:
+            db_failures["remaining"] -= 1
+            raise RuntimeError("inbox db temporarily down")
+        return real_record(*args, **kwargs)
+
+    monkeypatch.setattr(access, "record_dlq_notice_report", flaky_record)
+
+    res, delivery = await _emit_set_aside_into_dlq(nc, worker_live, raw_bytes=b"payload-c22", original_seq=1)
+    reported = await service.process_delivered_notices([delivery])
+
+    assert reported == 1
+    assert delivery.in_progress_calls >= 2
+    assert delivery.ack_calls == 1
+    assert len(chat.sent) == 1  # Chat sent ONCE on attempt 1, NOT repeated when Inbox recovered on attempt 3!
+    assert len(access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))) == 1
+    assert (worker_live.identity.runtime, res.copy_id) in access.dlq_reported_copy_keys(
+        TEAM, [(worker_live.identity.runtime, res.copy_id)]
+    )
+
+    # Subsequent recovery scan finds the receipt and sends no duplicate Inbox or chat notice.
+    dlq_stream = dlq_stream_name(TEAM)
+    consumer_name = dlq_notice_consumer_name(TEAM)
+    nc.consumer_info_map[(dlq_stream, consumer_name)] = {
+        "name": consumer_name,
+        "config": {"filter_subject": f"ua.v1.{TEAM}.*.dlq.notice.*", "max_deliver": 20},
+        "delivered": {"stream_seq": max(nc.messages[dlq_stream])},
+        "ack_floor": {"stream_seq": 0},
+        "num_ack_pending": 0,
+    }
+    assert await service.recover_exhausted_notices() == 0
+    assert len(chat.sent) == 1

@@ -2073,3 +2073,101 @@ def test_f14_validate_requested_partitions_rejection_branches(tmp_path: Path) ->
     assert authority._validate_requested_partitions(
         worker_cert, [2, 0], give_up=False, owned_by_team={"team_a": {0: 10, 2: 11}}, released_by_team={}  # type: ignore[arg-type]
     ) == (0, 2)
+
+
+@pytest.mark.asyncio
+async def test_authority_sweep_delivery_limits_and_install_dead_letter_routing(tmp_path: Path) -> None:
+    """A4 & A5: Authority sweeps each served team's UA1_TEAM_WORK_<team> into that team's UA1_DLQ_<team>,
+    routes _install traffic to its first served team, and isolates sweep failures in upkeep."""
+
+    from custom_transport.protocol1.dead_letters import dlq_notice_subject, dlq_raw_subject
+    from custom_transport.protocol1.identity import HostIdentity
+    from custom_transport.protocol1.live import LiveHost
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from tests import message_contract_support as fixtures
+    from tests.test_protocol1_dead_letters import FakeNatsConnection
+
+    authority = authority_at(tmp_path, partitions=2)
+    nc = FakeNatsConnection()
+    nc.is_closed = False  # type: ignore[attr-defined]
+    bundle = BootstrapBundle(
+        authority.installation,
+        ((authority.authority.key_id, authority.authority.public_key_text),),
+        partitions=2,
+    )
+    trust = authority._trust = PersistentTrustStore.open(
+        bundle, authority.layout.host_trust_dir(AUTHORITY_RUNTIME), fixtures.NOW
+    )
+    own_req = authority._own_request(("team_beta", "team_alpha"))
+    own_rec = authority.certificate_record(own_req, epoch=1, revocation_epoch=1, issued=fixtures.NOW)
+    trust.add(json.dumps(own_rec).encode("utf-8"), now=fixtures.NOW)
+    ident = HostIdentity(authority.host_keys, authority._held_certificate(own_rec))
+    live = LiveHost(nc, ident, trust, clock=lambda: fixtures.NOW)
+    authority.live = live
+    authority._nc = nc
+    authority._teams = ("team_alpha", "team_beta")
+    authority._own = own_rec
+    authority._revocations = {"issued_at": format_timestamp(fixtures.NOW), "body": {"revocation_epoch": 1, "entries": []}}
+    authority._forgotten_at = fixtures.NOW
+
+    # 1. dead_letter_setter routes _install traffic to sorted(certificate.teams)[0] ("team_alpha").
+    setter = authority.dead_letter_setter()
+    assert setter.resolve_notice_team("_install") == "team_alpha"
+    assert setter.resolve_notice_team(None) == "team_alpha"
+
+    # 2. Populate UA1_TEAM_WORK_team_alpha and UA1_TEAM_WORK_team_beta with stranded exhausted messages.
+    for team_name, payload in (("team_alpha", b"alpha-stranded"), ("team_beta", b"beta-stranded")):
+        stream = f"UA1_TEAM_WORK_{team_name}"
+        nc.streams[stream] = {"created": "2026-10-22T04:00:00Z"}
+        nc.messages[stream] = {
+            1: {"subject": f"ua.v1.{team_name}.lead-host-1.work.team", "data": payload, "time": "2026-10-22T04:30:00Z"},
+        }
+        nc.consumers[stream] = [
+            {
+                "name": f"team~{team_name}",
+                "config": {"filter_subject": f"ua.v1.{team_name}.*.work.team", "max_deliver": 20},
+                "delivered": {"stream_seq": 1},
+                "ack_floor": {"stream_seq": 0},
+                "num_ack_pending": 0,
+            }
+        ]
+
+    summary = await authority.sweep_delivery_limits()
+    assert summary.streams_checked == 2
+    assert summary.streams_failed == 0
+    assert summary.messages_swept == 2
+    assert nc.messages["UA1_TEAM_WORK_team_alpha"] == {}
+    assert nc.messages["UA1_TEAM_WORK_team_beta"] == {}
+
+    published_subjects = [subj for subj, _data, _hdrs in nc.jetstream().published]
+    assert any(subj.startswith("ua.v1.team_alpha.authority.dlq.raw.") for subj in published_subjects)
+    assert any(subj.startswith("ua.v1.team_alpha.authority.dlq.notice.") for subj in published_subjects)
+    assert any(subj.startswith("ua.v1.team_beta.authority.dlq.raw.") for subj in published_subjects)
+    assert any(subj.startswith("ua.v1.team_beta.authority.dlq.notice.") for subj in published_subjects)
+    # Silence unused import check when verifying subject prefixes directly.
+    assert dlq_raw_subject("team_alpha", "authority", "0" * 64).startswith("ua.v1.team_alpha.authority.dlq.raw.")
+    assert dlq_notice_subject("team_beta", "authority", "0" * 64).startswith("ua.v1.team_beta.authority.dlq.notice.")
+
+    # 3. upkeep() schedules sweep_delivery_limits when due, isolates failures, and retries on next minute after failure.
+    calls: list[str] = []
+    fail_first = {"flag": True}
+
+    async def fake_sweep() -> Any:
+        calls.append("sweep")
+        if fail_first["flag"]:
+            fail_first["flag"] = False
+            raise RuntimeError("transient nats hiccup")
+        return summary
+
+    authority.sweep_delivery_limits = fake_sweep  # type: ignore[method-assign]
+    await authority.upkeep(fixtures.NOW)
+    assert calls == ["sweep"]
+    assert authority._dlq_swept_at is None  # failed step does not advance timestamp -> retries next minute!
+    await authority.upkeep(fixtures.NOW + timedelta(minutes=1))
+    assert calls == ["sweep", "sweep"]
+    assert authority._dlq_swept_at == fixtures.NOW + timedelta(minutes=1)
+    # Within DLQ_SWEEP_INTERVAL (5 min), upkeep does not re-sweep; after 5 min, it sweeps again.
+    await authority.upkeep(fixtures.NOW + timedelta(minutes=3))
+    assert len(calls) == 2
+    await authority.upkeep(fixtures.NOW + timedelta(minutes=6))
+    assert len(calls) == 3

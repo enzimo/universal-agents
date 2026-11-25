@@ -90,7 +90,6 @@ PEER_REVOCATIONS_NAK_DELAY_SECONDS: Final[float] = 60.0
 _MAX_UNTRUSTED_PARSE_BYTES: Final = MAX_FRAME_BYTES * 2
 # Any JSON document up to _MAX_UNTRUSTED_PARSE_BYTES has at most half that many values; cap >= bytes covers all valid inputs (C17).
 _MAX_WALK_NODES: Final = _MAX_UNTRUSTED_PARSE_BYTES
-_MAX_REQUEST_PREVIEW_CHARS: Final = 240
 
 _COPY_ID_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
 _POINTER_PATTERN: Final = re.compile(r"^(/[a-z0-9_]{1,64}){0,16}$")
@@ -197,11 +196,11 @@ class SweepSummary:
 
 @dataclass(frozen=True)
 class OldEnvelopeSummary:
-    """Identifiers and bounded request preview read from a legacy ``MessageEnvelope`` raw copy."""
+    """Identifiers read from a legacy ``MessageEnvelope`` raw copy (never personal request text, C21)."""
 
     message_class: Optional[str]
     task_id: Optional[str]
-    request_preview: Optional[str]
+    request_id: Optional[str]
     person_ids: frozenset[str]
 
 
@@ -740,13 +739,20 @@ class DeadLetterSetter:
         stored_ns: int,
         team: Optional[str],
         pointer: Optional[str],
-        raw_stored_in_hold: bool,
-        on_raw_stored: Callable[[], None],
         effective_ack_wait: float,
         stop: Optional[asyncio.Event],
     ) -> SetAsideResult:
         deliveries = max(1, int(holder[0].metadata.num_delivered))
         retry_deadline = time.monotonic() + max(0.0, effective_ack_wait * 0.5)
+        # Skip raw re-publish only across sub-second transient retries inside one hold attempt.
+        # Across outer DeadLetterStreamFull hold attempts we always rewrite the raw copy (max_msgs_per_subject: 1
+        # replaces it in place) so orphan cleanup after a long full-stream hold cannot leave a notice without bytes (C18).
+        raw_stored_in_attempt = False
+
+        def mark_raw_stored() -> None:
+            nonlocal raw_stored_in_attempt
+            raw_stored_in_attempt = True
+
         for retry_index in range(self.transient_retries + 1):
             try:
                 return await self.set_aside(
@@ -759,8 +765,8 @@ class DeadLetterSetter:
                     stored_at=stored_ns,
                     team=team,
                     pointer=pointer,
-                    skip_raw_publish=raw_stored_in_hold,
-                    on_raw_stored=on_raw_stored,
+                    skip_raw_publish=raw_stored_in_attempt,
+                    on_raw_stored=mark_raw_stored,
                 )
             except DeadLetterStreamFull:
                 raise
@@ -793,12 +799,7 @@ class DeadLetterSetter:
         stored_ns = message_stored_timestamp_ns(message)
         raw_bytes = bytes(message.data)
         original_subject = str(message.subject)
-        raw_stored_in_hold = False
         effective_ack_wait = ack_wait_seconds if ack_wait_seconds is not None else self.ack_wait_seconds
-
-        def mark_raw_stored() -> None:
-            nonlocal raw_stored_in_hold
-            raw_stored_in_hold = True
 
         async def attempt_store() -> SetAsideResult:
             return await self._attempt_set_aside_with_transient_retries(
@@ -811,8 +812,6 @@ class DeadLetterSetter:
                 stored_ns=stored_ns,
                 team=team,
                 pointer=pointer,
-                raw_stored_in_hold=raw_stored_in_hold,
-                on_raw_stored=mark_raw_stored,
                 effective_ack_wait=effective_ack_wait,
                 stop=stop,
             )
@@ -1469,17 +1468,12 @@ def raw_copy_names_person(
     return _protocol1_frame_names_person(doc, target_refs) or _legacy_envelope_names_person(doc, target_ids)
 
 
-def _clean_preview(text: str) -> Optional[str]:
-    compact = " ".join(text.split())
-    if not compact:
-        return None
-    if len(compact) <= _MAX_REQUEST_PREVIEW_CHARS:
-        return compact
-    return compact[: _MAX_REQUEST_PREVIEW_CHARS - 1].rstrip() + "…"
-
-
 def extract_old_envelope_summary(data: bytes) -> Optional[OldEnvelopeSummary]:
-    """Read task id, message class, bounded request preview, and person ids from an ``upgrade_old_format`` copy."""
+    """Read message class, task id, request/correlation id, and person ids from an ``upgrade_old_format`` copy (C21).
+
+    Extracts identifiers only — never prompt or message text — so durable administrator Inbox and chat
+    notices never retain personal message content beyond the dead-letter stream's retention window.
+    """
 
     doc = _safe_parse_json_object(data)
     if doc is None:
@@ -1491,6 +1485,7 @@ def extract_old_envelope_summary(data: bytes) -> Optional[OldEnvelopeSummary]:
 
     content = msg_content if isinstance(msg_content, Mapping) else {}
     meta = msg_meta if isinstance(msg_meta, Mapping) else {}
+    header = doc.get("msg_header") if isinstance(doc.get("msg_header"), Mapping) else {}
     message_class = _nested_str(content, "message_class")
     task_id = (
         _nested_str(content, "task_id")
@@ -1498,18 +1493,15 @@ def extract_old_envelope_summary(data: bytes) -> Optional[OldEnvelopeSummary]:
         or _nested_str(meta, "root_task_id")
         or _nested_str(content, "original_envelope_snapshot", "msg_content", "task_id")
     )
-    raw_preview = (
-        _nested_str(content, "task_description")
-        or _nested_str(content, "prompt")
-        or _nested_str(content, "instruction")
-        or _nested_str(content, "message")
-        or _nested_str(content, "user_message")
-        or _nested_str(content, "content")
+    request_id = (
+        _nested_str(content, "request_id")
+        or _nested_str(meta, "msg_correlation_id")
+        or _nested_str(header, "idempotency_key")
     )
     return OldEnvelopeSummary(
         message_class=message_class,
         task_id=task_id,
-        request_preview=_clean_preview(raw_preview) if raw_preview else None,
+        request_id=request_id,
         person_ids=_old_envelope_person_ids(doc),
     )
 

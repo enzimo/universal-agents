@@ -138,23 +138,26 @@ class GatewayPersonRecords(Protocol):
 
 
 @dataclass(frozen=True)
-class PersonBlobDeletionResult:
-    """Outcome of removing a departed person's blob ownership and deleting unowned blobs."""
+class PersonTeamDataDeletionResult:
+    """Outcome of deleting a departed person's blobs and dead-letter raw copies (``team.delete_person_data``)."""
 
     owners_removed: int = 0
     blobs_deleted: int = 0
     blobs_kept: int = 0
+    dlq_copies_deleted: int = 0
+    dlq_copies_kept: int = 0
+    continuing_in_background: bool = False
     problem: str | None = None
 
 
 @runtime_checkable
-class GatewayPersonBlobs(Protocol):
-    """Tell the team services to remove a departed person's blob ownership and delete unowned blobs."""
+class GatewayPersonTeamData(Protocol):
+    """Tell the team services to delete a departed person's blobs and dead-letter raw copies."""
 
-    async def delete_person_blobs(
+    async def delete_person_data(
         self, person_id: str, *, actor_person_id: str
-    ) -> PersonBlobDeletionResult:
-        """Send ``blobs.delete_person`` for ``person_id``, authorized for ``actor_person_id``."""
+    ) -> PersonTeamDataDeletionResult:
+        """Send ``team.delete_person_data`` for ``person_id``, authorized for ``actor_person_id``."""
 
 
 @runtime_checkable
@@ -199,11 +202,11 @@ class GatewayPersonLifecycle:
         person_schedules: GatewayPersonSchedules | None,
         clock: GatewayClock,
         setup: GatewayPersonSetup | None = None,
-        blobs: GatewayPersonBlobs | None = None,
+        team_data: GatewayPersonTeamData | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._setup = setup
-        self._blobs = blobs
+        self._team_data = team_data
         self._settings = settings
         self._identity = identity
         self._records = records
@@ -338,7 +341,7 @@ class GatewayPersonLifecycle:
         person_id = str(change.person_id)
         reply = _Reply([change.text])
         withdrawn = self._withdraw(person_id, reply)
-        await self._delete_blobs(actor, person_id, reply)
+        await self._delete_team_data(actor, person_id, reply)
         outcome = await self._tell_manager(actor, person_id, PersonStanding.DISABLED, reply)
         reply.lines += _work_lines(outcome, removed=False, withdrawn=withdrawn)
         reply.lines.append(
@@ -354,7 +357,7 @@ class GatewayPersonLifecycle:
         held = self._hold(person_id, until, reply)
         withdrawn = self._withdraw(person_id, reply)
         forgotten = self._forget(actor, person_id, reply)
-        await self._delete_blobs(actor, person_id, reply)
+        await self._delete_team_data(actor, person_id, reply)
         credentials = await self._delete_credentials(person_id, forgotten, reply)
         outcome = await self._tell_manager(actor, person_id, PersonStanding.REMOVED, reply)
         reply.lines += _work_lines(outcome, removed=True, withdrawn=withdrawn)
@@ -437,23 +440,24 @@ class GatewayPersonLifecycle:
         reply.problems.extend(forgotten.problems)
         return forgotten
 
-    async def _delete_blobs(
+    async def _delete_team_data(
         self, actor: ResolvedGatewayUser, person_id: str, reply: _Reply
-    ) -> PersonBlobDeletionResult | None:
-        if self._blobs is None:
+    ) -> PersonTeamDataDeletionResult | None:
+        if self._team_data is None:
             return None
         try:
-            result = await self._blobs.delete_person_blobs(
+            result = await self._team_data.delete_person_data(
                 person_id, actor_person_id=actor.user.canonical_user_id
             )
         except Exception:  # noqa: BLE001 - reported in the reply; team_services upkeep retries
             self._logger.exception(
-                "Could not ask the team services to delete a departed person's blobs. "
-                "event=person_blobs_delete_failed person_id=%s",
+                "Could not ask the team services to delete a departed person's team data. "
+                "event=person_team_data_delete_failed person_id=%s",
                 person_id,
             )
             reply.problems.append(
-                "Their temporary blob storage could not be cleared yet; the team services will retry automatically."
+                "Their temporary blob storage and set-aside message copies could not be cleared yet; "
+                "the team services will retry automatically."
             )
             return None
         if result.problem:
@@ -623,11 +627,11 @@ def _nothing_to_restore(name: str, person_id: str, held: HeldPersonData | None) 
 
 __all__ = [
     "ForgottenRecords",
-    "GatewayPersonBlobs",
     "GatewayPersonLifecycle",
     "GatewayPersonLifecycleSettings",
     "GatewayPersonRecords",
+    "GatewayPersonTeamData",
     "GatewayPersonWork",
     "HeldPersonData",
-    "PersonBlobDeletionResult",
+    "PersonTeamDataDeletionResult",
 ]

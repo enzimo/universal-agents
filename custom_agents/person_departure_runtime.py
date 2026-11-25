@@ -209,7 +209,7 @@ async def settle_person(agent: Any, person_id: str, *, command_id: str | None = 
     await _stop_task_trees(agent, person_id, outcome, reason=reason, command_id=run_id)
     await _stop_objectives(agent, person_id, outcome, reason=reason, command_id=run_id)
     await asyncio.to_thread(_clear_schedules, agent, person_id, outcome)
-    await _delete_person_blobs(agent, person_id, outcome, command_id=command_id)
+    await _delete_person_team_data(agent, person_id, outcome, command_id=command_id)
     if person.standing is PersonStanding.REMOVED:
         await asyncio.to_thread(_forget_records, agent, person_id, outcome)
     logger.info(
@@ -232,17 +232,17 @@ async def settle_person(agent: Any, person_id: str, *, command_id: str | None = 
     return outcome
 
 
-async def _delete_person_blobs(
+async def _delete_person_team_data(
     agent: Any,
     person_id: str,
     outcome: PersonWorkOutcomeV1,
     *,
     command_id: str | None = None,
 ) -> None:
-    """Ask team services to remove the departed person's blob ownership and delete unowned blobs (A4, C06)."""
+    """Ask team services to delete the departed person's blobs and dead-letter raw copies (``team.delete_person_data``)."""
 
     host = process_host()
-    if host is None or not hasattr(host, "delete_person_blobs"):
+    if host is None or not hasattr(host, "delete_person_data"):
         return
     host_team = getattr(host, "team", None)
     if host_team is not None and str(host_team) != str(agent.team_id):
@@ -251,40 +251,60 @@ async def _delete_person_blobs(
     if not person_ref:
         return
     try:
-        reply = await host.delete_person_blobs(person_ref)
+        reply = await host.delete_person_data(person_ref)
     except AgentUnreachable as exc:
         logger.info(
-            "Deferred departed-person blob deletion because the lead host is not ready yet; "
-            "team services upkeep will retry. event=person_departure_blobs_deferred "
+            "Deferred departed-person team data deletion because the lead host is not ready yet; "
+            "team services upkeep will retry. event=person_departure_team_data_deferred "
             "person_id=%s reason=%s",
             person_id,
             exc,
         )
         if command_id is not None or not exc.clears:
-            outcome.problems.append(f"Their temporary blob storage could not be cleared yet ({exc}).")
+            outcome.problems.append(
+                f"Their temporary blob storage and set-aside message copies could not be cleared yet ({exc})."
+            )
         return
     except Exception as exc:  # noqa: BLE001 - reported; team_services upkeep retries
         logger.warning(
-            "Could not ask team services to delete a departed person's blobs. "
-            "event=person_departure_blobs_failed person_id=%s error=%s",
+            "Could not ask team services to delete a departed person's team data. "
+            "event=person_departure_team_data_failed person_id=%s error=%s",
             person_id,
             exc,
         )
-        outcome.problems.append("Their temporary blob storage could not be cleared yet.")
+        outcome.problems.append(
+            "Their temporary blob storage and set-aside message copies could not be cleared yet."
+        )
         return
-    if not isinstance(reply, dict) or reply.get("outcome") != "ok":
+    reply_outcome = reply.get("outcome") if isinstance(reply, dict) else None
+    if reply_outcome == "retry_later":
+        logger.info(
+            "Departed-person dead-letter scan is continuing in the background on team services. "
+            "event=person_departure_team_data_continuing person_id=%s owners_removed=%s blobs_deleted=%s "
+            "blobs_kept=%s dlq_copies_deleted=%s dlq_copies_kept=%s",
+            person_id,
+            reply.get("owners_removed", 0),
+            reply.get("blobs_deleted", 0),
+            reply.get("blobs_kept", 0),
+            reply.get("dlq_copies_deleted", 0),
+            reply.get("dlq_copies_kept", 0),
+        )
+        return
+    if reply_outcome != "ok":
         message = (
-            str(reply.get("message") or reply.get("outcome") or "unknown error")
+            str(reply.get("message") or reply_outcome or "unknown error")
             if isinstance(reply, dict)
             else "invalid reply"
         )
         logger.warning(
-            "Team services refused or failed departed-person blob deletion. "
-            "event=person_departure_blobs_refused person_id=%s message=%s",
+            "Team services refused or failed departed-person team data deletion. "
+            "event=person_departure_team_data_refused person_id=%s message=%s",
             person_id,
             message,
         )
-        outcome.problems.append(f"Their temporary blob storage could not be cleared ({message}).")
+        outcome.problems.append(
+            f"Their temporary blob storage and set-aside message copies could not be cleared ({message})."
+        )
 
 
 async def _stop_task_trees(

@@ -110,6 +110,7 @@ from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.contract_files import max_credential_bytes, role_permissions, transport
+from custom_transport.protocol1.dead_letters import DeadLetterSetter, SweepSummary, sweep_exhausted_streams
 from custom_transport.protocol1.mapping_check import PartitionMappingError, check_partition_mapping
 from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
 from custom_transport.protocol1.identity import HostIdentity
@@ -141,6 +142,8 @@ REVOCATIONS_RESIGN_INTERVAL = timedelta(hours=6)
 UPKEEP_INTERVAL = timedelta(minutes=1)
 # README "Forgetting": a receiver forgets at least daily.
 FORGET_INTERVAL = timedelta(days=1)
+# CRIT-1 sweep interval for each served team's UA1_TEAM_WORK_<team> stream (A4).
+DLQ_SWEEP_INTERVAL = timedelta(minutes=5)
 CERTIFICATES_BUCKET = "UA1_CERTS"
 PLACEMENT_BUCKET = "UA1_PLACEMENT"
 _PARTITION_OWNING_ROLES = frozenset({"lead_host", "worker_host"})
@@ -275,6 +278,8 @@ class InstallationAuthority:
         # Monotonic (sequence, digest) replay protection for partition_owner records (F13/SEC-07).
         self._held_partition_owners: dict[str, tuple[int, str]] = {}
         self._forgotten_at: Optional[datetime] = None
+        self._dlq_swept_at: Optional[datetime] = None
+        self._logged_stranded_dlq: set[tuple[str, int]] = set()
         self._ledger = IssueLedger(layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME, self.installation,
                                    logger=logger)
         # The authority host's trust store, opened first at start: it keeps the newest
@@ -1071,6 +1076,7 @@ class InstallationAuthority:
              "nats_revocation_reconcile_failed", next_check),
             (self._forget_due(now), self.forget, "authority_forget_failed",
              f"in {int(FORGET_INTERVAL.total_seconds() // 3600)} hours"),
+            (self._dlq_sweep_due(now), self._sweep_delivery_limits_step, "authority_dlq_sweep_failed", next_check),
         )
         for due, step, event, again in steps:
             if not due:
@@ -1094,6 +1100,77 @@ class InstallationAuthority:
 
     def _forget_due(self, now: datetime) -> bool:
         return self._forgotten_at is None or now - self._forgotten_at >= FORGET_INTERVAL
+
+    def _dlq_sweep_due(self, now: datetime) -> bool:
+        return bool(self._teams) and (
+            self._dlq_swept_at is None or now - self._dlq_swept_at >= DLQ_SWEEP_INTERVAL
+        )
+
+    def dead_letter_setter(self) -> DeadLetterSetter:
+        """Build a ``DeadLetterSetter`` for this authority (routes ``_install`` traffic to its first served team)."""
+
+        assert self.live is not None, "start() first"
+        return DeadLetterSetter(self.live, logger=self.logger)
+
+    async def _sweep_delivery_limits_step(self, now: datetime) -> None:
+        await self.sweep_delivery_limits()
+        self._dlq_swept_at = now
+
+    async def sweep_delivery_limits(self, *, stop: Optional[asyncio.Event] = None) -> SweepSummary:
+        """CRIT-1 sweep over each served team's ``UA1_TEAM_WORK_<team>`` stream (A4)."""
+
+        assert self.live is not None and self._nc is not None, "start() first"
+        setter = self.dead_letter_setter()
+        streams_checked = 0
+        streams_failed = 0
+        consumers_checked = 0
+        messages_swept = 0
+        stopped_full = False
+        duration_ms = 0.0
+        for team in self._teams:
+            if stop is not None and stop.is_set():
+                break
+            team_summary = await sweep_exhausted_streams(
+                self._nc,
+                (f"UA1_TEAM_WORK_{team}",),
+                setter,
+                team=team,
+                stop=stop,
+                logged_stranded=self._logged_stranded_dlq,
+                logger=self.logger,
+            )
+            streams_checked += team_summary.streams_checked
+            streams_failed += team_summary.streams_failed
+            consumers_checked += team_summary.consumers_checked
+            messages_swept += team_summary.messages_swept
+            stopped_full = stopped_full or team_summary.stopped_full
+            duration_ms += team_summary.duration_ms
+        log_fn = (
+            self.logger.warning
+            if (messages_swept > 0 or stopped_full or streams_failed > 0)
+            else self.logger.debug
+        )
+        log_fn(
+            "Completed installation authority dead-letter sweep pass. "
+            "event=authority_dlq_sweep_pass installation=%s teams=%s streams_checked=%s "
+            "streams_failed=%s consumers_checked=%s messages_swept=%s stopped_full=%s duration_ms=%.1f",
+            self.installation,
+            len(self._teams),
+            streams_checked,
+            streams_failed,
+            consumers_checked,
+            messages_swept,
+            stopped_full,
+            duration_ms,
+        )
+        return SweepSummary(
+            streams_checked=streams_checked,
+            consumers_checked=consumers_checked,
+            messages_swept=messages_swept,
+            stopped_full=stopped_full,
+            duration_ms=duration_ms,
+            streams_failed=streams_failed,
+        )
 
     async def _renew_own_certificate(self, now: datetime) -> None:
         """Replace the authority's own certificate and sign with the new one from now on.

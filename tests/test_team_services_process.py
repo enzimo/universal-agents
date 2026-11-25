@@ -562,3 +562,115 @@ async def test_c01_lock_lost_during_family_prepare_never_subscribes(monkeypatch)
         await asyncio.wait_for(task, timeout=5)
     assert "served_unexpectedly" not in events
     assert events == ["prepare_started", "lock_released"]
+
+
+@pytest.mark.asyncio
+async def test_c20_dead_letter_family_does_not_block_svc_team_serving_on_large_stream(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C20: TeamPersonDataOperations has prepare=None so svc.team serves immediately without waiting for DLQ scans."""
+
+    from access_control.people_directory import PeopleDirectory
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from team_services.dead_letters import (
+        DeadLetterService,
+        TeamPersonDataOperations,
+        TeamPersonDepartureService,
+    )
+
+    storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "c20.db")}})
+    access = AccessRepository(storage)
+    people = PeopleDirectory(access, "team_one")
+    dlq = DeadLetterService(
+        team_id="team_one",
+        live_fn=lambda: None,
+        access_repository=access,
+        people=people,
+    )
+    departure = TeamPersonDepartureService(team_id="team_one", live_fn=lambda: None, people=people)
+    ops = TeamPersonDataOperations(dead_letters=dlq, departure=departure, people=people)
+    family = ops.family()
+    assert family.prepare is None
+
+    # Even if maintain() blocks on a huge stream, serve_team subscribes and marks serving immediately!
+    maintain_started = asyncio.Event()
+    serve_reached = asyncio.Event()
+    stop = asyncio.Event()
+
+    async def slow_maintain() -> None:
+        maintain_started.set()
+        await asyncio.sleep(60)
+
+    async def idle_run(run_stop: asyncio.Event) -> None:
+        await run_stop.wait()
+
+    monkeypatch.setattr(dlq, "maintain", slow_maintain)
+    monkeypatch.setattr(dlq, "run", idle_run)
+
+    class _FakeSub:
+        async def unsubscribe(self) -> None:
+            return None
+
+    class _FakeLock:
+        instance = "inst-c20"
+
+        async def acquire(self, _stop: asyncio.Event) -> bool:
+            return True
+
+        async def keep(self, lock_stop: asyncio.Event) -> None:
+            await lock_stop.wait()
+
+        async def release(self) -> None:
+            return None
+
+    class _FakeLive:
+        identity = SimpleNamespace(installation="install_one")
+        trust = SimpleNamespace()
+
+        async def serve(self, *_args: Any, **_kwargs: Any) -> _FakeSub:
+            serve_reached.set()
+            return _FakeSub()
+
+        async def drain(self) -> None:
+            return None
+
+    class _FakePartitions:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def ensure_unowned_assigned(self) -> None:
+            return None
+
+        async def maintain(self) -> None:
+            return None
+
+        async def run(self, part_stop: asyncio.Event) -> None:
+            await part_stop.wait()
+
+    marked: list[str] = []
+    monkeypatch.setattr(process, "SingleInstanceLock", SimpleNamespace(on_connection=lambda *_args: _FakeLock()))
+    monkeypatch.setattr(process, "SessionService", lambda *_args: _sessions())
+    monkeypatch.setattr(process, "PartitionService", _FakePartitions)
+    monkeypatch.setattr(process, "mark_serving", lambda _layout, inst, _now: marked.append(inst))
+
+    host = SimpleNamespace(
+        start=AsyncMock(return_value=_FakeLive()),
+        nc=SimpleNamespace(flush=AsyncMock()),
+        clock=lambda: NOW,
+        logger=logging.getLogger("test"),
+        take_newest_certificate=AsyncMock(),
+        refresh_trust=AsyncMock(),
+        records=object(),
+        publish_liveness=AsyncMock(),
+        layout=None,
+        keep_up=AsyncMock(),
+    )
+
+    task = asyncio.create_task(process.serve_team(host, "team_one", stop, [ops.family()]))  # type: ignore[arg-type]
+    await asyncio.wait_for(serve_reached.wait(), timeout=5)
+    await asyncio.wait_for(maintain_started.wait(), timeout=5)
+    assert marked == ["inst-c20"]
+    stop.set()
+    await asyncio.wait_for(task, timeout=5)

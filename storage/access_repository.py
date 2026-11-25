@@ -2136,22 +2136,29 @@ class AccessRepository:
     def dlq_reported_copy_keys(
         self, team_id: str, keys: Iterable[tuple[str, str]]
     ) -> set[tuple[str, str]]:
-        """Return the subset of ``(issuer_runtime, copy_id)`` already recorded as reported for ``team_id``."""
+        """Return the subset of ``(issuer_runtime, copy_id)`` already recorded as reported for ``team_id`` (batched, C20)."""
 
         unique_keys = list(dict.fromkeys((str(runtime), str(copy_id)) for runtime, copy_id in keys))
         if not unique_keys:
             return set()
+        requested = set(unique_keys)
         p = self.dialect.bind
         found: set[tuple[str, str]] = set()
+        chunk_size = 200
+        unique_copy_ids = list(dict.fromkeys(copy_id for _, copy_id in unique_keys))
         with self._connect() as conn:
-            for runtime, copy_id in unique_keys:
-                row = conn.execute(
-                    f"SELECT 1 FROM protocol1_dlq_reported_notices "
-                    f"WHERE team_id = {p} AND issuer_runtime = {p} AND copy_id = {p} LIMIT 1",
-                    (team_id, runtime, copy_id),
-                ).fetchone()
-                if row is not None:
-                    found.add((runtime, copy_id))
+            for offset in range(0, len(unique_copy_ids), chunk_size):
+                chunk = unique_copy_ids[offset : offset + chunk_size]
+                placeholders = ",".join(p for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT issuer_runtime, copy_id FROM protocol1_dlq_reported_notices "
+                    f"WHERE team_id = {p} AND copy_id IN ({placeholders})",
+                    (team_id, *chunk),
+                ).fetchall()
+                for row in rows:
+                    pair = (str(row["issuer_runtime"]), str(row["copy_id"]))
+                    if pair in requested:
+                        found.add(pair)
         return found
 
     def record_dlq_notice_report(
