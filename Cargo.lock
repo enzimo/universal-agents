@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "ua-cedar-authorizer"
-version = "0.9.13"
+version = "0.9.14"
 dependencies = [
  "cedar-policy",
  "serde",
