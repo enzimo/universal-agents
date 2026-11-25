@@ -152,8 +152,10 @@ covered_record_kinds: [memory_fact, knowledge_page, schedule, objective, heartbe
 # same key is decided again (README, "Stored outcomes"): not_started, steering while its
 # request still waits to start; record_busy, a file or sign-in another request is writing;
 # retry_later, a bounded scan such as team.delete_person_data reached its time budget while
-# background cleanup continues; runtime_error, a failure that changed nothing; waiting, a
-# staged change the person has not decided yet.
+# one background continuation per (team, person) finishes the pass (a repeat call joins the
+# running continuation and reports its current counts; departure callers treat retry_later as
+# accepted because the background pass and upkeep complete the cleanup); runtime_error, a
+# failure that changed nothing; waiting, a staged change the person has not decided yet.
 retry_outcomes: [not_started, record_busy, retry_later, runtime_error, waiting]
 # Roles that hold NATS permissions. Agent roles for topology are in team-topologies.yaml.
 host_roles:

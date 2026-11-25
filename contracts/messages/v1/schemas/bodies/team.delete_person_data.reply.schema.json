@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/team.delete_person_data.reply.schema.json",
   "title": "team.delete_person_data reply",
-  "description": "Counts of removed blob ownership records, deleted and kept blobs, and deleted and kept raw dead-letter copies; returns retry_later with partial dead-letter counts when a bounded scan reaches its time budget.",
+  "description": "Counts of removed blob ownership records, deleted and kept blobs, and deleted and kept raw dead-letter copies; returns retry_later with cumulative progress counts when a bounded dead-letter scan reaches its time budget while one background continuation per (team, person) finishes the pass.",
   "oneOf": [
     {
       "type": "object",
@@ -11,18 +11,23 @@
           "const": "ok"
         },
         "owners_removed": {
+          "description": "Blob ownership records removed for the departing person during this cleanup.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "blobs_deleted": {
+          "description": "Blobs deleted because removing this person left no remaining owner.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "blobs_kept": {
+          "description": "Blobs referencing this person that were kept because another owner still holds them.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "dlq_copies_deleted": {
+          "description": "Raw dead-letter copies deleted because they named the departing person.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "dlq_copies_kept": {
+          "description": "Raw dead-letter copies scanned during this cleanup that did not name the departing person and were kept.",
           "$ref": "../common.schema.json#/$defs/count"
         }
       },
@@ -43,21 +48,27 @@
           "const": "retry_later"
         },
         "owners_removed": {
+          "description": "Blob ownership records removed for the departing person by the active cleanup.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "blobs_deleted": {
+          "description": "Blobs deleted because removing this person left no remaining owner.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "blobs_kept": {
+          "description": "Blobs referencing this person that were kept because another owner still holds them.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "dlq_copies_deleted": {
+          "description": "Raw dead-letter copies deleted so far by this cleanup pass because they named the departing person.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "dlq_copies_kept": {
+          "description": "Raw dead-letter copies scanned so far by this cleanup pass that did not name the departing person and were kept.",
           "$ref": "../common.schema.json#/$defs/count"
         },
         "message": {
+          "description": "Short explanation that the bounded scan reached its time budget and continues in the background.",
           "$ref": "../common.schema.json#/$defs/short_text"
         }
       },

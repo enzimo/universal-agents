@@ -27,11 +27,11 @@
     "blobs_deleted": 2,
     "blobs_kept": 1,
     "dlq_copies_deleted": 12,
-    "dlq_copies_kept": 500,
+    "dlq_copies_kept": 40,
     "message": "Dead-letter copy scan reached its time budget; cleanup continues in the background."
   },
   "causation_id": "01928f3a-7b2c-7e10-8000-000000000e10",
   "idempotency_key": "team.delete_person_data.reply:GrfBFilVVnigSJW3BQFsiHstQCnWuqjjH7tkavGqP4Y",
-  "body_digest": "iXrOVe3COn4EzZRcNyMTyfslFzEU2rrNbwJDEGxX5jQ",
-  "signature": "LCafqZv9n8s3Synd0ouZBuh5uhB0pmM7yMP8bMFPU8kFfoNsZtUhZeDJ5VpjbdwzJj0ohy-tjaYs8HtAxw2_Ag"
+  "body_digest": "KY7-PCfbr5y96rZbFA_XJ2qEOGJCT-8TcTd_lWQMlaM",
+  "signature": "ZAXFCE6XdloujmOiPoBdayJdd0WLZS2DBR8J5j24dkBlTMZKHDZ6vPLNnA_aIHHwCDHleAQ98vPOQqK67K92Aw"
 }

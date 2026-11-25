@@ -8,7 +8,7 @@
     "copy_id": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "description": "An unguessable 256-bit id (64 lowercase hexadecimal characters) derived deterministically from a receiver-local secret plus the set-aside message's stream and stream sequence, so redeliveries of the same message to the same receiver reuse the same copy id and replace a half-finished copy instead of leaving an orphan. It names the copy's subjects, dlq.raw.<copy> and dlq.notice.<copy>."
+      "description": "An unguessable 256-bit id (64 lowercase hexadecimal characters) derived deterministically from a receiver-local secret plus the set-aside message's stream, stream sequence, and JetStream stored timestamp, so redeliveries of the same message to the same receiver reuse the same copy id and replace a half-finished copy instead of leaving an orphan, while a recreated stream that reuses sequence numbers produces a new copy id. It names the copy's subjects, dlq.raw.<copy> and dlq.notice.<copy>."
     },
     "reason": {
       "type": "string",
