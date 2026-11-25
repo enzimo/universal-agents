@@ -76,6 +76,7 @@ from access_control.cli_binaries import Downloader, fetch_https, workspaces_root
 from access_control.data_folders import DataFolderRegistry, registration_problem
 from access_control.decision_effects import EffectJournal, OwnedFile, ReplacedFile
 from access_control.proposal_clis import cli_rows, install_programs
+from access_control.proposal_errors import ProposalRefused
 from access_control.tool_change_diffs import describe_injections, tool_change_rows
 from access_control.decisions import HandDownRefused
 from access_control.entities import PersonPrincipal, agent_type_id
@@ -131,16 +132,14 @@ GRANTABLE_TARGETS = frozenset({TargetKind.TOOL, TargetKind.OPERATION, TargetKind
 MCPRecordLookup = Callable[[str], MCPConnectionRecordV1 | None]
 
 
-class ProposalRefused(ValueError):
-    """The proposal cannot be reviewed or applied as it is; the message says why."""
-
-
 def proposal_digest(proposal: AccessProposalV1) -> str:
     """SHA-256 of the proposal; omits newly added fields at defaults so pre-upgrade digests stay stable."""
 
     payload = proposal.model_dump(mode="json")
     if not payload.get("tool_changes"):
         payload.pop("tool_changes", None)
+    if not payload.get("tool_removals"):
+        payload.pop("tool_removals", None)
     for tool in payload.get("tools") or ():
         if not tool.get("gate_injections"):
             tool.pop("gate_injections", None)
