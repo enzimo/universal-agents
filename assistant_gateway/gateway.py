@@ -204,11 +204,12 @@ from assistant_gateway.onboarding_account_keys import OnboardingAccountKeyHandov
 from assistant_gateway.installed_procedures import GatewayInstalledProcedures
 from assistant_gateway.mcp_controls import GatewayMCPControls
 from assistant_gateway.nats_manager_runtime import HANDLING_RETRY_DELAY_SECONDS, NatsGatewayManagerRuntime
-from assistant_gateway.person_departure import build_gateway_person_lifecycle
+from assistant_gateway.person_departure import GatewayTeamBlobs, build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
 from assistant_gateway.team_services_client import (
     AccessStorePersonReferences,
     MessageHostTeamServices,
+    gateway_blob_store,
     gateway_delivery_refs,
     new_request_id,
 )
@@ -740,10 +741,37 @@ def _team_commands(
     )
 
 
+def _person_blobs(
+    runtime: object,
+    team_services: GatewayTeamServices | None,
+    *,
+    references: GatewayPersonReferences,
+) -> GatewayTeamBlobs | None:
+    """Departed-person blob deletion client when this gateway can reach protocol 1 team services."""
+
+    if team_services is None and getattr(runtime, "message_host", None) is None:
+        return None
+    return GatewayTeamBlobs(
+        team_commands=_team_commands(runtime, team_services, references=references),
+        references=references,
+        logger_=logger,
+    )
+
+
 def _person_references(config: GatewayInstanceConfig) -> AccessStorePersonReferences:
     """People's opaque references, from the gateway's copy of the team's people."""
 
     return AccessStorePersonReferences(config.manager_storage_settings, config.manager.team_id)
+
+
+def _knowledge_blobs(runtime: object, *, team: str) -> Any:
+    """``UA1_BLOBS`` client over the gateway's protocol 1 host when available, else ``None``."""
+
+    return gateway_blob_store(
+        getattr(runtime, "message_host", None),
+        timeout_seconds=MANAGER_CONTROL_TIMEOUT_SECONDS,
+        team=team,
+    )
 
 
 class UserGateway:
@@ -1392,6 +1420,9 @@ class UserGateway:
                 person_schedules=self._maintenance_schedules,
                 clock=self._clock,
                 personal_setup=self.access_inbox.personal_setup,
+                blobs=_person_blobs(
+                    resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
+                ),
                 logger=logger,
             ),
         )
@@ -1535,6 +1566,9 @@ class UserGateway:
                 references=_person_references(config),
                 display_name=self.access_inbox.display_name,
                 enabled=config.agent.knowledge.enabled,
+                blobs=_knowledge_blobs(resolved_manager_runtime, team=config.manager.team_id),
+                max_body_chars=config.agent.knowledge.limits.max_body_chars,
+                max_note_chars=config.agent.knowledge.limits.max_note_chars,
             ),
             accounts=self.account_sharing,
             file_retention=self.stored_data.settings,

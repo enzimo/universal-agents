@@ -326,6 +326,11 @@
           "title": "Agent Definition Paths",
           "type": "array"
         },
+        "blob_retention_days": {
+          "default": 7,
+          "title": "Blob Retention Days",
+          "type": "integer"
+        },
         "context_engine": {
           "additionalProperties": true,
           "title": "Context Engine",
@@ -3564,8 +3569,13 @@
     },
     "QueueByteLimits": {
       "additionalProperties": false,
-      "description": "``transport.queues.max_bytes``: one byte limit per size kind of the contract's streams.\n\nThe field names are the contract's size kinds (``transport.yaml`` ``queues.size_kinds``).\nEach limit applies to each stream of its kind, each team's apart: every one of a team's\npartition streams has the ``partition`` limit. NATS sets the whole limit aside from its\nstorage when it creates the stream, so these are also what the installation reserves.",
+      "description": "``transport.queues.max_bytes``: one byte limit per size kind of the contract's streams.\n\nThe field names are the contract's size kinds (``transport.yaml`` ``queues.size_kinds``).\nPer-team limits apply to each stream of that kind, each team's apart: every one of a team's\npartition streams has the ``partition`` limit; ``blobs`` bounds the installation-wide\n``OBJ_UA1_BLOBS`` object store stream. NATS sets the whole limit aside from its storage\nwhen it creates each stream, so these are also what the installation reserves.",
       "properties": {
+        "blobs": {
+          "default": 536870912,
+          "title": "Blobs",
+          "type": "integer"
+        },
         "dead_letter": {
           "default": 134217728,
           "title": "Dead Letter",

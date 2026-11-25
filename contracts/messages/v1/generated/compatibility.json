@@ -6,7 +6,7 @@
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
   "authority_token_domain": "universal-agents/authority-token/v1",
-  "contract_sha256": "4d6f50b4654ba091f2be47adc3baf308e4cf6d7b6f744e0eecc3a7a9836c450f",
+  "contract_sha256": "17c1f2ffb3b77d6bd80af9c86f004fa26b37e1359029b5d3232b2bec9cc8f1cc",
   "kinds": [
     "access.decision",
     "access.request",
@@ -17,6 +17,8 @@
     "agent.pause",
     "agent.resume",
     "agent.status",
+    "blobs.delete_person",
+    "blobs.register",
     "credential.form.request",
     "credential.form.result",
     "custody.confirmed",

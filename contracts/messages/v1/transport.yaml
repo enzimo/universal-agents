@@ -150,7 +150,7 @@ nats_account:
 queues:
   max_bytes_setting: transport.queues.max_bytes                # one byte limit per size kind
   max_messages_per_subject_setting: transport.queues.max_messages_per_subject   # the partition streams' cap per stored subject
-  size_kinds: [partition, pool, edge, team_services, dead_letter]
+  size_kinds: [partition, pool, edge, team_services, dead_letter, blobs]
   warn_at_percent_setting: transport.queues.warn_at_percent
   warn_at_percent_default: 80
 
@@ -464,6 +464,8 @@ object_store_stream:
   deny_delete: true           # no message deletes through the stream API
   deny_purge: false           # deleting an object purges its chunks; only deleters hold the purge grant
   storage: file
+  max_consumers: 64           # bounds consumer creation on the blob store stream (S4)
+  discard: new                # a full blob store refuses new chunks and metadata (10077) rather than dropping live objects
 
 # Object stores. object_name is the template an object is named by: {team} is the team of
 # the frame that carries the reference (its issuer team), the other placeholder a blob_ref
@@ -490,6 +492,7 @@ object_store:
     deleters: [team_services]
     chunk_bytes: 131072                 # every chunk but the last holds exactly this many bytes (NATS's default); readers assume no size
     orphan_chunk_grace_seconds: 86400   # the team services sweep unnamed chunks only when the newest is older; a writer gives up after half
+    size_kind: blobs                    # bounded by transport.queues.max_bytes.blobs (S4)
 
 # How long a receiver keeps replay records: at least the longest expiry of any class plus the clock tolerance.
 replay_ledger_retention_seconds: 2592060   # 30 days plus a minute

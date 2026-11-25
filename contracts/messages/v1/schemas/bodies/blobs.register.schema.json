@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/blobs.register.schema.json",
+  "title": "blobs.register request",
+  "description": "A writer registers ownership of an object in UA1_BLOBS with the team services, confirming whether the object is already live or must be uploaded first.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "The host's id for this registration request; a retry keeps it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "sha256": {
+      "description": "The unpadded base64url SHA-256 digest of the blob's bytes.",
+      "$ref": "../common.schema.json#/$defs/sha256_digest"
+    },
+    "size": {
+      "description": "The blob's exact byte length.",
+      "$ref": "../common.schema.json#/$defs/count"
+    },
+    "owner": {
+      "description": "The work or system agent that holds this blob for its retention window.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "request"
+            },
+            "request_id": {
+              "description": "The person's request id (matching UA-Blob-Request).",
+              "$ref": "../common.schema.json#/$defs/record_id"
+            }
+          },
+          "required": [
+            "type",
+            "request_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "agent"
+            },
+            "agent_id": {
+              "description": "The system work's agent id (matching UA-Blob-Agent).",
+              "$ref": "../common.schema.json#/$defs/agent_id"
+            }
+          },
+          "required": [
+            "type",
+            "agent_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "person": {
+      "description": "Opaque reference to the person whose work stored this blob (matching UA-Blob-Person); required when owner.type is request and absent for system work.",
+      "$ref": "../common.schema.json#/$defs/person_ref"
+    }
+  },
+  "required": [
+    "request_id",
+    "sha256",
+    "size",
+    "owner"
+  ],
+  "additionalProperties": false
+}

@@ -1418,6 +1418,11 @@ def check_stream_sizes(transport: dict[str, Any]) -> None:
             raise ContractError(f"transport.yaml: stream {name} refuses new messages when full (discard: new), so "
                                 "nothing set aside is dropped to make room")
         used.add(stream["size_kind"])
+    for bucket, spec in transport.get("object_store", {}).items():
+        if spec.get("size_kind") not in kinds:
+            raise ContractError(f"transport.yaml: object_store.{bucket} names its byte limit's size kind (size_kind, one of "
+                                "queues.size_kinds)")
+        used.add(spec["size_kind"])
     if used != set(kinds):
         raise ContractError(f"transport.yaml: queues.size_kinds names only kinds a stream uses; unused "
                             f"{sorted(set(kinds) - used)}")
@@ -1724,10 +1729,11 @@ def key_form_covered(form: str, template: str) -> bool:
 # The stream settings every object store has (transport.yaml object_store_stream): no rollup
 # headers, since NATS checks a publish against its subject only and a writer's Nats-Rollup: all
 # would erase every object of the bucket; deleting an object purges its chunks (the deleters'
-# grant alone); no message is deleted one by one. Only the storage is a choice.
-OBJECT_STORE_STREAM = {"allow_rollup_hdrs": False, "deny_delete": True, "deny_purge": False}
+# grant alone); no message is deleted one by one; full stores refuse new writes (discard: new)
+# rather than dropping live objects. Storage and max_consumers are choices.
+OBJECT_STORE_STREAM = {"allow_rollup_hdrs": False, "deny_delete": True, "deny_purge": False, "discard": "new"}
 OBJECT_STORE_FIELDS = {"description", "object_name", "headers", "readers", "writers", "deleters", "chunk_bytes",
-                       "orphan_chunk_grace_seconds"}
+                       "orphan_chunk_grace_seconds", "size_kind"}
 # When an object's metadata carries a header: always, as one of the owner headers (exactly one
 # of them), or when a person's work stored the object.
 BLOB_HEADER_PRESENCE = {"always", "owner", "person"}
@@ -1751,19 +1757,24 @@ def check_object_store(registry: dict[str, Any], transport: dict[str, Any], sche
 
     where = "transport.yaml object_store_stream"
     settings = transport.get("object_store_stream")
-    if not isinstance(settings, dict) or set(settings) != {*OBJECT_STORE_STREAM, "storage"}:
-        raise ContractError(f"{where}: fields are {sorted({*OBJECT_STORE_STREAM, 'storage'})}")
+    if not isinstance(settings, dict) or set(settings) != {*OBJECT_STORE_STREAM, "storage", "max_consumers"}:
+        raise ContractError(f"{where}: fields are {sorted({*OBJECT_STORE_STREAM, 'storage', 'max_consumers'})}")
     for field_name, value in OBJECT_STORE_STREAM.items():
         if type(settings[field_name]) is not type(value) or settings[field_name] != value:
             raise ContractError(f"{where}: {field_name} is {value} (README, \"Blobs\")")
     if settings["storage"] not in {"file", "memory"}:
         raise ContractError(f"{where}: storage is file or memory")
+    if type(settings["max_consumers"]) is not int or settings["max_consumers"] < 1:
+        raise ContractError(f"{where}: max_consumers is a positive whole number")
     roles = set(registry["host_roles"])
     receivers = blob_receivers(registry, transport, schemas)
+    size_kinds = set(transport.get("queues", {}).get("size_kinds", []))
     for bucket, spec in transport["object_store"].items():
         where = f"transport.yaml object_store.{bucket}"
         if not isinstance(spec, dict) or set(spec) != OBJECT_STORE_FIELDS or "{" in bucket:
             raise ContractError(f"{where}: an installation-wide bucket with fields {sorted(OBJECT_STORE_FIELDS)}")
+        if spec["size_kind"] not in size_kinds:
+            raise ContractError(f"{where}: size_kind is one of transport.yaml queues.size_kinds")
         check_blob_name(where, spec["object_name"], schemas)
         for field_name in ("readers", "writers", "deleters"):
             listed = spec[field_name]
@@ -2361,24 +2372,21 @@ def object_stream(bucket: str) -> str:
 def object_store_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     """Per role: the subjects that read, write and delete objects (README, "Blobs").
 
-    A reader gets the bucket's stream information, the message get that finds an
-    object's last metadata by its subject, and what reading the chunks needs: an
-    unnamed ordered consumer on its own inbox, that consumer's information and its
-    flow control, as for a key-value watch. Like the watches, a reader names the
-    stream when it opens the consumer, so it needs no stream-name lookup, which
-    would list every team's streams (the NATS object store client's get does not,
-    and is refused). A writer publishes chunks and metadata without a rollup
-    header; NATS cannot tie a publish to one object, so readers check every blob's
-    SHA-256 against its name. A deleter purges the object's chunks after marking it
-    deleted; the purge grant covers the whole bucket, so only the team services
-    hold it.
+    A reader gets the bucket's stream information and direct message gets
+    (``$JS.API.STREAM.MSG.GET.<stream>``) to read an object's last metadata
+    (``last_by_subj``) and its chunks in sequence order (``next_by_subj``).
+    Readers hold no consumer-create grant (closing PR #151 S2) and no
+    stream-name lookup, which would list every team's streams. A writer
+    publishes chunks and metadata without a rollup header; NATS cannot tie a
+    publish to one object, so readers check every blob's SHA-256 against its
+    name. A deleter purges the object's chunks after marking it deleted; the
+    purge grant covers the whole bucket, so only the team services hold it.
     """
 
     grants: dict[str, set[str]] = {}
     for bucket, spec in transport["object_store"].items():
         stream = object_stream(bucket)
-        reads = {f"$JS.API.STREAM.INFO.{stream}", f"$JS.API.STREAM.MSG.GET.{stream}",
-                 f"$JS.API.CONSUMER.CREATE.{stream}", f"$JS.API.CONSUMER.INFO.{stream}.*", f"$JS.FC.{stream}.>"}
+        reads = {f"$JS.API.STREAM.INFO.{stream}", f"$JS.API.STREAM.MSG.GET.{stream}"}
         for role in spec["readers"]:
             grants.setdefault(role, set()).update(reads)
         for role in spec["writers"]:

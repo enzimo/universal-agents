@@ -23,7 +23,8 @@ from assistant_gateway.application.knowledge_pages import (
     YOU_LABEL,
     GatewayKnowledgePages,
 )
-from assistant_gateway.application.knowledge_wire import INLINE_TEXT_MAX
+from custom_messages.wire.sizes import INLINE_TEXT_MAX_CHARS
+from custom_transport.protocol1.blobs import BlobOwner, sha256_unpadded
 from assistant_gateway.application.team_commands import (
     GatewayTeamCommandService,
     PersonCopyNotCurrent,
@@ -47,7 +48,34 @@ from tests.test_gateway_website_app import (
 
 SESSION_KEY = "website:web-chat:knowledge"
 OTHER_SESSION_KEY = "website:web-chat:someone-else"
-REFERENCES = {"user_alpha": "p-alpha", "user_beta": "p-beta", "user_gamma": "p-gamma"}
+REFERENCES = {
+    "user_alpha": "p-alpha00000000000000001",
+    "user_beta": "p-beta000000000000000002",
+    "user_gamma": "p-gamma00000000000000003",
+}
+
+
+class _InMemoryBlobStore:
+    """Deterministic in-memory ``BlobStore`` for gateway HTTP tests."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.owners: list[BlobOwner] = []
+
+    async def put(self, data: bytes, *, media_type: str, owner: BlobOwner, name: str | None = None) -> dict:
+        payload = bytes(data)
+        digest = sha256_unpadded(payload)
+        self.objects[digest] = payload
+        self.owners.append(owner)
+        ref = {"sha256": digest, "size": len(payload), "media_type": media_type}
+        if name is not None:
+            ref["name"] = name
+        return ref
+
+    async def get(self, ref: dict, *, max_bytes: int | None = None) -> bytes:
+        raw = self.objects[str(ref["sha256"])]
+        assert max_bytes is None or len(raw) <= max_bytes
+        return raw
 
 
 class _TeamServices:
@@ -101,14 +129,15 @@ def site(tmp_path: Path):
             channel_name="website", user_id=owner, chat_id="web-chat", owner_canonical_user_id=owner,
         )
     team = _TeamServices()
+    blobs = _InMemoryBlobStore()
     names = {"user_beta": "Beatrix", "user_gamma": "user_gamma"}
     references = _References()
     gateway.knowledge = GatewayKnowledgePages(
         team_commands=GatewayTeamCommandService(team_services=team, references=references, request_ids=lambda: "cmd-1"),
-        references=references, display_name=lambda pid: names.get(pid, pid), enabled=True,
+        references=references, display_name=lambda pid: names.get(pid, pid), enabled=True, blobs=blobs,
     )
     app = InternalWebsiteInteractiveApp(config, gateway=gateway, bridge=SimpleNamespace())
-    return SimpleNamespace(app=app, team=team, gateway=gateway)
+    return SimpleNamespace(app=app, team=team, gateway=gateway, blobs=blobs)
 
 
 async def _signed_in(client: TestClient) -> dict[str, str]:
@@ -345,41 +374,41 @@ async def test_editors_are_named_and_person_ids_never_reach_the_browser(site) ->
 
 
 @pytest.mark.asyncio
-async def test_text_longer_than_web_chat_carries_is_refused_plainly(site) -> None:
-    """Longer typed text is refused before anything is sent; the team services' refusal of longer stored text reaches the browser as written."""
+async def test_text_longer_than_inline_limit_travels_as_blobs_in_web_chat(site) -> None:
+    """Text over 32,768 characters (up to 500,000) is sent and received transparently via UA1_BLOBS."""
 
-    exact, over = "x" * INLINE_TEXT_MAX, "x" * (INLINE_TEXT_MAX + 1)
-    too_long = (
-        "This page's text has 40,000 characters, more than the 32,768 Web Chat can show. Nothing was changed and "
-        "nothing was cut. Agents can still read and change all of it, for example to split the page into smaller "
-        "linked pages."
+    exact = "x" * INLINE_TEXT_MAX_CHARS
+    long_body = ("Long page text line.\n" * 3_000)[:60_000]
+    long_note = ("Long note text.\n" * 2_500)[:40_000]
+    page_blob_ref = await site.blobs.put(
+        long_body.encode("utf-8"),
+        media_type="text/plain",
+        owner=BlobOwner(request_id="cmd-1", person_ref=REFERENCES["user_alpha"]),
     )
+    reply_page = {**_page({"kind": "person", "person": REFERENCES["user_alpha"]}),
+                  "content": {"type": "blob", "ref": page_blob_ref}}
+    site.team.reply = {"outcome": "ok", "page": reply_page}
+
     async with TestClient(TestServer(site.app.build_app())) as client:
         headers = await _signed_in(client)
         save = "/api/web-chat/knowledge/pages/team/deploys/save"
-        refused_save = await client.post(save, headers=headers, json={"session_key": SESSION_KEY, "base_revision": 2,
-                                                                      "body": over})
-        refused_note = await client.post("/api/web-chat/knowledge/pages/team/deploys/notes", headers=headers,
-                                         json={"session_key": SESSION_KEY, "note": over})
-        typed = [(response.status, await response.json()) for response in (refused_save, refused_note)]
-        assert site.team.calls == []
-        sent = await client.post(save, headers=headers, json={"session_key": SESSION_KEY, "base_revision": 2,
-                                                              "body": exact})
-        site.team.refuse("runtime_error", too_long)
-        refused_read = await client.get(f"/api/web-chat/knowledge/pages/team/handbook?session_key={SESSION_KEY}")
-        refused_payload = await refused_read.json()
+        saved_exact = await client.post(save, headers=headers, json={"session_key": SESSION_KEY, "base_revision": 2,
+                                                                     "body": exact})
+        saved_long = await client.post(save, headers=headers, json={"session_key": SESSION_KEY, "base_revision": 2,
+                                                                    "body": long_body})
+        noted_long = await client.post("/api/web-chat/knowledge/pages/team/deploys/notes", headers=headers,
+                                       json={"session_key": SESSION_KEY, "note": long_note})
+        read_long = await client.get(f"/api/web-chat/knowledge/pages/team/deploys?session_key={SESSION_KEY}")
+        read_payload = await read_long.json()
 
-    for status, payload in typed:
-        assert status == 400
-        assert payload["error"] == {
-            "code": "invalid_request",
-            "message": f"The text is {INLINE_TEXT_MAX + 1} characters long; at most {INLINE_TEXT_MAX} can be sent. Shorten it.",
-        }
-    assert sent.status == 200
-    [(kind, body, _person), _read] = site.team.calls
-    assert kind == "knowledge.write" and body["content"]["text"] == exact
-    assert refused_read.status == 503
-    assert refused_payload["error"] == {"code": "runtime_error", "message": too_long}
+    assert saved_exact.status == 200 and saved_long.status == 200 and noted_long.status == 200
+    assert read_long.status == 200 and read_payload["page"]["body"] == long_body
+    [(kind_exact, body_exact, _), (kind_long, body_long, _), (kind_note, body_note, _), _read] = site.team.calls
+    assert kind_exact == "knowledge.write" and body_exact["content"] == {"type": "inline", "text": exact}
+    assert kind_long == "knowledge.write" and body_long["content"]["type"] == "blob"
+    assert site.blobs.objects[body_long["content"]["ref"]["sha256"]].decode("utf-8") == long_body
+    assert kind_note == "knowledge.add_note" and body_note["note"]["type"] == "blob"
+    assert site.blobs.objects[body_note["note"]["ref"]["sha256"]].decode("utf-8") == long_note
 
 
 def test_every_knowledge_action_becomes_a_contract_body() -> None:
@@ -387,3 +416,104 @@ def test_every_knowledge_action_becomes_a_contract_body() -> None:
     from custom_messages.contracts.control_v1 import KnowledgeCommandAction
 
     assert set(knowledge_wire._BODIES) == set(KnowledgeCommandAction)
+
+
+@pytest.mark.asyncio
+async def test_blob_transport_timeout_returns_503_and_refresh_guidance_after_save(site) -> None:
+    import nats.errors
+    from assistant_gateway.application.knowledge_pages import (
+        BLOB_CHANGE_REPLY_READ_FAILED_TEXT,
+        BLOB_WRITE_FAILED_TEXT,
+    )
+
+    long_body = "x" * (INLINE_TEXT_MAX_CHARS + 100)
+
+    async def _timeout_put(*_args, **_kwargs):
+        raise nats.errors.TimeoutError()
+
+    site.blobs.put = _timeout_put  # type: ignore[method-assign]
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        headers = await _signed_in(client)
+        write_resp = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/save",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "base_revision": 2, "body": long_body},
+        )
+        write_payload = await write_resp.json()
+
+        # Post-save reply blob fetch timeout returns 503 telling the user the change was saved and to refresh.
+        blob_ref = {"sha256": sha256_unpadded(b"saved"), "size": 5, "media_type": "text/plain"}
+        site.team.reply = {
+            "outcome": "ok",
+            "page": {**_page({"kind": "person", "person": REFERENCES["user_alpha"]}), "content": {"type": "blob", "ref": blob_ref}},
+        }
+
+        async def _timeout_get(*_args, **_kwargs):
+            raise nats.errors.TimeoutError()
+
+        site.blobs.get = _timeout_get  # type: ignore[method-assign]
+        note_resp = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/notes",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "note": "Short note"},
+        )
+        note_payload = await note_resp.json()
+
+    assert write_resp.status == 503
+    assert write_payload["error"] == {"code": "runtime_error", "message": BLOB_WRITE_FAILED_TEXT}
+    assert note_resp.status == 503
+    assert note_payload["error"] == {"code": "runtime_error", "message": BLOB_CHANGE_REPLY_READ_FAILED_TEXT}
+
+
+@pytest.mark.asyncio
+async def test_f7_gateway_refuses_disabled_missing_title_and_over_limit_before_uploading_blobs(site) -> None:
+    """F7 (SEC-4): GatewayKnowledgePages refuses disabled, missing-title, and over-limit requests before uploading blobs."""
+
+    site.gateway.knowledge._max_body_chars = 40_000
+    site.gateway.knowledge._max_note_chars = 35_000
+    long_over_body = "b" * 40_001
+    long_over_note = "n" * 35_001
+    long_valid_body = "v" * 36_000
+
+    async with TestClient(TestServer(site.app.build_app())) as client:
+        headers = await _signed_in(client)
+
+        # 1. Missing title on new page with long body -> refused before uploading any blob.
+        no_title = await client.post(
+            "/api/web-chat/knowledge/pages/team",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "title": "   ", "body": long_valid_body},
+        )
+        assert no_title.status == 400
+        assert (await no_title.json())["error"]["code"] == "invalid_request"
+
+        # 2. Body exceeding configured max_body_chars -> refused before uploading any blob.
+        over_body = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/save",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "base_revision": 2, "body": long_over_body},
+        )
+        assert over_body.status == 400
+        assert (await over_body.json())["error"]["code"] == "invalid_request"
+
+        # 3. Note exceeding configured max_note_chars -> refused before uploading any blob.
+        over_note = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/notes",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "note": long_over_note},
+        )
+        assert over_note.status == 400
+        assert (await over_note.json())["error"]["code"] == "invalid_request"
+
+        # 4. Knowledge disabled -> refused with knowledge_off (503) before uploading any blob.
+        site.gateway.knowledge._enabled = False
+        disabled_resp = await client.post(
+            "/api/web-chat/knowledge/pages/team/deploys/save",
+            headers=headers,
+            json={"session_key": SESSION_KEY, "base_revision": 2, "body": long_valid_body},
+        )
+        assert disabled_resp.status == 503
+        assert (await disabled_resp.json())["error"]["code"] == "knowledge_off"
+
+    assert site.blobs.objects == {}
+    assert site.team.calls == []

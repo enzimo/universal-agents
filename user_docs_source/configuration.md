@@ -455,8 +455,11 @@ how much they take instead of a percentage; they are on the instance's disk.
 When a server does set a limit for the account, the percentage counts the
 bytes stored, not the space its streams set aside. Every stream sets its
 whole limit aside when it is created: each team's message streams about
-2.1 GiB at the default `transport.queues.max_bytes`, plus 64 MB for set-aside
-messages. Leave room for those.
+2.1 GiB at the default `transport.queues.max_bytes`, the installation's
+temporary blob store (`OBJ_UA1_BLOBS`) 512 MiB by default
+(`transport.queues.max_bytes.blobs`, with blobs kept for
+`agent.blob_retention_days`, 7 days by default, or deleted immediately when
+their last owner departs), plus 64 MB for set-aside messages. Leave room for those.
 
 The bundled NATS server takes as its room, each time the whole instance
 starts, three quarters of the free space on the disk that holds its store plus

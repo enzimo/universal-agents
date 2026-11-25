@@ -2557,6 +2557,50 @@ kinds:
     wakes_model: never
     rendering: none
 
+  blobs.register:
+    description: Register an owner of a team blob in UA1_BLOBS, confirming whether the object is already live or must be uploaded first.
+    class: request_reply
+    address: svc.team
+    body: bodies/blobs.register.schema.json
+    body_rules:
+      - {forbids: /body/person, when: [{at: /body/owner/type, is: agent}]}
+      - {requires: /body/person, when: [{at: /body/owner/type, is: request}]}
+    reply:
+      body: bodies/blobs.register.reply.schema.json
+      errors: [not_allowed, runtime_error]
+    senders: [gateway, lead_host, worker_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: none
+    idempotency: [/issuer/runtime, /body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: normal}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
+  blobs.delete_person:
+    description: Remove a departed person's blob ownership records and immediately delete every blob left with no remaining owner.
+    class: request_reply
+    address: svc.team
+    body: bodies/blobs.delete_person.schema.json
+    reply:
+      body: bodies/blobs.delete_person.reply.schema.json
+      errors: [not_allowed, runtime_error]
+    senders: [gateway, lead_host]
+    receivers: [team_services]
+    expiry_seconds: 30
+    authority: optional
+    authority_binding: {type: command, at: /body/request_id, senders: [gateway]}
+    idempotency: [/issuer/runtime, /body/request_id]
+    admission: {execution_slot: false, accepted_while_paused: true, priority: high}
+    routing: team
+    topology_edge: none
+    ledger: none
+    wakes_model: never
+    rendering: none
+
   heartbeat_items.add:
     description: The lead adds a heartbeat item.
     class: request_reply

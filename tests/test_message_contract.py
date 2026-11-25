@@ -463,6 +463,9 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
         "UA1_PART_{team}~{partition}": ("partition", "new"), "UA1_POOL_WORK_{team}": ("pool", "new"),
         "UA1_EDGE_WORK_{team}": ("edge", "new"), "UA1_TEAM_WORK_{team}": ("team_services", "new"),
         "UA1_DLQ_{team}": ("dead_letter", "new")}
+    assert TRANSPORT["object_store"]["UA1_BLOBS"]["size_kind"] == "blobs"
+    assert TRANSPORT["object_store_stream"]["discard"] == "new"
+    assert TRANSPORT["object_store_stream"]["max_consumers"] >= 1
     readme = (CONTRACT / "README.md").read_text(encoding="utf-8")
     for text in ("**Stream sizes.**", "`transport.queues.max_bytes`", "`transport.queues.warn_at_percent`",
                  "(80 by default)", "**When the stream is full.**"):
@@ -477,6 +480,8 @@ def test_every_queued_stream_has_a_byte_limit_from_the_settings_and_refuses_new_
         (lambda t: t["streams"]["UA1_TEAM_WORK_{team}"].pop("discard"), "UA1_TEAM_WORK_{team} refuses new messages"),
         (lambda t: t["streams"]["UA1_PART_{team}~{partition}"].pop("size_kind"), "names its byte limit's size kind"),
         (lambda t: t["streams"]["UA1_EDGE_WORK_{team}"].update(size_kind="agent_work"), "names its byte limit's size kind"),
+        (lambda t: t["object_store"]["UA1_BLOBS"].pop("size_kind"), "object_store.UA1_BLOBS names its byte limit's size kind"),
+        (lambda t: t["object_store"]["UA1_BLOBS"].update(size_kind="agent_work"), "object_store.UA1_BLOBS names its byte limit's size kind"),
         (lambda t: t["queues"]["size_kinds"].append("agent_work"), "unused ['agent_work']"),
         (lambda t: t["queues"]["size_kinds"].append("edge"), "distinct snake_case"),
         (lambda t: t["queues"].update(max_bytes_setting="queues.max_bytes"), "names the settings"),
@@ -1831,8 +1836,7 @@ def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
     assert set(blobs["readers"]) == receivers == {"gateway", "lead_host", "worker_host", "team_services", "edge_adapter"}
     assert set(blobs["writers"]) == {"gateway", "lead_host", "worker_host", "team_services"}
     assert blobs["deleters"] == ["team_services"]
-    reads = {"$JS.API.STREAM.INFO.OBJ_UA1_BLOBS", "$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS",
-             "$JS.API.CONSUMER.CREATE.OBJ_UA1_BLOBS", "$JS.API.CONSUMER.INFO.OBJ_UA1_BLOBS.*", "$JS.FC.OBJ_UA1_BLOBS.>"}
+    reads = {"$JS.API.STREAM.INFO.OBJ_UA1_BLOBS", "$JS.API.STREAM.MSG.GET.OBJ_UA1_BLOBS"}
     writes = {"$O.UA1_BLOBS.C.>", "$O.UA1_BLOBS.M.>"}
     for role in REGISTRY["host_roles"]:
         publish = set(role_permissions(role)["publish"])
@@ -1841,15 +1845,21 @@ def test_blob_grants_follow_who_receives_writes_and_deletes_blobs() -> None:
         assert not (reads - publish) or not (reads & publish - {"$JS.API.STREAM.INFO.OBJ_UA1_BLOBS"}), role
         assert (writes & publish) == (writes if role in blobs["writers"] else set()), role
         assert ("$JS.API.STREAM.PURGE.OBJ_UA1_BLOBS" in publish) == (role == "team_services"), role
-        # Only the topology owner creates the bucket's stream (any stream of the account); no role names a
-        # consumer on it.
+        # S2: readers read chunks via STREAM.MSG.GET next_by_subj, never by creating consumers on OBJ_UA1_BLOBS.
+        assert not {subject for subject in publish if subject.startswith((
+            "$JS.API.CONSUMER.CREATE.OBJ_", "$JS.API.CONSUMER.DURABLE.CREATE.OBJ_",
+            "$JS.API.CONSUMER.INFO.OBJ_", "$JS.FC.OBJ_",
+        ))}, role
+        # Only the topology owner creates the bucket's stream (any stream of the account).
         assert not {subject for subject in publish if subject.startswith("$JS.API.STREAM.CREATE.")} - (
             {"$JS.API.STREAM.CREATE.*"} if role == TRANSPORT["topology_owner"] else set()), role
         assert ("$JS.API.STREAM.CREATE.*" in publish) == (role == TRANSPORT["topology_owner"]), role
-        assert not {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.DURABLE.CREATE.OBJ_")}, role
-    # Each team's copies are its own; rollups are off so no writer can erase the bucket.
+    # Each team's copies are its own; rollups are off so no writer can erase the bucket; S4 bounds consumers and bytes.
     assert blobs["object_name"] == "{team}~{sha256}"
+    assert blobs["size_kind"] == "blobs"
     assert TRANSPORT["object_store_stream"]["allow_rollup_hdrs"] is False
+    assert TRANSPORT["object_store_stream"]["discard"] == "new"
+    assert TRANSPORT["object_store_stream"]["max_consumers"] == 64
     assert not any("$JS.API.STREAM.NAMES" in subject for role in REGISTRY["host_roles"]
                    for subject in role_permissions(role)["publish"])
     # The headers name the owner, the team, the person by reference and the digest, each of a shared type.
@@ -1919,7 +1929,12 @@ def test_the_readme_metadata_example_follows_the_nats_object_store_format() -> N
     # With rollups allowed, any writer could erase every object with Nats-Rollup: all.
     (lambda t: t["object_store_stream"].update(allow_rollup_hdrs=True), "allow_rollup_hdrs is False"),
     (lambda t: t["object_store_stream"].update(storage="disk"), "storage is file or memory"),
+    (lambda t: t["object_store_stream"].update(discard="old"), "discard is new"),
+    (lambda t: t["object_store_stream"].update(max_consumers=0), "max_consumers is a positive"),
+    (lambda t: t["object_store_stream"].pop("max_consumers"), "fields are"),
     (lambda t: t["object_store_stream"].pop("deny_delete"), "fields are"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].update(size_kind="unknown"), "size_kind is one of"),
+    (lambda t: t["object_store"]["UA1_BLOBS"].pop("size_kind"), "installation-wide"),
 ])
 def test_the_generator_refuses_blob_grants_it_cannot_justify(change, problem: str | None) -> None:
     transport = copy.deepcopy(TRANSPORT)
@@ -1947,6 +1962,34 @@ def test_a_kind_that_starts_carrying_a_blob_needs_its_receivers_to_read() -> Non
     assert "scheduler" in EXPORT.blob_receivers(registry, TRANSPORT, schemas)
     with pytest.raises(EXPORT.ContractError, match="readers are exactly the roles"):
         EXPORT.check_object_store(registry, TRANSPORT, schemas)
+
+
+def test_blob_index_operations_match_their_senders_authority_and_models() -> None:
+    """CR-3 and A4: blobs.register and blobs.delete_person live on svc.team with generated wire models."""
+
+    register = REGISTRY["kinds"]["blobs.register"]
+    assert register["address"] == "svc.team"
+    assert set(register["senders"]) == {"gateway", "lead_host", "worker_host"}
+    assert register["receivers"] == ["team_services"]
+    assert register["authority"] == "none"
+    assert register["idempotency"] == ["/issuer/runtime", "/body/request_id"]
+    assert set(register["reply"]["errors"]) == {"not_allowed", "runtime_error"}
+
+    delete_person = REGISTRY["kinds"]["blobs.delete_person"]
+    assert delete_person["address"] == "svc.team"
+    assert set(delete_person["senders"]) == {"gateway", "lead_host"}
+    assert delete_person["receivers"] == ["team_services"]
+    assert delete_person["authority"] == "optional"
+    assert delete_person["authority_binding"] == {
+        "type": "command", "at": "/body/request_id", "senders": ["gateway"],
+    }
+    assert delete_person["idempotency"] == ["/issuer/runtime", "/body/request_id"]
+    assert set(delete_person["reply"]["errors"]) == {"not_allowed", "runtime_error"}
+
+    assert kinds.KINDS["blobs.register"].body_model is models.BlobsRegisterBodyAdapter
+    assert kinds.KINDS["blobs.register"].reply_model is models.BlobsRegisterReplyAdapter
+    assert kinds.KINDS["blobs.delete_person"].body_model is models.BlobsDeletePersonBodyAdapter
+    assert kinds.KINDS["blobs.delete_person"].reply_model is models.BlobsDeletePersonReplyAdapter
 
 
 def test_only_the_team_services_read_their_teams_dead_letters() -> None:

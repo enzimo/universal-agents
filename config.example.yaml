@@ -108,13 +108,14 @@ transport:
   credentials_file: null                        # Optional NATS user credentials file.
   nats:                                         # NATS operator-mode account and user credential settings.
     credential_lifetime_seconds: 900            # Lifetime in seconds of every issued NATS user JWT, including bootstrap users (60 to 86400). Hosts renew before expiry; on external servers without operator revocation, handovers and retired hosts wait out this lifetime plus clock skew.
-  queues:                                       # Every team's protocol 1 work and dead-letter streams. NATS sets each stream's whole byte limit aside when it creates the stream: a team reserves partitions x partition plus the other four limits (2.125 GiB at these defaults).
+  queues:                                       # Every team's protocol 1 work and dead-letter streams plus the installation-wide blob store stream. NATS sets each stream's whole byte limit aside when it creates the stream: a team reserves partitions x partition plus the other four team limits (2.125 GiB at these defaults), plus max_bytes.blobs (512 MiB) once for the installation.
     max_bytes:                                  # Byte limit of each stream, by kind (1 MiB = 1,048,576 bytes; at least 1 MiB). Lowering one drops nothing: a stream above it refuses new messages until it drains.
       partition: 16777216                       # 16 MiB. Each of a team's partition streams: the inboxes and control queues of the partition's agents. Must be at least 5 x max_messages_per_subject x 263,168 bytes (10,526,720 at a cap of 8), so lower the cap with it.
       pool: 134217728                           # 128 MiB. A team's worker pool stream.
       edge: 134217728                           # 128 MiB. A team's edge stream: work for people's chat routes and outside agents.
       team_services: 268435456                  # 256 MiB. A team's team-services stream: the copies of every task, result and handback the team services record.
       dead_letter: 134217728                    # 128 MiB. A team's dead-letter stream: set-aside copies and notices.
+      blobs: 536870912                          # 512 MiB. Installation-wide protocol 1 blob store stream (OBJ_UA1_BLOBS): files and long text across every team.
     warn_at_percent: 80                         # Administrators get an Inbox notice and the Status page shows a problem when a stream holds this percent of its limit (10 to 99).
     partitions: 96                              # Partition streams per team (1 to 128). Fixed when the instance is created: the instance refuses to start with another count.
     max_messages_per_subject: 8                 # Most messages one sender may have waiting in one agent's inbox or control queue; more are refused, so one busy agent leaves room for the others. max_bytes.partition must be at least 5 x this x 263,168 bytes, so raise it with the cap.
@@ -490,6 +491,7 @@ agent:
   restart_executing_task_grace_seconds: 900     # Restart grace for interrupted executing snapshots before failing fast.
   same_role_runtime_takeover_enabled: true      # Same-role replacement agents may claim stale runtime snapshots.
   request_conflict_checks: true                 # Refuse a request's change to a record (a personal knowledge page) another of the person's requests changed while it ran, and any change from a stopped or ended request; false keeps only "changed since you read it" checks. Agents cannot change it.
+  blob_retention_days: 7                        # Days to keep protocol 1 blobs (files and long text in OBJ_UA1_BLOBS) per owner before team services delete unowned blobs; departed people's blobs are deleted immediately (1 to 3650). Agents cannot change it.
   deferred_message_warning_threshold: 10        # Warn when deferred inbound delivery backlog reaches this count.
   max_deferred_messages: 100                    # Bound durable deferred admission; excess work remains with NATS for redelivery.
   tool_allowlist: null                          # Optional exact tool-name allowlist. null means no allowlist; [] means no tools. A name that is no tool function is refused.
@@ -599,7 +601,7 @@ agent:
       edit_war_freeze_minutes: 60               # How long a frozen page refuses agent edits (agents add notes instead).
       max_title_chars: 120
       max_summary_chars: 300
-      max_body_chars: 24000                     # Longer pages should be split into linked pages; Web Chat shows at most 32768 until long text travels as a file.
+      max_body_chars: 24000                     # Longest page text in characters (up to 500000); longer pages should be split into linked pages.
       max_note_chars: 2000
       max_tags: 10
     sensitive_content:

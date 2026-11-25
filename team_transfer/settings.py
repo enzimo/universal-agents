@@ -129,7 +129,8 @@ class SettingsSection:
     # 14: execution_control.ssh network guardrails (allowed_cidrs, allowed_domains, denied_cidrs),
     #     max_delegation_ttl_seconds and allow_password_bootstrap joined it.
     # 15: transport.nats.credential_lifetime_seconds joined it; not carried (_INSTALLATION_SETTINGS).
-    schema_version: ClassVar[int] = 15
+    # 16: agent.blob_retention_days and transport.queues.max_bytes.blobs joined it.
+    schema_version: ClassVar[int] = 16
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -819,10 +820,12 @@ __all__ = [
 # defaults and the same step reads version 13.
 # V15 added transport.nats.credential_lifetime_seconds (excluded via _INSTALLATION_SETTINGS);
 # an older export has none, so the new instance keeps its own default and the same step reads version 14.
+# V16 added agent.blob_retention_days and transport.queues.max_bytes.blobs; an older export has
+# neither, so the new instance takes their defaults and the same step reads version 15.
 
 
 def _upgraded_settings(records: SectionRecords) -> SectionRecords:
-    """An older export's records as version 15 reads them: retired settings dropped, a replica count as a whole number."""
+    """An older export's records as version 16 reads them: retired settings dropped, a replica count as a whole number."""
 
     retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
     upgraded: SectionRecords = []
@@ -836,6 +839,6 @@ def _upgraded_settings(records: SectionRecords) -> SectionRecords:
     return upgraded
 
 
-for _source in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14):
+for _source in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _upgraded_settings
 TEAM_ID_RENAMES[SettingsSection.name] = _renamed_team_settings

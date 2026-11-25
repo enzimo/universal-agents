@@ -1,0 +1,30 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "blobs.delete_person",
+  "message_id": "01928f3a-7b2c-7e11-8000-000000000e11",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "lead-host-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-lead-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.lead-host-1.svc.team",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "blob_delete_person_2",
+    "person": "person_1"
+  },
+  "idempotency_key": "blobs.delete_person:tYlf-69r70UuUT6lemIqXmlONFa6UEZ-mKIbqWsXACw",
+  "body_digest": "BasE-qdOec7oHjGf0hsq7aOC7_bzwTAxAKQWhmw128c",
+  "signature": "0kWJoDUbqTNJd8d3gUOdcoNYJtxKwjQnZSNA6ESl_awjkF45tFwpvJFAMkakCeJ6CEATwZP7lD3cpBibeMPbAw"
+}

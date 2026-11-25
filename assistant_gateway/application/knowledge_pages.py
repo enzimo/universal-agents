@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from pydantic import ValidationError
 
@@ -33,13 +33,23 @@ from assistant_gateway.application.knowledge_wire import (
     review_flags,
 )
 from assistant_gateway.application.route_context import GatewayRouteContextV1
-from assistant_gateway.application.team_commands import GatewayTeamCommandService
+from assistant_gateway.application.team_commands import (
+    GatewayTeamCommandService,
+    TeamCommandRefused,
+    TeamServicesNoAnswer,
+    TeamServicesUnavailable,
+)
 from custom_messages.contracts.control_v1 import (
+    KNOWLEDGE_READ_ACTIONS,
     KnowledgeCommandAction,
     KnowledgeCommandPayload,
     KnowledgeCommandResultPayload,
     KnowledgeReviewFlagPayload,
 )
+
+if TYPE_CHECKING:
+    from custom_transport.protocol1.blobs import BlobOwner
+    from custom_transport.protocol1.knowledge_blobs import BlobStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -48,9 +58,32 @@ TEAM_MEMBER_LABEL = "A team member"
 SYSTEM_LABEL = "The system"
 AGENT_LABEL = "An agent"
 SIGN_IN_TEXT = "Sign in with a registered user account to use the Knowledge page."
+KNOWLEDGE_OFF_TEXT = (
+    "The knowledge base is turned off for this team (agent.knowledge.enabled). Ask an administrator to turn it on."
+)
+MISSING_TITLE_TEXT = "Give the new page a title."
 NOT_SENDABLE_TEXT = (
     "Nothing was sent because the request was not valid (a value is missing, too long or of the wrong kind). "
     "Check the fields and try again."
+)
+BLOB_STORE_FULL_TEXT = (
+    "The team's temporary blob store is full, so this long Knowledge text could not be saved right now. "
+    "Ask an administrator to check transport.queues.max_bytes.blobs or agent.blob_retention_days."
+)
+BLOB_UNAVAILABLE_TEXT = (
+    "Long Knowledge text needs the team's blob store, which is not available in this process."
+)
+BLOB_READ_FAILED_TEXT = (
+    "The full text of this Knowledge page could not be loaded from temporary storage. "
+    "Try again; if it keeps failing, an administrator can check the gateway log."
+)
+BLOB_CHANGE_REPLY_READ_FAILED_TEXT = (
+    "Your change was saved, but the updated Knowledge text could not be loaded from temporary storage. "
+    "Refresh the page to see it; if it keeps failing, an administrator can check the gateway log."
+)
+BLOB_WRITE_FAILED_TEXT = (
+    "This long Knowledge text could not be stored for sending, so nothing was changed. "
+    "Try again; if it keeps failing, an administrator can check the gateway log."
 )
 # Lists the gateway completes from their continuations (module docstring), and their rows.
 CONTINUED_ROWS = {
@@ -100,17 +133,46 @@ class GatewayKnowledgePages:
         references: KnowledgeEditorReferences,
         display_name: Callable[[str], str],
         enabled: bool,
+        blobs: BlobStore | None = None,
+        max_body_chars: int = 500_000,
+        max_note_chars: int = 50_000,
     ) -> None:
         self._team_commands = team_commands
         self._references = references
         self._display_name = display_name
         self._enabled = bool(enabled)
+        self._blobs = blobs
+        self._max_body_chars = int(max_body_chars)
+        self._max_note_chars = int(max_note_chars)
 
     @property
     def enabled(self) -> bool:
         """Whether the team's knowledge base is on (``agent.knowledge.enabled``); the rail link shows only then."""
 
         return self._enabled
+
+    @staticmethod
+    def _check_text_limit(text: str | None, limit: int, label: str) -> None:
+        length = len(text or "")
+        if length > limit:
+            raise GatewayKnowledgeRefused(
+                "invalid_request",
+                f"{label} is {length:,} characters; at most {limit:,} are allowed.",
+            )
+
+    def _check_before_blobs(self, payload: KnowledgeCommandPayload) -> None:
+        """Refuse disabled or locally invalid requests before uploading blobs to ``OBJ_UA1_BLOBS`` (F7)."""
+
+        if not self._enabled:
+            raise GatewayKnowledgeRefused("knowledge_off", KNOWLEDGE_OFF_TEXT)
+        if payload.action is KnowledgeCommandAction.WRITE:
+            if not (payload.page or "").strip() and not (payload.title or "").strip():
+                raise GatewayKnowledgeRefused("invalid_request", MISSING_TITLE_TEXT)
+            self._check_text_limit(payload.body, self._max_body_chars, "Page text")
+        elif payload.action is KnowledgeCommandAction.ADD_NOTE:
+            self._check_text_limit(payload.note, self._max_note_chars, "Note text")
+        elif payload.action is KnowledgeCommandAction.PUBLISH_CONTRIBUTION and payload.edited:
+            self._check_text_limit(payload.body, self._max_body_chars, "Edited proposal text")
 
     async def run(
         self, context: GatewayRouteContextV1, payload: KnowledgeCommandPayload
@@ -120,6 +182,7 @@ class GatewayKnowledgePages:
         person_id = str(context.canonical_user_id or "").strip()
         if not person_id:
             raise PermissionError(SIGN_IN_TEXT)
+        self._check_before_blobs(payload)
         try:
             kind, body = knowledge_request(payload)
         except KnowledgeRequestNotSent as error:
@@ -142,14 +205,83 @@ class GatewayKnowledgePages:
 
     async def _request(self, kind: str, body: dict[str, Any], person_id: str,
                        action: KnowledgeCommandAction) -> dict[str, Any]:
+        # Imported lazily so command-line gateways never load protocol 1 wire models at import time.
+        from custom_transport.protocol1.blobs import BlobOwner
+        from custom_transport.protocol1.knowledge_blobs import reply_has_blobs, request_needs_blobs
+
+        wire_body = body
+        request_id: str | None = None
+        person_ref: str | None = None
+        if request_needs_blobs(body):
+            person_ref = await self._team_commands.resolve_person_ref(person_id, kind=kind)
+            request_id = self._team_commands.new_request_id()
+            owner = BlobOwner(request_id=request_id, person_ref=person_ref)
+            wire_body = await self._encode_request_blobs(body, owner, action)
         try:
-            return await self._team_commands.request(kind, body, person_id=person_id)
+            reply = await self._team_commands.request(
+                kind, wire_body, person_id=person_id, request_id=request_id, person_ref=person_ref
+            )
         except ValidationError as error:
             # The browser's request model let through a value the contract refuses: the gateway's defect.
             LOGGER.error("A Knowledge page request did not fit the message contract and was not sent. "
                          "event=web_knowledge_request_not_sendable action=%s errors=%s", action.value,
                          [".".join(str(part) for part in item["loc"]) for item in error.errors()])
             raise GatewayKnowledgeRefused("invalid_request", NOT_SENDABLE_TEXT) from error
+        if reply.get("outcome") == "ok" and reply_has_blobs(reply):
+            return await self._decode_reply_blobs(reply, action)
+        return reply
+
+    async def _encode_request_blobs(
+        self, body: dict[str, Any], owner: "BlobOwner", action: KnowledgeCommandAction
+    ) -> dict[str, Any]:
+        from custom_transport.protocol1.blobs import BlobError, BlobStoreFull
+        from custom_transport.protocol1.knowledge_blobs import KnowledgeBlobUnavailable, fit_request_body
+
+        try:
+            return await fit_request_body(body, self._blobs, owner)
+        except PermissionError as error:
+            raise GatewayKnowledgeRefused("authorization_denied", str(error)) from error
+        except BlobStoreFull as error:
+            LOGGER.warning("Blob store full while storing a Knowledge request. "
+                           "event=web_knowledge_blob_store_full action=%s detail=%s", action.value, error)
+            raise GatewayKnowledgeRefused("runtime_error", BLOB_STORE_FULL_TEXT) from error
+        except KnowledgeBlobUnavailable as error:
+            raise GatewayKnowledgeRefused("runtime_error", BLOB_UNAVAILABLE_TEXT) from error
+        except TeamServicesNoAnswer as error:
+            LOGGER.warning("Blob registration timed out before sending a Knowledge request. "
+                           "event=web_knowledge_blob_register_unanswered action=%s detail=%s", action.value, error)
+            raise GatewayKnowledgeRefused("runtime_error", BLOB_WRITE_FAILED_TEXT) from error
+        except TeamServicesUnavailable as error:
+            LOGGER.warning("Blob store or team services unavailable before sending a Knowledge request. "
+                           "event=web_knowledge_blob_unavailable action=%s detail=%s", action.value, error)
+            raise GatewayKnowledgeRefused("runtime_error", str(error)) from error
+        except (TeamCommandRefused, BlobError) as error:
+            LOGGER.error("Could not store a Knowledge request blob. event=web_knowledge_blob_write_failed "
+                         "action=%s error_type=%s detail=%s", action.value, type(error).__name__, error)
+            raise GatewayKnowledgeRefused("runtime_error", BLOB_WRITE_FAILED_TEXT) from error
+        except Exception as error:  # noqa: BLE001 - NATS/JetStream transport errors must not leak HTTP 500
+            LOGGER.error("Unexpected transport error while storing a Knowledge request blob. "
+                         "event=web_knowledge_blob_write_failed action=%s error_type=%s detail=%s",
+                         action.value, type(error).__name__, error, exc_info=error)
+            raise GatewayKnowledgeRefused("runtime_error", BLOB_WRITE_FAILED_TEXT) from error
+
+    async def _decode_reply_blobs(
+        self, reply: dict[str, Any], action: KnowledgeCommandAction
+    ) -> dict[str, Any]:
+        from custom_transport.protocol1.knowledge_blobs import KnowledgeBlobUnavailable, resolve_reply_body
+
+        is_read = action in KNOWLEDGE_READ_ACTIONS
+        try:
+            return await resolve_reply_body(reply, self._blobs)
+        except KnowledgeBlobUnavailable as error:
+            text = BLOB_UNAVAILABLE_TEXT if is_read else BLOB_CHANGE_REPLY_READ_FAILED_TEXT
+            raise GatewayKnowledgeRefused("runtime_error", text) from error
+        except Exception as error:  # noqa: BLE001 - blob and NATS/transport errors must not leak HTTP 500
+            LOGGER.error("Could not load a Knowledge reply blob. event=web_knowledge_blob_read_failed "
+                         "action=%s change=%s error_type=%s detail=%s",
+                         action.value, not is_read, type(error).__name__, error, exc_info=error)
+            text = BLOB_READ_FAILED_TEXT if is_read else BLOB_CHANGE_REPLY_READ_FAILED_TEXT
+            raise GatewayKnowledgeRefused("runtime_error", text) from error
 
     async def _whole_page(self, kind: str, body: dict[str, Any], person_id: str, action: KnowledgeCommandAction,
                           reply: dict[str, Any], rows: str) -> dict[str, Any]:

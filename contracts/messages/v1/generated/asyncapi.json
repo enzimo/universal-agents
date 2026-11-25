@@ -116,6 +116,12 @@
         "agent_status_reply": {
           "$ref": "#/components/messages/agent_status_reply"
         },
+        "blobs_delete_person_reply": {
+          "$ref": "#/components/messages/blobs_delete_person_reply"
+        },
+        "blobs_register_reply": {
+          "$ref": "#/components/messages/blobs_register_reply"
+        },
         "custody_decide_reply": {
           "$ref": "#/components/messages/custody_decide_reply"
         },
@@ -438,6 +444,12 @@
       "messages": {
         "access_withdraw": {
           "$ref": "#/components/messages/access_withdraw"
+        },
+        "blobs_delete_person": {
+          "$ref": "#/components/messages/blobs_delete_person"
+        },
+        "blobs_register": {
+          "$ref": "#/components/messages/blobs_register"
         },
         "custody_decide": {
           "$ref": "#/components/messages/custody_decide"
@@ -1239,6 +1251,92 @@
                 },
                 "kind": {
                   "const": "agent.status.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "blobs_delete_person": {
+        "name": "blobs.delete_person",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/blobs.delete_person.schema.json"
+                },
+                "kind": {
+                  "const": "blobs.delete_person"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Remove a departed person's blob ownership records and immediately delete every blob left with no remaining owner."
+      },
+      "blobs_delete_person_reply": {
+        "name": "blobs.delete_person.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/blobs.delete_person.reply.schema.json"
+                },
+                "kind": {
+                  "const": "blobs.delete_person.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "blobs_register": {
+        "name": "blobs.register",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/blobs.register.schema.json"
+                },
+                "kind": {
+                  "const": "blobs.register"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Register an owner of a team blob in UA1_BLOBS, confirming whether the object is already live or must be uploaded first."
+      },
+      "blobs_register_reply": {
+        "name": "blobs.register.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/blobs.register.reply.schema.json"
+                },
+                "kind": {
+                  "const": "blobs.register.reply"
                 }
               },
               "type": "object"
@@ -6124,6 +6222,48 @@
         ]
       }
     },
+    "receive_blobs_delete_person_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/blobs_delete_person"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/blobs_delete_person_reply"
+          }
+        ]
+      }
+    },
+    "receive_blobs_register_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/blobs_register"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/blobs_register_reply"
+          }
+        ]
+      }
+    },
     "receive_credential_form_request_edge": {
       "action": "receive",
       "channel": {
@@ -8896,6 +9036,48 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/agent_status_reply"
+          }
+        ]
+      }
+    },
+    "send_blobs_delete_person_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/blobs_delete_person"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/blobs_delete_person_reply"
+          }
+        ]
+      }
+    },
+    "send_blobs_register_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/blobs_register"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/blobs_register_reply"
           }
         ]
       }

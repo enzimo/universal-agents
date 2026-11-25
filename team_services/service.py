@@ -33,6 +33,8 @@ class OperationFamily:
     upkeep: Optional[Upkeep] = None
     # Called by the process after requests drain, before its connection closes.
     close: Optional[Callable[[], None]] = None
+    # Called by the process after acquiring the team lock and before serving svc.team.
+    prepare: Optional[Upkeep] = None
 
 
 class TeamServices:
@@ -44,6 +46,7 @@ class TeamServices:
         }
         side_by_side: set[str] = set()
         self.upkeep: list[Upkeep] = []
+        self.prepare: list[Upkeep] = []
         for family in families:
             overlap = self._handlers.keys() & family.handlers.keys()
             if overlap:
@@ -52,6 +55,8 @@ class TeamServices:
             side_by_side |= family.side_by_side & family.handlers.keys()
             if family.upkeep is not None:
                 self.upkeep.append(family.upkeep)
+            if family.prepare is not None:
+                self.prepare.append(family.prepare)
         self.side_by_side = frozenset(side_by_side)
 
     @property

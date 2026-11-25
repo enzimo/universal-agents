@@ -31,24 +31,31 @@ import contextlib
 import logging
 import signal
 from datetime import datetime
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
+from access_catalog.catalog import CatalogSource
+from access_control.cedar import CedarAccessClient
+from access_control.decisions import AccessService
+from access_control.entities import agent_role_resolver
 from access_control.people_directory import PeopleDirectory
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.wire.frame import Receiver
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+from custom_transport.protocol1.blobs import blob_store_handle
 from custom_transport.protocol1.host_runtime import TEAM_SERVICES_RUNTIME, TRUST_REFRESH_INTERVAL, MessageHost
 from custom_transport.protocol1.joining import HostProfile
 from custom_transport.protocol1.live import LiveHost
 from custom_transport.subjects import NatsSubjectMapper
 from release_version import release_version
 from storage.access_repository import AccessRepository
+from storage.blob_index_repository import BlobIndexRepository
 from runtime_settings.knowledge import knowledge_settings
 from custom_agents.schedule_store import ScheduleStore
 from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from default_values import TRANSPORT_DEFAULTS
+from team_services.blobs import BlobOperations, BlobService
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
@@ -177,6 +184,17 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
     )
     sessions.ensure_partitions = partitions.ensure_unowned_assigned
     services = TeamServices(sessions, families)
+    if services.prepare:
+        # Finish family startup recovery (such as retrying pending blob deletes) while holding the lock
+        # and before subscribing to svc.team so new registrations never race pre-crash deletes (C01).
+        family_prepare = asyncio.create_task(_prepare_families(services.prepare, team, host.logger))
+        await asyncio.wait({family_prepare, keeper}, return_when=asyncio.FIRST_COMPLETED)
+        if keeper.done():
+            family_prepare.cancel()
+            await asyncio.gather(family_prepare, return_exceptions=True)
+            await keeper
+            return
+        await family_prepare
     subscription = await live.serve("svc.team", Receiver(live.identity.installation, team, "team_services", team,
                                                          TEAM_SERVICES_RUNTIME), services.handle,
                                     side_by_side_kinds=services.side_by_side)
@@ -241,6 +259,20 @@ async def _drain(live: LiveHost, logger: logging.Logger) -> None:
                      "event=team_services_drain_timed_out seconds=%s", DRAIN_SECONDS)
 
 
+async def _prepare_families(steps: Sequence[Upkeep], team: str, logger: logging.Logger) -> None:
+    """Run each operation family's startup preparation before serving ``svc.team``; failures are logged."""
+
+    for step in steps:
+        try:
+            await step()
+        except Exception:
+            logger.exception(
+                "A team operation family could not finish startup preparation; upkeep will retry. "
+                "event=team_services_family_prepare_failed team=%s",
+                team,
+            )
+
+
 async def _maintain(sessions: SessionService, upkeep: Sequence[Upkeep], team: str, stop: asyncio.Event,
                     logger: logging.Logger) -> None:
     """``SessionService.maintain`` and each family's upkeep now and every ``MAINTENANCE_INTERVAL`` until ``stop``;
@@ -257,25 +289,65 @@ async def _maintain(sessions: SessionService, upkeep: Sequence[Upkeep], team: st
             await asyncio.wait_for(stop.wait(), timeout=MAINTENANCE_INTERVAL.total_seconds())
 
 
-def team_operations(config: GatewayInstanceConfig, clock: Callable[[], datetime]) -> list[OperationFamily]:
+def team_operations(
+    config: GatewayInstanceConfig,
+    clock: Callable[[], datetime],
+    *,
+    js: Any = None,
+) -> list[OperationFamily]:
     """The families of people's commands this process answers, on the team's database."""
 
     storage = config.manager_storage_settings
-    people = PeopleDirectory(AccessRepository(storage), config.manager.team_id)
+    access_repo = AccessRepository(storage)
+    people = PeopleDirectory(access_repo, config.manager.team_id)
     memory_store = create_pinned_memory_repository(storage, logger=_LOGGER)
     memory = MemoryOperations(memory_store, people, lead_memory_config(config), clock, _LOGGER)
     # The team's knowledge settings: agent types cannot override them.
     settings = knowledge_settings(config.agent.knowledge)
+    blob_service: Optional[BlobService] = None
+    if js is not None:
+        blob_service = BlobService(
+            repository=BlobIndexRepository(storage),
+            people=people,
+            js=js,
+            team_id=config.manager.team_id,
+            retention_days=config.agent.blob_retention_days,
+            clock=clock,
+            logger=_LOGGER,
+        )
+    merge_access: Optional[AccessService] = None
+    if config.authorization.enabled:
+        merge_access = AccessService(
+            store=access_repo,
+            catalog=CatalogSource(config.instance_root).current(),
+            cedar=CedarAccessClient(binary=config.authorization.cedar_binary_path),
+            team_id=config.manager.team_id,
+            agent_role_of=agent_role_resolver(config.manager.named_agent_type),
+            lead_agent_type=config.manager.named_agent_type,
+        )
     # With the knowledge base off no store is opened, and its commands are answered feature_off.
     knowledge_store = create_knowledge_repository(storage, logger=_LOGGER) if settings.enabled else None
-    knowledge = KnowledgeOperations(knowledge_store, people, settings, clock, _LOGGER, personal_memory=memory_store)
+    knowledge = KnowledgeOperations(
+        knowledge_store,
+        people,
+        settings,
+        clock,
+        _LOGGER,
+        personal_memory=memory_store,
+        blobs=blob_service,
+        access_service=merge_access,
+        request_conflict_checks=config.agent.request_conflict_checks,
+    )
     conversations = ConversationStore(db_path=storage.sqlite_path or "", storage_settings=storage, logger=_LOGGER,
                                       artifacts_dir=config.layout.conversation_artifacts_dir)
     topics = TopicOperations(conversations, people, clock, _LOGGER)
     schedules = ScheduleOperations(ScheduleStore(storage_settings=storage, default_cron_timezone=config.user.timezone),
                                    people, _delivery_refs(config),
                                    SystemScheduleCheck(config, people), clock, _LOGGER)
-    return [memory.family(), knowledge.family(), topics.family(), schedules.family()]
+    families: list[OperationFamily] = [memory.family(), knowledge.family(), topics.family(), schedules.family()]
+    if blob_service is not None:
+        families.append(BlobOperations(blob_service, people, _LOGGER).family())
+    return families
 
 
 def _delivery_refs(config: GatewayInstanceConfig) -> DeliveryRefs | None:
@@ -300,11 +372,13 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
     try:
         host = MessageHost(config.layout, team_services_profile(team), adapter.nats_connection, logger=_LOGGER)
         relays = Relays(host, team, config.manager.named_agent_type, _LOGGER)
+        nc = getattr(host, "nc", None)
+        js = blob_store_handle(nc) if nc is not None else None
         await serve_team(
             host,
             team,
             stop,
-            [*team_operations(config, host.clock), relays.family()],
+            [*team_operations(config, host.clock, js=js), relays.family()],
             credential_lifetime_seconds=config.transport.nats.credential_lifetime_seconds,
         )
     except LockLost as lost:

@@ -183,11 +183,11 @@ def _leaf_paths(values: dict, prefix: str) -> dict[str, object]:
 
 
 def test_every_queue_setting_has_its_comment_and_default_in_both_files() -> None:
-    """A1: each setting is documented in instance_config.yaml's comments and inline in config.example.yaml."""
+    """A1/A2: each setting is documented in instance_config.yaml's comments and inline in config.example.yaml."""
 
     leaves = _leaf_paths(QueueSettings().model_dump(), "transport.queues")
     example = _example_queue_lines()
-    assert len(leaves) == 8  # five byte limits, the warning level, the partition count and the cap
+    assert len(leaves) == 9  # six byte limits (five per-team + blobs), warning level, partition count, cap
     for path, default in leaves.items():
         assert _INSTANCE_CONFIG_COMMENTS.get(path), f"{path} has no instance file comment"
         line = example.get(path)
@@ -261,3 +261,28 @@ def test_the_replica_count_is_one_to_five(replicas: int, accepted: bool) -> None
         return
     with pytest.raises(ValidationError, match="transport.replicas"):
         TransportSettings(replicas=replicas)
+
+
+def test_blob_retention_days_defaults_bounds_projection_and_operator_only() -> None:
+    from config_loader import Config, resolve_agent_type_settings
+    from custom_agents.runtime_setting_registry import OPERATOR_ONLY_RUNTIME_SETTINGS
+    from default_values import AGENT_DEFAULTS, MAX_BLOB_RETENTION_DAYS, MIN_BLOB_RETENTION_DAYS
+    from runtime_settings.agents import AgentRuntimeDefaultsSettings
+
+    assert AGENT_DEFAULTS.blob_retention_days.value == 7
+    assert AgentRuntimeDefaultsSettings().blob_retention_days == 7
+    assert AgentRuntimeDefaultsSettings(blob_retention_days=MIN_BLOB_RETENTION_DAYS).blob_retention_days == 1
+    assert AgentRuntimeDefaultsSettings(blob_retention_days=MAX_BLOB_RETENTION_DAYS).blob_retention_days == 3650
+    for bad in (0, -1, MAX_BLOB_RETENTION_DAYS + 1, True, 3.5, "seven"):
+        with pytest.raises(ValidationError, match="agent.blob_retention_days"):
+            AgentRuntimeDefaultsSettings(blob_retention_days=bad)
+    assert "agent.blob_retention_days" in OPERATOR_ONLY_RUNTIME_SETTINGS
+    assert _INSTANCE_CONFIG_COMMENTS.get("agent.blob_retention_days")
+
+    example_text = EXAMPLE_CONFIG.read_text(encoding="utf-8")
+    blob_line = next((line for line in example_text.splitlines() if line.strip().startswith("blob_retention_days:")), None)
+    assert blob_line is not None and " # " in blob_line
+    assert yaml.safe_load(blob_line.split(":", 1)[1].partition(" # ")[0]) == 7
+
+    projected = resolve_agent_type_settings(Config({"agent": {"blob_retention_days": 14}}))
+    assert projected["blob_retention_days"] == 14

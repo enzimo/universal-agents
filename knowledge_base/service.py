@@ -823,6 +823,7 @@ class KnowledgeService:
         base_revision: int,
         source_revision: int,
         confirm_review: bool = False,
+        command_outcome: Optional[CommandOutcome] = None,
     ) -> MergeResult:
         """Merge the source page into the target: one page, and the source's name leads to it.
 
@@ -876,6 +877,7 @@ class KnowledgeService:
                 refuse_frozen=actor.is_agent,
             ),
             now=self._clock(),
+            command_outcome=command_outcome,
         )
         return MergeResult(source=stored_source, target=stored_target, review_kinds=review)
 

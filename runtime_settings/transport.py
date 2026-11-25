@@ -184,9 +184,10 @@ class QueueByteLimits(BaseModel):
     """``transport.queues.max_bytes``: one byte limit per size kind of the contract's streams.
 
     The field names are the contract's size kinds (``transport.yaml`` ``queues.size_kinds``).
-    Each limit applies to each stream of its kind, each team's apart: every one of a team's
-    partition streams has the ``partition`` limit. NATS sets the whole limit aside from its
-    storage when it creates the stream, so these are also what the installation reserves.
+    Per-team limits apply to each stream of that kind, each team's apart: every one of a team's
+    partition streams has the ``partition`` limit; ``blobs`` bounds the installation-wide
+    ``OBJ_UA1_BLOBS`` object store stream. NATS sets the whole limit aside from its storage
+    when it creates each stream, so these are also what the installation reserves.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -196,8 +197,9 @@ class QueueByteLimits(BaseModel):
     edge: int = TRANSPORT_DEFAULTS.queues_max_bytes_edge.value
     team_services: int = TRANSPORT_DEFAULTS.queues_max_bytes_team_services.value
     dead_letter: int = TRANSPORT_DEFAULTS.queues_max_bytes_dead_letter.value
+    blobs: int = TRANSPORT_DEFAULTS.queues_max_bytes_blobs.value
 
-    @field_validator("partition", "pool", "edge", "team_services", "dead_letter", mode="before")
+    @field_validator("partition", "pool", "edge", "team_services", "dead_letter", "blobs", mode="before")
     @classmethod
     def _at_least_one_frame(cls, value: Any, info: Any) -> int:
         return whole_number(

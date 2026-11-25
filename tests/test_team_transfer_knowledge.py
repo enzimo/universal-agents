@@ -344,14 +344,13 @@ def test_planning_checks_links_against_the_destinations_own_page_even_when_the_p
         assert outcomes[link_key][0] is RecordOutcome.IMPORT
 
 
-def test_knowledge_longer_than_web_chat_shows_travels_whole(tmp_path: Path) -> None:
-    """Web Chat shows at most INLINE_TEXT_MAX characters (team_services.knowledge); agents write up to
-    max_body_chars, and a team transfer carries every longer page, revision, note and proposal row exactly."""
+def test_knowledge_longer_than_inline_limit_travels_whole(tmp_path: Path) -> None:
+    """A team transfer carries every long page, revision, note and proposal row (> INLINE_TEXT_MAX_CHARS) exactly."""
 
     import json
 
     from assistant_gateway.config import GatewayInstanceConfig
-    from knowledge_base.records import INLINE_TEXT_MAX
+    from custom_messages.wire.sizes import INLINE_TEXT_MAX_CHARS
     from runtime_settings.knowledge import KnowledgeWriteLimits
     from storage.knowledge_repository import KNOWLEDGE_TRANSFER_TABLES
 
@@ -379,7 +378,7 @@ def test_knowledge_longer_than_web_chat_shows_travels_whole(tmp_path: Path) -> N
 
         return {
             table: sorted(json.dumps(row, sort_keys=True, default=str) for row in store.export_rows(table)
-                          if len(str(row.get("body") or "")) > INLINE_TEXT_MAX)
+                          if len(str(row.get("body") or "")) > INLINE_TEXT_MAX_CHARS)
             for table in KNOWLEDGE_TRANSFER_TABLES
         }
 

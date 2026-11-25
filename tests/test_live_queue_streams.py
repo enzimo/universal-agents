@@ -39,7 +39,14 @@ import pytest
 from nats.js.errors import APIError
 
 from custom_messages.wire.partitions import agent_partition
-from custom_messages.wire.queues import QueueLimits, queue_stream_config, team_consumers, team_queue_streams
+from custom_messages.wire.queues import (
+    QueueLimits,
+    object_store_stream_config,
+    object_store_streams,
+    queue_stream_config,
+    team_consumers,
+    team_queue_streams,
+)
 from custom_transport.jetstream_account import reported_bytes, request_account_info
 from custom_transport.protocol1.bootstrap import read_bundle
 from custom_transport.protocol1 import host_keys
@@ -117,12 +124,17 @@ def test_every_stream_is_created_with_its_settings_set_aside_whole_and_a_restart
                     assert stored.metadata["ua.partitions"] == "96"
                 else:
                     assert getattr(stored, field) == value, (stream.name, field)
+        for stream in object_store_streams(transport()):
+            wanted = object_store_stream_config(transport(), stream, limits)
+            stored = (await js.stream_info(stream.name)).config
+            for field, value in wanted.items():
+                assert getattr(stored, field) == value, (stream.name, field)
         for consumer in team_consumers(transport(), TEAM):
             stored = (await js.consumer_info(consumer.stream, consumer.name)).config
             assert (stored.filter_subject, stored.max_deliver, stored.ack_wait) == (
                 consumer.config["filter_subject"], consumer.config["max_deliver"], consumer.config["ack_wait"])
-        # NATS sets every limit aside when it creates the stream, before any message.
-        assert (await account(nc))["reserved_storage"] == 99 * MIB + 2 * MIB
+        # NATS sets every limit aside when it creates the stream, before any message (100 team streams + OBJ_UA1_BLOBS).
+        assert (await account(nc))["reserved_storage"] == 99 * MIB + 2 * MIB + MIB
         created = {stream.name: (await js.stream_info(stream.name)).created for stream in streams}
         caplog.clear()
         with caplog.at_level("INFO"):
@@ -146,7 +158,7 @@ def test_a_changed_limit_updates_the_stream_at_the_next_start_and_keeps_metadata
         await topology(nc, queue_limits(pool=3 * MIB), partitions=4).ensure([TEAM])
         stored = (await js.stream_info(pool)).config
         assert (stored.max_bytes, stored.metadata["owner"]) == (3 * MIB, "operator")
-        assert (await account(nc))["reserved_storage"] == 7 * MIB + 3 * MIB  # four partitions, three more, the pool
+        assert (await account(nc))["reserved_storage"] == 7 * MIB + 3 * MIB + MIB  # 4 parts, 3 more, pool, blobs
 
     run(tmp_path, scenario, partitions=4)
 
@@ -178,7 +190,7 @@ def test_a_store_too_small_stops_the_start_naming_the_stream_and_a_later_start_w
         await topology(nc, queue_limits(partition=MIB // 4)).ensure([TEAM])
         for stream in team_queue_streams(transport(), TEAM, 96):
             await js.stream_info(stream.name)
-        assert (await account(nc))["reserved_storage"] == 96 * (MIB // 4) + 4 * MIB
+        assert (await account(nc))["reserved_storage"] == 96 * (MIB // 4) + 4 * MIB + MIB
 
     run(tmp_path, scenario, max_file_store=40 * MIB)
 
@@ -195,7 +207,7 @@ def test_room_a_lowered_limit_gives_back_serves_a_raised_one_at_the_same_start(t
     async def scenario(nc: Any) -> None:
         await topology(nc, queue_limits(pool=8 * MIB), partitions=4).ensure([TEAM])
         await topology(nc, queue_limits(partition=3 * MIB, pool=MIB), partitions=4).ensure([TEAM])
-        assert (await account(nc))["reserved_storage"] == 4 * 3 * MIB + MIB + 3 * MIB
+        assert (await account(nc))["reserved_storage"] == 4 * 3 * MIB + MIB + 3 * MIB + MIB
 
     run(tmp_path, scenario, partitions=4, max_file_store=20 * MIB)
 
@@ -249,7 +261,7 @@ def test_after_nats_restarts_with_less_storage_than_is_set_aside_the_same_settin
     assert message.startswith(f"NATS refused to lower the limit of stream UA1_PART_{AUTHORITY_TEAM}~0: JetStream error "
                               "10047, insufficient storage resources available.")
     assert "Lowering a limit cannot help then." in message
-    assert "for 104,857,600 bytes set aside the disk needs about 139,810,134 bytes free at every start." in message
+    assert "for 105,906,176 bytes set aside the disk needs about 141,208,235 bytes free at every start." in message
     assert "Free disk space and restart the instance" in message
     authority_starts(300 * MIB, queues=queue_limits(partition=MIB // 4))  # disk space freed, NATS restarted
 
@@ -275,17 +287,17 @@ def test_an_account_with_limits_per_replica_tier_is_checked_against_its_tier(tmp
             with pytest.raises(StreamAccountRefused, match="per replica tier \\(R1\\) and has none for R3"):
                 await topology(nc, queue_limits(replicas=3)).ensure([TEAM])
             assert (await account(nc))["streams"] == 0
-            await topology(nc, queue_limits()).ensure([TEAM])  # 100 streams and 7 buckets
+            await topology(nc, queue_limits()).ensure([TEAM])  # 100 streams, 7 buckets, 1 object store
             info = await account(nc)
-            assert info["limits"]["max_storage"] == 0 and info["tiers"]["R1"]["streams"] == 107
+            assert info["limits"]["max_storage"] == 0 and info["tiers"]["R1"]["streams"] == 108
             # The top-level figure is the tiers' total, so the Status page reads it on either kind of account.
-            assert reported_bytes(info, "reserved_storage") == info["tiers"]["R1"]["reserved_storage"] == 100 * MIB
+            assert reported_bytes(info, "reserved_storage") == info["tiers"]["R1"]["reserved_storage"] == 101 * MIB
             with pytest.raises(StreamAccountRefused) as refused:
                 await topology(nc, queue_limits()).ensure([TEAM, "team_more"])
             assert str(refused.value).startswith(
-                "The NATS account's tier R1 allows 120 streams and holds 107; this start would add 102. A team needs "
+                "The NATS account's tier R1 allows 120 streams and holds 108; this start would add 102. A team needs "
                 "102 streams at partition count 96 (96 partition streams, 4 more and 2 buckets)")
-            assert (await account(nc))["streams"] == 107, "nothing was made"
+            assert (await account(nc))["streams"] == 108, "nothing was made"
         finally:
             await nc.close()
 

@@ -1,0 +1,35 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "blobs.register",
+  "message_id": "01928f3a-7b2c-7e02-8000-000000000e02",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "worker-host-1",
+    "membership_epoch": 3,
+    "revocation_epoch": 1,
+    "key_id": "test-worker-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "team_services",
+    "id": "team_example"
+  },
+  "subject": "ua.v1.team_example.worker-host-1.svc.team",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "request_id": "blob_reg_agent_1",
+    "sha256": "DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0",
+    "size": 40000,
+    "owner": {
+      "type": "agent",
+      "agent_id": "researcher-2"
+    }
+  },
+  "idempotency_key": "blobs.register:XEmV-u5k5rZ0oWwmmn2T52yH-3ziktWN5XkEZK809ZM",
+  "body_digest": "8bOP5k7vKul0hozQqHr7VgrZSK_KYLzGEk-NSmSjt0c",
+  "signature": "mYWCUztW44NFsMC67bMRQ0txhXPC4eByMJZBhWxFKm3h-zc9rCl-hVwvxwe8XxyMKvxdfJpku_PlP_YS444zCg"
+}

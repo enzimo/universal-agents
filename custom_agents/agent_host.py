@@ -116,6 +116,7 @@ from custom_transport.protocol1.host_partitions import (
     OwnedPartition,
 )
 from custom_transport.protocol1.host_runtime import HOST_COMPONENTS_MAX, MessageHost
+from custom_transport.protocol1.ids import new_message_id
 from custom_transport.protocol1.joining import AGENT_TYPE_PATTERN, HostProfile
 from custom_transport.protocol1.live import ServiceUnavailable, Unsupported
 from custom_agents.agent_requests import (
@@ -820,6 +821,47 @@ class AgentProcessHost:
         assert self.host is not None and self.host.live is not None
         reply = await self.host.live.request(kind, body, self._audience(), team=self.team)
         return dict(reply.raw["body"])
+
+    async def delete_person_blobs(
+        self,
+        person_ref: str,
+        *,
+        request_id: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Ask the team services to delete a departed person's unowned blobs (``blobs.delete_person``).
+
+        Callable from any agent's event loop (runs on the host's loop via ``_on_host_loop`` after
+        checking join readiness and draining state, C06). Raises ``AgentUnreachable`` when the
+        host has not joined yet or is draining, and ``ServiceUnavailable`` / ``RequestRefused`` on
+        transport errors.
+        """
+
+        if self.loop is None or self.loop.is_closed():
+            raise AgentUnreachable("this process's message host is not running", clears=False)
+
+        async def _send() -> dict[str, Any]:
+            if self._draining is not None or (
+                self.host is not None and self.host.installation_contract is not None
+            ):
+                raise AgentUnreachable(
+                    "this process runs another message contract than its installation and is draining",
+                    clears=False,
+                )
+            if self.host is None or self.host.live is None or self._joined is None or not self._joined.is_set():
+                raise AgentUnreachable("this process has not joined the team's messaging yet", clears=True)
+            req_id = request_id or new_message_id()
+            body = {"request_id": req_id, "person": person_ref}
+            reply = await self.host.live.request(
+                "blobs.delete_person",
+                body,
+                self._audience(),
+                team=self.team,
+                timeout=timeout,
+            )
+            return dict(reply.raw["body"])
+
+        return dict(await self._on_host_loop(_send()))
 
     async def _close_earlier_sessions(self) -> None:
         """Find earlier sessions by their verified records, never a placement's mutable KV revision."""

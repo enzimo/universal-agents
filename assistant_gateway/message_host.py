@@ -285,6 +285,33 @@ class GatewayMessageHost:
                     "id": target_team}
         return await host.live.request(kind, body, audience, team=target_team, authority=token, timeout=timeout)
 
+    async def request_team(
+        self,
+        kind: str,
+        body: dict[str, Any],
+        *,
+        team: Optional[str] = None,
+        timeout: float = 30.0,
+    ) -> VerifiedFrame:
+        """Send a host-authenticated request with no authority token to ``svc.team`` (e.g. ``blobs.register``)."""
+
+        target_team = self.team if team is None else team
+        if target_team not in self.teams:
+            raise ValueError(f"gateway {self.runtime_id!r} does not serve team {target_team!r}")
+        host = await self.ready(timeout)
+        assert host.live is not None
+        audience = {"installation": host.identity.installation, "team": target_team, "target": "team_services",
+                    "id": target_team}
+        return await host.live.request(kind, body, audience, team=target_team, timeout=timeout)
+
+    async def blob_store_handle(self, *, timeout: float = 30.0) -> Any:
+        """Return the ``OBJ_UA1_BLOBS`` handle once this host has joined the installation."""
+
+        from custom_transport.protocol1.blobs import blob_store_handle
+
+        host = await self.ready(timeout)
+        return blob_store_handle(host.nc)
+
     async def close(self) -> None:
         """Stop the host (module docstring): raises only when the caller itself is cancelled."""
 

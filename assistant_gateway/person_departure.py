@@ -28,6 +28,7 @@ Every path comes from the instance layout.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import stat
 from collections.abc import Callable
@@ -47,11 +48,20 @@ from assistant_gateway.application.identity_service import GatewayIdentityServic
 from assistant_gateway.application.manager_commands import GatewayManagerCommandService
 from assistant_gateway.application.person_lifecycle import (
     ForgottenRecords,
+    GatewayPersonBlobs,
     GatewayPersonLifecycle,
     GatewayPersonLifecycleSettings,
     HeldPersonData,
+    PersonBlobDeletionResult,
 )
 from assistant_gateway.application.ports import GatewayClock, GatewayPersonSchedules, GatewaySecureBroker
+from assistant_gateway.application.team_commands import (
+    GatewayPersonReferences,
+    GatewayTeamCommandService,
+    PersonCopyNotCurrent,
+    TeamCommandRefused,
+    TeamServicesUnavailable,
+)
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.personal_setup import GatewayPersonalSetup
 from assistant_gateway.person_setup import GatewayPersonSetupStore
@@ -283,6 +293,72 @@ class GatewayPersonDeparture:
 
 
 
+class GatewayTeamBlobs:
+    """``GatewayPersonBlobs`` over ``GatewayTeamCommandService`` (``blobs.delete_person``)."""
+
+    def __init__(
+        self,
+        *,
+        team_commands: GatewayTeamCommandService,
+        references: GatewayPersonReferences,
+        logger_: logging.Logger = logger,
+    ) -> None:
+        self._team_commands = team_commands
+        self._references = references
+        self._logger = logger_
+
+    async def delete_person_blobs(
+        self, person_id: str, *, actor_person_id: str
+    ) -> PersonBlobDeletionResult:
+        try:
+            target_ref = await asyncio.to_thread(self._references.person_ref, person_id)
+        except PersonCopyNotCurrent as exc:
+            self._logger.warning(
+                "Could not refresh a departing person's copy before deleting their blobs. "
+                "event=person_blobs_target_copy_stale person_id=%s error=%s",
+                person_id,
+                exc,
+            )
+            return PersonBlobDeletionResult(
+                problem="Their temporary blob storage could not be cleared yet because the team's people copy could not be updated."
+            )
+        if target_ref is None:
+            return PersonBlobDeletionResult()
+        try:
+            reply = await self._team_commands.request(
+                "blobs.delete_person",
+                {"person": target_ref},
+                person_id=actor_person_id,
+            )
+        except (TeamServicesUnavailable, TeamCommandRefused) as exc:
+            self._logger.warning(
+                "Team services could not delete a departed person's blobs right now; upkeep will retry. "
+                "event=person_blobs_delete_unavailable person_id=%s error=%s",
+                person_id,
+                exc,
+            )
+            return PersonBlobDeletionResult(
+                problem="Their temporary blob storage could not be cleared yet; the team services will retry automatically."
+            )
+        if reply.get("outcome") != "ok":
+            message = str(reply.get("message") or reply.get("outcome") or "unknown error")
+            self._logger.warning(
+                "Team services refused or could not finish deleting a departed person's blobs. "
+                "event=person_blobs_delete_refused person_id=%s outcome=%s message=%s",
+                person_id,
+                reply.get("outcome"),
+                message,
+            )
+            return PersonBlobDeletionResult(
+                problem=f"Their temporary blob storage could not be cleared ({message})."
+            )
+        return PersonBlobDeletionResult(
+            owners_removed=int(reply.get("owners_removed", 0)),
+            blobs_deleted=int(reply.get("blobs_deleted", 0)),
+            blobs_kept=int(reply.get("blobs_kept", 0)),
+        )
+
+
 def build_gateway_person_lifecycle(
     config: GatewayInstanceConfig,
     *,
@@ -294,11 +370,21 @@ def build_gateway_person_lifecycle(
     person_schedules: GatewayPersonSchedules,
     clock: GatewayClock,
     personal_setup: GatewayPersonalSetup,
+    blobs: GatewayPersonBlobs | None = None,
+    team_commands: GatewayTeamCommandService | None = None,
+    references: GatewayPersonReferences | None = None,
     logger: logging.Logger | None = None,
 ) -> GatewayPersonLifecycle:
-    """The person lifecycle for this gateway: its stores, the manager, the broker and per-person schedules."""
+    """The person lifecycle for this gateway: its stores, the manager, the broker, team blobs, and per-person schedules."""
 
     storage = config.manager_storage_settings
+    resolved_blobs = blobs
+    if resolved_blobs is None and team_commands is not None and references is not None:
+        resolved_blobs = GatewayTeamBlobs(
+            team_commands=team_commands,
+            references=references,
+            logger_=logger or globals()["logger"],
+        )
     records = GatewayPersonDeparture(
         state_store=state_store,
         access=lambda: AccessRepository(storage),
@@ -325,8 +411,15 @@ def build_gateway_person_lifecycle(
             team_id=config.gateway.team_id,
             personal_setup=personal_setup,
         ),
+        blobs=resolved_blobs,
         logger=logger,
     )
 
 
-__all__ = ["GatewayPersonDeparture", "build_gateway_person_lifecycle", "grant_concerns", "request_concerns"]
+__all__ = [
+    "GatewayPersonDeparture",
+    "GatewayTeamBlobs",
+    "build_gateway_person_lifecycle",
+    "grant_concerns",
+    "request_concerns",
+]

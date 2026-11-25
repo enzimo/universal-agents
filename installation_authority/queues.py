@@ -69,6 +69,8 @@ from custom_messages.wire.queues import (
     QueueStream,
     agent_consumers,
     consumer_agent,
+    object_store_stream_config,
+    object_store_streams,
     queue_stream_config,
     queue_streams_per_team,
     streams_set_aside,
@@ -110,6 +112,13 @@ _SERVER_ERRORS = (NatsError, TimeoutError)
 # What a refusal says the start left: nothing before the first change, the streams made after.
 _NOTHING_CHANGED = "Nothing was changed."
 _MADE_SO_FAR_STAY = "The streams made so far stay; once the cause is fixed, the next start finishes the team."
+_MADE_SO_FAR_STAY_INSTALLATION = (
+    "The streams made so far stay; once the cause is fixed, the next start finishes the installation's streams."
+)
+
+
+def _made_so_far_stay(team: Optional[str]) -> str:
+    return _MADE_SO_FAR_STAY if team is not None else _MADE_SO_FAR_STAY_INSTALLATION
 CAP_SETTING = "transport.queues.max_messages_per_subject"
 COUNT_SETTING = "transport.queues.partitions"
 REPLICAS_SETTING = "transport.replicas"
@@ -292,6 +301,7 @@ class QueueTopology:
         changes: list[StreamChange] = []
         for team in teams:
             changes.extend(await self._team_changes(team))
+        changes.extend(await self._object_store_changes())
         changes.extend(await self._bucket_changes(teams))
         # Lowered streams first: they give back the room the others may need.
         ordered = [change for change in changes if change.reserve < 0] + [c for c in changes if c.reserve >= 0]
@@ -327,6 +337,18 @@ class QueueTopology:
             if "max_msgs_per_subject" in changed and current is not None:
                 await self._check_cap(stream, current, int(config["max_msgs_per_subject"]))
             changes.append(StreamChange(stream.name, team, config, current, changed, setting=stream.setting))
+        return changes
+
+    async def _object_store_changes(self) -> list[StreamChange]:
+        """The installation-wide object store streams (``OBJ_UA1_BLOBS``) to create or update (S4)."""
+
+        changes: list[StreamChange] = []
+        for stream in object_store_streams(self._transport):
+            config = object_store_stream_config(self._transport, stream, self.limits)
+            current = await self._current(stream.name)
+            changed = () if current is None else _changed_fields(config, current)
+            if current is None or changed:
+                changes.append(StreamChange(stream.name, None, config, current, changed, setting=stream.setting))
         return changes
 
     async def _bucket_changes(self, teams: list[str]) -> list[StreamChange]:
@@ -472,14 +494,19 @@ class QueueTopology:
                 await self._js.update_stream(config=config)
         except _SERVER_ERRORS as error:
             raise await self._refusal(change, error, pending) from None
-        kind = "bucket" if change.bucket else "queue_stream"
+        if change.bucket:
+            kind, label = "bucket", "key-value bucket"
+        elif change.team is None:
+            kind, label = "object_store", "object store stream"
+        else:
+            kind, label = "queue_stream", "message stream"
         if change.current is None:
             self._logger.info("Created a %s. event=protocol1_%s_created stream=%s max_bytes=%s replicas=%s",
-                              "key-value bucket" if change.bucket else "message stream", kind, change.name,
+                              label, kind, change.name,
                               change.config.get("max_bytes", -1), change.config["num_replicas"])
         else:
             self._logger.info("Updated a %s. event=protocol1_%s_updated stream=%s changed=%s",
-                              "key-value bucket" if change.bucket else "message stream", kind, change.name, ",".join(
+                              label, kind, change.name, ",".join(
                                   f"{name}:{_shown(getattr(change.current, name))}->{_shown(change.config[name])}"
                                   for name in change.changed))
 
@@ -559,11 +586,12 @@ class QueueTopology:
         """The start refusal for the server's refusal of ``change``, or its missing answer."""
 
         action = "create" if change.current is None else "update"
+        after = _made_so_far_stay(change.team)
         if isinstance(error, APIError) and _no_room_in_cluster(error):
             return await self._cluster_storage_refusal(change, action, error)
         if not isinstance(error, APIError) or error.err_code != INSUFFICIENT_STORAGE:
-            return self._server_refusal(f"{action} {change.what}", error, after=_MADE_SO_FAR_STAY, change=change)
-        room = AccountRoom.read(await self._account_info(after=_MADE_SO_FAR_STAY), self.limits.replicas)
+            return self._server_refusal(f"{action} {change.what}", error, after=after, change=change)
+        room = AccountRoom.read(await self._account_info(after=after), self.limits.replicas)
         refused = f"JetStream error {INSUFFICIENT_STORAGE}, {error.description}."
         if change.reserve <= 0:
             # A lowering or a change of no size can be refused only when what is set aside already
@@ -577,6 +605,7 @@ class QueueTopology:
                 f"measures its storage when it starts), or give an external server more storage (its "
                 f"max_file_store) or raise its account's limit. Nothing else was changed by this start's refused "
                 f"step; once NATS has the room, the next start finishes.")
+        finishes = "finishes the team" if change.team is not None else "finishes the installation's streams"
         return StreamStorageRefused(
             f"NATS has no room to set aside {_limit(change.config):,} bytes for {change.what} "
             f"({change.setting}): {refused} {self._totals(change.team, room)}"
@@ -584,7 +613,7 @@ class QueueTopology:
             f"{change.setting} or the other transport.queues.max_bytes entries, or give NATS more storage (free disk "
             f"space and restart the instance, or an external server's max_file_store). If NATS started with less "
             f"room than its streams had already set aside, it refuses every change, a lowered limit too, until it "
-            f"has more. The streams made so far stay; once the limits fit, the next start finishes the team.")
+            f"has more. The streams made so far stay; once the limits fit, the next start {finishes}.")
 
     async def _cluster_storage_refusal(self, change: StreamChange, action: str,
                                        error: APIError) -> StreamStorageRefused:
@@ -596,7 +625,8 @@ class QueueTopology:
         existing stream is refused with 10047 instead, and gets the 10047 refusal (``_refusal``).
         """
 
-        room = AccountRoom.read(await self._account_info(after=_MADE_SO_FAR_STAY), self.limits.replicas)
+        after = _made_so_far_stay(change.team)
+        room = AccountRoom.read(await self._account_info(after=after), self.limits.replicas)
         copies = self.limits.replicas
         setting = f" ({change.setting})" if change.setting else ""
         fewer = f", lower {REPLICAS_SETTING} so fewer servers need that room" if copies > 1 else ""
@@ -606,7 +636,7 @@ class QueueTopology:
             f"NATS refused to {action} {change.what}: {lacking} (JetStream error {error.err_code}, "
             f"{error.description}). Each server that keeps a copy of a stream needs room for the stream's whole "
             f"limit in its own storage, here {_limit(change.config):,} bytes{setting}. "
-            f"{self._totals(change.team, room)} {_lower(change)}{fewer}, or give the cluster's servers more storage (their max_file_store). {_MADE_SO_FAR_STAY}")
+            f"{self._totals(change.team, room)} {_lower(change)}{fewer}, or give the cluster's servers more storage (their max_file_store). {after}")
 
     def _server_refusal(self, doing: str, error: BaseException, *, after: str,
                         change: Optional[StreamChange] = None) -> AuthorityStartRefused:
@@ -658,10 +688,14 @@ class QueueTopology:
 
     @property
     def consumers_needed(self) -> int:
-        """The most consumers one of the instance's streams takes: the contract's largest ``max_consumers``, buckets too."""
+        """The most consumers one of the instance's streams takes: the contract's largest ``max_consumers``, buckets and object stores too."""
 
         streams = [int(spec.get("max_consumers", 0)) for spec in self._transport["streams"].values()]
-        return max([*streams, int(self._transport["key_value_stream"].get("max_consumers", 0))])
+        return max([
+            *streams,
+            int(self._transport["key_value_stream"].get("max_consumers", 0)),
+            int(self._transport["object_store_stream"].get("max_consumers", 0)),
+        ])
 
     async def _account_info(self, *, after: str) -> dict[str, Any]:
         """The account's information as the server sends it (``custom_transport.jetstream_account``).
@@ -709,14 +743,16 @@ class QueueTopology:
                 f"{math.ceil(set_aside / BUNDLED_STORAGE_SHARE):,} bytes free at every start.")
 
     def _team_count(self) -> str:
-        """How many streams a team needs at this partition count, buckets included."""
+        """How many streams a team needs at this partition count, buckets and object stores included."""
 
         team_buckets = sum(TEAM_PLACEHOLDER in bucket for bucket in self._transport["key_value"])
         shared = len(self._transport["key_value"]) - team_buckets
+        object_stores = len(self._transport["object_store"])
+        store_noun = "object store" if object_stores == 1 else "object stores"
         others = queue_streams_per_team(self._transport, self.partitions) - self.partitions
         return (f"A team needs {self.partitions + others + team_buckets:,} streams at partition count "
                 f"{self.partitions} ({self.partitions} partition streams, {others} more and {team_buckets} buckets), "
-                f"and the installation {shared} buckets of its own.")
+                f"and the installation {shared} buckets and {object_stores} {store_noun} of its own.")
 
 
 def _first_upper(text: str) -> str:

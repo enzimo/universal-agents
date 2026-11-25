@@ -59,6 +59,7 @@ PART_1 = f"UA1_PART_{TEAM}~1"
 PART_0 = f"UA1_PART_{TEAM}~0"
 POOL = f"UA1_POOL_WORK_{TEAM}"
 DEAD_LETTERS = f"UA1_DLQ_{TEAM}"
+BLOBS = "OBJ_UA1_BLOBS"
 
 
 class _Clock:
@@ -95,7 +96,7 @@ class _Streams:
                                    missing=self.missing)
 
 
-_NAMES = {"part_0": PART_0, "part_1": PART_1, "pool": POOL, "dead_letters": DEAD_LETTERS}
+_NAMES = {"part_0": PART_0, "part_1": PART_1, "pool": POOL, "dead_letters": DEAD_LETTERS, "blobs": BLOBS}
 
 
 def usage(name: str, percent: float, limit: int | None = MIB) -> JetStreamStreamUsage:
@@ -171,6 +172,21 @@ def test_a_stream_at_the_level_is_a_problem_naming_the_team_its_kind_and_the_set
     assert dead_letters.title == f"Team {TEAM}'s message stream for set-aside messages (dead letters) is 90% full"
     assert "receivers keep each message they would set aside" in dead_letters.summary
     assert "transport.queues.max_bytes.dead_letter" in dead_letters.action
+
+
+def test_blob_store_stream_at_the_level_uses_installation_scoped_wording_naming_both_settings(tmp_path) -> None:
+    """C05: OBJ_UA1_BLOBS has team=None and produces plain installation-scoped advice naming both settings."""
+
+    capacity = _capacity(tmp_path / "levels.json", _Clock())
+    [finding] = capacity.findings([usage(BLOBS, 86.0)])
+    assert finding.finding_id == f"queue_filling:{BLOBS}:20261118T120000Z"
+    assert finding.title == f"The installation's blob store stream ({BLOBS}) is 86% full"
+    assert "Team None" not in finding.title
+    assert "refuses new files and long text" in finding.summary
+    assert "transport.queues.max_bytes.blobs" in finding.action
+    assert "agent.blob_retention_days" in finding.action
+    assert f"Limit: {MIB:,} bytes (transport.queues.max_bytes.blobs)" in finding.details
+    assert capacity.unmeasured([BLOBS, f"UA1_POOL_WORK_{OTHER}"]) == [BLOBS]
 
 
 def test_the_finding_keeps_its_id_while_the_stream_stays_at_the_level_and_ends_only_below_the_margin(tmp_path) -> None:
@@ -446,17 +462,22 @@ def test_the_gateway_asks_for_its_own_teams_protocol_1_subjects(tmp_path) -> Non
     asked: list[str] = []
 
     class _Adapter:
-        async def jetstream_streams(self, *, subject: str) -> list:
+        async def jetstream_streams(self, *, subject: str) -> JetStreamStreamList:
             asked.append(subject)
-            return []
+            if subject == "$O.UA1_BLOBS.>":
+                return JetStreamStreamList(streams=[usage(BLOBS, 50.0)], missing=())
+            return JetStreamStreamList(streams=[usage(POOL, 40.0)], missing=(PART_0,))
 
     config = _config(tmp_path)
     runtime = NatsGatewayManagerRuntime(settings=NatsGatewayManagerRuntimeSettings.from_gateway_config(config),
                                         adapter=_Adapter())  # type: ignore[arg-type]
     assert asyncio.run(runtime.team_streams(TEAM)) is None  # not connected
     runtime._connected = True
-    asyncio.run(runtime.team_streams(TEAM))
-    assert asked == [f"{SUBJECT_ROOT}{TEAM}.>"] == [f"ua.v1.{TEAM}.>"]
+    listed = asyncio.run(runtime.team_streams(TEAM))
+    assert asked == [f"{SUBJECT_ROOT}{TEAM}.>", "$O.UA1_BLOBS.>"] == [f"ua.v1.{TEAM}.>", "$O.UA1_BLOBS.>"]
+    assert listed is not None
+    assert [s.name for s in listed.streams] == [POOL, BLOBS]
+    assert listed.missing == (PART_0,)
 
 
 # -- a real NATS server -----------------------------------------------------------------------
@@ -478,13 +499,21 @@ def test_the_gateway_lists_its_teams_streams_on_a_real_server_and_finds_the_full
             for team in (TEAM, OTHER):
                 for _ in range(9):  # about 88% of the 1 MiB limit
                     await js.publish(f"ua.v1.{team}.lead-host-1.work.pool.researchers", filler)
+            for idx in range(9):  # about 88% of the 1 MiB OBJ_UA1_BLOBS limit
+                await js.publish(f"$O.UA1_BLOBS.C.nuidcap{idx}", filler)
         finally:
             await nc.close()
         adapter = NatsTransportAdapter(config=NatsTransportConfig(servers=[url], storage="file"),
                                        mapper=NatsSubjectMapper(team_id=TEAM))
         await adapter.connect(reconcile_topology=True)  # the gateway's 0.9 streams too: none is listed
         try:
-            listed = await adapter.jetstream_streams(subject=f"{SUBJECT_ROOT}{TEAM}.>")
+            config = _config(tmp_path)
+            runtime = NatsGatewayManagerRuntime(
+                settings=NatsGatewayManagerRuntimeSettings.from_gateway_config(config),
+                adapter=adapter,
+            )
+            runtime._connected = True
+            listed = await runtime.team_streams(TEAM)
         finally:
             await adapter.close()
         assert listed is not None
@@ -497,9 +526,14 @@ def test_the_gateway_lists_its_teams_streams_on_a_real_server_and_finds_the_full
 
     assert listed.missing == ()
     assert {item.name for item in listed.streams} == {
-        stream.name for stream in team_queue_streams(transport(), TEAM, 1)}
+        *(stream.name for stream in team_queue_streams(transport(), TEAM, 1)),
+        BLOBS,
+    }
     pool = next(item for item in listed.streams if item.name == POOL)
     assert pool.max_bytes == MIB and pool.messages == 9 and 0.8 * MIB < pool.stored_bytes < MIB
-    [finding] = findings
-    assert finding.finding_id.startswith(f"queue_filling:{POOL}:")
-    assert finding.title == f"Team {TEAM}'s message stream for the worker pools is 88% full"
+    blobs_stream = next(item for item in listed.streams if item.name == BLOBS)
+    assert blobs_stream.max_bytes == MIB and blobs_stream.messages == 9 and 0.8 * MIB < blobs_stream.stored_bytes < MIB
+    by_prefix = {finding.finding_id.split(":")[1]: finding for finding in findings}
+    assert set(by_prefix) == {POOL, BLOBS}
+    assert by_prefix[POOL].title == f"Team {TEAM}'s message stream for the worker pools is 88% full"
+    assert "blob store" in by_prefix[BLOBS].title.lower() and "88% full" in by_prefix[BLOBS].title
