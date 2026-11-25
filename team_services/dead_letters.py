@@ -40,9 +40,10 @@ from typing import Any, Callable, Mapping, Optional, Protocol, Sequence
 
 from nats.errors import TimeoutError as NatsTimeoutError
 from nats.js.errors import NotFoundError
+from pydantic import TypeAdapter, ValidationError
 
 from access_control.people import PERSON_ROLE_ADMIN, is_administrator
-from access_control.people_directory import PeopleDirectory
+from access_control.people_directory import PeopleDirectory, PersonNow
 from custom_agents.instance_delivery_context import default_notification_gateway_context
 from custom_agents.stuck_work import ChatRoute
 from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1, PersonStanding
@@ -52,7 +53,8 @@ from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.enums import RequesterType
 from custom_messages.wire.encoding import b64url
 from custom_messages.wire.frame import Receiver, VerifiedFrame
-from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT
+from custom_messages.wire.kinds import DEFAULT_PARTITION_COUNT, INSTALLATION_SCOPE
+from custom_messages.wire.models import RuntimeId
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.transport_codec import encode_envelope
 from custom_transport.protocol1.dead_letters import (
@@ -66,6 +68,7 @@ from custom_transport.protocol1.dead_letters import (
     StoredStreamMessage,
     SweepSummary,
     bind_dlq_notice_consumer,
+    check_stream_near_expiry,
     classify_durable_refusal,
     consumer_cutoff_seq,
     consumer_info,
@@ -128,6 +131,10 @@ TEAM_PERSON_DATA_SIDE_BY_SIDE_KINDS = frozenset(TEAM_PERSON_DATA_KINDS)
 
 _DEPARTED_STANDINGS = frozenset({PersonStanding.DISABLED, PersonStanding.REMOVED})
 _SHORT_TEXT_MAX = 500
+_INBOX_TITLE_MAX = 400
+_INBOX_SUMMARY_MAX = 4000
+_AUTHORITY_RUNTIME = "authority"
+_RUNTIME_ID_ADAPTER: TypeAdapter[str] = TypeAdapter(RuntimeId)
 
 _REASON_WORDS: Mapping[str, str] = {
     "malformed": "the message was malformed and could not be read",
@@ -189,6 +196,7 @@ class _VerifiedNoticeItem:
     raw_stored: bool
     raw_size: int
     raw_status: str  # "ok", "not_stored", "missing", "mismatch", "departed_deleted"
+    raw_sha256: str = ""
     old_envelope: Optional[OldEnvelopeSummary] = None
     person_labels: tuple[str, ...] = ()
 
@@ -200,6 +208,8 @@ class _InvalidNoticeItem:
     refusal_code: str
     subject: str
     stream_seq: int
+    subject_valid: bool = False
+    display_runtime: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -353,9 +363,25 @@ def _format_verified_line(item: _VerifiedNoticeItem, dlq_stream: str) -> str:
     return f"{base} ({'; '.join(extras)})." if extras else f"{base}."
 
 
+def _truncate_notice_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
 def _format_invalid_line(item: _InvalidNoticeItem) -> str:
+    if item.subject_valid:
+        return (
+            f"- invalid dead-letter notice from {item.subject_runtime} "
+            f"(stream sequence {item.stream_seq}): refused as {item.refusal_code}; copy {item.copy_id}."
+        )
+    if item.display_runtime:
+        return (
+            f"- invalid dead-letter notice from {item.display_runtime} on an unexpected subject "
+            f"(stream sequence {item.stream_seq}): refused as {item.refusal_code}; copy {item.copy_id}."
+        )
     return (
-        f"- invalid dead-letter notice from {item.subject_runtime} on {item.subject} "
+        f"- invalid dead-letter notice on an unexpected subject "
         f"(stream sequence {item.stream_seq}): refused as {item.refusal_code}; copy {item.copy_id}."
     )
 
@@ -423,8 +449,8 @@ def format_dlq_admin_notice(
         f"{dlq_stream} for an operator to look at; nothing was sent to anyone in their place."
     )
     return FormattedAdminNotice(
-        title=f"{total} message(s) could not be handled and were set aside",
-        text=text,
+        title=_truncate_notice_text(f"{total} message(s) could not be handled and were set aside", _INBOX_TITLE_MAX),
+        text=_truncate_notice_text(text, _INBOX_SUMMARY_MAX),
     )
 
 
@@ -638,7 +664,7 @@ class DeadLetterService:
             runtime=live.identity.runtime,
         )
 
-    def _departed_person_targets(self) -> tuple[frozenset[str], frozenset[str]]:
+    def _people_directory_snapshot(self) -> tuple[frozenset[str], frozenset[str], dict[str, PersonNow]]:
         records = self._people.store.team_people(self._team_id)
         refs = frozenset(
             rec.person_ref
@@ -650,6 +676,16 @@ class DeadLetterService:
             for rec in records
             if rec.standing in _DEPARTED_STANDINGS and rec.person_id
         )
+        by_id = {
+            rec.person_id: PersonNow(
+                rec.person_id, rec.standing, tuple(rec.roles), display_name=rec.display_name
+            )
+            for rec in records
+        }
+        return refs, ids, by_id
+
+    def _departed_person_targets(self) -> tuple[frozenset[str], frozenset[str]]:
+        refs, ids, _ = self._people_directory_snapshot()
         return refs, ids
 
     def sweep_stream_names(self, live: LiveHost) -> tuple[str, ...]:
@@ -792,7 +828,7 @@ class DeadLetterService:
         live = self._require_live()
         now = _utc(self._clock())
         receiver = self._dlq_receiver(live)
-        departed_refs, departed_ids = await asyncio.to_thread(self._departed_person_targets)
+        departed_refs, departed_ids, people_by_id = await asyncio.to_thread(self._people_directory_snapshot)
 
         verified_items: list[_VerifiedNoticeItem] = []
         invalid_items: list[_InvalidNoticeItem] = []
@@ -802,7 +838,13 @@ class DeadLetterService:
             if stop is not None and stop.is_set():
                 break
             outcome = await self._inspect_delivered_notice(
-                live, msg, receiver=receiver, now=now, departed_refs=departed_refs, departed_ids=departed_ids
+                live,
+                msg,
+                receiver=receiver,
+                now=now,
+                departed_refs=departed_refs,
+                departed_ids=departed_ids,
+                people_by_id=people_by_id,
             )
             if outcome == "pause":
                 await self._pause_for_stale_revocations()
@@ -839,6 +881,7 @@ class DeadLetterService:
         now: datetime,
         departed_refs: frozenset[str],
         departed_ids: frozenset[str],
+        people_by_id: Mapping[str, PersonNow],
     ) -> _VerifiedNoticeItem | _InvalidNoticeItem | str:
         raw_bytes = bytes(msg.data)
         subject = str(msg.subject)
@@ -880,7 +923,19 @@ class DeadLetterService:
             verified,
             departed_refs=departed_refs,
             departed_ids=departed_ids,
+            people_by_id=people_by_id,
         )
+
+    def _validated_subject_runtime(self, subject: str) -> Optional[str]:
+        """Return token 3 (runtime) of an unparsable subject only if the prefix matches and it fits RuntimeId (SEC-2)."""
+
+        parts = subject.split(".")
+        if len(parts) < 4 or parts[0] != "ua" or parts[1] != "v1" or parts[2] != self._team_id:
+            return None
+        try:
+            return str(_RUNTIME_ID_ADAPTER.validate_python(parts[3]))
+        except ValidationError:
+            return None
 
     def _invalid_item_from_refusal(
         self, subject: str, raw_bytes: bytes, stream_seq: int, refusal_code: str
@@ -888,15 +943,19 @@ class DeadLetterService:
         parsed = parse_dlq_notice_subject(subject, self._team_id)
         if parsed is not None:
             runtime, copy_id = parsed
+            subject_valid = True
+            display_runtime: Optional[str] = runtime
         else:
             runtime = "_invalid_subject"
             copy_id = hashlib.sha256(f"{subject}\x00".encode("utf-8") + raw_bytes).hexdigest()
+            subject_valid = False
+            display_runtime = self._validated_subject_runtime(subject)
         self._logger.warning(
             "Dead-letter notice failed verification; summarizing for administrators and recording receipt. "
             "event=protocol1_dlq_invalid_notice stream=%s seq=%s subject=%s runtime=%s copy_id=%s refusal=%s",
             self._dlq_stream,
             stream_seq,
-            subject,
+            subject[:200],
             runtime,
             copy_id,
             refusal_code,
@@ -907,7 +966,42 @@ class DeadLetterService:
             refusal_code=refusal_code,
             subject=subject,
             stream_seq=stream_seq,
+            subject_valid=subject_valid,
+            display_runtime=display_runtime,
         )
+
+    def _display_original_subject(self, original_subject: str, *, reason: str, issuer_runtime: str) -> str:
+        """Check that a protocol 1 notice's ``original.subject`` carries this team's prefix (CRIT-2)."""
+
+        if reason == "upgrade_old_format":
+            return original_subject
+        if original_subject.startswith(f"ua.v1.{self._team_id}."):
+            return original_subject
+        if issuer_runtime == _AUTHORITY_RUNTIME and original_subject.startswith(f"ua.v1.{INSTALLATION_SCOPE}."):
+            return original_subject
+        return "an unexpected subject"
+
+    @staticmethod
+    def _resolve_old_envelope_person_labels(
+        person_ids: frozenset[str],
+        *,
+        departed_ids: frozenset[str],
+        people_by_id: Mapping[str, PersonNow],
+    ) -> tuple[str, ...]:
+        """Map legacy envelope person ids to PeopleDirectory display names or safe fallback labels (SEC-3, GR-5)."""
+
+        labels: list[str] = []
+        for pid in sorted(person_ids):
+            person = people_by_id.get(pid)
+            if person is None:
+                label = "a person who has left" if pid in departed_ids else "a person not in the team's records"
+            elif person.standing in _DEPARTED_STANDINGS or pid in departed_ids:
+                label = "a person who has left"
+            else:
+                label = person.display_name or person.person_id
+            if label not in labels:
+                labels.append(label)
+        return tuple(labels)
 
     async def _inspect_verified_notice(
         self,
@@ -916,6 +1010,7 @@ class DeadLetterService:
         *,
         departed_refs: frozenset[str],
         departed_ids: frozenset[str],
+        people_by_id: Mapping[str, PersonNow],
     ) -> _VerifiedNoticeItem:
         body = verified.raw["body"]
         issuer_runtime = str(verified.frame.issuer.runtime)
@@ -945,18 +1040,19 @@ class DeadLetterService:
 
         person_labels: tuple[str, ...] = ()
         if reason == "upgrade_old_format" and old_envelope is not None and old_envelope.person_ids:
-            labels: list[str] = []
-            for pid in sorted(old_envelope.person_ids):
-                label = "a person who has left" if pid in departed_ids else pid
-                if label not in labels:
-                    labels.append(label)
-            person_labels = tuple(labels)
+            person_labels = self._resolve_old_envelope_person_labels(
+                old_envelope.person_ids, departed_ids=departed_ids, people_by_id=people_by_id
+            )
+
+        displayed_subject = self._display_original_subject(
+            str(original["subject"]), reason=reason, issuer_runtime=issuer_runtime
+        )
 
         return _VerifiedNoticeItem(
             issuer_runtime=issuer_runtime,
             copy_id=copy_id,
             reason=reason,
-            original_subject=str(original["subject"]),
+            original_subject=displayed_subject,
             original_stream=str(original["stream"]),
             original_stream_sequence=int(original["stream_sequence"]),
             deliveries=int(original["deliveries"]),
@@ -968,6 +1064,7 @@ class DeadLetterService:
             raw_stored=raw_stored,
             raw_size=raw_size,
             raw_status=raw_status,
+            raw_sha256=raw_sha256,
             old_envelope=old_envelope,
             person_labels=person_labels,
         )
@@ -1015,6 +1112,88 @@ class DeadLetterService:
             return "ok", extract_old_envelope_summary(stored.data)
         return "ok", None
 
+    async def _dedupe_and_filter_batch(
+        self,
+        verified_items: Sequence[_VerifiedNoticeItem],
+        invalid_items: Sequence[_InvalidNoticeItem],
+    ) -> tuple[
+        list[_VerifiedNoticeItem],
+        list[_InvalidNoticeItem],
+        dict[tuple[str, str], tuple[str, int, str]],
+        list[tuple[str, str]],
+        list[tuple[str, str, str]],
+    ]:
+        """Filter already-reported copies and deduplicate cross-runtime originals within a batch and against DB (C02, F2)."""
+
+        candidate_keys = [
+            *((item.issuer_runtime, item.copy_id) for item in verified_items),
+            *((item.subject_runtime, item.copy_id) for item in invalid_items),
+        ]
+        already_reported = await asyncio.to_thread(
+            self._access.dlq_reported_copy_keys, self._team_id, candidate_keys
+        )
+        candidate_originals = [
+            (item.original_stream, item.original_stream_sequence, item.raw_sha256)
+            for item in verified_items
+            if item.raw_sha256 and (item.issuer_runtime, item.copy_id) not in already_reported
+        ]
+        reported_originals = (
+            await asyncio.to_thread(self._access.dlq_reported_original_keys, self._team_id, candidate_originals)
+            if candidate_originals
+            else {}
+        )
+
+        fresh_verified: list[_VerifiedNoticeItem] = []
+        fresh_invalid: list[_InvalidNoticeItem] = []
+        original_keys_map: dict[tuple[str, str], tuple[str, int, str]] = {}
+        batch_aliases: list[tuple[str, str]] = []
+        db_duplicate_aliases: list[tuple[str, str, str]] = []
+        seen_copy_keys: set[tuple[str, str]] = set()
+        seen_originals: set[tuple[str, int, str]] = set()
+
+        for item in verified_items:
+            copy_key = (item.issuer_runtime, item.copy_id)
+            if copy_key in already_reported or copy_key in seen_copy_keys:
+                continue
+            seen_copy_keys.add(copy_key)
+            orig_key = (item.original_stream, item.original_stream_sequence, item.raw_sha256)
+            if item.raw_sha256:
+                existing_notice_id = reported_originals.get(orig_key)
+                if existing_notice_id is not None:
+                    db_duplicate_aliases.append((item.issuer_runtime, item.copy_id, existing_notice_id))
+                    continue
+                if orig_key in seen_originals:
+                    batch_aliases.append(copy_key)
+                    continue
+                seen_originals.add(orig_key)
+                original_keys_map[copy_key] = orig_key
+            fresh_verified.append(item)
+
+        for inv in invalid_items:
+            copy_key = (inv.subject_runtime, inv.copy_id)
+            if copy_key in already_reported or copy_key in seen_copy_keys:
+                continue
+            seen_copy_keys.add(copy_key)
+            fresh_invalid.append(inv)
+
+        return fresh_verified, fresh_invalid, original_keys_map, batch_aliases, db_duplicate_aliases
+
+    async def _record_db_duplicate_aliases(self, aliases: Sequence[tuple[str, str, str]]) -> None:
+        if not aliases:
+            return
+        try:
+            await asyncio.to_thread(
+                self._access.record_dlq_copy_aliases,
+                self._team_id,
+                aliases,
+                reported_at_utc=_utc(self._clock()),
+            )
+        except Exception:
+            self._logger.debug(
+                "Could not store duplicate copy-id alias receipts; recovery will deduplicate by original key.",
+                exc_info=True,
+            )
+
     async def _report_and_ack_batch(
         self,
         verified_items: Sequence[_VerifiedNoticeItem],
@@ -1024,21 +1203,16 @@ class DeadLetterService:
         waiting_after: int,
         stop: Optional[asyncio.Event],
     ) -> int:
-        # C02: Filter out any copy already recorded in protocol1_dlq_reported_notices before building
-        # the notice and chat message (handles crash-before-ack, changed batches, and duplicates).
-        candidate_keys = [
-            *((item.issuer_runtime, item.copy_id) for item in verified_items),
-            *((item.subject_runtime, item.copy_id) for item in invalid_items),
-        ]
-        already_reported = await asyncio.to_thread(
-            self._access.dlq_reported_copy_keys, self._team_id, candidate_keys
-        )
-        fresh_verified = [
-            item for item in verified_items if (item.issuer_runtime, item.copy_id) not in already_reported
-        ]
-        fresh_invalid = [
-            item for item in invalid_items if (item.subject_runtime, item.copy_id) not in already_reported
-        ]
+        # C02 & F2: Filter out any copy already recorded by copy key or by (original.stream, seq, raw.sha256),
+        # and deduplicate cross-runtime duplicates within the same fetched batch before alerting.
+        (
+            fresh_verified,
+            fresh_invalid,
+            original_keys_map,
+            batch_aliases,
+            db_duplicate_aliases,
+        ) = await self._dedupe_and_filter_batch(verified_items, invalid_items)
+        await self._record_db_duplicate_aliases(db_duplicate_aliases)
         if not fresh_verified and not fresh_invalid:
             for msg in ackable_messages:
                 await msg.ack()
@@ -1058,6 +1232,8 @@ class DeadLetterService:
             notice_id=notice_id,
             formatted=formatted,
             receipt_keys=receipt_keys,
+            original_keys=original_keys_map,
+            alias_receipts=batch_aliases,
             stop=stop,
         )
         if not delivered:
@@ -1092,12 +1268,19 @@ class DeadLetterService:
         notice_id: str,
         formatted: FormattedAdminNotice,
         receipt_keys: Sequence[tuple[str, str]],
+        original_keys: Mapping[tuple[str, str], tuple[str, int, str]] | None = None,
+        alias_receipts: Sequence[tuple[str, str]] = (),
         stop: Optional[asyncio.Event],
     ) -> bool:
         async def attempt_deliver() -> bool:
             now = _utc(self._clock())
             inbox_ok, inbox_created = await self._try_store_inbox_with_receipts(
-                notice_id, formatted, receipt_keys, now
+                notice_id,
+                formatted,
+                receipt_keys,
+                now,
+                original_keys=original_keys,
+                alias_receipts=alias_receipts,
             )
             chat_sender = self._chat_sender
             if (
@@ -1158,14 +1341,17 @@ class DeadLetterService:
         formatted: FormattedAdminNotice,
         receipt_keys: Sequence[tuple[str, str]],
         now: datetime,
+        *,
+        original_keys: Mapping[tuple[str, str], tuple[str, int, str]] | None = None,
+        alias_receipts: Sequence[tuple[str, str]] = (),
     ) -> tuple[bool, bool]:
         notice = AccessNoticeV1(
             notice_id=notice_id[:120],
             team_id=self._team_id,
             kind=AccessNoticeKind.MESSAGES_SET_ASIDE,
             recipient_roles=(PERSON_ROLE_ADMIN,),
-            title=formatted.title[:400],
-            summary=formatted.text[:4000],
+            title=formatted.title[:_INBOX_TITLE_MAX],
+            summary=formatted.text[:_INBOX_SUMMARY_MAX],
             created_at_utc=now,
         )
         try:
@@ -1174,6 +1360,8 @@ class DeadLetterService:
                 self._team_id,
                 notice,
                 receipt_keys,
+                original_keys=original_keys,
+                alias_receipts=alias_receipts,
                 reported_at_utc=now,
             )
             return True, bool(notice_created or receipts_inserted > 0)
@@ -1250,6 +1438,7 @@ class DeadLetterService:
         now: datetime,
         departed_refs: frozenset[str],
         departed_ids: frozenset[str],
+        people_by_id: Mapping[str, PersonNow],
         verified_items: list[_VerifiedNoticeItem],
         invalid_items: list[_InvalidNoticeItem],
     ) -> bool:
@@ -1258,7 +1447,13 @@ class DeadLetterService:
         unreported = await self._filter_unreported_stored_notices(batch)
         for stored in unreported:
             outcome = await self._inspect_stored_notice(
-                live, stored, receiver=receiver, now=now, departed_refs=departed_refs, departed_ids=departed_ids
+                live,
+                stored,
+                receiver=receiver,
+                now=now,
+                departed_refs=departed_refs,
+                departed_ids=departed_ids,
+                people_by_id=people_by_id,
             )
             if outcome == "temporary":
                 return False
@@ -1281,7 +1476,7 @@ class DeadLetterService:
 
         now = _utc(self._clock())
         receiver = self._dlq_receiver(live)
-        departed_refs, departed_ids = await asyncio.to_thread(self._departed_person_targets)
+        departed_refs, departed_ids, people_by_id = await asyncio.to_thread(self._people_directory_snapshot)
         verified_items: list[_VerifiedNoticeItem] = []
         invalid_items: list[_InvalidNoticeItem] = []
         next_seq = start_seq
@@ -1304,6 +1499,7 @@ class DeadLetterService:
                     now=now,
                     departed_refs=departed_refs,
                     departed_ids=departed_ids,
+                    people_by_id=people_by_id,
                     verified_items=verified_items,
                     invalid_items=invalid_items,
                 )
@@ -1364,9 +1560,10 @@ class DeadLetterService:
 
         reported = 0
         if verified_items or invalid_items:
-            reported = await self._report_recovered_batch(verified_items, invalid_items, stop=stop)
-            if reported == 0:
+            recovered_count = await self._report_recovered_batch(verified_items, invalid_items, stop=stop)
+            if recovered_count is None:
                 return 0
+            reported = recovered_count
 
         if scanned_up_to > last_scanned:
             await asyncio.to_thread(
@@ -1400,6 +1597,7 @@ class DeadLetterService:
         now: datetime,
         departed_refs: frozenset[str],
         departed_ids: frozenset[str],
+        people_by_id: Mapping[str, PersonNow],
     ) -> _VerifiedNoticeItem | _InvalidNoticeItem | str:
         try:
             verified = await live.verify(
@@ -1427,6 +1625,7 @@ class DeadLetterService:
             verified,
             departed_refs=departed_refs,
             departed_ids=departed_ids,
+            people_by_id=people_by_id,
         )
 
     async def _report_recovered_batch(
@@ -1435,20 +1634,15 @@ class DeadLetterService:
         invalid_items: Sequence[_InvalidNoticeItem],
         *,
         stop: Optional[asyncio.Event],
-    ) -> int:
-        candidate_keys = [
-            *((item.issuer_runtime, item.copy_id) for item in verified_items),
-            *((item.subject_runtime, item.copy_id) for item in invalid_items),
-        ]
-        already = await asyncio.to_thread(
-            self._access.dlq_reported_copy_keys, self._team_id, candidate_keys
-        )
-        fresh_verified = [
-            item for item in verified_items if (item.issuer_runtime, item.copy_id) not in already
-        ]
-        fresh_invalid = [
-            item for item in invalid_items if (item.subject_runtime, item.copy_id) not in already
-        ]
+    ) -> Optional[int]:
+        (
+            fresh_verified,
+            fresh_invalid,
+            original_keys_map,
+            batch_aliases,
+            db_duplicate_aliases,
+        ) = await self._dedupe_and_filter_batch(verified_items, invalid_items)
+        await self._record_db_duplicate_aliases(db_duplicate_aliases)
         if not fresh_verified and not fresh_invalid:
             return 0
         receipt_keys = [
@@ -1462,10 +1656,12 @@ class DeadLetterService:
             notice_id=notice_id,
             formatted=formatted,
             receipt_keys=receipt_keys,
+            original_keys=original_keys_map,
+            alias_receipts=batch_aliases,
             stop=stop,
         )
         if not delivered:
-            return 0
+            return None
         self._logger.warning(
             "Recovered stranded dead-letter notices from %s. "
             "event=protocol1_dlq_notices_recovered team=%s notice_id=%s count=%s invalid=%s",
@@ -1514,8 +1710,41 @@ class DeadLetterService:
             )
         return created
 
+    async def _check_team_work_near_expiry(self, nc: Any, *, now: datetime) -> Optional[NearExpiryMessage]:
+        """Read-only ``STREAM.INFO`` near-expiry check on ``UA1_TEAM_WORK_<team>`` (never sweeps it, C26)."""
+
+        team_work_stream = f"UA1_TEAM_WORK_{self._team_id}"
+        try:
+            info = await stream_info(nc, team_work_stream, timeout=self._api_timeout_seconds)
+        except Exception as exc:
+            self._logger.warning(
+                "Could not inspect UA1_TEAM_WORK stream info for near-expiry check. "
+                "event=protocol1_dlq_team_work_near_expiry_check_failed team=%s stream=%s error_type=%s error=%s",
+                self._team_id,
+                team_work_stream,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        if info is None:
+            return None
+        near = check_stream_near_expiry(info, now=now, margin_seconds=self._near_expiry_margin_seconds)
+        if near is not None:
+            self._logger.warning(
+                "Oldest stored message in work stream is nearing max_age. "
+                "event=protocol1_dlq_stream_near_expiry stream=%s first_seq=%s first_ts=%s "
+                "remaining_seconds=%.1f max_age_seconds=%.1f messages=%s",
+                near.stream,
+                near.first_seq,
+                near.first_ts,
+                near.remaining_seconds,
+                near.max_age_seconds,
+                near.messages,
+            )
+        return near
+
     async def sweep_work_streams(self, *, stop: Optional[asyncio.Event] = None) -> SweepSummary:
-        """Sweep partition, pool, and edge streams of this team (idle backstop + near-expiry Inbox warning)."""
+        """Sweep partition, pool, and edge streams of this team (idle backstop) and check near-expiry on all team work streams."""
 
         live = self._require_live()
         setter = DeadLetterSetter(live, logger=self._logger)
@@ -1533,10 +1762,25 @@ class DeadLetterService:
             timeout=self._api_timeout_seconds,
             logger=self._logger,
         )
-        for item in summary.near_expiry:
+        all_near_expiry = list(summary.near_expiry)
+        if stop is None or not stop.is_set():
+            team_work_near = await self._check_team_work_near_expiry(live.nc, now=now)
+            if team_work_near is not None:
+                all_near_expiry.append(team_work_near)
+        for item in all_near_expiry:
             if stop is not None and stop.is_set():
                 break
             await self._record_near_expiry_notice(item, now=now)
+        if len(all_near_expiry) != len(summary.near_expiry):
+            summary = SweepSummary(
+                streams_checked=summary.streams_checked,
+                consumers_checked=summary.consumers_checked,
+                messages_swept=summary.messages_swept,
+                stopped_full=summary.stopped_full,
+                duration_ms=summary.duration_ms,
+                streams_failed=summary.streams_failed,
+                near_expiry=tuple(all_near_expiry),
+            )
         log_fn = (
             self._logger.warning
             if (summary.messages_swept > 0 or summary.stopped_full or summary.streams_failed > 0 or summary.near_expiry)

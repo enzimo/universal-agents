@@ -22,19 +22,14 @@ import logging
 import signal
 from typing import Any
 
-from access_control.people import PERSON_ROLE_ADMIN
 from assistant_gateway.config import GatewayInstanceConfig
-from custom_messages.contracts.access_v2 import AccessNoticeKind, AccessNoticeV1
 from custom_messages.wire.queues import QueueLimits
 from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
-from custom_transport.protocol1.dead_letters import NearExpiryMessage, format_near_expiry_notice
 from custom_transport.protocol1.joining import certificate_agent_types
 from custom_transport.protocol1.host_keys import load_authority_keys, load_host_keys
-from custom_transport.protocol1.live import utc_now
 from custom_transport.subjects import NatsSubjectMapper
 from installation_authority.refusals import AuthorityStartRefused
 from installation_authority.service import AUTHORITY_RUNTIME, InstallationAuthority
-from storage.access_repository import AccessRepository
 
 _LOGGER = logging.getLogger("installation_authority")
 
@@ -82,39 +77,12 @@ async def run_installation_authority(config: GatewayInstanceConfig) -> None:
         if nats_settings is not None
         else None
     )
-    storage_settings = getattr(config, "manager_storage_settings", None)
     authority_kwargs: dict[str, Any] = {
         "partitions": config.transport.queues.partitions,
         "queues": queue_limits(config),
         "logger": _LOGGER,
         "catalog_agent_types": lambda: catalog_agent_types(config),
     }
-    if storage_settings is not None:
-        access_repo = AccessRepository(storage_settings)
-
-        async def notify_near_expiry(team: str, item: NearExpiryMessage) -> None:
-            notice_id, title, summary = format_near_expiry_notice(team, item)
-            notice = AccessNoticeV1(
-                notice_id=notice_id,
-                team_id=team,
-                kind=AccessNoticeKind.QUEUED_MESSAGE_EXPIRING,
-                recipient_roles=(PERSON_ROLE_ADMIN,),
-                title=title,
-                summary=summary,
-                created_at_utc=utc_now(),
-            )
-            created = await asyncio.to_thread(access_repo.create_notice_if_absent, notice)
-            if created:
-                _LOGGER.warning(
-                    "Told administrators about a queued message nearing expiry in UA1_TEAM_WORK. "
-                    "event=authority_near_expiry_notice team=%s notice_id=%s stream=%s first_seq=%s",
-                    team,
-                    notice_id,
-                    item.stream,
-                    item.first_seq,
-                )
-
-        authority_kwargs["on_near_expiry"] = notify_near_expiry
     if credential_lifetime_seconds is not None:
         authority_kwargs["credential_lifetime_seconds"] = credential_lifetime_seconds
     authority = InstallationAuthority(layout, load_authority_keys(layout), load_host_keys(layout, AUTHORITY_RUNTIME),

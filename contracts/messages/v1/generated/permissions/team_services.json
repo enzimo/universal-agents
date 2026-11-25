@@ -56,6 +56,7 @@
     "$JS.API.STREAM.INFO.UA1_EDGE_WORK_{team}",
     "$JS.API.STREAM.INFO.UA1_PART_{team}~{partition}",
     "$JS.API.STREAM.INFO.UA1_POOL_WORK_{team}",
+    "$JS.API.STREAM.INFO.UA1_TEAM_WORK_{team}",
     "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}",
     "$JS.API.STREAM.MSG.DELETE.UA1_EDGE_WORK_{team}",
     "$JS.API.STREAM.MSG.DELETE.UA1_PART_{team}~{partition}",

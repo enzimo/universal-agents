@@ -101,6 +101,8 @@ _MAX_WALK_NODES: Final = _MAX_UNTRUSTED_PARSE_BYTES
 
 _COPY_ID_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
 _POINTER_PATTERN: Final = re.compile(r"^(/[a-z0-9_]{1,64}){0,16}$")
+_OLD_MESSAGE_CLASS_PATTERN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+_OLD_ID_PATTERN: Final = re.compile(r"^[A-Za-z0-9_.:~-]{1,128}$")
 _RFC3339_PATTERN: Final = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$"
 )
@@ -832,6 +834,8 @@ class DeadLetterSetter:
                 remaining = retry_deadline - time.monotonic()
                 if retry_index >= self.transient_retries or remaining <= 0:
                     raise _SetAsideTransientExhausted(exc) from exc
+                # CON-2: Extend the ack deadline before each short retry so slow publishes do not trigger duplicate deliveries.
+                await _send_in_progress((holder[0],), self.logger)
                 pause = min(0.25, remaining / 2.0, self.initial_retry_seconds * (2 ** retry_index))
                 if await _sleep_or_stop(max(0.0, pause), stop):
                     raise _SetAsideTransientExhausted(exc) from exc
@@ -888,6 +892,9 @@ class DeadLetterSetter:
                 claims.get("message_id", "-"),
                 exc,
             )
+
+        # CON-2: Extend ack_wait immediately on entering set-aside so a late failure never loses its lease mid-publish.
+        await _send_in_progress((holder[0],), self.logger)
 
         try:
             result = await hold_with_in_progress(
@@ -1956,11 +1963,18 @@ def raw_copy_names_person(
     return _protocol1_frame_names_person(doc, target_refs) or _legacy_envelope_names_person(doc, target_ids)
 
 
-def extract_old_envelope_summary(data: bytes) -> Optional[OldEnvelopeSummary]:
-    """Read message class, task id, request/correlation id, and person ids from an ``upgrade_old_format`` copy (C21).
+def _first_matching_id(candidates: Sequence[Optional[str]], pattern: re.Pattern[str]) -> Optional[str]:
+    for value in candidates:
+        if value is not None and pattern.fullmatch(value):
+            return value
+    return None
 
-    Extracts identifiers only — never prompt or message text — so durable administrator Inbox and chat
-    notices never retain personal message content beyond the dead-letter stream's retention window.
+
+def extract_old_envelope_summary(data: bytes) -> Optional[OldEnvelopeSummary]:
+    """Read message class, task id, request/correlation id, and person ids from an ``upgrade_old_format`` copy (C21, F3).
+
+    Extracts validated identifiers only — never prompt or free text — so durable administrator Inbox and chat
+    notices never retain personal message content or attacker-chosen sentences.
     """
 
     doc = _safe_parse_json_object(data)
@@ -1974,17 +1988,23 @@ def extract_old_envelope_summary(data: bytes) -> Optional[OldEnvelopeSummary]:
     content = msg_content if isinstance(msg_content, Mapping) else {}
     meta = msg_meta if isinstance(msg_meta, Mapping) else {}
     header = doc.get("msg_header") if isinstance(doc.get("msg_header"), Mapping) else {}
-    message_class = _nested_str(content, "message_class")
-    task_id = (
-        _nested_str(content, "task_id")
-        or _nested_str(content, "root_task_id")
-        or _nested_str(meta, "root_task_id")
-        or _nested_str(content, "original_envelope_snapshot", "msg_content", "task_id")
+    message_class = _first_matching_id((_nested_str(content, "message_class"),), _OLD_MESSAGE_CLASS_PATTERN)
+    task_id = _first_matching_id(
+        (
+            _nested_str(content, "task_id"),
+            _nested_str(content, "root_task_id"),
+            _nested_str(meta, "root_task_id"),
+            _nested_str(content, "original_envelope_snapshot", "msg_content", "task_id"),
+        ),
+        _OLD_ID_PATTERN,
     )
-    request_id = (
-        _nested_str(content, "request_id")
-        or _nested_str(meta, "msg_correlation_id")
-        or _nested_str(header, "idempotency_key")
+    request_id = _first_matching_id(
+        (
+            _nested_str(content, "request_id"),
+            _nested_str(meta, "msg_correlation_id"),
+            _nested_str(header, "idempotency_key"),
+        ),
+        _OLD_ID_PATTERN,
     )
     return OldEnvelopeSummary(
         message_class=message_class,

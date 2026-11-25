@@ -145,8 +145,10 @@ def test_every_change_to_a_person_is_copied_after_it_is_stored(tmp_path: Path) -
     )
     (webby,) = [user.canonical_user_id for user in store.list_gateway_users() if user.display_name == "Webby"]
     assert _copy(access, webby) == (PersonStanding.ACTIVE, ("member",))
-    # The scheduler's reader sees the same copy.
-    assert PeopleDirectory(access, TEAM).person(mia).active
+    # The scheduler's reader sees the same copy, including display_name (F3).
+    mia_now = PeopleDirectory(access, TEAM).person(mia)
+    assert mia_now.active
+    assert mia_now.display_name == "Mia"
 
 
 def test_an_unchanged_person_keeps_their_change_time(tmp_path: Path) -> None:

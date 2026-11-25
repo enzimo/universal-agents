@@ -1682,8 +1682,10 @@ def check_delivery_advisories(registry: dict[str, Any], transport: dict[str, Any
             raise ContractError(f"{cwhere}: advisory consumers use pull mode and explicit ack")
         if type(consumer["ack_wait_seconds"]) is not int or consumer["ack_wait_seconds"] < 1:
             raise ContractError(f"{cwhere}: ack_wait_seconds is a positive whole number")
-        if type(consumer["max_deliveries"]) is not int or consumer["max_deliveries"] < 1:
-            raise ContractError(f"{cwhere}: max_deliveries is a positive whole number")
+        if type(consumer["max_deliveries"]) is not int or consumer["max_deliveries"] != -1:
+            raise ContractError(
+                f"{cwhere}: max_deliveries is -1 (unlimited) so transient failures retry instead of stranding advisories"
+            )
         listed = consumer["streams"]
         if not isinstance(listed, list) or not listed or len(set(listed)) != len(listed):
             raise ContractError(f"{cwhere}: streams lists distinct durable work stream templates")
@@ -2436,7 +2438,9 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
         )
     )
     # Dead-letter custody inspects stream info, reads raw copies and notices by sequence,
-    # and deletes raw copies on departure or orphan cleanup.
+    # deletes raw copies on departure or orphan cleanup, and reads metadata-only STREAM.INFO
+    # on every durable work stream of its team (including UA1_TEAM_WORK_{team}) to post
+    # near-expiry Inbox warnings while keeping the installation authority free of the database.
     dlq_custody = transport["dead_letter_custody"]
     grants.setdefault(dlq_custody["role"], set()).update(
         subject
@@ -2446,6 +2450,10 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
             f"$JS.API.STREAM.MSG.GET.{stream}",
             f"$JS.API.STREAM.MSG.DELETE.{stream}",
         )
+    )
+    grants.setdefault(dlq_custody["role"], set()).update(
+        f"$JS.API.STREAM.INFO.{stream}"
+        for stream in transport["classes"]["durable"]["streams"]
     )
     # Delivery-exhaustion advisories: each owning role pulls and acknowledges its own consumer
     # on its team's UA1_DLQ_ADVISORY_{team} workqueue stream (README, "Dead letters"). The

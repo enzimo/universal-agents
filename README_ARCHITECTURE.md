@@ -6544,11 +6544,12 @@ renamed secrets included). The authority:
   receivers forget (`custom_messages.wire.trust.kept_for`; revoked ones stay). It also creates
   each team's `UA1_DLQ_ADVISORY_<team>` workqueue stream (capturing `$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES`
   for every work stream of the team) with its two disjoint pull consumers (`adv_team~<team>` for
-  team services and `adv_auth~<team>` for the authority), watches `adv_auth~<team>`
+  team services and `adv_auth~<team>` for the authority, both with unlimited redeliveries), watches `adv_auth~<team>`
   (`watch_delivery_advisories`) to set exhausted `UA1_TEAM_WORK_<team>` messages aside immediately
-  even on busy consumers, runs the idle-cutoff sweep backstop and `STREAM.INFO` `state.first_ts`
-  near-expiry Inbox check on `UA1_TEAM_WORK_<team>` (`sweep_delivery_limits`, fault-isolated
-  inside `upkeep`), and provides `dead_letter_setter()` so installation-traffic (`_install`)
+  even on busy consumers, runs the idle-cutoff sweep backstop and near-expiry log check on
+  `UA1_TEAM_WORK_<team>` (`sweep_delivery_limits`, fault-isolated inside `upkeep`, staying completely
+  free of the manager's database; `DeadLetterService` writes the Inbox notice via its read-only
+  `STREAM.INFO` grant on `UA1_TEAM_WORK_<team>`), and provides `dead_letter_setter()` so installation-traffic (`_install`)
   dead-letter notices route to a team its certificate serves. A failed
   step is tried again a minute later, except the forgetting: it notes the day it ran
   before it starts, so after a failure it runs again the next day. Hosts read the
@@ -6892,19 +6893,24 @@ They serve the team's address (`svc.team`) and answer, so far:
   (holding with `+WPI` while `UA1_DLQ_<team>` is full) and deletes the exact sequence even
   while later messages remain in flight on a busy consumer. `sweep_exhausted_streams` stays as
   the periodic idle-consumer cutoff backstop (`delivered.stream_seq` when `num_ack_pending == 0`,
-  else `ack_floor.stream_seq`) and checks `STREAM.INFO` `state.first_ts` on every non-empty
-  work stream, posting an idempotent administrators' Inbox notice (`queued_message_expiring`)
+  else `ack_floor.stream_seq`) and `DeadLetterService` checks `STREAM.INFO` `state.first_ts` on every non-empty
+  work stream of its team (partition, pool, edge, and read-only metadata on `UA1_TEAM_WORK_<team>`),
+  posting an idempotent administrators' Inbox notice (`queued_message_expiring`)
   naming the stream and `first_seq` when the oldest stored message comes within 24 hours of
-  `max_age` (surfacing CRIT-1's no-pull case before JetStream drops it).
+  `max_age` (surfacing CRIT-1's no-pull case before JetStream drops it, while keeping
+  `InstallationAuthority` free of the database).
   `DeadLetterService` runs both the notice watch on `dlq~<team>` and the advisory watch on
   `adv_team~<team>`, verifies each raw copy's
   size and SHA-256, deletes copies naming already-departed people immediately, alerts
   administrators via Inbox (`AccessRepository.record_dlq_notice_report`, atomic with
-  per-`(team_id, issuer_runtime, copy_id)` receipts in `protocol1_dlq_reported_notices`)
+  per-`(team_id, issuer_runtime, copy_id)` receipts in `protocol1_dlq_reported_notices`
+  and per-`(team_id, original_stream, original_stream_sequence, raw_sha256)` receipts in
+  `protocol1_dlq_reported_originals` so cross-runtime duplicates never repeat alerts)
   and the owner's configured chat (holding on Inbox outages without re-sending chat),
-  names the person and task id for `upgrade_old_format` copies without quoting personal
+  names the person (by `PeopleDirectory` display name or `"a person not in the team's records"`)
+  and validated task/request ids for `upgrade_old_format` copies without quoting personal
   request text, recovers exhausted notices from `UA1_DLQ_<team>` using persisted scan
-  cursors (`protocol1_dlq_scan_cursors`; both tables are local JetStream reporting state
+  cursors (`protocol1_dlq_scan_cursors`; all three tables are local JetStream reporting state
   and never travel in a team transfer), and sweeps departed copies and aged orphaned raw
   copies under a per-pass time budget tied to the departed set. Unified
   `team.delete_person_data` (`TeamPersonDataOperations`, `TeamPersonDepartureService`)

@@ -561,6 +561,74 @@ def test_the_process_exits_when_it_stops_following_placements(tmp_path: Path, mo
     assert "event=installation_authority_placements_stopped error=the consumers could not be listed" in caplog.text
 
 
+def test_c26_run_installation_authority_starts_on_postgres_without_postgres_dsn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C26: run_installation_authority works with a real GatewayInstanceConfig on PostgreSQL without POSTGRES_DSN."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    monkeypatch.delenv("POSTGRES_DSN", raising=False)
+    config = GatewayInstanceConfig.create(
+        instance_name="pg_auth_test",
+        instance_root=str(tmp_path / "instance"),
+        team_id="team_pg",
+        timezone="UTC",
+        manager_agent_id=None,
+    )
+    config = config.model_copy(
+        update={
+            "state": config.state.model_copy(
+                update={
+                    "storage": config.state.storage.model_copy(
+                        update={"backend": "postgres", "postgres": config.state.storage.postgres.model_copy(update={"dsn": None})}
+                    )
+                }
+            )
+        }
+    )
+    # Prove this real config raises ValueError if anything touches manager_storage_settings without POSTGRES_DSN.
+    with pytest.raises(ValueError, match="postgres\\.dsn is required"):
+        _ = config.manager_storage_settings
+
+    started: list[str] = []
+
+    class _Adapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.nats_connection = SimpleNamespace()
+
+        async def connect(self) -> None:
+            started.append("connected")
+
+        async def close(self) -> None:
+            started.append("closed")
+
+    class _Authority:
+        def __init__(self, *_args: Any, **kwargs: Any) -> None:
+            assert "on_near_expiry" not in kwargs
+
+        async def start(self, _nc: Any, *, teams: Any) -> None:
+            started.append(f"started:{','.join(teams)}")
+
+        async def keep_current(self) -> None:
+            await asyncio.Event().wait()
+
+        async def follow_placements(self, stop: asyncio.Event) -> None:
+            stop.set()
+
+        async def watch_delivery_advisories(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
+    monkeypatch.setattr(authority_process, "NatsTransportAdapter", _Adapter)
+    monkeypatch.setattr(authority_process, "InstallationAuthority", _Authority)
+    monkeypatch.setattr(authority_process, "load_authority_keys", lambda _layout: SimpleNamespace())
+    monkeypatch.setattr(authority_process, "load_host_keys", lambda _layout, _rt: SimpleNamespace())
+
+    asyncio.run(authority_process.run_installation_authority(config))
+    assert started == ["connected", "started:team_pg", "closed"]
+
+
 @pytest.mark.parametrize("changed", ["key_id", "public_key", "expired", "absent"])
 def test_held_agent_types_require_the_same_live_certificate_key(changed) -> None:
     from installation_authority.service import _held_agent_types
@@ -2180,9 +2248,12 @@ async def test_authority_sweep_delivery_limits_and_install_dead_letter_routing(t
 
 
 @pytest.mark.asyncio
-async def test_f1_authority_advisory_watch_and_near_expiry_callback(tmp_path: Path) -> None:
-    """F1: Authority handles MAX_DELIVERIES advisories for UA1_TEAM_WORK_<team> on busy consumers
-    and invokes on_near_expiry when UA1_TEAM_WORK_<team>'s oldest message nears max_age."""
+async def test_f1_authority_advisory_watch_and_near_expiry_summary(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """F1 & C26: Authority handles MAX_DELIVERIES advisories for UA1_TEAM_WORK_<team> on busy consumers
+    and logs/reports near-expiry in SweepSummary without any database dependency."""
 
     from custom_transport.protocol1.dead_letters import (
         MAX_DELIVERIES_ADVISORY_PREFIX,
@@ -2196,14 +2267,9 @@ async def test_f1_authority_advisory_watch_and_near_expiry_callback(tmp_path: Pa
     from tests import message_contract_support as fixtures
     from tests.test_protocol1_dead_letters import FakeDelivery, FakeNatsConnection
 
-    warned: list[tuple[str, str, int]] = []
     now = datetime(2026, 10, 29, 0, 0, 0, tzinfo=timezone.utc)
 
-    async def on_near(team: str, item: Any) -> None:
-        warned.append((team, item.stream, item.first_seq))
-
     authority = authority_at(tmp_path, partitions=2)
-    authority._on_near_expiry = on_near
     authority.clock = lambda: now
     nc = FakeNatsConnection()
     nc.is_closed = False  # type: ignore[attr-defined]
@@ -2255,10 +2321,13 @@ async def test_f1_authority_advisory_watch_and_near_expiry_callback(tmp_path: Pa
 
     nc.request = req_with_age  # type: ignore[method-assign]
 
-    # Sweep sees busy consumer (0 swept) and fires on_near_expiry for seq 1!
-    summary = await authority.sweep_delivery_limits()
+    # Sweep sees busy consumer (0 swept), logs near-expiry warning, and returns it in SweepSummary.
+    with caplog.at_level(logging.WARNING):
+        summary = await authority.sweep_delivery_limits()
     assert summary.messages_swept == 0
-    assert warned == [("team_alpha", stream, 1)]
+    assert len(summary.near_expiry) == 1
+    assert (summary.near_expiry[0].stream, summary.near_expiry[0].first_seq) == (stream, 1)
+    assert "event=protocol1_dlq_stream_near_expiry" in caplog.text
 
     # Advisory watch sets aside seq 1 and deletes it while keeping seq 2 intact.
     adv_payload = json.dumps(

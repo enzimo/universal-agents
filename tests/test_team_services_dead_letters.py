@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,7 @@ from custom_messages.contracts.access_v2 import AccessNoticeKind, PersonStanding
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext
+from custom_messages.wire.encoding import b64url
 from custom_messages.wire.frame import VerifiedAuthority, VerifiedFrame
 from custom_messages.wire.kinds import MAX_FRAME_BYTES
 from custom_messages.transport_codec import decode_envelope
@@ -70,6 +72,8 @@ from team_services.dead_letters import (
     LegacyNatsChatNoticeSender,
     TeamPersonDataOperations,
     TeamPersonDepartureService,
+    _VerifiedNoticeItem,
+    format_dlq_admin_notice,
 )
 from tests import message_contract_support as fixtures
 from tests.test_protocol1_dead_letters import FakeDelivery, FakeJetStream, FakeNatsConnection
@@ -95,6 +99,7 @@ def _person(
     person_ref: str,
     standing: PersonStanding = PersonStanding.ACTIVE,
     roles: tuple[str, ...] = (PERSON_ROLE_MEMBER,),
+    display_name: str | None = None,
 ) -> TeamPersonV1:
     effective_roles = roles if standing is PersonStanding.ACTIVE else ()
     return TeamPersonV1(
@@ -103,6 +108,7 @@ def _person(
         person_ref=person_ref,
         standing=standing,
         roles=effective_roles,
+        display_name=display_name,
         changed_at_utc=NOW,
     )
 
@@ -1341,3 +1347,257 @@ async def test_f1_team_services_advisory_watch_and_near_expiry_inbox_warning(tmp
     assert await service.poll_advisories_once() == 0
     assert adv_msg_dup.ack_calls == 1
     assert len(nc.jetstream().published) == published_before
+
+
+@pytest.mark.asyncio
+async def test_c26_team_services_posts_near_expiry_inbox_warning_for_team_work_without_sweeping_it(
+    tmp_path: Path,
+) -> None:
+    """C26: DeadLetterService checks STREAM.INFO on UA1_TEAM_WORK_<team> for near-expiry Inbox warnings
+    without ever sweeping or deleting messages from UA1_TEAM_WORK_<team>."""
+
+    nc = DlqFakeNatsConnection()
+    ts_live, _worker_live = _make_hosts(nc)
+    ts_live.trust.store.partition_count = 1  # type: ignore[attr-defined]
+    access = AccessRepository(_storage(tmp_path))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,)))
+    people = PeopleDirectory(access, TEAM)
+    now = datetime(2026, 10, 29, 0, 0, 0, tzinfo=timezone.utc)
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        clock=lambda: now,
+        near_expiry_margin_seconds=86_400.0,
+    )
+
+    team_work_stream = f"UA1_TEAM_WORK_{TEAM}"
+    max_age_ns = 604_860 * 1_000_000_000
+    nc.streams[team_work_stream] = {"created": "2026-10-20T00:00:00Z"}
+    nc.messages[team_work_stream] = {
+        1: {"subject": f"ua.v1.{TEAM}.lead-host-1.work.team", "data": b"stuck-team-work", "time": "2026-10-22T12:00:00Z"},
+    }
+    orig_req = nc.request
+
+    async def req_with_age(subject: str, payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        # Must never attempt CONSUMER.LIST, STREAM.MSG.GET, or STREAM.MSG.DELETE on UA1_TEAM_WORK.
+        assert not subject.startswith(f"$JS.API.CONSUMER.LIST.{team_work_stream}")
+        assert not subject.startswith(f"$JS.API.STREAM.MSG.GET.{team_work_stream}")
+        assert not subject.startswith(f"$JS.API.STREAM.MSG.DELETE.{team_work_stream}")
+        resp = await orig_req(subject, payload, timeout=timeout)
+        if subject == f"$JS.API.STREAM.INFO.{team_work_stream}":
+            doc = json.loads(resp.data.decode("utf-8"))
+            doc["state"]["first_ts"] = "2026-10-22T12:00:00Z"
+            doc["config"] = {"max_age": max_age_ns}
+            resp = SimpleNamespace(data=json.dumps(doc).encode("utf-8"))
+        return resp
+
+    nc.request = req_with_age  # type: ignore[method-assign]
+
+    summary = await service.sweep_work_streams()
+    assert summary.messages_swept == 0
+    assert any(item.stream == team_work_stream and item.first_seq == 1 for item in summary.near_expiry)
+    assert 1 in nc.messages[team_work_stream]  # untouched by team_services
+    notices = access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))
+    assert len(notices) == 1
+    assert notices[0][0].kind is AccessNoticeKind.QUEUED_MESSAGE_EXPIRING
+    assert team_work_stream in notices[0][0].title
+
+
+@pytest.mark.asyncio
+async def test_f2_cross_runtime_duplicate_notices_deduplicated_in_batch_and_across_batches(
+    tmp_path: Path,
+) -> None:
+    """F2 (CON-1 / FA-4 / DI-3): Two runtimes setting the same message aside produce ONE alert in-batch and across batches."""
+
+    nc = DlqFakeNatsConnection()
+    ts_live, worker_live = _make_hosts(nc)
+    access = AccessRepository(_storage(tmp_path))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,)))
+    people = PeopleDirectory(access, TEAM)
+    chat = RecordingChatSender()
+    current_time = [NOW]
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        chat_sender=chat,
+        clock=lambda: current_time[0],
+        report_quiet_seconds=0.0,
+    )
+
+    # 1. Cross-runtime duplicate across two separate batches (worker-host-1 then team-services sweep).
+    payload_a = b'{"protocol":"1.0-pre","kind":"task.request","message_id":"019a0000-0000-7000-8000-000000000001"}'
+    res_w1, deliv_w1 = await _emit_set_aside_into_dlq(
+        nc, worker_live, raw_bytes=payload_a, reason="handler_failed", original_seq=11
+    )
+    res_ts1, deliv_ts1 = await _emit_set_aside_into_dlq(
+        nc, ts_live, raw_bytes=payload_a, reason="delivery_limit", original_seq=11
+    )
+    assert res_w1.copy_id != res_ts1.copy_id  # different runtime keys -> different copy_ids
+
+    assert await service.process_delivered_notices([deliv_w1]) == 1
+    assert len(access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))) == 1
+    assert len(chat.sent) == 1
+
+    # Second batch carries the sweep's notice for the exact same (stream, seq, raw.sha256): suppressed + acked + alias stored!
+    assert await service.process_delivered_notices([deliv_ts1]) == 0
+    assert deliv_ts1.ack_calls == 1
+    assert len(access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))) == 1
+    assert len(chat.sent) == 1
+    assert (ts_live.identity.runtime, res_ts1.copy_id) in access.dlq_reported_copy_keys(
+        TEAM, [(ts_live.identity.runtime, res_ts1.copy_id)]
+    )
+
+    # 2. Cross-runtime duplicate WITHIN ONE FETCHED BATCH: deduplicated to 1 line and 1 notice!
+    payload_b = b'{"protocol":"1.0-pre","kind":"task.request","message_id":"019a0000-0000-7000-8000-000000000002"}'
+    res_w2, deliv_w2 = await _emit_set_aside_into_dlq(
+        nc, worker_live, raw_bytes=payload_b, reason="handler_failed", original_seq=22
+    )
+    res_ts2, deliv_ts2 = await _emit_set_aside_into_dlq(
+        nc, ts_live, raw_bytes=payload_b, reason="delivery_limit", original_seq=22
+    )
+    assert res_w2.copy_id != res_ts2.copy_id
+    assert await service.process_delivered_notices([deliv_w2, deliv_ts2]) == 1
+    assert deliv_w2.ack_calls == 1 and deliv_ts2.ack_calls == 1
+    notices_after = access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))
+    assert len(notices_after) == 2
+    assert len(chat.sent) == 2
+    assert "1 message(s) could not be handled" in chat.sent[-1]["title"]
+    assert (ts_live.identity.runtime, res_ts2.copy_id) in access.dlq_reported_copy_keys(
+        TEAM, [(ts_live.identity.runtime, res_ts2.copy_id)]
+    )
+
+    # 3. Different bytes at the same sequence (recreated stream) get a different raw.sha256 and ARE reported!
+    payload_c = b'{"protocol":"1.0-pre","kind":"task.request","message_id":"019a0000-0000-7000-8000-000000000003"}'
+    _, deliv_recreated = await _emit_set_aside_into_dlq(
+        nc, worker_live, raw_bytes=payload_c, reason="handler_failed", original_seq=11,
+        stored_at_ns=1_792_800_000_000_000_000,
+    )
+    assert await service.process_delivered_notices([deliv_recreated]) == 1
+    assert len(chat.sent) == 3
+
+    # 4. Pruning removes old entries from both protocol1_dlq_reported_notices and protocol1_dlq_reported_originals.
+    orig_a = (f"UA1_PART_{TEAM}~8", 11, b64url(hashlib.sha256(payload_a).digest()))
+    assert orig_a in access.dlq_reported_original_keys(TEAM, [orig_a])
+    access.prune_dlq_reported_notices(TEAM, before_utc=NOW + timedelta(days=31))
+    assert access.dlq_reported_original_keys(TEAM, [orig_a]) == {}
+
+
+@pytest.mark.asyncio
+async def test_f3_untrusted_text_blocked_in_invalid_subject_original_subject_old_envelope_and_chat_shortened(
+    tmp_path: Path,
+) -> None:
+    """F3 (CRIT-2, SEC-2, SEC-3, GR-5): blocks sender-chosen text in invalid subjects, off-team original.subject,
+    old-envelope identifiers/unknown people, uses PeopleDirectory display names, and shortens chat text."""
+
+    nc = DlqFakeNatsConnection()
+    ts_live, worker_live = _make_hosts(nc)
+    access = AccessRepository(_storage(tmp_path))
+    access.record_person(_person(ADMIN_ID, ADMIN_REF, PersonStanding.ACTIVE, (PERSON_ROLE_OWNER,), display_name="Admin User"))
+    access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.ACTIVE, display_name="Alice Example"))
+    people = PeopleDirectory(access, TEAM)
+    chat = RecordingChatSender()
+    service = DeadLetterService(
+        team_id=TEAM,
+        live_fn=lambda: ts_live,
+        access_repository=access,
+        people=people,
+        chat_sender=chat,
+        clock=lambda: NOW,
+        report_quiet_seconds=0.0,
+    )
+
+    # 1. SEC-2: Invalid notice on unparsable subject never prints publisher-chosen subject tokens.
+    evil_token = "URGENT_admins_must_run_curl_evil_sh_now"
+    bad_delivery = FakeDelivery(
+        data=b"not-a-frame",
+        subject=f"ua.v1.{TEAM}.worker-1.dlq.notice.{evil_token}",
+        stream=dlq_stream_name(TEAM),
+        stream_seq=41,
+        timestamp_ns=int(NOW.timestamp() * 1_000_000_000),
+    )
+    bad_delivery_garbage = FakeDelivery(
+        data=b"not-a-frame-2",
+        subject=f"completely.weird.{evil_token}",
+        stream=dlq_stream_name(TEAM),
+        stream_seq=42,
+        timestamp_ns=int(NOW.timestamp() * 1_000_000_000),
+    )
+
+    # 2. CRIT-2: Validly signed notice whose protocol 1 original.subject lacks ua.v1.<team>. prefix shows "an unexpected subject".
+    _, off_team_delivery = await _emit_set_aside_into_dlq(
+        nc,
+        worker_live,
+        raw_bytes=b'{"protocol":"1.0-pre","kind":"task.request"}',
+        reason="malformed",
+        original_subject="other.prefix.attacker-payload",
+        original_seq=43,
+    )
+
+    # 3. SEC-3 & GR-5: upgrade_old_format drops hostile message_class/task_id, uses display_name for Alice,
+    #    and labels unknown person ids as "a person not in the team's records".
+    old_known = json.dumps({
+        "msg_meta": {"msg_correlation_id": "req-ok-7", "gateway_context": {"canonical_user_id": ALICE_ID}},
+        "msg_content": {
+            "message_class": "TaskRequest: Alice password is secret",
+            "task_id": "z" * 250,
+            "root_task_id": "task-clean-7",
+        },
+    }).encode("utf-8")
+    _, old_known_deliv = await _emit_set_aside_into_dlq(
+        nc, worker_live, raw_bytes=old_known, reason="upgrade_old_format", original_seq=44
+    )
+    old_unknown = json.dumps({
+        "msg_meta": {"gateway_context": {"canonical_user_id": "attacker-fake-person-text"}},
+        "msg_content": {"message_class": "TaskRequest", "task_id": "task-clean-8"},
+    }).encode("utf-8")
+    _, old_unknown_deliv = await _emit_set_aside_into_dlq(
+        nc, worker_live, raw_bytes=old_unknown, reason="upgrade_old_format", original_seq=45
+    )
+
+    reported = await service.process_delivered_notices(
+        [bad_delivery, bad_delivery_garbage, off_team_delivery, old_known_deliv, old_unknown_deliv]
+    )
+    assert reported == 5
+    notice = access.notices_for(TEAM, person_id=ADMIN_ID, roles=(PERSON_ROLE_ADMIN,))[0][0]
+    for channel_text in (notice.summary, chat.sent[0]["text"]):
+        assert evil_token not in channel_text
+        assert "worker-1 on an unexpected subject (stream sequence 41)" in channel_text
+        assert "invalid dead-letter notice on an unexpected subject (stream sequence 42)" in channel_text
+        assert "other.prefix.attacker-payload" not in channel_text
+        assert "(an unexpected subject)" in channel_text
+        assert "password is secret" not in channel_text
+        assert ("z" * 250) not in channel_text
+        assert "for Alice Example" in channel_text
+        assert "task-clean-7" in channel_text
+        assert "attacker-fake-person-text" not in channel_text
+        assert "for a person not in the team's records" in channel_text
+
+    # 4. SEC-3: Chat text is shortened identically to Inbox summary (<= 4000 chars).
+    long_items = [
+        _VerifiedNoticeItem(
+            issuer_runtime="worker-host-1",
+            copy_id=f"{i:064x}",
+            reason="malformed",
+            original_subject=f"ua.v1.{TEAM}.lead-1." + ("a" * 100) + "." + ("b" * 100) + "." + ("c" * 100) + "." + ("d" * 100),
+            original_stream="UA1_PART_" + ("s" * 200),
+            original_stream_sequence=i + 1,
+            deliveries=1,
+            release="0.10.0",
+            issued_at="2026-10-22T00:00:00Z",
+            claimed_kind="task.request",
+            claimed_message_id="019a0000-0000-7000-8000-000000000001",
+            pointer="/body/prompt",
+            raw_stored=True,
+            raw_size=10,
+            raw_status="ok",
+            raw_sha256="A" * 43,
+        )
+        for i in range(10)
+    ]
+    formatted_long = format_dlq_admin_notice(long_items, (), dlq_stream=dlq_stream_name(TEAM))
+    assert len(formatted_long.text) <= 4000
+    assert formatted_long.text.endswith("...")

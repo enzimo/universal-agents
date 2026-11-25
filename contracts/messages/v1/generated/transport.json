@@ -163,7 +163,7 @@
       "installation_authority": {
         "ack": "explicit",
         "ack_wait_seconds": 60,
-        "max_deliveries": 20,
+        "max_deliveries": -1,
         "mode": "pull",
         "name": "adv_auth~{team}",
         "role": "installation_authority",
@@ -174,7 +174,7 @@
       "team_services": {
         "ack": "explicit",
         "ack_wait_seconds": 60,
-        "max_deliveries": 20,
+        "max_deliveries": -1,
         "mode": "pull",
         "name": "adv_team~{team}",
         "role": "team_services",

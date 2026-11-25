@@ -4162,9 +4162,21 @@ def test_delivery_advisories_contract_rules_and_permissions() -> None:
         "$JS.API.CONSUMER.INFO.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
         "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
         "$JS.ACK.UA1_DLQ_ADVISORY_{team}.adv_team~{team}.>",
+        "$JS.API.STREAM.INFO.UA1_TEAM_WORK_{team}",
     ):
         assert grant in ts_perms
         assert grant not in worker_perms
+    # C26: team_services gets read-only STREAM.INFO on UA1_TEAM_WORK_{team} for near-expiry warnings,
+    # never message reads, deletes, or consumer listing on its own inbox stream.
+    for forbidden in (
+        "$JS.API.STREAM.MSG.GET.UA1_TEAM_WORK_{team}",
+        "$JS.API.STREAM.MSG.DELETE.UA1_TEAM_WORK_{team}",
+        "$JS.API.CONSUMER.LIST.UA1_TEAM_WORK_{team}",
+    ):
+        assert forbidden not in ts_perms
+    # C28: advisory consumers use unlimited deliveries (-1) so transient failures retry instead of stranding.
+    for consumer_spec in adv["consumers"].values():
+        assert consumer_spec["max_deliveries"] == -1
     # Installation authority pulls adv_auth~{team} via account-wide TOPOLOGY_OWNER_GRANTS (no per-team $JS.* lines).
     for grant in (
         "$JS.API.CONSUMER.INFO.*.*",
@@ -4187,6 +4199,8 @@ def test_delivery_advisories_contract_rules_and_permissions() -> None:
         (lambda t: t["delivery_advisories"].update(retention="limits"), "retention is workqueue"),
         (lambda t: t["delivery_advisories"].update(discard="old"), "discard is new"),
         (lambda t: t["delivery_advisories"].update(max_age_seconds=60), "at least the durable work streams"),
+        (lambda t: t["delivery_advisories"]["consumers"]["team_services"].update(max_deliveries=20),
+         "max_deliveries is -1"),
         (lambda t: t["delivery_advisories"]["consumers"]["installation_authority"]["streams"].append("UA1_POOL_WORK_{team}"),
          "must be disjoint"),
         (lambda t: t["delivery_advisories"]["consumers"]["team_services"]["streams"].remove("UA1_EDGE_WORK_{team}"),
@@ -4196,3 +4210,8 @@ def test_delivery_advisories_contract_rules_and_permissions() -> None:
         change(mutated)
         with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
             EXPORT.check_delivery_advisories(registry, mutated)
+
+    # F3 / CRIT-2: dlq.notice schema constrains original.subject and release to identifiers (no free text).
+    dlq_schema = json.loads((CONTRACT / "schemas/bodies/dlq.notice.schema.json").read_text())
+    assert "pattern" in dlq_schema["properties"]["original"]["properties"]["subject"]
+    assert "pattern" in dlq_schema["properties"]["release"]

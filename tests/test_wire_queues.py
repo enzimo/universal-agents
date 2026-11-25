@@ -316,4 +316,5 @@ def test_delivery_advisory_stream_and_disjoint_consumers_cover_every_work_stream
     assert set(ts_consumer.config["filter_subjects"]).isdisjoint({auth_consumer.config["filter_subject"]})
     assert set(delivery_advisory_subjects(TRANSPORT, "team_a", 4)) == set(expected_subjects)
     for consumer in consumers.values():
+        assert consumer.config["max_deliver"] == -1
         ConsumerConfig(**consumer.config).as_dict()

@@ -71,7 +71,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import inspect
 import json
 import logging
 from dataclasses import dataclass
@@ -234,7 +233,6 @@ class InstallationAuthority:
         nats_account_public_key: Optional[str] = None,
         nats_account_signing_key: Optional[NatsSigningKey] = None,
         revoker: Optional[NatsRevoker] = None,
-        on_near_expiry: Optional[Callable[[str, NearExpiryMessage], Any]] = None,
         near_expiry_margin_seconds: float = DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS,
     ) -> None:
         """``contract_sha256`` is the contract this authority runs: its code's, unless a test gives another.
@@ -291,7 +289,6 @@ class InstallationAuthority:
         self._forgotten_at: Optional[datetime] = None
         self._dlq_swept_at: Optional[datetime] = None
         self._logged_stranded_dlq: set[tuple[str, int]] = set()
-        self._on_near_expiry = on_near_expiry
         self._near_expiry_margin_seconds = max(0.0, float(near_expiry_margin_seconds))
         self._advisory_watches: dict[str, DeliveryAdvisoryWatch] = {}
         self._ledger = IssueLedger(layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME, self.installation,
@@ -1168,25 +1165,13 @@ class InstallationAuthority:
             return
         await asyncio.gather(*(self._advisory_watch(team).run(stop) for team in self._teams))
 
-    async def _notify_near_expiry(self, team: str, item: NearExpiryMessage) -> None:
-        if self._on_near_expiry is None:
-            return
-        try:
-            outcome = self._on_near_expiry(team, item)
-            if inspect.isawaitable(outcome):
-                await outcome
-        except Exception:
-            self.logger.exception(
-                "Could not deliver near-expiry Inbox warning for UA1_TEAM_WORK. "
-                "event=authority_near_expiry_notify_failed installation=%s team=%s stream=%s first_seq=%s",
-                self.installation,
-                team,
-                item.stream,
-                item.first_seq,
-            )
-
     async def sweep_delivery_limits(self, *, stop: Optional[asyncio.Event] = None) -> SweepSummary:
-        """Idle-cutoff backstop sweep and near-expiry check over each served team's ``UA1_TEAM_WORK_<team>`` (A4, F1)."""
+        """Idle-cutoff backstop sweep and near-expiry log check over each served team's ``UA1_TEAM_WORK_<team>`` (A4, F1).
+
+        Administrator Inbox notices for near-expiry messages (including ``UA1_TEAM_WORK_<team>``)
+        are written by ``team_services.DeadLetterService`` so the installation authority stays
+        free of any database connection (C26).
+        """
 
         assert self.live is not None and self._nc is not None, "start() first"
         setter = self.dead_letter_setter()
@@ -1218,9 +1203,7 @@ class InstallationAuthority:
             messages_swept += team_summary.messages_swept
             stopped_full = stopped_full or team_summary.stopped_full
             duration_ms += team_summary.duration_ms
-            for item in team_summary.near_expiry:
-                near_expiry.append(item)
-                await self._notify_near_expiry(team, item)
+            near_expiry.extend(team_summary.near_expiry)
         log_fn = (
             self.logger.warning
             if (messages_swept > 0 or stopped_full or streams_failed > 0 or near_expiry)

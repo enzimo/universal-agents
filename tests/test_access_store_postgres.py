@@ -676,19 +676,44 @@ def test_postgres_dlq_reported_notices_and_scan_cursors(settings: StorageSetting
         created_at_utc=now,
     )
     receipts1 = [("worker-host-1", "a" * 64), ("worker-host-1", "b" * 64)]
+    orig_key_a = ("UA1_PART_team_pg~0", 11, "A" * 43)
+    orig_key_b = ("UA1_PART_team_pg~0", 12, "B" * 43)
+    orig_map1 = {receipts1[0]: orig_key_a, receipts1[1]: orig_key_b}
 
-    # Atomic insert of AccessNoticeV1 + per-copy receipts.
-    created, inserted = repo.record_dlq_notice_report(TEAM, notice1, receipts1, reported_at_utc=now)
+    # Atomic insert of AccessNoticeV1 + per-copy receipts + per-original receipts (F2).
+    created, inserted = repo.record_dlq_notice_report(
+        TEAM, notice1, receipts1, original_keys=orig_map1, reported_at_utc=now
+    )
     assert created is True and inserted == 2
     assert repo.dlq_reported_copy_keys(TEAM, receipts1) == set(receipts1)
     assert repo.dlq_reported_copy_keys(other_team, receipts1) == set()
+    assert repo.dlq_reported_original_keys(TEAM, [orig_key_a, orig_key_b]) == {
+        orig_key_a: notice1.notice_id,
+        orig_key_b: notice1.notice_id,
+    }
+    assert repo.dlq_reported_original_keys(other_team, [orig_key_a]) == {}
 
     # Replaying the same receipts is a no-op even under a different notice_id (C02).
     notice_dup = notice1.model_copy(update={"notice_id": "dlq-pg-notice-dup"})
     created_dup, inserted_dup = repo.record_dlq_notice_report(
-        TEAM, notice_dup, receipts1, reported_at_utc=now + timedelta(minutes=1)
+        TEAM, notice_dup, receipts1, original_keys=orig_map1, reported_at_utc=now + timedelta(minutes=1)
     )
     assert created_dup is False and inserted_dup == 0
+    assert len(repo.notices_for(TEAM, person_id=OWNER.id, roles=(PERSON_ROLE_ADMIN,))) == 1
+
+    # F2: Cross-runtime duplicate copy_id for an already-reported original writes NO second Inbox notice,
+    # and records the duplicate copy_id as an alias pointing to the original notice_id.
+    cross_runtime_copy = ("team-services", "c" * 64)
+    notice_cross = notice1.model_copy(update={"notice_id": "dlq-pg-notice-cross"})
+    created_cross, inserted_cross = repo.record_dlq_notice_report(
+        TEAM,
+        notice_cross,
+        [cross_runtime_copy],
+        original_keys={cross_runtime_copy: orig_key_a},
+        reported_at_utc=now + timedelta(minutes=2),
+    )
+    assert created_cross is False and inserted_cross == 0
+    assert repo.dlq_reported_copy_keys(TEAM, [cross_runtime_copy]) == {cross_runtime_copy}
     assert len(repo.notices_for(TEAM, person_id=OWNER.id, roles=(PERSON_ROLE_ADMIN,))) == 1
 
     # Batched lookup over >200 keys exercises chunking and distinguishes (runtime, copy_id) pairs (C20).
@@ -706,13 +731,17 @@ def test_postgres_dlq_reported_notices_and_scan_cursors(settings: StorageSetting
     )
     assert found == {receipts1[0], many_keys[0], many_keys[-1]}
 
-    # Pruning deletes only receipts older than before_utc for the target team.
+    # Pruning deletes only receipts (both copy and original tables) older than before_utc for the target team.
     notice_other = notice1.model_copy(update={"notice_id": "dlq-pg-notice-other", "team_id": other_team})
-    repo.record_dlq_notice_report(other_team, notice_other, [receipts1[0]], reported_at_utc=now)
+    repo.record_dlq_notice_report(
+        other_team, notice_other, [receipts1[0]], original_keys={receipts1[0]: orig_key_a}, reported_at_utc=now
+    )
     pruned = repo.prune_dlq_reported_notices(TEAM, before_utc=now + timedelta(days=1))
-    assert pruned == 2
+    assert pruned == 3  # receipts1[0], receipts1[1], cross_runtime_copy alias
     assert repo.dlq_reported_copy_keys(TEAM, receipts1) == set()
+    assert repo.dlq_reported_original_keys(TEAM, [orig_key_a, orig_key_b]) == {}
     assert repo.dlq_reported_copy_keys(other_team, [receipts1[0]]) == {receipts1[0]}
+    assert repo.dlq_reported_original_keys(other_team, [orig_key_a]) == {orig_key_a: notice_other.notice_id}
     assert len(repo.dlq_reported_copy_keys(TEAM, many_keys)) == 250
 
     # Scan cursor defaults to (0, "") and upserts BIGINT sequences cleanly via ON CONFLICT.

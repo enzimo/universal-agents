@@ -1748,7 +1748,7 @@ class DeliveryRefusedBody(WireModel):
 
 
 class DlqNoticeBodyOriginal(WireModel):
-    subject: Annotated[str, StringConstraints(min_length=1, max_length=512)]
+    subject: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_~:-]{1,128}(\\.[A-Za-z0-9_~:-]{1,128}){0,15}$', min_length=1, max_length=512)]
     stream: Annotated[str, StringConstraints(pattern='^[A-Za-z0-9_~-]{1,255}$')]
     stream_sequence: Count
     deliveries: Count
@@ -1781,7 +1781,7 @@ class DlqNoticeBody(WireModel):
     original: DlqNoticeBodyOriginal
     claimed: Union[DlqNoticeBodyClaimed, MISSING] = Field(default=MISSING)
     raw: DlqNoticeBodyRaw
-    release: Annotated[str, StringConstraints(min_length=1, max_length=64)]
+    release: Annotated[str, StringConstraints(pattern='^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$', min_length=1, max_length=64)]
 
 
 class HeartbeatItemsAddBody(WireModel):

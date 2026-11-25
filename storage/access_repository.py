@@ -85,7 +85,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -435,10 +435,11 @@ class AccessRepository:
                 changed_at TEXT NOT NULL,
                 PRIMARY KEY (team_id, subject)
             )""")
-            # Local JetStream dead-letter reporting state for protocol 1 UA1_DLQ_<team> (C02, C10):
-            # per-(team, issuer_runtime, copy_id) receipts committed atomically with access_notices,
-            # and per-stream recovery scan cursors. Both are local to this installation's JetStream
-            # broker and never travel in a team transfer.
+            # Local JetStream dead-letter reporting state for protocol 1 UA1_DLQ_<team> (C02, C10, F2):
+            # per-(team, issuer_runtime, copy_id) receipts and per-(team, original_stream,
+            # original_stream_sequence, raw_sha256) receipts committed atomically with access_notices,
+            # plus per-stream recovery scan cursors. All three are local to this installation's
+            # JetStream broker and never travel in a team transfer.
             conn.execute("""CREATE TABLE IF NOT EXISTS protocol1_dlq_reported_notices (
                 team_id TEXT NOT NULL, issuer_runtime TEXT NOT NULL, copy_id TEXT NOT NULL,
                 notice_id TEXT NOT NULL, reported_at TEXT NOT NULL,
@@ -447,6 +448,16 @@ class AccessRepository:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS protocol1_dlq_reported_notices_reported "
                 "ON protocol1_dlq_reported_notices(team_id, reported_at)"
+            )
+            conn.execute("""CREATE TABLE IF NOT EXISTS protocol1_dlq_reported_originals (
+                team_id TEXT NOT NULL, original_stream TEXT NOT NULL,
+                original_stream_sequence BIGINT NOT NULL, raw_sha256 TEXT NOT NULL,
+                notice_id TEXT NOT NULL, reported_at TEXT NOT NULL,
+                PRIMARY KEY (team_id, original_stream, original_stream_sequence, raw_sha256)
+            )""")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS protocol1_dlq_reported_originals_reported "
+                "ON protocol1_dlq_reported_originals(team_id, reported_at)"
             )
             conn.execute("""CREATE TABLE IF NOT EXISTS protocol1_dlq_scan_cursors (
                 team_id TEXT NOT NULL, stream_name TEXT NOT NULL,
@@ -2161,38 +2172,140 @@ class AccessRepository:
                         found.add(pair)
         return found
 
+    def dlq_reported_original_keys(
+        self, team_id: str, keys: Iterable[tuple[str, int, str]]
+    ) -> dict[tuple[str, int, str], str]:
+        """Return ``{(original_stream, original_stream_sequence, raw_sha256): notice_id}`` already reported (F2)."""
+
+        unique_keys = list(
+            dict.fromkeys((str(stream), int(seq), str(sha)) for stream, seq, sha in keys if stream and sha)
+        )
+        if not unique_keys:
+            return {}
+        requested = set(unique_keys)
+        p = self.dialect.bind
+        found: dict[tuple[str, int, str], str] = {}
+        chunk_size = 200
+        unique_digests = list(dict.fromkeys(sha for _, _, sha in unique_keys))
+        with self._connect() as conn:
+            for offset in range(0, len(unique_digests), chunk_size):
+                chunk = unique_digests[offset : offset + chunk_size]
+                placeholders = ",".join(p for _ in chunk)
+                rows = conn.execute(
+                    f"SELECT original_stream, original_stream_sequence, raw_sha256, notice_id "
+                    f"FROM protocol1_dlq_reported_originals "
+                    f"WHERE team_id = {p} AND raw_sha256 IN ({placeholders})",
+                    (team_id, *chunk),
+                ).fetchall()
+                for row in rows:
+                    triple = (
+                        str(row["original_stream"]),
+                        int(row["original_stream_sequence"]),
+                        str(row["raw_sha256"]),
+                    )
+                    if triple in requested:
+                        found[triple] = str(row["notice_id"])
+        return found
+
+    def record_dlq_copy_aliases(
+        self,
+        team_id: str,
+        aliases: Iterable[tuple[str, str, str]],
+        *,
+        reported_at_utc: datetime,
+    ) -> int:
+        """Record copy-id receipts for cross-runtime duplicates whose original was already reported (F2)."""
+
+        unique_aliases = list(
+            dict.fromkeys((str(runtime), str(copy_id), str(notice_id)) for runtime, copy_id, notice_id in aliases)
+        )
+        if not unique_aliases:
+            return 0
+        p = self.dialect.bind
+        ts = self._dlq_ts(reported_at_utc)
+        inserted = 0
+        with self._connect() as conn:
+            conn.begin_write()
+            for runtime, copy_id, notice_id in unique_aliases:
+                rc = conn.execute(
+                    f"INSERT INTO protocol1_dlq_reported_notices("
+                    f"team_id, issuer_runtime, copy_id, notice_id, reported_at"
+                    f") VALUES ({p},{p},{p},{p},{p}) "
+                    "ON CONFLICT(team_id, issuer_runtime, copy_id) DO NOTHING",
+                    (team_id, runtime, copy_id, notice_id, ts),
+                )
+                if rc.rowcount and rc.rowcount > 0:
+                    inserted += int(rc.rowcount)
+            conn.commit()
+        return inserted
+
     def record_dlq_notice_report(
         self,
         team_id: str,
         notice: AccessNoticeV1,
         receipts: Iterable[tuple[str, str]],
         *,
+        original_keys: Mapping[tuple[str, str], tuple[str, int, str]] | None = None,
+        alias_receipts: Iterable[tuple[str, str]] = (),
         reported_at_utc: datetime,
     ) -> tuple[bool, int]:
-        """Atomically store ``notice`` and its per-copy receipts in one write transaction (C02, C10).
+        """Atomically store ``notice`` and its per-copy and per-original receipts in one write transaction (C02, C10, F2).
 
         Returns ``(notice_created, receipts_inserted)``. If every receipt in ``receipts`` was
-        already recorded by an earlier pass, neither ``access_notices`` nor receipts are written
+        already recorded by an earlier pass (either by copy key or by ``(original_stream,
+        original_stream_sequence, raw_sha256)``), no new ``access_notices`` row is written
+        (duplicate copy keys are still recorded as aliases pointing at the original ``notice_id``)
         and ``(False, 0)`` is returned.
         """
 
         unique_receipts = list(dict.fromkeys((str(runtime), str(copy_id)) for runtime, copy_id in receipts))
+        unique_aliases = list(dict.fromkeys((str(runtime), str(copy_id)) for runtime, copy_id in alias_receipts))
         if not unique_receipts:
             return False, 0
+        orig_map = original_keys or {}
         p = self.dialect.bind
         ts = self._dlq_ts(reported_at_utc)
         with self._connect() as conn:
             conn.begin_write()
             missing: list[tuple[str, str]] = []
+            missing_originals: list[tuple[str, int, str]] = []
+            seen_originals: set[tuple[str, int, str]] = set()
+            alias_rows: list[tuple[str, str, str]] = []
             for runtime, copy_id in unique_receipts:
                 row = conn.execute(
                     f"SELECT 1 FROM protocol1_dlq_reported_notices "
                     f"WHERE team_id = {p} AND issuer_runtime = {p} AND copy_id = {p} LIMIT 1",
                     (team_id, runtime, copy_id),
                 ).fetchone()
-                if row is None:
-                    missing.append((runtime, copy_id))
+                if row is not None:
+                    continue
+                orig = orig_map.get((runtime, copy_id))
+                if orig is not None:
+                    orig_triple = (str(orig[0]), int(orig[1]), str(orig[2]))
+                    if orig_triple in seen_originals:
+                        alias_rows.append((runtime, copy_id, notice.notice_id))
+                        continue
+                    orig_row = conn.execute(
+                        f"SELECT notice_id FROM protocol1_dlq_reported_originals "
+                        f"WHERE team_id = {p} AND original_stream = {p} "
+                        f"AND original_stream_sequence = {p} AND raw_sha256 = {p} LIMIT 1",
+                        (team_id, *orig_triple),
+                    ).fetchone()
+                    if orig_row is not None:
+                        alias_rows.append((runtime, copy_id, str(orig_row["notice_id"])))
+                        continue
+                    seen_originals.add(orig_triple)
+                    missing_originals.append(orig_triple)
+                missing.append((runtime, copy_id))
             if not missing:
+                for runtime, copy_id, existing_notice_id in alias_rows:
+                    conn.execute(
+                        f"INSERT INTO protocol1_dlq_reported_notices("
+                        f"team_id, issuer_runtime, copy_id, notice_id, reported_at"
+                        f") VALUES ({p},{p},{p},{p},{p}) "
+                        "ON CONFLICT(team_id, issuer_runtime, copy_id) DO NOTHING",
+                        (team_id, runtime, copy_id, existing_notice_id, ts),
+                    )
                 conn.commit()
                 return False, 0
             notice_cursor = conn.execute(
@@ -2211,6 +2324,24 @@ class AccessRepository:
                 )
                 if rc.rowcount and rc.rowcount > 0:
                     receipts_inserted += int(rc.rowcount)
+            for runtime, copy_id in unique_aliases:
+                alias_rows.append((runtime, copy_id, notice.notice_id))
+            for runtime, copy_id, target_notice_id in alias_rows:
+                conn.execute(
+                    f"INSERT INTO protocol1_dlq_reported_notices("
+                    f"team_id, issuer_runtime, copy_id, notice_id, reported_at"
+                    f") VALUES ({p},{p},{p},{p},{p}) "
+                    "ON CONFLICT(team_id, issuer_runtime, copy_id) DO NOTHING",
+                    (team_id, runtime, copy_id, target_notice_id, ts),
+                )
+            for orig_stream, orig_seq, raw_sha in missing_originals:
+                conn.execute(
+                    f"INSERT INTO protocol1_dlq_reported_originals("
+                    f"team_id, original_stream, original_stream_sequence, raw_sha256, notice_id, reported_at"
+                    f") VALUES ({p},{p},{p},{p},{p},{p}) "
+                    "ON CONFLICT(team_id, original_stream, original_stream_sequence, raw_sha256) DO NOTHING",
+                    (team_id, orig_stream, orig_seq, raw_sha, notice.notice_id, ts),
+                )
             conn.commit()
         return bool(notice_cursor.rowcount and notice_cursor.rowcount > 0), receipts_inserted
 
@@ -2223,6 +2354,10 @@ class AccessRepository:
             conn.begin_write()
             cursor = conn.execute(
                 f"DELETE FROM protocol1_dlq_reported_notices WHERE team_id = {p} AND reported_at < {p}",
+                (team_id, cutoff),
+            )
+            conn.execute(
+                f"DELETE FROM protocol1_dlq_reported_originals WHERE team_id = {p} AND reported_at < {p}",
                 (team_id, cutoff),
             )
             conn.commit()

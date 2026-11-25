@@ -374,9 +374,11 @@ size_check:
 # The dead-letter custody role inspects its team's dead-letter stream info, finds a raw copy
 # by its subject (the last message for ua.v1.<team>.<notice sender>.dlq.raw.<copy id>),
 # reads it, and deletes it by the sequence that read returns; it deletes raw copies that
-# name a departed person or have been orphaned without a notice, and scans notices below its
-# consumer's cutoff after crashes (README, "Dead letters"). Only per-team streams, so the
-# grant reaches no other team's copies.
+# name a departed person or have been orphaned without a notice, scans notices below its
+# consumer's cutoff after crashes, and reads metadata-only STREAM.INFO on every durable work
+# stream of its team (including UA1_TEAM_WORK_{team}) to post near-expiry Inbox warnings
+# while keeping the installation authority free of the database (README, "Dead letters").
+# Only per-team streams, so the grant reaches no other team's copies.
 dead_letter_custody:
   role: team_services
   streams: ["UA1_DLQ_{team}"]
@@ -404,7 +406,7 @@ delivery_advisories:
       mode: pull
       ack: explicit
       ack_wait_seconds: 60
-      max_deliveries: 20
+      max_deliveries: -1      # unlimited: idempotent handler retries instead of silently stranding advisories
     installation_authority:
       role: installation_authority
       name: adv_auth~{team}
@@ -412,7 +414,7 @@ delivery_advisories:
       mode: pull
       ack: explicit
       ack_wait_seconds: 60
-      max_deliveries: 20
+      max_deliveries: -1      # unlimited: idempotent handler retries instead of silently stranding advisories
 
 # Every bucket's stream (KV_<bucket>, subjects $KV.<bucket>.>) has these settings; the
 # topology owner creates it as a stream with them (README, "Key-value grants"). Client
