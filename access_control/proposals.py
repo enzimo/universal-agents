@@ -46,10 +46,11 @@ of the access plan is the design; the rules here are:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from access_catalog.catalog import (
@@ -66,19 +67,31 @@ from access_catalog.instance_tools import (
     private_hosts,
     read_proposed_tool_file,
     remove_instance_tool,
+    remove_proposed_tool_file,
     replace_instance_tool,
     restore_instance_tool,
+    restore_removed_instance_tool,
     tool_definition,
     with_proposed_tools,
     write_instance_tool,
 )
 from access_control.cli_binaries import Downloader, fetch_https, workspaces_root
 from access_control.data_folders import DataFolderRegistry, registration_problem
-from access_control.decision_effects import EffectJournal, OwnedFile, ReplacedFile
+from access_control.decision_effects import EffectJournal, OwnedFile, RemovedFile, ReplacedFile
 from access_control.proposal_clis import cli_rows, install_programs
 from access_control.proposal_errors import ProposalRefused
 from access_control.tool_change_diffs import describe_injections, tool_change_rows
-from access_control.decisions import HandDownRefused
+from access_control.tool_removals import (
+    active_grants_for_tool,
+    active_grants_for_tool_in_store,
+    check_tool_removal_conflicts,
+    grant_targets_tool,
+    load_removable_tool_file,
+    reviewed_removal_impact_ids,
+    tool_removal_rows,
+    with_tool_removal_baselines,
+)
+from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import PersonPrincipal, agent_type_id
 from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, grantable_folder_id
 from access_control.grant_entries import GrantPlan
@@ -105,7 +118,9 @@ from custom_messages.contracts.access_v2 import (
     LinkPurpose,
     OwnerScope,
     ProposedAccountLinkV1,
+    ProposedCliToolV1,
     ProposedGrantV1,
+    ProposedHttpToolV1,
     ReviewItemV1,
     SubjectKind,
     SubjectRefV1,
@@ -331,6 +346,7 @@ def with_tool_change_baselines(
 _SUMMARY_SECTION_WORDS = {
     "tool": ("add {n} new tool", "add {n} new tools"),
     "tool_change": ("change {n} tool", "change {n} tools"),
+    "tool_removal": ("remove {n} tool", "remove {n} tools"),
     "access": ("give {n} access", "give {n} accesses"),
     "restriction": ("add {n} restriction", "add {n} restrictions"),
     "folder": ("register {n} folder", "register {n} folders"),
@@ -364,8 +380,12 @@ def _summary_bucket(row: ReviewItemV1) -> str:
 def proposal_summary(rows: tuple[ReviewItemV1, ...]) -> str:
     """The proposal in one line from its review rows, such as "Access proposal: add 1 new tool, give 2 accesses"."""
 
-    # A tool's extra rows (its commands, its setup steps, its change details) are not more tools.
-    items = [row for row in rows if not (row.section in {"tool", "tool_change"} and row.item_id.count("-") > 1)]
+    # A tool's extra rows (its commands, its setup steps, its change details, its removal impacts) are not more tools.
+    items = [
+        row
+        for row in rows
+        if not (row.section in {"tool", "tool_change", "tool_removal"} and row.item_id.count("-") > 1)
+    ]
     counts = {section: sum(1 for row in items if _summary_bucket(row) == section) for section in _SUMMARY_SECTION_WORDS}
     parts = [
         _SUMMARY_SECTION_WORDS[section][count != 1].format(n=count) for section, count in counts.items() if count
@@ -396,7 +416,7 @@ def _target_name(catalog: ToolCatalog, target: TargetRefV1) -> str:
     return f"{name} ({operation})" if operation else name
 
 
-def _tool_words(tool) -> str:
+def _tool_words(tool: ProposedHttpToolV1) -> str:
     routes = "; ".join(
         f"{route.name} ({route.method} {route.path}) needs {LEVEL_WORDS[route.level]}" for route in tool.routes
     )
@@ -412,7 +432,7 @@ def _tool_words(tool) -> str:
     return words
 
 
-def _setup_step_rows(index: int | str, tool) -> list[ReviewItemV1]:
+def _setup_step_rows(index: int | str, tool: ProposedHttpToolV1 | ProposedCliToolV1) -> list[ReviewItemV1]:
     """One row per proposed setup step, in the exact words people will be shown."""
 
     prefix = index if isinstance(index, str) else f"tool-{index}"
@@ -450,26 +470,37 @@ class ProposalCompiler:
     mcp_records: MCPRecordLookup = _no_mcp_records
     # The one agent type that keeps lasting access ("access follows the work").
     lead_agent_type: str = "TeamArchitect"
-    # Instance root for checking proposal-written tool files in tool_changes.
+    # Instance root for checking proposal-written tool files in tool_changes and tool_removals.
     instance_root: Path | None = None
-    # Active links (account and gate) for one tool_id, used for re-link and new-host warnings.
+    # Active links (account and gate) for one tool_id, used for re-link, new-host, and removal impact warnings.
     links_for_tool: Callable[[str], list[AccountLinkV1]] = lambda _tool_id: []
     # Active operation blocks on one tool_id, used to warn when route removals widen them.
     blocks_for_tool: Callable[[str], list[GrantV1]] = lambda _tool_id: []
+    # Active grants and blocks targeting one tool_id, used for tool_removals impact rows.
+    grants_for_tool: Callable[[str], list[GrantV1]] = lambda _tool_id: []
 
     def compile(
         self, proposal: AccessProposalV1, *, person: PersonPrincipal | None, task_id: str | None
     ) -> CompiledProposal:
         servers = self._servers(proposal)
+        removed_files = self._tool_removal_files(proposal)
         changed_files = self._tool_change_files(proposal)
         try:
             candidate = with_proposed_tools(
-                self.catalog, proposal.tools, proposal.clis, proposal.tool_changes
+                self.catalog,
+                proposal.tools,
+                proposal.clis,
+                proposal.tool_changes,
+                proposal.tool_removals,
             )
             for record in servers:
                 candidate.add_mcp_tool(record)
             candidate.validate()
         except (CatalogError, ValueError) as exc:
+            if proposal.tool_removals and not (proposal.tools or proposal.clis or proposal.tool_changes or servers):
+                raise ProposalRefused(f"A proposed tool cannot be removed: {exc}") from exc
+            if proposal.tool_removals:
+                raise ProposalRefused(f"The proposed tool changes cannot be applied: {exc}") from exc
             raise ProposalRefused(f"A proposed tool cannot be added: {exc}") from exc
         new_mcp = {record.descriptor.capability_id for record in servers}
         new_tools = {tool.tool_id for tool in proposal.tools} | {cli.tool_id for cli in proposal.clis} | new_mcp
@@ -478,13 +509,14 @@ class ProposalCompiler:
             flags = ["new_host"] + (["private_address"] if private_hosts(tool) else [])
             rows.append(ReviewItemV1(item_id=f"tool-{index}", section="tool", text=_tool_words(tool), flags=tuple(flags)))
             rows += _setup_step_rows(index, tool)
-        rows += self._tool_change_rows(proposal, changed_files)
         for index, cli in enumerate(proposal.clis):
             rows += cli_rows(index, cli, _setup_step_rows)
         rows += [
             ReviewItemV1(item_id=f"server-{index}", section="tool", text=_mcp_server_words(record), flags=_mcp_server_flags(record))
             for index, record in enumerate(servers)
         ]
+        rows += self._tool_change_rows(proposal, changed_files)
+        rows += self._tool_removal_rows(proposal, removed_files)
         needs: dict[tuple[str, str], tuple[TargetRefV1, AccessLevel]] = {}
         for index, grant in enumerate(proposal.grants):
             self._check_target(candidate, grant.target, what="Access")
@@ -631,6 +663,64 @@ class ProposalCompiler:
                 raise ProposalRefused(
                     f"The proposed change to {item.tool_id} makes no changes to its current definition."
                 )
+            rows += item_rows
+        return rows
+
+    def _tool_removal_files(self, proposal: AccessProposalV1) -> list[ProposedToolFile]:
+        """Read and verify each ``tool_removals`` target file once against its pinned baseline."""
+
+        if not proposal.tool_removals:
+            return []
+        check_tool_removal_conflicts(proposal)
+        if self.instance_root is None:
+            raise ProposalRefused("Tool removals cannot be validated without an instance root.")
+        files: list[ProposedToolFile] = []
+        for item in proposal.tool_removals:
+            tool_file = load_removable_tool_file(self.instance_root, self.catalog, item.tool_id)
+            if item.expected_sha256 is None:
+                logger.warning(
+                    "Refused a proposed tool removal with no pinned baseline digest. "
+                    "event=proposal_tool_removal_refused reason=missing_baseline tool_id=%s",
+                    item.tool_id,
+                )
+                raise ProposalRefused(f"The proposed removal of {item.tool_id} is missing its baseline digest.")
+            if item.expected_sha256 != tool_file.sha256:
+                logger.warning(
+                    "Refused a proposed tool removal whose file changed after preparation. "
+                    "event=proposal_tool_removal_refused reason=baseline_changed tool_id=%s",
+                    item.tool_id,
+                )
+                raise ProposalRefused(
+                    f"The catalog file for {item.tool_id} changed after the proposal was prepared; propose it again."
+                )
+            files.append(tool_file)
+        return files
+
+    def _tool_removal_rows(
+        self, proposal: AccessProposalV1, removed_files: list[ProposedToolFile]
+    ) -> list[ReviewItemV1]:
+        rows: list[ReviewItemV1] = []
+        for index, (item, tool_file) in enumerate(zip(proposal.tool_removals, removed_files)):
+            active_grants, active_blocks = active_grants_for_tool(self.grants_for_tool(item.tool_id), item.tool_id)
+            try:
+                item_rows = tool_removal_rows(
+                    index,
+                    tool_file.definition,
+                    active_grants=active_grants,
+                    active_blocks=active_blocks,
+                    active_links=self.links_for_tool(item.tool_id),
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "Refused a proposed tool removal whose impact could not fit without truncation. "
+                    "event=proposal_tool_removal_refused reason=review_row_too_long tool_id=%s error=%s",
+                    item.tool_id,
+                    exc,
+                )
+                raise ProposalRefused(
+                    f"The proposed removal of {item.tool_id} cannot be shown on the review card without hiding "
+                    f"part of its impact: {exc}"
+                ) from exc
             rows += item_rows
         return rows
 
@@ -804,6 +894,83 @@ class ProposalCompiler:
 _APPLY_REFUSALS = (HandDownRefused, CatalogError, AccessStoreConflict, PermissionError, ValueError)
 
 
+def _service_with_catalog(service: AccessService, catalog: ToolCatalog) -> AccessService:
+    """Build an unshared ``AccessService`` against ``catalog``, sharing ``service.store`` and ``service.cedar``."""
+
+    return AccessService(
+        store=service.store,
+        catalog=catalog,
+        cedar=service.cedar,
+        team_id=service.team_id,
+        clock=service.clock,
+        agent_role_of=service.agent_role_of,
+        lead_agent_type=service.lead_agent_type,
+    )
+
+
+def _check_removal_grants_authority(
+    check_service: AccessService,
+    reviewer: PersonPrincipal,
+    grants: Iterable[GrantV1],
+) -> None:
+    """Verify ``reviewer`` may revoke every live grant or block removed alongside a tool."""
+
+    for grant in grants:
+        if grant.kind is GrantKind.BLOCK:
+            if not AccessRequests.may_unblock(reviewer, grant):
+                raise HandDownRefused(f"You cannot remove block {grant.grant_id} on {grant.target.id}.")
+        elif not check_service.may_revoke(reviewer, grant):
+            raise HandDownRefused(f"You cannot remove grant {grant.grant_id} on {grant.target.id}.")
+
+
+def _check_removal_grants_reviewed(
+    request: AccessRequestV1,
+    grants: Iterable[GrantV1],
+    reviewed_grant_ids: frozenset[str],
+) -> None:
+    """Refuse if active/pending grants or blocks appeared after the proposal was compiled for review."""
+
+    unreviewed = [grant.grant_id for grant in grants if grant.grant_id not in reviewed_grant_ids]
+    if unreviewed:
+        logger.warning(
+            "Refused a tool removal because new grants or blocks appeared after review. "
+            "event=proposal_tool_removal_impact_changed request_id=%s unreviewed_grants=%s",
+            request.request_id,
+            ",".join(unreviewed),
+        )
+        raise HandDownRefused(
+            "New access grants or restrictions were added for a removed tool after this proposal was prepared; "
+            "TeamLead must propose the removal again so the full impact can be reviewed."
+        )
+
+
+def _check_removal_links_reviewed(
+    request: AccessRequestV1,
+    links: Iterable[AccountLinkV1],
+    reviewed_link_ids: frozenset[str],
+) -> None:
+    """Refuse if active account or gate links appeared after the proposal was compiled for review."""
+
+    unreviewed = [link.link_id for link in links if link.link_id not in reviewed_link_ids]
+    if unreviewed:
+        logger.warning(
+            "Refused a tool removal because new credential links appeared after review. "
+            "event=proposal_tool_removal_impact_changed request_id=%s unreviewed_links=%s",
+            request.request_id,
+            ",".join(unreviewed),
+        )
+        raise HandDownRefused(
+            "New credential links were added for a removed tool after this proposal was prepared; "
+            "TeamLead must propose the removal again so the full impact can be reviewed."
+        )
+
+
+def _reviewed_removal_sets(request: AccessRequestV1) -> tuple[frozenset[str], frozenset[str]]:
+    if request.change is None:
+        return frozenset(), frozenset()
+    return reviewed_removal_impact_ids(request.change.items)
+
+
 @dataclass
 class ProposalApplier:
     """Applies an approved proposal at the decision (``access_control.requests.ChangeApplier``)."""
@@ -817,7 +984,7 @@ class ProposalApplier:
     # The MCP registry, for proposals that install MCP servers (none: refused).
     mcp_store: Callable[[], MCPConnectionStore] | None = None
     # Account links to open for the approver after the decision, by request id.
-    account_links: dict[str, list] = field(default_factory=dict)
+    account_links: dict[str, list[ProposedAccountLinkV1]] = field(default_factory=dict)
     # How a proposed CLI's program is downloaded (https only; tests stand in).
     download: Downloader = fetch_https
 
@@ -839,6 +1006,9 @@ class ProposalApplier:
                 link for link in service.store.list_links(service.team_id, purpose=None) if link.tool_id == tool_id
             ],
             blocks_for_tool=lambda tool_id: active_operation_blocks_for_tool(
+                service.store, service.team_id, tool_id, now=service.clock()
+            ),
+            grants_for_tool=lambda tool_id: active_grants_for_tool_in_store(
                 service.store, service.team_id, tool_id, now=service.clock()
             ),
         )
@@ -867,7 +1037,9 @@ class ProposalApplier:
         requests = self.requests()
         proposal = self.stored_proposal(requests, request)
         if proposal.installs and not is_administrator(reviewer.roles):
-            raise HandDownRefused("Only an owner or an administrator approves new tools, MCP servers and data folders.")
+            raise HandDownRefused(
+                "Only an owner or an administrator approves new tools, tool changes, tool removals, MCP servers and data folders."
+            )
         if proposal.mcp_servers and self.mcp_store is None:
             raise HandDownRefused("This gateway cannot install MCP servers: it has no MCP registry.")
         person = self.person(request.person_id) if request.person_id else None
@@ -882,11 +1054,12 @@ class ProposalApplier:
             self.account_links[request.request_id] = list(proposal.account_links)
         logger.warning(
             "An access proposal was applied. event=proposal_applied request_id=%s by=%s tools=%s tool_changes=%s "
-            "mcp_servers=%s grants=%s folders=%s revoked=%s",
+            "tool_removals=%s mcp_servers=%s grants=%s folders=%s revoked=%s",
             request.request_id,
             reviewer.person_id,
-            ",".join(tool.tool_id for tool in (*proposal.tools, *proposal.clis)),
+            ",".join([*(tool.tool_id for tool in proposal.tools), *(cli.tool_id for cli in proposal.clis)]),
             ",".join(changed.tool_id for changed in proposal.tool_changes),
+            ",".join(removed.tool_id for removed in proposal.tool_removals),
             ",".join(item.connection_id for item in proposal.mcp_servers),
             ",".join(applied.grant_ids),
             ",".join(folder.name for folder in proposal.data_folders),
@@ -912,6 +1085,36 @@ class ProposalApplier:
                 service.team_id,
             )
 
+    def _precheck_tool_removals(
+        self,
+        requests: AccessRequests,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        compiled: CompiledProposal,
+    ) -> ToolCatalog | None:
+        """Capture the pre-removal catalog and run a fast impact + authority pre-check before touching disk."""
+
+        if not compiled.proposal.tool_removals:
+            return None
+        pre_removal_catalog = self.catalogs.current()
+        pre_removal_service = _service_with_catalog(requests.service, pre_removal_catalog)
+        now = requests.service.clock()
+        reviewed_grant_ids, reviewed_link_ids = _reviewed_removal_sets(request)
+        all_links = requests.service.store.list_links(requests.service.team_id, purpose=None)
+        for item in compiled.proposal.tool_removals:
+            live = active_grants_for_tool_in_store(
+                requests.service.store, requests.service.team_id, item.tool_id, now=now
+            )
+            _check_removal_grants_reviewed(request, live, reviewed_grant_ids)
+            _check_removal_grants_authority(pre_removal_service, reviewer, live)
+            tool_links = [link for link in all_links if link.tool_id == item.tool_id]
+            _check_removal_links_reviewed(request, tool_links, reviewed_link_ids)
+        return pre_removal_catalog
+
+    def _finish_committed_recovery(self, requests: AccessRequests, recovery: DecisionRecovery, claim: DecisionClaim) -> None:
+        if self._discard_removed_staging(recovery, raise_on_error=False):
+            requests.clear_recovery(claim)
+
     def _apply_items(
         self,
         requests: AccessRequests,
@@ -932,8 +1135,11 @@ class ProposalApplier:
         as such and other errors are raised again as they were.
         """
 
+        pre_removal_catalog = self._precheck_tool_removals(requests, request, reviewer, compiled)
         recovery = requests.recovery_record(
-            claim, finished, {"tool_files": [], "replaced_tool_files": [], "programs": [], "servers": []}
+            claim,
+            finished,
+            {"tool_files": [], "replaced_tool_files": [], "removed_tool_files": [], "programs": [], "servers": []},
         )
         requests.service.store.save_decision_recovery(recovery)
         journal = EffectJournal(requests.service.store, recovery)
@@ -959,7 +1165,19 @@ class ProposalApplier:
                 staging_parts=(temporary.name,),
             )
 
-        def publish_replacement(commit: Callable[[], None]) -> None:
+        def prepare_removal(
+            path: Path, device: int, inode: int, previous_bytes: bytes, staging_path: Path
+        ) -> None:
+            journal.prepare_removal(
+                "removed_tool_files",
+                (path.name,),
+                device,
+                inode,
+                previous_bytes,
+                staging_parts=(staging_path.name,),
+            )
+
+        def publish_effect(commit: Callable[[], None]) -> None:
             with requests.service.store.decision_effect_transaction(claim):
                 commit()
 
@@ -975,7 +1193,21 @@ class ProposalApplier:
 
         try:
             install_programs(self.instance_root, compiled.proposal.clis, download, before_write=prepare_program)
-            for tool in (*compiled.proposal.tools, *compiled.proposal.clis):
+            for removed in compiled.proposal.tool_removals:
+                assert removed.expected_sha256 is not None
+                remove_proposed_tool_file(
+                    self.instance_root,
+                    removed.tool_id,
+                    expected_sha256=removed.expected_sha256,
+                    before_remove=prepare_removal,
+                    publish=publish_effect,
+                    keep_staging=True,
+                )
+            new_tools: tuple[ProposedHttpToolV1 | ProposedCliToolV1, ...] = (
+                *compiled.proposal.tools,
+                *compiled.proposal.clis,
+            )
+            for tool in new_tools:
                 write_instance_tool(self.instance_root, tool, before_write=prepare_tool)
             for changed in compiled.proposal.tool_changes:
                 assert changed.previous_definition_digest is not None
@@ -984,22 +1216,36 @@ class ProposalApplier:
                     changed,
                     expected_previous_sha256=changed.previous_definition_digest,
                     before_replace=prepare_replacement,
-                    publish=publish_replacement,
+                    publish=publish_effect,
                 )
             self._install_servers(
                 compiled.proposal, request, reviewer, prepare_server, claim, now=requests.service.clock()
             )
             requests.service.catalog = self.catalogs.current()
-            applied = self._store(requests, request, reviewer, finished, compiled, claim)
-            requests.clear_recovery(claim)
+            applied = self._store(
+                requests,
+                request,
+                reviewer,
+                finished,
+                compiled,
+                claim,
+                pre_removal_catalog=pre_removal_catalog,
+            )
+            self._finish_committed_recovery(requests, recovery, claim)
             return applied
         except BaseException as exc:
             stored = requests.outcome_stored_despite(exc, request.request_id, reviewer, finished.decided_at_utc)
             if stored is not None:
-                requests.clear_recovery(claim)
+                self._finish_committed_recovery(requests, recovery, claim)
                 return stored
+            # Require the recovery row to still exist so a stalled claim whose
+            # recovery row was already reconciled by maintenance never replays
+            # undo, while allowing cleanup while this decision's own claim is live.
             stored = requests.reconcile_decision(
-                recovery, lambda latest, current, elsewhere: self.recover(requests, latest, current, elsewhere)
+                recovery,
+                lambda latest, current, elsewhere: self.recover(requests, latest, current, elsewhere),
+                require_record=True,
+                skip_live_claim=False,
             )
             if stored is not None:
                 return stored
@@ -1015,6 +1261,47 @@ class ProposalApplier:
                 raise HandDownRefused(f"The proposal could not be applied, so nothing changed: {exc}") from exc
             raise
 
+    def _discard_removed_staging(self, recovery: DecisionRecovery, *, raise_on_error: bool) -> bool:
+        """Unlink this decision's removal staging files after commit or when GRANTED."""
+
+        records = recovery.effects.get("removed_tool_files", ())
+        if not records:
+            return True
+        from runtime_settings.instance_layout import InstanceLayout
+
+        directory = InstanceLayout.at(self.instance_root).instance_tools_dir
+        removed = [RemovedFile.model_validate(record) for record in records]
+        failures: list[Exception] = []
+        for item in removed:
+            try:
+                item.discard_staging(directory)
+            except Exception as exc:  # noqa: BLE001 - retry on next recovery pass
+                failures.append(exc)
+                logger.exception(
+                    "Could not unlink a committed removal's staging file; Inbox recovery will retry. "
+                    "event=proposal_removal_staging_cleanup_failed request_id=%s path=%s",
+                    recovery.claim.request_id,
+                    "/".join(item.staging_parts),
+                )
+        if failures:
+            if raise_on_error:
+                raise failures[0]
+            return False
+        return True
+
+    def _keep_removed_for_other_decision(
+        self, recovery: DecisionRecovery, current: AccessRequestV1, claimed_elsewhere: bool
+    ) -> None:
+        if current.status is AccessRequestStatus.GRANTED:
+            self._discard_removed_staging(recovery, raise_on_error=True)
+        logger.warning(
+            "Another decision owns or approved this proposal; removed tool files are not restored. "
+            "event=proposal_removals_kept request_id=%s status=%s claimed_elsewhere=%s",
+            recovery.claim.request_id,
+            current.status.value,
+            claimed_elsewhere,
+        )
+
     def recover(
         self, requests: AccessRequests, recovery: DecisionRecovery,
         current: AccessRequestV1 | None, claimed_elsewhere: bool,
@@ -1022,6 +1309,7 @@ class ProposalApplier:
         """Reconcile under the store lock; an exception's type never establishes ownership."""
 
         if recovery.matches(current):
+            self._discard_removed_staging(recovery, raise_on_error=True)
             return current
         effects = recovery.effects
         from runtime_settings.instance_layout import InstanceLayout
@@ -1029,22 +1317,28 @@ class ProposalApplier:
         directory = InstanceLayout.at(self.instance_root).instance_tools_dir
         written = [OwnedFile.model_validate(record) for record in effects["tool_files"]]
         replaced = [ReplacedFile.model_validate(record) for record in effects["replaced_tool_files"]]
+        removed = [RemovedFile.model_validate(record) for record in effects.get("removed_tool_files", ())]
         programs = [OwnedFile.model_validate(record) for record in effects["programs"]]
         installed = [MCPConnectionRecordV1.model_validate(record) for record in effects["servers"]]
         if current is not None and (
             current.status is AccessRequestStatus.GRANTED
             or (current.status is AccessRequestStatus.WAITING and claimed_elsewhere)
         ):
-            # A newer decision may have reused these programs. Keep them even
-            # when renewal failed with a database error rather than ClaimLost.
+            # A newer decision may have reused these programs or approved the
+            # removal. Keep them even when renewal failed with a database error.
             programs = []
+            if removed:
+                self._keep_removed_for_other_decision(recovery, current, claimed_elsewhere)
+                removed = []
             if current.status is AccessRequestStatus.GRANTED:
                 written, replaced, installed = [], [], []
             logger.warning(
                 "Another decision may use this proposal's programs; they are kept. "
                 "event=proposal_programs_kept request_id=%s", recovery.claim.request_id,
             )
-        self._undo_items(requests, directory, recovery.claim.request_id, written, replaced, programs, installed)
+        self._undo_items(
+            requests, directory, recovery.claim.request_id, written, replaced, removed, programs, installed
+        )
         return None
 
     def _undo_items(
@@ -1054,10 +1348,11 @@ class ProposalApplier:
         request_id: str,
         written: list[OwnedFile],
         replaced: list[ReplacedFile],
+        removed: list[RemovedFile],
         programs: list[OwnedFile],
         installed: list[MCPConnectionRecordV1],
     ) -> None:
-        """Take back the files, replacements, programs and servers a failed approval wrote (each step logged on failure)."""
+        """Take back the files, replacements, removals, programs and servers a failed approval applied (each step logged on failure)."""
 
         steps: list[tuple[str, Callable[[], None]]] = [
             *((
@@ -1071,6 +1366,18 @@ class ProposalApplier:
                     lambda previous, target=directory.joinpath(*item.parts): restore_instance_tool(target, previous),
                 ),
             ) for item in reversed(replaced)),
+            *((
+                f"removed tool file {'/'.join(item.parts)}",
+                lambda item=item: item.restore(
+                    directory,
+                    lambda item=item: restore_removed_instance_tool(
+                        directory.joinpath(*item.parts),
+                        directory.joinpath(*item.staging_parts),
+                        expected_device=item.device,
+                        expected_inode=item.inode,
+                    ),
+                ),
+            ) for item in reversed(removed)),
             *((f"program {'/'.join(owned.parts)}", lambda owned=owned: owned.remove(workspaces_root(self.instance_root))) for owned in programs),
             ("MCP servers", lambda: self._restore_servers(installed, request_id=request_id)),
             ("catalog", lambda: setattr(requests.service, "catalog", self.catalogs.current())),
@@ -1164,10 +1471,16 @@ class ProposalApplier:
         finished: AccessRequestV1,
         compiled: CompiledProposal,
         claim: DecisionClaim,
+        *,
+        pre_removal_catalog: ToolCatalog | None = None,
     ) -> AccessRequestV1:
         service = requests.service
         now = service.clock()
         proposal = compiled.proposal
+        removed_tool_ids = tuple(item.tool_id for item in proposal.tool_removals)
+        pre_removal_service = (
+            _service_with_catalog(service, pre_removal_catalog) if pre_removal_catalog is not None else None
+        )
         grants = self._all_grants(request, reviewer, finished, compiled, now)
         for grant in grants:
             refusal = self._refusal(requests, reviewer, grant)
@@ -1181,11 +1494,26 @@ class ProposalApplier:
             removed = service.store.get(grant_id)
             if removed is None:
                 raise HandDownRefused(f"You cannot remove {grant_id}.")
-            for held in service.entry_grants(removed):
-                if not service.may_revoke(reviewer, held):
+            revoke_service = (
+                pre_removal_service
+                if pre_removal_service is not None
+                and any(grant_targets_tool(removed, tool_id) for tool_id in removed_tool_ids)
+                else service
+            )
+            for held in revoke_service.entry_grants(removed):
+                if not revoke_service.may_revoke(reviewer, held):
                     raise HandDownRefused(f"You cannot remove {held.grant_id}.")
                 revoke_ids.append(held.grant_id)
         ending = tuple(dict.fromkeys(revoke_ids))
+
+        reviewed_grant_ids, reviewed_link_ids = _reviewed_removal_sets(request)
+
+        def check_removal_grants(matched: list[GrantV1]) -> None:
+            _check_removal_grants_reviewed(request, matched, reviewed_grant_ids)
+            _check_removal_grants_authority(pre_removal_service or service, reviewer, matched)
+
+        def check_removal_links(matched: list[AccountLinkV1]) -> None:
+            _check_removal_links_reviewed(request, matched, reviewed_link_ids)
 
         def outcome(plan: GrantPlan | None) -> AccessRequestV1:
             assert plan is not None
@@ -1199,6 +1527,9 @@ class ProposalApplier:
             plan=lambda: service.plan_grants(grants, ending=ending),
             data_folders=folders,
             revoke_ids=ending,
+            revoke_tool_ids=removed_tool_ids,
+            check_tool_removal_grants=check_removal_grants if removed_tool_ids else None,
+            check_tool_removal_links=check_removal_links if removed_tool_ids else None,
             finish=outcome,
             claim_id=claim.claim_id,
             actor=SubjectRefV1(kind=SubjectKind.USER, id=reviewer.person_id),
@@ -1213,7 +1544,7 @@ class ProposalApplier:
         reviewer: PersonPrincipal,
         finished: AccessRequestV1,
         compiled: CompiledProposal,
-        now,
+        now: datetime,
     ) -> list[GrantV1]:
         """Agent grants (kept rows as proposed, the rest for the task), the person's own, and blocks."""
 
@@ -1230,7 +1561,9 @@ class ProposalApplier:
         return grants
 
     @staticmethod
-    def _lifetime(item: ProposedGrantV1, keep: bool, finished: AccessRequestV1, now):
+    def _lifetime(
+        item: ProposedGrantV1, keep: bool, finished: AccessRequestV1, now: datetime
+    ) -> tuple[GrantLifetime, datetime | None]:
         if item.lifetime != "until_revoked" or not keep:
             return GrantLifetime.TASK, None
         if finished.keep_hours:
@@ -1245,7 +1578,9 @@ class ProposalApplier:
             return f"You cannot restrict {grant.target.id}: it is beyond your own authority."
         return requests.service.grant_refusal(reviewer, grant)
 
-    def _base(self, request: AccessRequestV1, reviewer: PersonPrincipal, now, **fields) -> GrantV1:
+    def _base(
+        self, request: AccessRequestV1, reviewer: PersonPrincipal, now: datetime, **fields: Any
+    ) -> GrantV1:
         title = request.change.title if request.change else "access proposal"
         task_bound = fields.get("lifetime") is GrantLifetime.TASK
         return GrantV1(
@@ -1260,7 +1595,15 @@ class ProposalApplier:
             **fields,
         )
 
-    def _grant(self, request, reviewer, now, item: ProposedGrantV1, lifetime: GrantLifetime, expires=None) -> GrantV1:
+    def _grant(
+        self,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        now: datetime,
+        item: ProposedGrantV1,
+        lifetime: GrantLifetime,
+        expires: datetime | None = None,
+    ) -> GrantV1:
         return self._base(
             request,
             reviewer,
@@ -1274,7 +1617,14 @@ class ProposalApplier:
             for_person_id=request.person_id,
         )
 
-    def _person_grant(self, request, reviewer, now, target: TargetRefV1, level: AccessLevel) -> GrantV1:
+    def _person_grant(
+        self,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        now: datetime,
+        target: TargetRefV1,
+        level: AccessLevel,
+    ) -> GrantV1:
         return self._base(
             request,
             reviewer,
@@ -1285,7 +1635,15 @@ class ProposalApplier:
             lifetime=GrantLifetime.UNTIL_REVOKED,
         )
 
-    def _block(self, request, reviewer, now, agent_type: str, target: TargetRefV1, reason: str) -> GrantV1:
+    def _block(
+        self,
+        request: AccessRequestV1,
+        reviewer: PersonPrincipal,
+        now: datetime,
+        agent_type: str,
+        target: TargetRefV1,
+        reason: str,
+    ) -> GrantV1:
         return self._base(
             request,
             reviewer,
@@ -1297,7 +1655,9 @@ class ProposalApplier:
             lifetime=GrantLifetime.UNTIL_REVOKED,
         ).model_copy(update={"reason": reason[:2000]})
 
-    def _folders(self, reviewer: PersonPrincipal, now, proposal: AccessProposalV1) -> list[DataFolderRecordV1]:
+    def _folders(
+        self, reviewer: PersonPrincipal, now: datetime, proposal: AccessProposalV1
+    ) -> list[DataFolderRecordV1]:
         registry = self.data_folders()
         records = []
         for folder in proposal.data_folders:
@@ -1317,9 +1677,12 @@ __all__ = [
     "ProposalApplier",
     "ProposalCompiler",
     "ProposalRefused",
+    "check_tool_removal_conflicts",
     "load_changeable_tool_file",
+    "load_removable_tool_file",
     "proposal_digest",
     "proposal_summary",
     "with_mcp_defaults",
     "with_tool_change_baselines",
+    "with_tool_removal_baselines",
 ]
