@@ -2475,17 +2475,21 @@ grant's record (`GrantV1.approval_id`), which is how grants travel, so the
 transfer format does not change either.
 
 When nobody can hand the access on, or a service is missing from the tool
-catalog (or an existing proposal-written web API tool needs updated hosts,
-routes, injections, or a team gate credential), TeamLead proposes the whole
-change with `propose_access_change`
+catalog (or an existing proposal-written tool needs updated hosts, routes,
+injections, or a team gate credential, or is no longer needed), TeamLead
+proposes the whole change with `propose_access_change`
 (`custom_tools/providers/access_proposals.py`, catalog `fn:access_proposals`):
-typed items for new web API tools, changes to existing proposal-written web API
-tools (`tool_changes`, `ProposedHttpToolChangeV1`), grants for agent types,
+typed items for new web API or command-line tools, changes to existing
+proposal-written web API tools (`tool_changes`, `ProposedHttpToolChangeV1`),
+removals of existing proposal-written web API or command-line tools
+(`tool_removals`, `ProposedToolRemovalV1`), grants for agent types,
 restrictions, data folders, account or team gate links (`link_purpose`) and
 revocations (`AccessProposalV1`), never code or policy text.
 `access_control/proposals.py` (`ProposalCompiler`) checks every item against
-the catalog as it would be with the new and changed tools and writes the review
-rows in trusted code's words, flagging items that widen access. For
+the catalog as it would be with the new, changed, and removed tools and writes
+the review rows in trusted code's words, flagging items that widen access.
+`proposal_digest` omits empty `tool_removals` so pre-upgrade pending proposals
+keep their exact digests. For
 `tool_changes`, `with_tool_change_baselines` pins the current file's SHA-256
 (`load_changeable_tool_file` refuses built-in tools, operator hand-written
 files, and files carrying operator-only settings `ProposedHttpToolV1` cannot
@@ -2497,7 +2501,23 @@ widens to whole tool**) when removing or renaming a route widens an active
 one-operation block to the whole tool, flags `block_moved` (**Blocked route
 changes**) when changing a blocked route's method or path moves an active block
 off the request it was written for, and names any account or gate links that
-must be linked again. All web API tool `hosts` (in `ToolDefinitionV1`,
+must be linked again. For `tool_removals`, `access_control/tool_removals.py`
+pins the current `proposed-*.yaml` SHA-256 (`with_tool_removal_baselines`):
+`load_removable_tool_file` accepts only proposal-written `http:*` and `cli:*`
+files (refusing built-in tools, operator hand-written files, `mcp:*` servers,
+unknown tools, and unsafe/symlinked files with
+`event=proposal_tool_removal_refused`), `check_tool_removal_conflicts` refuses
+duplicate removals or same-proposal add/change/grant/block/link conflicts on
+the same tool, and `tool_removal_rows` renders each removal under the
+`tool_removal` review section (**Tool removals** in the Inbox) with the tool
+summary (noting explicitly for `cli:*` that workspace files under
+`team/tools/<name>/` are not deleted) plus explicit impact rows for every
+active grant, active whole-tool or `tool_id#...` operation block, and active
+account or gate link that approval will revoke, enforcing the 80-row card cap
+without silent truncation. In `assistant_gateway/access_inbox.py`, non-admin
+viewers see only their own and team-wide detail rows under `tool_removal`
+(`_tool_removal_row_visible`), preventing disclosure of other people's grants,
+blocks, or personal links. All web API tool `hosts` (in `ToolDefinitionV1`,
 `ProposedHttpToolV1`, and `ProposedHttpToolChangeV1`) are normalized and
 validated by `custom_messages/contracts/access_v2.py::validate_host_name`:
 exact ASCII names up to 253 characters, single trailing dot removed, with
@@ -2505,10 +2525,16 @@ dot-separated labels of 1 to 63 ASCII characters that start and end with an
 ASCII letter or digit and allow `-` and `_` only inside labels (refusing
 non-ASCII hosts with a punycode suggestion and refusing labels starting or
 ending with `-` or `_`). With authorization off, `apply_by_agreement` returns
-the same diff rows on `confirmed=false` for the person to read and applies the
-change on `confirmed=true`, like a new tool; the owner chose not to make the
-agent confirm what it saw a second time. The replacement still refuses if the
-file changed between reading its baseline and writing it. The
+the same diff rows for `tool_changes` and impact rows for `tool_removals` on
+`confirmed=false` for the person to read, and on `confirmed=true` validates any
+MCP servers upfront, verifies baselines, stages removed files with
+`remove_proposed_tool_file` (claim-unique `.removed-<token>.tmp`), applies
+`data_folders` and tool-removal DB cleanup atomically through
+`AccessRepository.apply_together`, discards staging files after commit, and
+rolls back written/replaced/staged files, downloaded programs, and MCP servers
+in isolated steps on error; the owner chose not to make the agent confirm what
+it saw a second time. Both replacements and removals still refuse if the
+file changed between reading its baseline and acting on it. The
 proposal is one change request on a platform tool at `full`, so an
 administrator decides it and the Inbox, chat buttons, workflow linking,
 withdrawal and resume work as for any change.
@@ -2522,18 +2548,35 @@ example from `assistant_cli access decide`, is refused. Why at the decision:
 only the gateway holds the reviewer's verified roles at that moment, so it can
 check each item against the reviewer's own authority, and nobody would be
 waiting to apply a file a person sent. The proposal applier re-reads the stored
-plan, compares its digest with the one reviewed, re-verifies every
-`tool_changes` file against its pinned SHA-256, writes any new tool file and
-atomically replaces changed `proposed-*.yaml` files in `control/access/tools/`
+plan, compares its digest with the one reviewed, pre-checks revocation
+authority for any `tool_removals` (grants via `service.may_revoke` against the
+pre-removal catalog; blocks via `requests.may_unblock`), re-verifies every
+`tool_changes` and `tool_removals` file against its pinned SHA-256, writes any
+new tool file, atomically replaces changed `proposed-*.yaml` files, and stages
+removed `proposed-*.yaml` files in `control/access/tools/` by atomic rename to
+claim-unique `.removed-<token>.tmp` siblings without following symlinks
 (`access_catalog/instance_tools.py`, `write_instance_tool` /
-`replace_instance_tool`), journaling replacements via
-`access_control/decision_effects.py` (`ReplacedFile`, published inside
-`decision_effect_transaction`), reloads the catalog, and stores grants, blocks,
-data folders, revocations and the request outcome in one transaction
-(`AccessRepository.apply_together`) under the decision's claim; if anything
-fails, including a busy database, the new tool files, replaced files (restored
-to their recorded bytes unless modified externally), downloaded programs and
-MCP servers it wrote are taken back, so nothing is half applied. Because the
+`replace_instance_tool` / `remove_proposed_tool_file` and
+`safe_open.move_file`), journaling replacements via `ReplacedFile` and removals
+via `RemovedFile` in `access_control/decision_effects.py` (published inside
+`decision_effect_transaction`; pre-upgrade `access_decision_recoveries` rows
+upgrade in place on open with `removed_tool_files: []`), reloads the catalog,
+and stores grants, blocks, data folders, explicit revocations, atomic cleanup
+of all active/pending grants, whole-tool and `tool_id#...` operation blocks,
+active account/gate links (`reason="tool_removed"`), `access_tool_setup_states`,
+and `access_account_sharing` rows for removed tools (re-checking revocation
+authority and post-review impact locking under the database write lock so new
+grants or links added after review refuse the removal), and the request outcome
+in one transaction (`AccessRepository.apply_together`) under the decision's
+claim, then discards the staging files (`RemovedFile.discard_staging`). If
+anything fails, including a busy database (cleaned up via
+`decision_cleanup_transaction(..., require_record=True, skip_live_claim=False)`),
+or during crash recovery (`ProposalApplier.recover`), the new tool files,
+replaced files (restored to their recorded bytes unless modified externally),
+removed files (`RemovedFile.restore` via `safe_open.restore_staged_file`,
+verifying inode and SHA-256 without overwriting an externally recreated file,
+logging `access_decision_artifact_changed`), downloaded programs and MCP
+servers it wrote are taken back, so nothing is half applied. Because the
 claim is held from before the first file is written and renewed around each
 download, a second approval of the same proposal is refused while the first
 works; if the first stalls past its limit and the second takes over, the first

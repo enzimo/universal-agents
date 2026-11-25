@@ -1209,3 +1209,35 @@ test("tool-change rows render under Tool changes (not New tools) with widened-bl
   assert.ok(compactFlags.includes("Block widens to whole tool"));
   assert.ok(compactFlags.includes("Blocked route changes"));
 });
+
+test("tool-removal rows render under Tool removals (not New tools or Tool changes) with full impact rows", () => {
+  const document = fakeDocument();
+  const proposal = review({
+    request_id: "req-tool-removal",
+    kind: "change",
+    title: "TeamArchitect asks to make a change: Remove Gitea",
+    summary: "Access proposal: remove 1 tool. Takes effect when approved.",
+    rows: [
+      { item_id: "remove-0", section: "tool_removal", text: "Remove web API tool Gitea (http:gitea); hosts: gitea.example.com. Revokes 1 active grant, 1 active block, and 1 active credential link.", flags: [] },
+      { item_id: "remove-0-grant-0", section: "tool_removal", text: "Revoke active grant g_1: TeamArchitect loses read-and-change access to Gitea (http:gitea) (until removed, for owner-1's work).", flags: [] },
+      { item_id: "remove-0-block-0", section: "tool_removal", text: "Revoke active operation block b_1: Worker on Gitea (http:gitea, operation route:delete) (until removed).", flags: [] },
+      { item_id: "remove-0-link-0", section: "tool_removal", text: "Revoke active team gate credential link l_1: on Gitea (http:gitea).", flags: [] },
+    ],
+    choices: [{ choice: "approve", label: "Approve" }, { choice: "deny", label: "Deny" }],
+  });
+  const card = renderReviewCard(document, proposal, { formatTime });
+  const sections = byClass(card, "access-review-row-section").map(node => node.textContent);
+  assert.deepEqual(sections, ["Tool removals"]);
+  assert.ok(!sections.includes("New tools"));
+  assert.ok(!sections.includes("Tool changes"));
+  const texts = byClass(card, "access-review-row-text").map(node => node.textContent);
+  assert.equal(texts.length, 4);
+  assert.match(texts[0], /Remove web API tool Gitea \(http:gitea\)/);
+  assert.match(texts[1], /Revoke active grant g_1/);
+  assert.match(texts[2], /Revoke active operation block b_1/);
+  assert.match(texts[3], /Revoke active team gate credential link l_1:/);
+
+  const compact = renderReviewCard(document, proposal, { formatTime, compact: true });
+  const compactSections = byClass(compact, "access-review-row-section").map(node => node.textContent);
+  assert.deepEqual(compactSections, ["Tool removals"]);
+});

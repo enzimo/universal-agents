@@ -110,6 +110,7 @@ from custom_messages.contracts.access_v2 import (
     SubjectKind,
     SubjectRefV1,
     TASK_BOUND_LIFETIMES,
+    TargetKind,
     TeamPersonV1,
     ToolSetupStateV1,
 )
@@ -513,21 +514,25 @@ class AccessRepository:
             conn.commit()
 
     def _proposal_recovery_effects(self) -> None:
-        """Add ``replaced_tool_files`` to pre-upgrade proposal recovery rows on open.
+        """Add missing ``replaced_tool_files`` and ``removed_tool_files`` keys to proposal recovery rows on open.
 
-        Proposal recovery rows saved before tool replacement existed carry
-        ``tool_files`` without ``replaced_tool_files``. Adding the empty list
-        once at open keeps reconciliation reading each effect category directly
-        without fallback keys or ``KeyError`` loops. Later opens find nothing
-        to update with a read and take no write lock.
+        Pre-upgrade proposal recovery rows carry ``tool_files`` without newer
+        effect categories. Adding empty lists once at open keeps reconciliation
+        reading each category directly without fallback keys or ``KeyError``
+        loops. Later opens find nothing to update with a read and take no write
+        lock.
         """
 
         def _needs_upgrade(raw: str) -> dict[str, Any] | None:
             effects = json.loads(raw)
-            if isinstance(effects, dict) and "tool_files" in effects and "replaced_tool_files" not in effects:
-                effects["replaced_tool_files"] = []
-                return effects
-            return None
+            if not isinstance(effects, dict) or "tool_files" not in effects:
+                return None
+            changed = False
+            for key in ("replaced_tool_files", "removed_tool_files"):
+                if key not in effects:
+                    effects[key] = []
+                    changed = True
+            return effects if changed else None
 
         with self._connect() as conn:
             rows = conn.execute("SELECT claim_id, effects_json FROM access_decision_recoveries").fetchall()
@@ -550,7 +555,7 @@ class AccessRepository:
             conn.commit()
         if upgraded:
             logger.info(
-                "Upgraded proposal decision recovery rows with replaced_tool_files. "
+                "Upgraded proposal decision recovery rows with missing tool file categories. "
                 "event=access_decision_recoveries_upgraded rows=%s",
                 upgraded,
             )
@@ -1149,6 +1154,82 @@ class AccessRepository:
 
     # -- several changes at once (access proposals, Phase 6) ----------------------
 
+    @staticmethod
+    def _matching_removed_tool(grant: GrantV1, tool_ids: set[str]) -> str | None:
+        if grant.target.kind is TargetKind.TOOL and grant.target.id in tool_ids:
+            return grant.target.id
+        if grant.target.kind is TargetKind.OPERATION:
+            prefix, sep, _ = grant.target.id.partition("#")
+            if sep and prefix in tool_ids:
+                return prefix
+        return None
+
+    @staticmethod
+    def _is_live_grant(grant: GrantV1, at: datetime) -> bool:
+        if grant.expires_at_utc is not None and grant.expires_at_utc <= at:
+            return False
+        if grant.uses_remaining is not None and grant.uses_remaining <= 0:
+            return False
+        return True
+
+    def _grants_for_removed_tools_in(
+        self, conn: Any, team_id: str, tool_ids: tuple[str, ...]
+    ) -> list[tuple[str, GrantV1]]:
+        p = self.dialect.bind
+        target_set = set(tool_ids)
+        rows = conn.execute(
+            f"SELECT * FROM access_grants WHERE team_id={p} AND status IN ({p},{p}) "
+            "ORDER BY created_at, grant_id",
+            (team_id, GrantStatus.ACTIVE.value, GrantStatus.PENDING.value),
+        ).fetchall()
+        matched: list[tuple[str, GrantV1]] = []
+        for row in rows:
+            grant = self._grant_from_row(row)
+            tool_id = self._matching_removed_tool(grant, target_set)
+            if tool_id is not None:
+                matched.append((tool_id, grant))
+        return matched
+
+    def _active_links_for_removed_tools_in(
+        self, conn: Any, team_id: str, tool_ids: tuple[str, ...]
+    ) -> list[AccountLinkV1]:
+        p = self.dialect.bind
+        matched: list[AccountLinkV1] = []
+        for tool_id in tool_ids:
+            rows = conn.execute(
+                f"SELECT * FROM access_account_links WHERE team_id={p} AND tool_id={p} AND status={p} "
+                "ORDER BY created_at, link_id",
+                (team_id, tool_id, AccountLinkStatus.ACTIVE.value),
+            ).fetchall()
+            matched.extend(self._link_from_row(row) for row in rows)
+        return matched
+
+    def _apply_planned_grants_in(self, conn: Any, planned: Any, *, at: datetime) -> None:
+        if planned is None:
+            return
+        by_id = {grant.grant_id: grant for grant in planned.new}
+        for grant in planned.new:
+            self._insert_grant(conn, grant)
+        for old_id, new_grant_id in planned.replaced.items():
+            self._replace_in(conn, old_id, by_id[new_grant_id], at=at)
+
+    def _cleanup_removed_tools_in(
+        self,
+        conn: Any,
+        team_id: str,
+        removed_tools: tuple[str, ...],
+        matched_grants: list[tuple[str, GrantV1]],
+        *,
+        actor: SubjectRefV1,
+        at: datetime,
+    ) -> None:
+        for tool_id, grant in matched_grants:
+            self._revoke_in(conn, grant.grant_id, actor=actor, at=at, detail={"tool_removed": tool_id})
+        for tool_id in removed_tools:
+            self._revoke_tool_links_in(conn, team_id, tool_id, actor=actor, at=at)
+            self._delete_tool_setup_states_in(conn, team_id, tool_id)
+            self._delete_tool_account_sharing_in(conn, team_id, tool_id)
+
     def apply_together(
         self,
         team_id: str,
@@ -1156,34 +1237,53 @@ class AccessRepository:
         plan: Callable[[], PlanT] | None = None,
         data_folders: Iterable[DataFolderRecordV1] = (),
         revoke_ids: Iterable[str] = (),
+        revoke_tool_ids: Iterable[str] = (),
+        check_tool_removal_grants: Callable[[list[GrantV1]], None] | None = None,
+        check_tool_removal_links: Callable[[list[AccountLinkV1]], None] | None = None,
         finish: Callable[[PlanT | None], AccessRequestV1] | None = None,
         claim_id: str | None = None,
         actor: SubjectRefV1,
         at: datetime,
     ) -> tuple[PlanT | None, AccessRequestV1 | None]:
-        """Write grants, blocks, data folders, revocations and a request's outcome in one transaction.
+        """Write grants, blocks, data folders, revocations, tool-removal cleanup and a request's outcome in one transaction.
 
         Either everything is stored or nothing is: an approved proposal never
-        leaves half its access in place. ``plan`` (``access_control.grant_entries``)
-        runs after the write lock is taken, as in ``store_planned``: its new
-        grants are stored and the grants they cover end. ``finish`` builds the
-        request's outcome from the plan; it is stored under the deciding
-        claim (``claim_id``, see ``finish_request``). Returns the plan and the
-        stored outcome.
+        leaves half its access in place. ``plan`` (``access_control.grant_entries``),
+        ``check_tool_removal_grants``, and ``check_tool_removal_links`` run after
+        the write lock is taken, as in ``store_planned``: new grants are stored,
+        covered grants end, and any active/pending grants, blocks, account/gate
+        links, setup states, and account-sharing rows for ``revoke_tool_ids``
+        are revoked/deleted atomically (only unexpired grants with uses remaining
+        are passed to ``check_tool_removal_grants``, while stale expired/spent
+        rows are still revoked). ``finish`` builds the request's outcome from
+        the plan; it is stored under the deciding claim (``claim_id``, see
+        ``finish_request``). Returns the plan and the stored outcome.
         """
 
+        removed_tools = tuple(dict.fromkeys(revoke_tool_ids))
         with self._connect() as conn:
             conn.begin_write()
+            matched_removal_grants = (
+                self._grants_for_removed_tools_in(conn, team_id, removed_tools) if removed_tools else []
+            )
+            live_removal_grants = [
+                grant for _, grant in matched_removal_grants if self._is_live_grant(grant, at)
+            ]
+            matched_removal_links = (
+                self._active_links_for_removed_tools_in(conn, team_id, removed_tools) if removed_tools else []
+            )
             with self._joining(conn):
+                if check_tool_removal_grants is not None and live_removal_grants:
+                    check_tool_removal_grants(live_removal_grants)
+                if check_tool_removal_links is not None and matched_removal_links:
+                    check_tool_removal_links(matched_removal_links)
                 planned = plan() if plan is not None else None
             for folder in data_folders:
                 self._insert_data_folder(conn, folder)
-            if planned is not None:
-                by_id = {grant.grant_id: grant for grant in planned.new}
-                for grant in planned.new:
-                    self._insert_grant(conn, grant)
-                for old_id, new_grant_id in planned.replaced.items():
-                    self._replace_in(conn, old_id, by_id[new_grant_id], at=at)
+            self._apply_planned_grants_in(conn, planned, at=at)
+            self._cleanup_removed_tools_in(
+                conn, team_id, removed_tools, matched_removal_grants, actor=actor, at=at
+            )
             for grant_id in revoke_ids:
                 self._revoke_in(conn, grant_id, actor=actor, at=at)
             finished = finish(planned) if finish is not None else None
@@ -1603,6 +1703,62 @@ class AccessRepository:
             conn.commit()
         return link.model_copy(update={"status": AccountLinkStatus.REVOKED, "revoked_at_utc": at, "revoked_by": actor})
 
+    def _revoke_tool_links_in(
+        self, conn: Any, team_id: str, tool_id: str, *, actor: SubjectRefV1, at: datetime
+    ) -> list[str]:
+        p = self.dialect.bind
+        rows = conn.execute(
+            f"SELECT * FROM access_account_links WHERE team_id={p} AND tool_id={p} AND status={p} "
+            "ORDER BY created_at, link_id",
+            (team_id, tool_id, AccountLinkStatus.ACTIVE.value),
+        ).fetchall()
+        revoked: list[str] = []
+        for row in rows:
+            link = self._link_from_row(row)
+            self._mark_link_revoked(conn, link, actor=actor, at=at, reason="tool_removed")
+            revoked.append(link.link_id)
+        return revoked
+
+    def _delete_tool_setup_states_in(self, conn: Any, team_id: str, tool_id: str) -> int:
+        p = self.dialect.bind
+        cursor = conn.execute(
+            f"DELETE FROM access_tool_setup_states WHERE team_id={p} AND tool_id={p}",
+            (team_id, tool_id),
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
+    def _delete_tool_account_sharing_in(self, conn: Any, team_id: str, tool_id: str) -> int:
+        p = self.dialect.bind
+        cursor = conn.execute(
+            f"DELETE FROM access_account_sharing WHERE team_id={p} AND subject={p}",
+            (team_id, tool_id),
+        )
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
+    def revoke_links_for_tools(
+        self, team_id: str, tool_ids: Iterable[str], *, actor: SubjectRefV1, at: datetime
+    ) -> list[str]:
+        """Revoke active/pending grants and active account/gate links, and clear setup/sharing rows for removed tools."""
+
+        targets = tuple(dict.fromkeys(tool_ids))
+        if not targets:
+            return []
+        revoked: list[str] = []
+        with self._connect() as conn:
+            conn.begin_write()
+            matched_grants = self._grants_for_removed_tools_in(conn, team_id, targets)
+            for tool_id, grant in matched_grants:
+                self._revoke_in(conn, grant.grant_id, actor=actor, at=at, detail={"tool_removed": tool_id})
+            deleted_sharing = 0
+            for tool_id in targets:
+                revoked += self._revoke_tool_links_in(conn, team_id, tool_id, actor=actor, at=at)
+                self._delete_tool_setup_states_in(conn, team_id, tool_id)
+                deleted_sharing += self._delete_tool_account_sharing_in(conn, team_id, tool_id)
+            if revoked or matched_grants or deleted_sharing:
+                self._bump(conn, team_id)
+            conn.commit()
+        return revoked
+
     # -- access requests -----------------------------------------------------
 
     @staticmethod
@@ -1835,7 +1991,7 @@ class AccessRepository:
                 (notice.notice_id, notice.team_id, notice.model_dump_json(), _utc(notice.created_at_utc)),
             )
             conn.commit()
-        return cursor.rowcount > 0
+        return bool(cursor.rowcount > 0)
 
     def _visible_notices(
         self, conn: Any, team_id: str, *, person_id: str, roles: tuple[str, ...]
@@ -2480,9 +2636,22 @@ class AccessRepository:
 
     @contextmanager
     def decision_cleanup_transaction(
-        self, claim: DecisionClaim, *, require_record: bool = False, now: datetime | None = None
+        self,
+        claim: DecisionClaim,
+        *,
+        require_record: bool = False,
+        skip_live_claim: bool | None = None,
+        now: datetime | None = None,
     ) -> Iterator[tuple[AccessRequestV1 | None, bool, DecisionRecovery | None] | None]:
         """Recheck the outcome and claim while excluding a takeover during local cleanup.
+
+        ``require_record`` skips cleanup when another pass already reconciled
+        and deleted this claim's recovery row. ``skip_live_claim`` (defaults to
+        ``require_record``) additionally skips cleanup while this claim is still
+        live so background maintenance never races a renewed download; the
+        claimant's own failure handler passes ``require_record=True,
+        skip_live_claim=False`` so it cleans up its own live failure while
+        skipping undo if maintenance already reconciled its row after a stall.
 
         A failed read is never evidence that a commit failed. The caller must
         preserve its effects when entering this transaction fails. A successful
@@ -2490,13 +2659,14 @@ class AccessRepository:
         """
 
         p = self.dialect.bind
+        skip_live = require_record if skip_live_claim is None else skip_live_claim
         with self._connect() as conn:
             conn.begin_write()
             row = conn.execute(
                 f"SELECT * FROM access_decision_recoveries WHERE claim_id={p}", (claim.claim_id,)
             ).fetchone()
             if require_record and row is None:
-                # Another maintenance pass already reconciled this record.
+                # Another pass already reconciled this record.
                 yield None
                 return
             with self._joining(conn):
@@ -2505,7 +2675,7 @@ class AccessRepository:
                     f"SELECT claim_id, claimed_until FROM access_request_claims WHERE request_id={p}", (claim.request_id,)
                 ).fetchone()
                 if (
-                    require_record and held is not None and held[0] == claim.claim_id
+                    skip_live and held is not None and held[0] == claim.claim_id
                     and datetime.fromisoformat(held[1]) > (now or datetime.now(timezone.utc))
                 ):
                     # A download renewed after the maintenance pass read its

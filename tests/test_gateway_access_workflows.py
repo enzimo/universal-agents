@@ -335,3 +335,222 @@ async def test_workflow_routes_need_sign_in_and_csrf_and_serve_their_assets(tmp_
             assert "credential_actions" not in await logs.json()
     finally:
         await gateway.close()
+
+
+def test_workflow_prepare_redacts_other_peoples_tool_removal_details_for_non_admin_owner(tmp_path: Path) -> None:
+    """F1: GatewayAccessWorkflowPage.prepare() passes viewer_id so non-admin owners never see other people's removal rows."""
+
+    from datetime import datetime, timezone
+
+    from access_catalog.instance_tools import write_instance_tool
+    from access_control.proposals import ACCESS_PROPOSAL_KIND, proposal_summary, with_tool_removal_baselines
+    from custom_messages.contracts.access_v2 import (
+        AccessProposalV1,
+        AccountLinkStatus,
+        AccountLinkV1,
+        GrantKind,
+        GrantLifetime,
+        GrantStatus,
+        GrantV1,
+        LinkOwnerKind,
+        LinkPurpose,
+        ProposedHttpToolV1,
+        ProposedToolRemovalV1,
+        SubjectKind,
+        SubjectRefV1,
+    )
+
+    instance_root = tmp_path / "instance"
+    write_instance_tool(
+        instance_root,
+        ProposedHttpToolV1(
+            tool_id="http:gitea",
+            display_name="Gitea",
+            hosts=("gitea.example.com",),
+            uses_credential=True,
+        ),
+    )
+    storage = storage_settings(tmp_path)
+    manager = Manager()
+
+    async def emit(_event: Any) -> None:
+        return None
+
+    inbox = GatewayAccessInbox(
+        settings=GatewayAccessInboxSettings(
+            team_id=TEAM,
+            instance_name="test",
+            response_route="gateway-route",
+            lead_agent_type="TeamArchitect",
+            inbox_url="/webchat",
+            instance_root=instance_root,
+            storage_settings=storage,
+            cedar_binary=str(BINARY),
+            authorization_enabled=True,
+        ),
+        memberships=MembershipRoles(Identity({"owner-1": "owner", "member-1": "member", "member-2": "member"})),
+        manager_client=manager,
+        session_repository=SimpleNamespace(get_session_by_conversation_id=lambda _id: None),
+        proactive_session=lambda: None,
+        emit_delivery_event=emit,
+    )
+    workflows = AccessWorkflowService(AccessWorkflowRepository(storage))
+    service = AccessService(
+        store=AccessRepository(storage),
+        catalog=load_catalog(instance_root),
+        cedar=CedarAccessClient(binary=str(BINARY)),
+        team_id=TEAM,
+        agent_role_of=agent_role_resolver("TeamArchitect"),
+    )
+    try:
+        member_ctx = "task_context_member_removal"
+        record = workflows.submit(
+            WorkflowProposalV2.model_validate(proposal()),
+            requester=WorkflowRequester("agent-lead", "TeamArchitect", TEAM, MEMBER.person_id, context_id=member_ctx),
+            task_id="task-member-lead",
+            idempotency_key="member-removal",
+            catalog=service.catalog,
+        )
+        agents = AccessRequests(
+            service=service,
+            inbox=StoredAccessInbox(service.store),
+            lead_agent_type="TeamArchitect",
+            watcher=WorkflowRequestWatcher(lambda: workflows, lambda: member_ctx),
+        )
+        now = datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc)
+        owner_ref = SubjectRefV1(kind=SubjectKind.USER, id="owner-1")
+        for grant in (
+            GrantV1(
+                grant_id="g_wf_member1",
+                team_id=TEAM,
+                kind=GrantKind.ACCESS,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.READ,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id="member-1",
+            ),
+            GrantV1(
+                grant_id="g_wf_teamwide",
+                team_id=TEAM,
+                kind=GrantKind.ACCESS,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.READ,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id=None,
+            ),
+            GrantV1(
+                grant_id="g_wf_member2_secret",
+                team_id=TEAM,
+                kind=GrantKind.ACCESS,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.FULL,
+                lifetime=GrantLifetime.UNTIL_REVOKED,
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id="member-2",
+            ),
+            GrantV1(
+                grant_id="b_wf_member2_private",
+                team_id=TEAM,
+                kind=GrantKind.BLOCK,
+                subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/Worker"),
+                target=TargetRefV1(kind=TargetKind.TOOL, id="http:gitea"),
+                level=AccessLevel.FULL,
+                lifetime=GrantLifetime.TASK,
+                task_id="task-m2",
+                status=GrantStatus.ACTIVE,
+                granted_by=owner_ref,
+                created_at_utc=now,
+                for_person_id="member-2",
+            ),
+        ):
+            service.store.create(grant)
+        for link in (
+            AccountLinkV1(
+                link_id="l_wf_member1",
+                team_id=TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id="member-1",
+                purpose=LinkPurpose.ACCOUNT,
+                credential_key="cred_wf_m1",
+                status=AccountLinkStatus.ACTIVE,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="member-1"),
+                created_at_utc=now,
+            ),
+            AccountLinkV1(
+                link_id="l_wf_member2_secret",
+                team_id=TEAM,
+                tool_id="http:gitea",
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id="member-2",
+                purpose=LinkPurpose.ACCOUNT,
+                credential_key="cred_wf_m2",
+                status=AccountLinkStatus.ACTIVE,
+                created_by=SubjectRefV1(kind=SubjectKind.USER, id="member-2"),
+                created_at_utc=now,
+            ),
+        ):
+            service.store.create_link(link)
+
+        removal_proposal = with_tool_removal_baselines(
+            AccessProposalV1(
+                title="Remove Gitea",
+                reason="Retired.",
+                tool_removals=(ProposedToolRemovalV1(tool_id="http:gitea"),),
+            ),
+            instance_root=instance_root,
+            catalog=service.catalog,
+        )
+        compiled = inbox.proposals.compiler(inbox.requests()).compile(
+            removal_proposal, person=MEMBER, task_id="task-member-lead"
+        )
+        service.store.save_plan(
+            TEAM, "chg_wf_rm", ACCESS_PROPOSAL_KIND, compiled.digest, removal_proposal.model_dump(mode="json"), at=now
+        )
+        agents.submit_change(
+            requester=LEAD,
+            person=MEMBER,
+            proposal=ChangeProposalV1(
+                kind=ACCESS_PROPOSAL_KIND,
+                change_id="chg_wf_rm",
+                plan_digest=compiled.digest,
+                title=removal_proposal.title,
+                summary=proposal_summary(compiled.rows),
+                effect=tuple(row.text[:1000] for row in compiled.rows[:40]),
+                items=compiled.rows,
+            ),
+            reason=removal_proposal.reason,
+            task_id="task-member-lead",
+        )
+
+        page = GatewayAccessWorkflowPage(
+            service=AccessWorkflowService(AccessWorkflowRepository(storage)),
+            access_inbox=inbox,
+            team_id=TEAM,
+        )
+        prepared = asyncio.run(page.prepare(record.workflow_id, owner_id=MEMBER.person_id))
+        assert len(prepared["reviews"]) == 1
+        review = prepared["reviews"][0]
+        assert review["can_decide"] is False
+        rows_text = "\n".join(row["text"] for row in review["rows"])
+        effect_text = "\n".join(review["effect"])
+        assert "Remove web API tool Gitea (http:gitea)" in rows_text
+        for visible_id in ("g_wf_member1", "g_wf_teamwide", "l_wf_member1"):
+            assert visible_id in rows_text and visible_id in effect_text
+        for hidden_id in ("g_wf_member2_secret", "b_wf_member2_private", "l_wf_member2_secret", "member-2"):
+            assert hidden_id not in rows_text
+            assert hidden_id not in effect_text
+    finally:
+        inbox.close()
+        service.cedar.close()

@@ -1164,15 +1164,21 @@ class AccessRequests:
             )
 
     def reconcile_decision(
-        self, recovery: DecisionRecovery,
+        self,
+        recovery: DecisionRecovery,
         reconcile: Callable[[DecisionRecovery, AccessRequestV1 | None, bool], AccessRequestV1 | None],
-        *, require_record: bool = False,
+        *,
+        require_record: bool = False,
+        skip_live_claim: bool | None = None,
     ) -> AccessRequestV1 | None:
         """Check the outcome and claim without a takeover racing the local cleanup."""
 
         try:
             with self.service.store.decision_cleanup_transaction(
-                recovery.claim, require_record=require_record, now=self.service.clock()
+                recovery.claim,
+                require_record=require_record,
+                skip_live_claim=skip_live_claim,
+                now=self.service.clock(),
             ) as state:
                 if state is None:
                     return None
@@ -1202,6 +1208,7 @@ class AccessRequests:
                     recovery,
                     lambda latest, current, elsewhere: applier.recover(self, latest, current, elsewhere),
                     require_record=True,
+                    skip_live_claim=True,
                 )
                 logger.info(
                     "Reconciled an access decision's external work. event=access_decision_recovered "

@@ -61,7 +61,8 @@ from access_catalog.catalog import CatalogSource, ToolCatalog
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import PersonPrincipal, agent_role_resolver
-from access_control.people import effective_roles
+from access_control.people import effective_roles, is_administrator
+from access_control.tool_removals import is_tool_removal_overview_row, parse_tool_removal_row_target
 from access_control.inbox import StoredAccessInbox
 from access_control.requests import (
     ACCESS_PROPOSAL_CHANGE,
@@ -108,7 +109,9 @@ from custom_messages.contracts.access_v2 import (
     AccessRequestStatus,
     AccessRequestV1,
     AccessReviewChoice,
+    LinkOwnerKind,
     LinkPurpose,
+    ReviewItemV1,
     SubjectKind,
     ToolKind,
 )
@@ -439,17 +442,69 @@ class GatewayAccessInbox:
             return "your work"
         return f"{self._memberships.display_name(request.person_id)}'s work"
 
-    def review_rows(self, requests: AccessRequests, request: AccessRequestV1) -> list[dict[str, Any]]:
+    @staticmethod
+    def _tool_removal_row_visible(
+        requests: AccessRequests, viewer: PersonPrincipal | None, item: ReviewItemV1
+    ) -> bool:
+        """Apply ``access_map.py`` privacy rules to ``tool_removal`` detail rows for non-administrators.
+
+        Overview and host-continuation rows remain visible; any detail or unrecognized
+        ``tool_removal`` row fails closed when ``viewer`` is missing, the row cannot
+        be parsed, or the referenced record is missing or belongs to another team.
+        """
+
+        if is_tool_removal_overview_row(item):
+            return True
+        if viewer is None:
+            return False
+        parsed = parse_tool_removal_row_target(item)
+        if parsed is None:
+            return False
+        team_id = requests.service.team_id
+        kind, record_id = parsed
+        if kind == "link":
+            link = requests.service.store.get_link(record_id)
+            if link is None or link.team_id != team_id:
+                return False
+            return link.owner_kind is LinkOwnerKind.TEAM or link.owner_id == viewer.person_id
+        grant = requests.service.store.get(record_id)
+        if grant is None or grant.team_id != team_id:
+            return False
+        if grant.subject.kind is SubjectKind.USER:
+            return grant.subject.id == viewer.person_id
+        return grant.for_person_id in {None, viewer.person_id}
+
+    @classmethod
+    def _visible_change_items(
+        cls, requests: AccessRequests, request: AccessRequestV1, viewer: PersonPrincipal | None
+    ) -> list[ReviewItemV1]:
+        assert request.change is not None
+        if viewer is not None and is_administrator(viewer.roles):
+            return list(request.change.items)
+        return [
+            item
+            for item in request.change.items
+            if item.section != "tool_removal" or cls._tool_removal_row_visible(requests, viewer, item)
+        ]
+
+    def review_rows(
+        self, requests: AccessRequests, request: AccessRequestV1, *, viewer: PersonPrincipal | None = None
+    ) -> list[dict[str, Any]]:
         """Each thing to approve, one row each; grant rows may be kept for later tasks.
 
         A staged change or proposal brings its own rows. An access request is
         one row; it is keepable when it is for a task and asks for longer than
-        the task (without a task the access lasts as asked, with no box).
+        the task (without a task the access lasts as asked, with no box). For
+        non-administrator viewers, ``tool_removal`` detail rows belonging to
+        other people are omitted.
         """
 
         if request.change is not None:
             if request.change.items:
-                return [item.model_dump(mode="json") for item in request.change.items]
+                return [
+                    item.model_dump(mode="json")
+                    for item in self._visible_change_items(requests, request, viewer)
+                ]
             return [
                 {"item_id": f"effect-{index}", "section": "access", "text": line, "flags": [], "keepable": False}
                 for index, line in enumerate(request.change.effect)
@@ -476,16 +531,25 @@ class GatewayAccessInbox:
             }
         ]
 
-    @staticmethod
-    def effect_lines(requests: AccessRequests, request: AccessRequestV1) -> list[str]:
+    @classmethod
+    def effect_lines(
+        cls, requests: AccessRequests, request: AccessRequestV1, *, viewer: PersonPrincipal | None = None
+    ) -> list[str]:
         """What approving does: a change's effect, or what a code tool lets agents do.
 
         Code tools say it in their catalog description; for ``code:unconfined``
         that is running code with the runtime's own rights, so a person sees it
-        before approving (decision D9).
+        before approving (decision D9). For non-administrator viewers,
+        ``tool_removal`` detail lines belonging to other people are omitted.
         """
 
         if request.change is not None:
+            if (
+                (viewer is None or not is_administrator(viewer.roles))
+                and request.change.items
+                and any(item.section == "tool_removal" for item in request.change.items)
+            ):
+                return [item.text[:1000] for item in cls._visible_change_items(requests, request, viewer)[:40]]
             return list(request.change.effect)
         if before_work_ids(request):
             return [SAVED_BEFORE_WORK_IDS]
@@ -592,7 +656,8 @@ class GatewayAccessInbox:
     ) -> dict[str, Any]:
         choices = self.review_choices(request, web=True)
         labels = self._web_labels(request)
-        rows = self.review_rows(requests, request)
+        viewer = self.person(viewer_id) if viewer_id else None
+        rows = self.review_rows(requests, request, viewer=viewer)
         follow_ups = self._follow_ups.snapshot(
             request.request_id,
             viewer_id=viewer_id,
@@ -602,7 +667,7 @@ class GatewayAccessInbox:
             "request_id": request.request_id,
             "kind": request.kind.value,
             "change_kind": request.change.kind if request.change is not None else None,
-            "effect": self.effect_lines(requests, request),
+            "effect": self.effect_lines(requests, request, viewer=viewer),
             "rows": rows,
             # What each choice does, per state of the card's boxes (access_choice_effects).
             "choice_effects": choice_effects(request, self.choice_words(requests, request, viewer_id)),

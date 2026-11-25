@@ -1052,7 +1052,17 @@ REVIEW_FLAGS = frozenset(
         "team_account",
     }
 )
-REVIEW_SECTIONS = ("tool", "tool_change", "access", "restriction", "folder", "account", "revocation", "delivery")
+REVIEW_SECTIONS = (
+    "tool",
+    "tool_change",
+    "tool_removal",
+    "access",
+    "restriction",
+    "folder",
+    "account",
+    "revocation",
+    "delivery",
+)
 
 
 class ReviewItemV1(AccessContractModel):
@@ -1064,7 +1074,9 @@ class ReviewItemV1(AccessContractModel):
     """
 
     item_id: str = Field(min_length=1, max_length=80)
-    section: Literal["tool", "tool_change", "access", "restriction", "folder", "account", "revocation", "delivery"]
+    section: Literal[
+        "tool", "tool_change", "tool_removal", "access", "restriction", "folder", "account", "revocation", "delivery"
+    ]
     # Long enough for one proposed setup step in its exact words (tool_setup_spec_v1 limits).
     text: str = Field(min_length=1, max_length=1600)
     flags: tuple[str, ...] = ()
@@ -1183,6 +1195,19 @@ class ProposedHttpToolChangeV1(ProposedHttpToolV1):
     previous_definition_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class ProposedToolRemovalV1(AccessContractModel):
+    """Remove an existing proposal-written web API (``http:*``) or installed CLI (``cli:*``) tool.
+
+    ``expected_sha256`` pins the SHA-256 hex digest of the existing
+    ``proposed-*.yaml`` file bytes read when preparing the review so applying
+    refuses if the file changed in between. Trusted code sets and overwrites it;
+    agents never supply it.
+    """
+
+    tool_id: str = Field(pattern=TOOL_ID_PATTERN.pattern)
+    expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
 class ProposedCliToolV1(AccessContractModel):
     """A CLI TeamLead proposes; trusted code builds the catalog entry and installs the program.
 
@@ -1287,6 +1312,7 @@ class AccessProposalV1(AccessContractModel):
     reason: str = Field(min_length=1, max_length=2000)
     tools: tuple[ProposedHttpToolV1, ...] = Field(default=(), max_length=4)
     tool_changes: tuple[ProposedHttpToolChangeV1, ...] = Field(default=(), max_length=4)
+    tool_removals: tuple[ProposedToolRemovalV1, ...] = Field(default=(), max_length=4)
     clis: tuple[ProposedCliToolV1, ...] = Field(default=(), max_length=2)
     mcp_servers: tuple[ProposedMCPServerV1, ...] = Field(default=(), max_length=4)
     grants: tuple[ProposedGrantV1, ...] = Field(default=(), max_length=20)
@@ -1300,6 +1326,7 @@ class AccessProposalV1(AccessContractModel):
         items = (
             self.tools,
             self.tool_changes,
+            self.tool_removals,
             self.clis,
             self.mcp_servers,
             self.grants,
@@ -1314,9 +1341,16 @@ class AccessProposalV1(AccessContractModel):
 
     @property
     def installs(self) -> bool:
-        """Whether it adds to or changes the team's catalog or data folders (an administrator's decision)."""
+        """Whether it adds to, changes, or removes from the team's catalog or data folders (an administrator's decision)."""
 
-        return bool(self.tools or self.tool_changes or self.clis or self.mcp_servers or self.data_folders)
+        return bool(
+            self.tools
+            or self.tool_changes
+            or self.tool_removals
+            or self.clis
+            or self.mcp_servers
+            or self.data_folders
+        )
 
 
 class AccessRequestV1(AccessContractModel):
@@ -1781,6 +1815,7 @@ __all__ = [
     "LinkOwnerKind",
     "LinkPurpose",
     "ProposedHttpToolChangeV1",
+    "ProposedToolRemovalV1",
     "canonical_injections",
     "injections_match",
     "AccessDecisionV1",
