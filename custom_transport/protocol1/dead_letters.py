@@ -40,7 +40,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Awaitable, Callable, Collection, Final, Mapping, Optional, Sequence, TypeVar
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -115,7 +115,7 @@ class DeadLetterStreamFull(DeadLetterError):
     """``UA1_DLQ_<team>`` refused a publish because its byte limit was reached (JetStream 10077)."""
 
 
-class DurableRefusalAction(str, Enum):
+class DurableRefusalAction(StrEnum):
     """How a protocol 1 durable receiver responds to a ``FrameRefused`` verification failure."""
 
     SET_ASIDE = "set_aside"
@@ -1504,6 +1504,27 @@ def extract_old_envelope_summary(data: bytes) -> Optional[OldEnvelopeSummary]:
         request_id=request_id,
         person_ids=_old_envelope_person_ids(doc),
     )
+
+
+async def bind_dlq_notice_consumer(nc: Any, *, stream: str, consumer: str) -> Any:
+    """Bind to an existing pull consumer on ``UA1_DLQ_<team>`` (ADR-019: pulled, never pushed)."""
+
+    js = nc.jetstream()
+    return await js.pull_subscribe_bind(consumer, stream=stream)
+
+
+async def publish_jetstream_message(
+    nc: Any,
+    subject: str,
+    payload: bytes,
+    *,
+    headers: Optional[Mapping[str, str]] = None,
+) -> Any:
+    """Publish one message over JetStream after passing the send barrier (``before_send``)."""
+
+    await before_send()
+    js = nc.jetstream()
+    return await js.publish(subject, payload, headers=dict(headers) if headers is not None else None)
 
 
 def _validate_id(adapter: TypeAdapter[str], value: str, what: str) -> None:

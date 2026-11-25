@@ -62,6 +62,7 @@ from custom_transport.protocol1.dead_letters import (
     OldEnvelopeSummary,
     StoredStreamMessage,
     SweepSummary,
+    bind_dlq_notice_consumer,
     classify_durable_refusal,
     consumer_cutoff_seq,
     consumer_info,
@@ -78,13 +79,13 @@ from custom_transport.protocol1.dead_letters import (
     message_stored_timestamp_ns,
     parse_dlq_notice_subject,
     parse_dlq_raw_subject,
+    publish_jetstream_message,
     raw_copy_names_person,
     stream_info,
     sweep_exhausted_streams,
 )
 from custom_transport.protocol1.host_runtime import TEAM_SERVICES_RUNTIME
 from custom_transport.protocol1.live import LiveHost, answer_headers
-from custom_transport.send_barrier import before_send
 from custom_transport.subjects import NatsSubjectMapper
 from storage.access_repository import AccessRepository
 from team_services.blobs import LEAD_HOST_ROLE, BlobService
@@ -523,9 +524,7 @@ class LegacyNatsChatNoticeSender:
                 "UA-Correlation-Id": notice_id,
                 "UA-From-Agent": self._sender_id,
             }
-            await before_send()
-            js = nc.jetstream()
-            await js.publish(subject, payload, headers=headers)
+            await publish_jetstream_message(nc, subject, payload, headers=headers)
             return True
         except Exception:
             self._logger.error(
@@ -709,9 +708,10 @@ class DeadLetterService:
     async def _ensure_pull_subscription(self, live: LiveHost) -> Any:
         if self._pull_sub is not None:
             return self._pull_sub
-        js = live.nc.jetstream()
         try:
-            self._pull_sub = await js.pull_subscribe_bind(self._consumer_name, stream=self._dlq_stream)
+            self._pull_sub = await bind_dlq_notice_consumer(
+                live.nc, stream=self._dlq_stream, consumer=self._consumer_name
+            )
             self._missing_consumer_logged = False
             return self._pull_sub
         except NotFoundError:
