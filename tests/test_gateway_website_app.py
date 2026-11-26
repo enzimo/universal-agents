@@ -5401,3 +5401,272 @@ async def test_web_chat_procedure_routes_list_add_and_reject_as_the_signed_in_pe
     finally:
         await gateway.close()
         access_runtime._runtime_access.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_web_chat_attachment_route_sandboxes_and_enforces_inline_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+    from tests.staged_attachment_helpers import staged_attachment
+
+    config = _config(tmp_path)
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    config.interactive_apps.internal_website.web_chat_token_env_var = (
+        "WEB_CHAT_AUTH_TOKEN"
+    )
+    monkeypatch.setenv("WEB_CHAT_AUTH_TOKEN", "uaweb_test_token")
+    store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    session_key = "website:web-chat:att_security"
+    owner = config.user.canonical_user_id
+    store.create_session(
+        session_key=session_key,
+        conversation_id="conv_att_security",
+        manager_agent_id="manager_1",
+        channel_name="website",
+        user_id=owner,
+        chat_id="web-chat",
+        owner_canonical_user_id=owner,
+    )
+    gateway = _StatefulFakeGateway(store)
+    app = InternalWebsiteInteractiveApp(
+        config, gateway=gateway, bridge=SimpleNamespace()
+    )
+
+    def _store_record(
+        *,
+        attachment_id: str,
+        filename: str,
+        data: bytes,
+        stored_content_type: str,
+        stored_kind: str,
+        use_staged_copy: bool = True,
+    ) -> None:
+        if use_staged_copy:
+            staged = staged_attachment(
+                config,
+                data=data,
+                filename=Path(filename).name or "payload.bin",
+                content_type="application/octet-stream",
+            )
+            local_path = staged.path
+            digest = staged.sha256 or hashlib.sha256(data).hexdigest()
+        else:
+            upload_dir = config.layout.uploads_dir / "att_security"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            upload_file = upload_dir / f"{attachment_id}.bin"
+            upload_file.write_bytes(data)
+            local_path = str(upload_file)
+            digest = hashlib.sha256(data).hexdigest()
+        store.upsert_attachment(
+            attachment_id=attachment_id,
+            session_key=session_key,
+            conversation_id="conv_att_security",
+            correlation_id="corr_att_security",
+            filename=filename,
+            content_type=stored_content_type,
+            kind=stored_kind,
+            size_bytes=len(data),
+            sha256=digest,
+            local_path=local_path,
+            owner_canonical_user_id=owner,
+        )
+
+    cases = [
+        # (id, filename, body, stored_ct, stored_kind, expected_disp, expected_ct)
+        (
+            "att_svg",
+            "vector.svg",
+            b"<svg xmlns='http://www.w3.org/2000/svg' onload='alert(1)'></svg>",
+            "image/svg+xml",
+            "image",
+            "attachment",
+            "application/octet-stream",
+        ),
+        (
+            "att_html_forged",
+            "fake.png",
+            b"<html><script>alert(1)</script></html>",
+            "text/html; charset=utf-8",
+            "image",
+            "attachment",
+            "application/octet-stream",
+        ),
+        (
+            "att_js",
+            "script.js",
+            b"alert(1);\n",
+            "text/javascript",
+            "document",
+            "attachment",
+            "application/octet-stream",
+        ),
+        (
+            "att_xjs",
+            "legacy.js",
+            b"alert(2);\n",
+            "application/x-javascript",
+            "document",
+            "attachment",
+            "application/octet-stream",
+        ),
+        (
+            "att_css",
+            "style.css",
+            b"body { display: none; }\n",
+            "text/css",
+            "document",
+            "attachment",
+            "application/octet-stream",
+        ),
+        (
+            "att_png",
+            "photo.png",
+            b"\x89PNG\r\n\x1a\npng-bytes",
+            "image/png",
+            "document",
+            "inline",
+            "image/png",
+        ),
+        (
+            "att_jpg_alias",
+            "photo.jpg",
+            b"\xff\xd8\xff\xd9",
+            "IMAGE/JPG; quality=90",
+            "image",
+            "inline",
+            "image/jpeg",
+        ),
+        (
+            "att_audio",
+            "clip.mp3",
+            b"ID3-audio-bytes",
+            "audio/mpeg",
+            "audio",
+            "inline",
+            "audio/mpeg",
+        ),
+        (
+            "att_video",
+            "clip.mp4",
+            b"ftypmp42-video-bytes",
+            "video/mp4",
+            "video",
+            "inline",
+            "video/mp4",
+        ),
+        (
+            "att_malformed_and_hostile_name",
+            'evil\r\nX-Injected: 1\u202e"dir/a.png',
+            b"raw-bytes",
+            "not a media type",
+            "image",
+            "attachment",
+            "application/octet-stream",
+        ),
+    ]
+    for att_id, filename, body, stored_ct, stored_kind, _disp, _ct in cases:
+        _store_record(
+            attachment_id=att_id,
+            filename=filename,
+            data=body,
+            stored_content_type=stored_ct,
+            stored_kind=stored_kind,
+            use_staged_copy=(att_id != "att_malformed_and_hostile_name"),
+        )
+
+    async with TestClient(TestServer(app.build_app())) as client:
+        auth_response = await client.post(
+            "/api/web-chat/auth", json={"token": "uaweb_test_token"}
+        )
+        session_cookie = auth_response.cookies["ua_web_chat_session"].value
+        headers = {"Cookie": f"ua_web_chat_session={session_cookie}"}
+
+        for att_id, _filename, expected_body, _stored_ct, _stored_kind, expected_disp, expected_ct in cases:
+            resp = await client.get(
+                f"/api/web-chat/attachments/{att_id}",
+                headers=headers,
+            )
+            body = await resp.read()
+            assert resp.status == 200, att_id
+            assert body == expected_body, att_id
+            assert resp.headers["Content-Security-Policy"] == "sandbox; default-src 'none'", att_id
+            assert resp.headers["X-Content-Type-Options"] == "nosniff", att_id
+            assert resp.headers["Cache-Control"] == "no-store", att_id
+            assert resp.headers["Cross-Origin-Resource-Policy"] == "same-origin", att_id
+            assert resp.headers["Referrer-Policy"] == "no-referrer", att_id
+            assert resp.headers["Content-Type"] == expected_ct, att_id
+            disposition_header = resp.headers["Content-Disposition"]
+            assert disposition_header.startswith(f"{expected_disp}; "), (att_id, disposition_header)
+            assert "filename*=UTF-8''" in disposition_header, (att_id, disposition_header)
+            assert "\r" not in disposition_header and "\n" not in disposition_header, att_id
+            if att_id == "att_malformed_and_hostile_name":
+                assert "\u202e" not in disposition_header
+                assert "%E2%80%AE" not in disposition_header
+                assert "X-Injected" not in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_web_chat_workspace_content_sandboxes_image_preview_but_keeps_pdf_unrestricted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    config.interactive_apps.internal_website.web_chat_enabled = True
+    config.interactive_apps.internal_website.web_chat_token_env_var = (
+        "WEB_CHAT_AUTH_TOKEN"
+    )
+    monkeypatch.setenv("WEB_CHAT_AUTH_TOKEN", "uaweb_test_token")
+    workspace = config.workspace_path
+    workspace.mkdir(parents=True, exist_ok=True)
+    team_dir = workspace / "team"
+    team_dir.mkdir(parents=True, exist_ok=True)
+    png_bytes = b"\x89PNG\r\n\x1a\nworkspace-image"
+    pdf_bytes = b"%PDF-1.4\n%workspace-pdf\n"
+    (team_dir / "diagram.png").write_bytes(png_bytes)
+    (team_dir / "manual.pdf").write_bytes(pdf_bytes)
+
+    admin_id = config.user.canonical_user_id
+    gateway = _UserTokenFakeGateway()
+    gateway.access_inbox = SimpleNamespace(
+        person=lambda person_id: (
+            SimpleNamespace(roles=("owner",)) if person_id == admin_id else None
+        )
+    )
+    app = InternalWebsiteInteractiveApp(
+        config, gateway=gateway, bridge=SimpleNamespace()
+    )
+
+    async with TestClient(TestServer(app.build_app())) as client:
+        auth_response = await client.post(
+            "/api/web-chat/auth", json={"token": "uaweb_test_token"}
+        )
+        session_cookie = auth_response.cookies["ua_web_chat_session"].value
+        headers = {"Cookie": f"ua_web_chat_session={session_cookie}"}
+
+        image_resp = await client.get(
+            "/api/web-chat/workspace/content?path=team%2Fdiagram.png",
+            headers=headers,
+        )
+        image_body = await image_resp.read()
+
+        pdf_resp = await client.get(
+            "/api/web-chat/workspace/content?path=team%2Fmanual.pdf",
+            headers=headers,
+        )
+        pdf_body = await pdf_resp.read()
+
+    assert image_resp.status == 200
+    assert image_body == png_bytes
+    assert image_resp.headers["Content-Type"] == "image/png"
+    assert image_resp.headers["Content-Disposition"] == "inline"
+    assert image_resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert image_resp.headers["Content-Security-Policy"] == "sandbox; default-src 'none'"
+
+    assert pdf_resp.status == 200
+    assert pdf_body == pdf_bytes
+    assert pdf_resp.headers["Content-Type"] == "application/pdf"
+    assert pdf_resp.headers["Content-Disposition"] == "inline"
+    assert pdf_resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert "Content-Security-Policy" not in pdf_resp.headers

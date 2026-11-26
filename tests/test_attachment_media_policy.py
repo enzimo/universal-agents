@@ -21,6 +21,7 @@ from assistant_gateway.attachment_media import (
     attachment_response_content_type,
     is_inline_attachment_content_type,
     normalize_media_type,
+    parse_media_type,
     resolve_attachment_content_type,
 )
 from assistant_gateway.attachments import validate_user_notification_attachments
@@ -194,12 +195,12 @@ def test_validate_notification_attachment_flags_mismatched_kind_for_ambiguous_au
     tmp_path: Path,
 ) -> None:
     layout = _layout(tmp_path)
-    voice = layout.person_dir("alice") / "recording.caf"
-    voice.write_bytes(b"caff-bytes")
+    voice = layout.person_dir("alice") / "recording.voicememo"
+    voice.write_bytes(b"voice-bytes")
     config = SimpleNamespace(workspace_path=layout.workspaces_dir)
 
     accepted, errors = validate_user_notification_attachments(
-        [{"path": "recording.caf", "kind": "audio"}],
+        [{"path": "recording.voicememo", "kind": "audio"}],
         config=config,
         person_id="alice",
     )
@@ -210,7 +211,7 @@ def test_validate_notification_attachment_flags_mismatched_kind_for_ambiguous_au
     assert "content_type" in errors[0]
 
     accepted_explicit, errors_explicit = validate_user_notification_attachments(
-        [{"path": "recording.caf", "content_type": "audio/x-caf", "kind": "audio"}],
+        [{"path": "recording.voicememo", "content_type": "audio/x-caf", "kind": "audio"}],
         config=config,
         person_id="alice",
     )
@@ -218,6 +219,69 @@ def test_validate_notification_attachment_flags_mismatched_kind_for_ambiguous_au
     assert len(accepted_explicit) == 1
     assert accepted_explicit[0].content_type == "audio/x-caf"
     assert accepted_explicit[0].kind == "audio"
+
+
+@pytest.mark.parametrize(
+    "bad_content_type",
+    ["png", "image", "image/png, image/jpeg", "image/png\r\nX-Injected: 1"],
+)
+@pytest.mark.parametrize("kind", [None, "image"])
+def test_validate_notification_attachment_rejects_malformed_content_type(
+    tmp_path: Path,
+    bad_content_type: str,
+    kind: str | None,
+) -> None:
+    layout = _layout(tmp_path)
+    photo = layout.person_dir("alice") / "photo.png"
+    photo.write_bytes(b"\x89PNG\r\n\x1a\n")
+    config = SimpleNamespace(workspace_path=layout.workspaces_dir)
+    payload: dict[str, object] = {"path": "photo.png", "content_type": bad_content_type}
+    if kind is not None:
+        payload["kind"] = kind
+
+    accepted, errors = validate_user_notification_attachments(
+        [payload],
+        config=config,
+        person_id="alice",
+    )
+
+    assert accepted == []
+    assert len(errors) == 1
+    assert "is not a media type" in errors[0]
+    assert repr(bad_content_type) in errors[0]
+    assert "application/octet-stream" not in errors[0]
+
+
+def test_validate_notification_attachment_heic_mismatch_points_to_omitting_kind(
+    tmp_path: Path,
+) -> None:
+    layout = _layout(tmp_path)
+    photo = layout.person_dir("alice") / "photo.heic"
+    photo.write_bytes(b"heic-bytes")
+    config = SimpleNamespace(workspace_path=layout.workspaces_dir)
+
+    accepted_auto, errors_auto = validate_user_notification_attachments(
+        [{"path": "photo.heic"}],
+        config=config,
+        person_id="alice",
+    )
+    assert errors_auto == []
+    assert len(accepted_auto) == 1
+    assert accepted_auto[0].content_type == "image/heic"
+    assert accepted_auto[0].kind == "document"
+
+    accepted, errors = validate_user_notification_attachments(
+        [{"path": "photo.heic", "content_type": "image/heic", "kind": "image"}],
+        config=config,
+        person_id="alice",
+    )
+    assert accepted == []
+    assert len(errors) == 1
+    assert "does not match content type 'image/heic'" in errors[0]
+    assert "kind 'document'" in errors[0]
+    assert "PNG, JPEG, GIF, and WebP" in errors[0]
+    assert "leave kind out" in errors[0]
+    assert "set content_type" not in errors[0]
 
 
 def test_validate_notification_attachment_normalizes_image_jpg_to_jpeg(
@@ -353,6 +417,24 @@ def test_normalize_media_type(raw: str | None, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("IMAGE/PNG; charset=utf-8", "image/png"),
+        ("image/jpg", "image/jpeg"),
+        ("", None),
+        (None, None),
+        ("png", None),
+        ("image", None),
+        ("image/png, image/jpeg", None),
+        ("image/png\r\nX-Injected: 1", None),
+        ("image/png; charset=utf-8\r\nX-Injected: 1", None),
+    ],
+)
+def test_parse_media_type(raw: str | None, expected: str | None) -> None:
+    assert parse_media_type(raw) == expected
+
+
+@pytest.mark.parametrize(
     ("content_type", "expected_kind", "expected_disposition", "expected_response_ct"),
     [
         ("image/png", "image", "inline", "image/png"),
@@ -399,6 +481,6 @@ def test_resolve_attachment_content_type_falls_back_to_filename_only_when_omitte
         == "text/html"
     )
     assert (
-        resolve_attachment_content_type(None, filename="recording.caf")
+        resolve_attachment_content_type(None, filename="recording.voicememo")
         == DEFAULT_ATTACHMENT_CONTENT_TYPE
     )

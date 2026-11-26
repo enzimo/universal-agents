@@ -43,8 +43,10 @@ from access_control import safe_open
 from access_control.safe_open import UnsafePath
 from access_control.sensitive_paths import sensitive_reason
 from assistant_gateway.attachment_media import (
+    DEFAULT_ATTACHMENT_CONTENT_TYPE,
     AttachmentKind,
     attachment_kind_for_content_type,
+    parse_media_type,
     resolve_attachment_content_type,
 )
 from custom_messages.contracts.delivery_v1 import UserNotificationAttachment
@@ -236,9 +238,21 @@ def _infer_attachment_kind(*, requested: str | None, content_type: str) -> Attac
         raise ValueError(f"kind must be one of {sorted(ATTACHMENT_KINDS)}")
     derived = attachment_kind_for_content_type(content_type)
     if normalized != "auto" and normalized != derived:
+        if content_type == DEFAULT_ATTACHMENT_CONTENT_TYPE:
+            raise ValueError(
+                f"kind {normalized!r} does not match content type {content_type!r} "
+                f"(sent as kind {derived!r}); set content_type to the file's media type "
+                "or leave kind out"
+            )
+        if content_type.startswith("image/") and derived == "document":
+            raise ValueError(
+                f"kind {normalized!r} does not match content type {content_type!r}: "
+                f"content type {content_type!r} is sent as kind {derived!r} "
+                "(only PNG, JPEG, GIF, and WebP are kind 'image'); leave kind out"
+            )
         raise ValueError(
-            f"kind {normalized!r} does not match content type {content_type!r}; "
-            "set content_type to the file's media type or leave kind out"
+            f"kind {normalized!r} does not match content type {content_type!r}: "
+            f"content type {content_type!r} is sent as kind {derived!r}; leave kind out"
         )
     return derived
 
@@ -283,10 +297,21 @@ def validate_user_notification_attachments(
         if rejection:
             errors.append(f"attachments[{index}].path {rejection}: {resolved}")
             continue
-        content_type = resolve_attachment_content_type(
-            payload.get("content_type"),
-            filename=resolved.name,
-        )
+        raw_content_type = str(payload.get("content_type") or "").strip()
+        if raw_content_type:
+            parsed_content_type = parse_media_type(raw_content_type)
+            if parsed_content_type is None:
+                errors.append(
+                    f"attachments[{index}].content_type {raw_content_type!r} is not a "
+                    "media type such as 'image/png'; correct it or leave it out"
+                )
+                continue
+            content_type = parsed_content_type
+        else:
+            content_type = resolve_attachment_content_type(
+                None,
+                filename=resolved.name,
+            )
         try:
             kind = _infer_attachment_kind(
                 requested=str(payload.get("kind") or "auto"),

@@ -17,6 +17,7 @@ from assistant_gateway.application.website_application import (
     GatewayWorkspaceFileDownload,
     WebsiteGatewayApplication,
 )
+from assistant_gateway.attachment_media import ATTACHMENT_SANDBOX_CSP
 from assistant_gateway.interactive_apps.website_support import (
     LOGGER,
     _WORKSPACE_HTML_PREVIEW_CSP,
@@ -223,6 +224,10 @@ class WebsiteWorkspaceHandlers:
                 charset="utf-8",
                 headers=headers,
             )
+        if content.preview_kind == "image":
+            # Sandbox raw image previews on the Web Chat origin; leave PDF
+            # previews without sandbox CSP so Chromium's built-in PDF viewer works.
+            headers["Content-Security-Policy"] = ATTACHMENT_SANDBOX_CSP
         return web.Response(
             body=content.content,
             content_type=content.content_type,

@@ -27,6 +27,7 @@ from assistant_gateway.interactive_apps.website_handlers.workspace_download impo
     ByteRange,
     accepts_html_navigation,
     build_attachment_disposition,
+    build_content_disposition,
     parse_byte_range,
     safe_download_content_type,
     unauthenticated_download_redirect_location,
@@ -122,6 +123,12 @@ def test_build_attachment_disposition_sanitizes_and_encodes_utf8() -> None:
     assert "%C2%85" not in c1_and_cf
     assert "%E2%80%8B" not in c1_and_cf
     assert c1_and_cf == 'attachment; filename="note.txt"; filename*=UTF-8\'\'note.txt'
+
+    inline_plain = build_content_disposition("shot.png", disposition="inline")
+    assert inline_plain == 'inline; filename="shot.png"; filename*=UTF-8\'\'shot.png'
+    inline_injected = build_content_disposition('a\r\n"b.png', disposition="inline")
+    assert inline_injected.startswith('inline; filename="a_b.png"; ')
+    assert "\r" not in inline_injected and "\n" not in inline_injected
 
 
 def test_safe_download_content_type_neutralizes_active_web_types() -> None:

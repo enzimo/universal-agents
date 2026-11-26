@@ -600,6 +600,48 @@ async def test_telegram_app_delivers_image_attachment(monkeypatch, tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_telegram_app_delivers_non_allowlisted_image_document_kind_as_photo(
+    tmp_path,
+) -> None:
+    config = _config(tmp_path)
+    heic = staged_attachment(
+        config,
+        data=b"heic-data",
+        filename="photo.heic",
+        content_type="image/heic",
+    )
+    assert heic.content_type == "image/heic"
+    assert heic.kind == "document"
+    app = TelegramInteractiveApp(
+        config,
+        application=GatewayApplicationFacade(SimpleNamespace()),
+        bridge=SimpleNamespace(),
+    )
+    app._app = _FakeApp()
+
+    await app.deliver_event(
+        GatewayDeliveryEvent(
+            text="HEIC photo attached.",
+            session_key="session_1",
+            channel_name="telegram",
+            user_id="u1",
+            chat_id="-100123",
+            thread_id=None,
+            conversation_id="conv_1",
+            scheduled_job_id=None,
+            correlation_id="corr_heic",
+            original_message_id=None,
+            attachments=(heic,),
+        )
+    )
+
+    assert len(app._app.bot.sent_photos) == 1
+    assert app._app.bot.sent_documents == []
+    assert app._app.bot.sent_photos[0]["photo"].getvalue() == b"heic-data"
+    assert app._app.bot.sent_photos[0]["photo"].name == "photo.heic"
+
+
+@pytest.mark.asyncio
 async def test_interactive_app_manager_raises_for_explicit_app_start_failure(
     tmp_path,
 ) -> None:

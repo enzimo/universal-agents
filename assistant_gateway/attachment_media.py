@@ -11,7 +11,6 @@ HTTP handlers, and notification validation can share it without cycles.
 from __future__ import annotations
 
 import mimetypes
-from pathlib import Path
 import re
 from typing import Literal
 
@@ -29,14 +28,6 @@ INLINE_IMAGE_CONTENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
-INLINE_IMAGE_CONTENT_TYPES_BY_SUFFIX: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-}
-
 _MEDIA_TYPE_ALIASES: dict[str, str] = {
     "image/jpg": "image/jpeg",
 }
@@ -50,13 +41,22 @@ AttachmentKind = Literal["image", "audio", "video", "document"]
 AttachmentDisposition = Literal["inline", "attachment"]
 
 
+def parse_media_type(content_type: str | None) -> str | None:
+    """Parse and normalize a MIME ``type/subtype``, or return None if empty/malformed."""
+
+    raw = str(content_type or "")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        return None
+    candidate = raw.split(";", 1)[0].strip().lower()
+    if not candidate or not _MEDIA_TYPE_PATTERN.match(candidate):
+        return None
+    return _MEDIA_TYPE_ALIASES.get(candidate, candidate)
+
+
 def normalize_media_type(content_type: str | None) -> str:
     """Normalize a MIME media type to lowercase ``type/subtype`` or octet-stream."""
 
-    candidate = str(content_type or "").split(";", 1)[0].strip().lower()
-    if not candidate or not _MEDIA_TYPE_PATTERN.match(candidate):
-        return DEFAULT_ATTACHMENT_CONTENT_TYPE
-    return _MEDIA_TYPE_ALIASES.get(candidate, candidate)
+    return parse_media_type(content_type) or DEFAULT_ATTACHMENT_CONTENT_TYPE
 
 
 def resolve_attachment_content_type(
@@ -69,7 +69,8 @@ def resolve_attachment_content_type(
     An explicit ``content_type`` always takes precedence over ``filename`` so a
     misleading suffix (such as ``.png`` on a ``text/html`` file) can never
     promote a non-raster file to an inline image. When ``content_type`` is
-    omitted, fall back to ``mimetypes.guess_type`` and the raster suffix map.
+    omitted, fall back to ``mimetypes.guess_type`` and then
+    ``application/octet-stream``.
     """
 
     explicit = str(content_type or "").strip()
@@ -80,11 +81,6 @@ def resolve_attachment_content_type(
         guessed = mimetypes.guess_type(name)[0]
         if guessed:
             return normalize_media_type(guessed)
-        suffix_match = INLINE_IMAGE_CONTENT_TYPES_BY_SUFFIX.get(
-            Path(name).suffix.lower()
-        )
-        if suffix_match:
-            return suffix_match
     return DEFAULT_ATTACHMENT_CONTENT_TYPE
 
 

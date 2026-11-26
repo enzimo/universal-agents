@@ -354,9 +354,12 @@ def notify_user(
              "filename": "site.png",
              "content_type": "image/png",
              "caption": "Screenshot"}. Only path is required. Attachment kind is
-             derived from the file's media type (leave kind out or set
-             content_type to the file's media type; a kind that disagrees with
-             the resolved content_type is rejected). Relative paths start in
+             derived from the file's media type (only PNG, JPEG, GIF, and WebP
+             are kind "image"; non-XML audio/* and video/* are "audio"/"video";
+             other types including SVG and HEIC are "document"). Leave kind out,
+             or set content_type when the filename suffix is unknown; a kind
+             that disagrees with the resolved content_type is rejected. Relative
+             paths start in
              this task's folder; files must be in the person's folder or the
              shared team/ and agents/ folders. The message stores file
              references, not binary bytes.
