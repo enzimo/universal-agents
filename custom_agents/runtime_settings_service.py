@@ -233,12 +233,12 @@ def runtime_settings_options_payload() -> dict[str, Any]:
                 "disabled, explicit conversational agreement applies it."
             ),
             SettingDecisionClass.USER_AUTHORIZED.value: (
-                "Settings that belong to one person, such as their proactive delivery target or "
-                "context-debug dumps. With authorization enabled, the requesting person (or an "
-                "administrator) may approve the plan only when every setting in the plan is "
-                "user_authorized; mixing in any lead_managed setting makes the whole plan wait "
-                "for an administrator. With authorization disabled, explicit conversational "
-                "agreement applies it."
+                "Settings currently marked user_authorized (today the proactive delivery target "
+                "delivery.default_target.* and the context-debug dump settings). With authorization "
+                "enabled, the requesting person (or an administrator) may approve the plan only when "
+                "every setting in the plan is user_authorized; mixing in any lead_managed setting "
+                "makes the whole plan wait for an administrator. With authorization disabled, "
+                "explicit conversational agreement applies it."
             ),
             SettingDecisionClass.OPERATOR_ONLY.value: (
                 "Agents cannot stage or apply the setting. Change it through operator-owned configuration."
@@ -263,7 +263,7 @@ def runtime_settings_options_payload() -> dict[str, Any]:
         ],
         "workflow": [
             "Stage one or more changes targeting the same persisted source and review old/new values, target scope, digest, and expiry.",
-            "With authorization enabled, a team administrator approves the plan in the Inbox; the requesting person may also approve it only when every setting in the plan is user_authorized. Stage a person's own user_authorized settings in a separate plan when they should be able to approve them themselves, and tell a member when an administrator must decide.",
+            "With authorization enabled, a team administrator approves the plan in the Inbox; the requesting person may also approve it only when every setting in the plan is user_authorized. Stage user_authorized settings in a separate plan when the requesting person should be able to approve them, and tell a member when an administrator must decide.",
             "With authorization disabled, ask for explicit conversational agreement and pass confirmed=true to apply_change.",
             "Apply before expiry. Model-affecting baseline and workspace changes are tested at staging and again before any write; failed tests preserve both live and persisted profiles.",
             "Model settings stored in LLM_OVERRIDES.yaml need no restart. A change explicitly targeting the applying agent's own type switches that agent at once. Workspace-default changes and changes for other types reach affected running agents at their next turn, including the applying agent when it inherits the default. Until then their status shows the previous values; the apply result's running_agents says so. Check saved values with get_runtime_configuration_context(agent_types=[...]).",
@@ -1292,8 +1292,8 @@ class RuntimeSettingsService:
                 f"{answered}Explain the old and new values and why, then call apply_change(change_id, reason). "
                 "This plan includes administrator-managed settings, so a team administrator must approve the "
                 "exact plan in the Inbox and your task waits until they decide. Tell a member that an "
-                "administrator must decide; stage a person's own user_authorized settings in a separate plan "
-                "when they should be able to approve them themselves."
+                "administrator must decide; stage the user_authorized settings in a separate plan when the "
+                "requesting person should be able to approve them."
             )
         return (
             f"{answered}Explain the old and new values and why, then call apply_change(change_id, reason). "

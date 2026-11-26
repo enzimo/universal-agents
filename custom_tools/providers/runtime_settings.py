@@ -600,8 +600,8 @@ def list_runtime_settings_options() -> str:
     authorization on, a team administrator approves the exact plan in the
     Inbox; the requesting person may also approve it only when every setting
     in the plan is `user_authorized` (a plan mixing in any `lead_managed`
-    setting waits for an administrator, so stage a person's own settings
-    separately when they should approve them). With authorization off, the
+    setting waits for an administrator, so stage `user_authorized` settings
+    separately when the requesting person should approve them). With authorization off, the
     person's conversational agreement applies it. `operator_only` settings
     cannot be staged. For models, `llm.*` is the instance baseline,
     `workspace_default.llm.*` is `LLM_OVERRIDES.yaml`'s workspace-wide

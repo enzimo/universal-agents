@@ -609,6 +609,20 @@ def test_swapped_plan_before_resume_is_refused_and_uses_up_approval(tmp_path: Pa
     assert "plan changed after it was approved" in after.apply_error.lower()
 
 
+def _record_applied_digests(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    """Record the plan digest each RuntimeSettingsService.apply() call receives."""
+
+    seen: list[str | None] = []
+    real_apply = RuntimeSettingsService.apply
+
+    def recording_apply(self: RuntimeSettingsService, change_id: str, approval: ChangeApproval) -> dict[str, Any]:
+        seen.append(approval.plan_digest)
+        return real_apply(self, change_id, approval)
+
+    monkeypatch.setattr(RuntimeSettingsService, "apply", recording_apply)
+    return seen
+
+
 @needs_cedar
 def test_toctou_plan_swap_between_describe_and_apply_is_refused_in_person_approval(
     tmp_path: Path,
@@ -694,8 +708,17 @@ def test_toctou_plan_swap_between_describe_and_apply_is_refused_in_held_access(
         supports_audio_input=None,
         supports_file_input=None,
         probe_runtime_llm_profile=probe,
-        apply_runtime_llm_profile=lambda profile, *, source="test": live.activated.append(profile.model_id),
     )
+
+    def activate(profile: Any, *, source: str = "test") -> None:
+        # Update the running profile like a real agent so a valid apply verifies.
+        live.activated.append(profile.model_id)
+        agent.model_provider = profile.provider
+        for field, value in profile.model_dump(mode="python").items():
+            if field != "provider":
+                setattr(agent, field, value)
+
+    agent.apply_runtime_llm_profile = activate
     service = access_runtime.runtime_requests(agent).service
     apply_starter_profile(service, owner(agent), "trusted", lead_agent_type=TEAM_ARCHITECT_AGENT_TYPE)
 
@@ -717,15 +740,26 @@ def test_toctou_plan_swap_between_describe_and_apply_is_refused_in_held_access(
 
     def describe_then_swap(self: RuntimeSettingsService, change_id: str) -> ChangeProposalV1:
         proposal = real_describe(self, change_id)
-        _rewrite_plan_on_disk(Path(original["plan_path"]), replacement)
+        if change_id == original["change_id"]:
+            _rewrite_plan_on_disk(Path(original["plan_path"]), replacement)
         return proposal
 
     monkeypatch.setattr(RuntimeSettingsService, "describe", describe_then_swap)
+    applied_digests = _record_applied_digests(monkeypatch)
 
     refused = run_apply_change(agent, original["change_id"], ToolCall(tool_use_id="tooluse_toctou_held"))
     assert refused["status"] == "refused", refused
     assert "plan digest is missing or no longer matches" in refused["reason"]
     assert live.activated == []
+    # held_access passed the digest it described, not the swapped plan's.
+    assert applied_digests == [original["plan_digest"]]
+
+    # The same path applies an unswapped plan, so the refusal above came from
+    # the digest check rather than from held_access failing on its own.
+    applied = run_apply_change(agent, other["change_id"], ToolCall(tool_use_id="tooluse_toctou_held_ok"))
+    assert applied["status"] == "applied", applied
+    assert applied_digests == [original["plan_digest"], other["plan_digest"]]
+    assert live.activated == ["openai/gpt-5.2"]
 
 
 def test_toctou_plan_swap_between_describe_and_apply_is_refused_in_agreement(
@@ -755,10 +789,12 @@ def test_toctou_plan_swap_between_describe_and_apply_is_refused_in_agreement(
 
     def describe_then_swap(self: RuntimeSettingsService, change_id: str) -> ChangeProposalV1:
         proposal = real_describe(self, change_id)
-        _rewrite_plan_on_disk(Path(original["plan_path"]), replacement)
+        if change_id == original["change_id"]:
+            _rewrite_plan_on_disk(Path(original["plan_path"]), replacement)
         return proposal
 
     monkeypatch.setattr(RuntimeSettingsService, "describe", describe_then_swap)
+    applied_digests = _record_applied_digests(monkeypatch)
 
     before_bytes = config_path.read_bytes()
     refused = run_apply_change(
@@ -770,6 +806,20 @@ def test_toctou_plan_swap_between_describe_and_apply_is_refused_in_agreement(
     assert refused["status"] == "refused", refused
     assert "plan digest is missing or no longer matches" in refused["reason"]
     assert config_path.read_bytes() == before_bytes
+    # Agreement passed the digest it described, not the swapped plan's.
+    assert applied_digests == [original["plan_digest"]]
+
+    # The same path applies an unswapped plan, so the refusal above came from
+    # the digest check rather than from agreement failing on its own.
+    applied = run_apply_change(
+        agent,
+        other["change_id"],
+        ToolCall(tool_use_id="tooluse_toctou_agreement_ok"),
+        confirmed=True,
+    )
+    assert applied["status"] == "applied", applied
+    assert applied_digests == [original["plan_digest"], other["plan_digest"]]
+    assert config_path.read_bytes() != before_bytes
 
 
 @pytest.mark.parametrize(

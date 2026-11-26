@@ -21,8 +21,12 @@ platform changes. Instead:
    longer matches (for example after an upgrade that tightened who may
    approve it, or if the plan file changed), trusted code uses up the
    approval and records why so a stale approval cannot be retried or reused.
-   If a request belongs to a different change id, it is refused without
-   using up that other change's approval.
+   A request that was already waiting before such an upgrade can still be
+   decided by the person it named then; nothing applies, because the resumed
+   call refuses it. If a request belongs to a different change id, it is
+   refused without using up that other change's approval. The owner and kind
+   re-check runs only on this person-approval resume; every mode (person
+   approval, held access, agreement) passes the plan digest to ``apply``.
 
 With authorization off there is no review: the person's conversational
 agreement applies the change (decision D8).
@@ -48,8 +52,9 @@ class ChangeApproval:
     # The approver's note from the Inbox, returned to the agent with the result.
     # Not part of ``to_record``: configuration keeps who approved, not why.
     note: str = ""
-    # The exact staged plan digest that was described or approved; checked by
-    # services on apply so a plan swapped after describe/approval cannot apply.
+    # The exact staged plan digest that was described or approved. Today only
+    # RuntimeSettingsService checks it on apply, so a runtime settings plan
+    # swapped after describe/approval cannot apply; other services: follow-up.
     # Not part of ``to_record``: saved receipts keep plan_digest on their own.
     plan_digest: str | None = None
 
@@ -84,10 +89,10 @@ class ChangeAdapter(Protocol):
         """Apply the plan; only trusted code with an approval calls this.
 
         ``approval.plan_digest`` is the exact plan digest that was described or
-        approved (across person approval, held access, and agreement). A service
-        that reloads its plan from disk compares ``approval.plan_digest`` with
-        the loaded plan's digest and refuses when it is missing or differs;
-        ``RuntimeSettingsService`` enforces this check.
+        approved (in person approval, held access, and agreement). Today only
+        ``RuntimeSettingsService`` compares it with the plan it reloads and
+        refuses when it is missing or differs; the other change services do
+        not check it yet (a follow-up).
 
         An adapter may also define ``async after_apply(agent, result)`` for
         follow-up work that must not undo the change (refreshing running
