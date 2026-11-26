@@ -486,7 +486,8 @@ tools:
 
 
 @pytest.fixture
-def gated_world(tmp_path: Path):
+def gated_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "credential_catalog.db"))
     tools = tmp_path / "instance" / "control" / "access" / "tools"
     tools.mkdir(parents=True)
     (tools / "gated.yaml").write_text(GATED_TOOLS_YAML, encoding="utf-8")
@@ -514,7 +515,26 @@ def _make_link(
     injections: tuple,
 ):
     from custom_messages.contracts.access_v2 import AccountLinkV1, LinkOwnerKind, LinkPurpose
+    from secure_tool_broker.credential_catalog import CatalogCredential
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
 
+    credential_key = f"key_{link_id}"
+    scope = (
+        CredentialOwnerScope.team(owner_id)
+        if LinkOwnerKind(owner_kind) is LinkOwnerKind.TEAM
+        else CredentialOwnerScope.user(owner_id)
+    )
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        credential_key,
+        CatalogCredential(display_name=credential_key, purpose="test link").model_dump(
+            mode="json", exclude_none=True
+        ),
+    )
     return store.create_link(
         AccountLinkV1(
             link_id=link_id,
@@ -523,7 +543,7 @@ def _make_link(
             owner_kind=LinkOwnerKind(owner_kind),
             owner_id=owner_id,
             purpose=LinkPurpose(purpose),
-            credential_key=f"key_{link_id}",
+            credential_key=credential_key,
             injections=injections,
             created_by=SubjectRefV1(kind=SubjectKind.USER, id="user-1"),
             created_at_utc=datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc),
@@ -677,7 +697,7 @@ def test_outdated_account_links_refuse_without_falling_back_and_gate_ignores_acc
 
 
 def test_sign_in_tool_skips_outdated_team_fallback_link_instead_of_blocking_sign_in(
-    tmp_path: Path, caplog
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
 ) -> None:
     import logging
     from access_catalog.catalog import CatalogSource, ToolCatalog
@@ -685,6 +705,8 @@ def test_sign_in_tool_skips_outdated_team_fallback_link_instead_of_blocking_sign
     from access_control.identity import ContextVerifier
     from custom_messages.contracts.access_v2 import AccountSharing, CredentialInjectionV1, InjectionPlacement
     from secure_tool_broker.access_gate import BrokerAccessGate
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "credential_catalog.db"))
 
     store = AccessRepository(
         resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})

@@ -27,6 +27,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from custom_messages.contracts.access_v2 import (
+    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
     REASON_ACCOUNT_LINK_MISSING,
     REASON_ACCOUNT_LINK_OUTDATED,
     REASON_GATE_LINK_MISSING,
@@ -222,8 +223,13 @@ def is_missing_key(error: BrokerWebRequestError) -> bool:
 
 
 def credential_setup_hint(error: BrokerWebRequestError) -> str | None:
-    """Actionable hint for an outdated link or missing team gate refusal, or None for other errors."""
+    """Actionable hint for an expired, outdated, or missing team gate link refusal, or None for other errors."""
 
+    if error.reason_code == REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED:
+        return (
+            error.next_step
+            or "the temporary linked credential expired; link a new one with the /link command in the message"
+        )
     if error.reason_code == REASON_ACCOUNT_LINK_OUTDATED:
         return (
             error.next_step
@@ -242,6 +248,7 @@ __all__ = [
     "BrokerWebRequestError",
     "BrokerWebResponse",
     "REASON_ACCESS_DENIED",
+    "REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED",
     "REASON_ACCOUNT_LINK_MISSING",
     "REASON_ACCOUNT_LINK_OUTDATED",
     "REASON_GATE_LINK_MISSING",

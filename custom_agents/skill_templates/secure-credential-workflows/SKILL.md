@@ -365,6 +365,27 @@ When a workflow needs a new named credential:
   or Docker secrets should be registered by user-named env var with
   `credential_catalog.credential.register_existing_source`; do not scan env
   vars or ask the user to paste the secret.
+- Direct agent saves (`credential.collect` and
+  `credential.register_existing_source`) cannot drop Sealbox records that an
+  existing catalog key already uses (for example changing `item_id`, removing a
+  secret field, or moving a Sealbox-backed key to an environment variable or
+  another source). The broker refuses before writing anything with
+  `credential_replacement_form_only`; return a terminal
+  `secure_credential_collection_request` action so the person decides through
+  the secure form.
+- When the person saves over an existing key through the secure form using a
+  different item or field layout (or moving it to another source), the broker
+  permanently deletes every version of the replaced Sealbox records. Confirm
+  that consequence with the person before asking them to replace a key under a
+  new layout.
+- If a credential write fails with `credential_dropped_cleanup_pending`, tell
+  the person that the broker is still removing an earlier Sealbox value for
+  that record (it retries automatically within 6 hours) and ask them to try
+  again later.
+- If a successful storage result includes `dropped_records_not_deleted` with
+  `dropped_cleanup_retry_scheduled: true`, tell the person that their new
+  credential is stored and working, and that the broker queued the earlier
+  replaced Sealbox record(s) for automatic deletion.
 
 ## Deleting Credentials
 
@@ -626,6 +647,15 @@ raw credential in any field.
     manager item name such as `team-nats-agents :: default :: home_assistant`
     is valid as `item_name`, but do not reuse it as the catalog key. `::` is
     valid inside a catalog key; ` :: ` with spaces is not.
+  - `credential.collect` and `credential.register_existing_source` refuse with
+    `credential_replacement_form_only` if saving over an existing key would
+    drop any Sealbox record it currently uses (use
+    `secure_credential_collection_request` so the person decides on the form).
+    Either action can also return `credential_dropped_cleanup_pending` while a
+    replaced Sealbox record is still waiting to be deleted (retried within
+    6 hours), and a form save can report `dropped_records_not_deleted` with
+    `dropped_cleanup_retry_scheduled: true` when the new credential is stored
+    and cleanup of the older record is queued.
   - `credential.bind_for_openshell` takes the `tool_id` whose linked account
     code should use and returns a `lease_id`; release it afterward with
     `credential.release_openshell_binding` and that `lease_id`. See OpenShell

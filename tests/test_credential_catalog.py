@@ -986,7 +986,7 @@ async def test_credential_deletion_session_requires_confirmation_before_delete(
 ) -> None:
     deleted: list[dict[str, object]] = []
 
-    def fake_delete(request_payload, *, context, scope):
+    def fake_delete(request_payload, *, context, scope, **_kwargs):
         assert context.canonical_user_id == TEST_CANONICAL_USER_ID
         assert context.principal_type == "user"
         assert scope == CredentialOwnerScope.user(TEST_CANONICAL_USER_ID)
@@ -1074,7 +1074,7 @@ async def test_credential_deletion_accepted_before_expiry_cannot_be_expired(
     loop = asyncio.get_running_loop()
     release_operation = Event()
 
-    def fake_delete(request_payload, *, context, scope):
+    def fake_delete(request_payload, *, context, scope, **_kwargs):
         loop.call_soon_threadsafe(operation_started.set)
         release_operation.wait()
         return ToolResult(

@@ -7,17 +7,21 @@ three isolated maintenance jobs:
    scopes: under the catalog key lock, ``credential_catalog.delete_credential``
    runs the ``before_delete`` hook (``revoke_links_for_expired_credential``,
    also called by team transfer import when a transferred temporary credential
-   expired before import) before removing anything. For each active account or
-   gate link referencing the credential, it creates one deterministic Inbox
-   notice first (naming the tool, whether a shared team account still applies
-   or no linked account remains, and the exact ``/link`` command; team and gate
-   links notify team administrators via ``recipient_roles=(PERSON_ROLE_ADMIN,)``),
-   then revokes the link with the team's system role actor (never a fake
-   person). No notice is sent when no active link used the credential. Only
-   after all link notices and revocations succeed does ``delete_credential``
-   remove all Sealbox versions and compare-and-delete the catalog row (so a
-   concurrently renewed or replaced credential is never deleted, and any
-   failure leaves the catalog row for the next run to finish with one notice).
+   expired before import and by the hand-deletion flow for expired credentials)
+   before removing anything. For each active account or gate link referencing
+   the credential, it revokes the link first with the team's system role actor
+   (never a fake person) and, only when that revocation actually changed the
+   link, creates one deterministic Inbox notice (keyed by team, link, credential
+   key, and ``expires_at``, naming the tool, whether a usable shared team
+   account still applies or no linked account remains, and the exact ``/link``
+   command; team and gate links notify team administrators via
+   ``recipient_roles=(PERSON_ROLE_ADMIN,)``). No notice is sent when no active
+   link used the credential or when the person already relinked it. Only after
+   all link revocations and notices succeed does ``delete_credential`` remove
+   all Sealbox versions and compare-and-delete the catalog row (reloading and
+   retrying if the row was rewritten while still expired; a concurrently renewed
+   or replaced credential is never deleted, and any failure leaves the catalog
+   row for the next run to finish with one notice).
 2. **Per-tenant Sealbox expired-secret cleanup**: runs
    ``sealbox-cli secret cleanup-expired --output json`` with a 90-second
    timeout (counting timeouts separately as unknown outcomes) for each recorded
@@ -50,20 +54,26 @@ from access_control.tool_setup_states import (
 from custom_messages.contracts.access_v2 import (
     AccessNoticeKind,
     AccessNoticeV1,
+    AccountLinkStatus,
     AccountLinkV1,
     LinkOwnerKind,
     LinkPurpose,
     SubjectKind,
     SubjectRefV1,
 )
-from secure_tool_broker.credential_catalog import delete_credential
+from secure_tool_broker.credential_catalog import (
+    CatalogCredential,
+    DroppedSealboxCleanupReport,
+    delete_credential,
+    retry_pending_dropped_sealbox_deletes,
+)
 from secure_tool_broker.credential_catalog_store import (
     CredentialCatalogStore,
     CredentialOwnerScope,
     SealboxTenantMapping,
     resolve_catalog_db_path,
 )
-from secure_tool_broker.credential_expiry import is_expired
+from secure_tool_broker.credential_expiry import is_expired, parse_utc_timestamp
 from secure_tool_broker.redaction import redact_text
 from secure_tool_broker.sealbox_cli import (
     SEALBOX_TIMEOUT_ERROR_CODE,
@@ -86,6 +96,7 @@ JANITOR_INTERVAL_SECONDS: Final[float] = 6 * 3600.0
 SEALBOX_CLEANUP_TIMEOUT_SECONDS: Final[int] = 90
 
 _NOTICE_ID_PREFIX: Final = "credential_expired_"
+JANITOR_LINK_REVOCATION_FAILED: Final[str] = "janitor_link_revocation_failed"
 _UNSUPPORTED_SUBCOMMAND_MARKERS: Final = (
     "unrecognized subcommand",
     "unknown subcommand",
@@ -102,6 +113,9 @@ class ExpiredCredentialsReport:
     links_revoked: int = 0
     notices_sent: int = 0
     link_failures: int = 0
+    dropped_records_deleted: int = 0
+    dropped_records_skipped: int = 0
+    dropped_records_failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -150,8 +164,13 @@ def _link_matches_scope(link: AccountLinkV1, scope: CredentialOwnerScope, creden
     return False
 
 
-def _expired_link_notice_id(team_id: str, link: AccountLinkV1) -> str:
-    raw = "|".join((team_id, link.link_id, link.credential_key))
+def _expired_link_notice_id(
+    team_id: str,
+    link: AccountLinkV1,
+    *,
+    expires_at: str,
+) -> str:
+    raw = "|".join([team_id, link.link_id, link.credential_key, str(expires_at)])
     return _NOTICE_ID_PREFIX + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
 
 
@@ -161,6 +180,7 @@ def _build_revoked_link_notice(
     *,
     fallback_team_link: AccountLinkV1 | None,
     now: datetime,
+    expires_at: str,
 ) -> AccessNoticeV1:
     tool_name = _tool_display_name(gate, link.tool_id)
     command = link_command(link.tool_id, link.owner_kind, purpose=link.purpose)
@@ -180,7 +200,7 @@ def _build_revoked_link_notice(
                 f"team account with {command}."
             )
         return AccessNoticeV1(
-            notice_id=_expired_link_notice_id(gate.team_id, link),
+            notice_id=_expired_link_notice_id(gate.team_id, link, expires_at=expires_at),
             team_id=gate.team_id,
             kind=AccessNoticeKind.CREDENTIAL_EXPIRED,
             recipient_person_id=None,
@@ -204,7 +224,7 @@ def _build_revoked_link_notice(
             f"Run {command} to link a new credential."
         )
     return AccessNoticeV1(
-        notice_id=_expired_link_notice_id(gate.team_id, link),
+        notice_id=_expired_link_notice_id(gate.team_id, link, expires_at=expires_at),
         team_id=gate.team_id,
         kind=AccessNoticeKind.CREDENTIAL_EXPIRED,
         recipient_person_id=link.owner_id,
@@ -215,24 +235,82 @@ def _build_revoked_link_notice(
     )
 
 
+def _needs_retry_notice_for_system_revoked_link(
+    link: AccountLinkV1,
+    *,
+    actor: SubjectRefV1,
+    expires_at: str,
+) -> bool:
+    """Return True when ``link`` was already revoked by the broker system actor for this expiry."""
+
+    if link.status is not AccountLinkStatus.REVOKED or link.revoked_by != actor:
+        return False
+    if link.revoked_at_utc is None:
+        return False
+    try:
+        return link.revoked_at_utc >= parse_utc_timestamp(expires_at)
+    except Exception:
+        return False
+
+
+def _update_revoked_personal_link_setup_state(
+    gate: Any,
+    link: AccountLinkV1,
+    *,
+    fallback_team_link: AccountLinkV1 | None,
+) -> None:
+    if link.owner_kind is not LinkOwnerKind.PERSON or link.purpose is not LinkPurpose.ACCOUNT:
+        return
+    # Do not overwrite setup state if the person already created a replacement link.
+    replacement = gate.links.active_link(
+        gate.team_id, link.tool_id, LinkOwnerKind.PERSON, link.owner_id, purpose=LinkPurpose.ACCOUNT
+    )
+    if replacement is not None:
+        return
+    if fallback_team_link is not None:
+        tool_id = link.tool_id
+        person_id = link.owner_id
+
+        def _record_team_fallback() -> None:
+            ToolSetupStates(gate.links).note_ready(
+                gate.team_id,
+                person_id,
+                tool_id,
+                how=HOW_TEAM_LINK,
+                source=SOURCE_PERIODIC_CHECK,
+            )
+
+        safely(
+            _record_team_fallback,
+            what="janitor_link_fallback_state",
+            tool_id=tool_id,
+            person_id=person_id,
+        )
+    else:
+        note_link_missing(gate.links, gate.team_id, link.owner_id, link.tool_id)
+
+
 def revoke_links_for_expired_credential(
     gate: Any,
     scope: CredentialOwnerScope,
     credential_key: str,
     *,
+    expires_at: str,
     now: datetime | None = None,
 ) -> tuple[int, int, int]:
-    """Notify each active link's owner and revoke active links referencing ``credential_key``.
+    """Revoke active links referencing ``credential_key`` and notify each revoked link's owner.
 
     Shared by the broker janitor (before deleting the Sealbox records and catalog
-    row, so any failure leaves the catalog row as a retry marker) and by team
-    transfer import (when an imported temporary credential expired before import).
+    row, so any failure leaves the catalog row as a retry marker), by the hand-deletion
+    flow for expired credentials, and by team transfer import (when an imported
+    temporary credential expired before import).
 
-    Order per link: create the deterministic Inbox notice first (fixed id from
-    ``team_id``, ``link_id``, ``credential_key``), then revoke the link with the
-    system role actor, then update tool setup state. A notice failure leaves the
-    link active for retry; a revoke failure leaves the link active and retries
-    without sending a duplicate notice.
+    Order per link: revoke the active link first with the system role actor, and
+    only when this revocation actually changed the link (so a person who relinked
+    concurrently never gets a false expiry notice) create the deterministic Inbox
+    notice (including ``expires_at`` in its id) and update tool setup state. If
+    notice creation fails after revocation, the next retry sees the system-revoked
+    link and delivers the missing notice once without duplicating already-sent notices.
 
     Returns ``(links_revoked, notices_sent, link_failures)``.
     """
@@ -243,7 +321,7 @@ def revoke_links_for_expired_credential(
         return 0, 0, 0
     moment = _utc_now(now)
     try:
-        active_links = gate.links.list_links(gate.team_id, purpose=None, include_revoked=False)
+        all_links = gate.links.list_links(gate.team_id, purpose=None, include_revoked=True)
     except Exception as exc:  # noqa: BLE001 - caller keeps catalog row for retry
         LOGGER.warning(
             "Broker janitor failed to list active links for an expired credential. "
@@ -255,54 +333,50 @@ def revoke_links_for_expired_credential(
             type(exc).__name__,
         )
         return 0, 0, 1
-    matching = [link for link in active_links if _link_matches_scope(link, scope, credential_key)]
-    if not matching:
+    actor = _system_actor(gate.team_id)
+    matching_active = [
+        link
+        for link in all_links
+        if link.status is AccountLinkStatus.ACTIVE and _link_matches_scope(link, scope, credential_key)
+    ]
+    matching_retry_notice = [
+        link
+        for link in all_links
+        if _link_matches_scope(link, scope, credential_key)
+        and _needs_retry_notice_for_system_revoked_link(link, actor=actor, expires_at=expires_at)
+    ]
+    if not matching_active and not matching_retry_notice:
         return 0, 0, 0
 
-    actor = _system_actor(gate.team_id)
     revoked_count = 0
     notices_count = 0
     failures = 0
-    for link in matching:
+    for link in matching_active:
         try:
+            revoked = gate.links.revoke_link(link.link_id, actor=actor, at=moment)
+            changed = (
+                revoked.status is AccountLinkStatus.REVOKED
+                and revoked.revoked_by == actor
+                and revoked.revoked_at_utc == moment
+            )
+            if not changed:
+                # The person relinked or another actor revoked this link before we could;
+                # do not send a misleading expiry notice or overwrite setup state.
+                continue
+            revoked_count += 1
             fallback_team_link: AccountLinkV1 | None = None
             if link.owner_kind is LinkOwnerKind.PERSON and link.purpose is LinkPurpose.ACCOUNT:
-                # Pass person_id=None to inspect only the team's shared fallback link,
-                # so this gives the exact post-revocation answer even before revoke_link
-                # runs or when the catalog row is absent (team transfer import).
                 fallback_team_link, _ = gate.resolve_account_link(link.tool_id, None, now=moment)
             notice = _build_revoked_link_notice(
                 gate,
                 link,
                 fallback_team_link=fallback_team_link,
                 now=moment,
+                expires_at=expires_at,
             )
             if gate.links.create_notice_if_absent(notice):
                 notices_count += 1
-            gate.links.revoke_link(link.link_id, actor=actor, at=moment)
-            revoked_count += 1
-            if link.owner_kind is LinkOwnerKind.PERSON and link.purpose is LinkPurpose.ACCOUNT:
-                if fallback_team_link is not None:
-                    tool_id = link.tool_id
-                    person_id = link.owner_id
-
-                    def _record_team_fallback() -> None:
-                        ToolSetupStates(gate.links).note_ready(
-                            gate.team_id,
-                            person_id,
-                            tool_id,
-                            how=HOW_TEAM_LINK,
-                            source=SOURCE_PERIODIC_CHECK,
-                        )
-
-                    safely(
-                        _record_team_fallback,
-                        what="janitor_link_fallback_state",
-                        tool_id=tool_id,
-                        person_id=person_id,
-                    )
-                else:
-                    note_link_missing(gate.links, gate.team_id, link.owner_id, link.tool_id)
+            _update_revoked_personal_link_setup_state(gate, link, fallback_team_link=fallback_team_link)
         except Exception as exc:  # noqa: BLE001 - isolate each link failure
             failures += 1
             LOGGER.warning(
@@ -316,7 +390,79 @@ def revoke_links_for_expired_credential(
                 link.credential_key,
                 type(exc).__name__,
             )
+    for link in matching_retry_notice:
+        try:
+            fallback_team_link = None
+            if link.owner_kind is LinkOwnerKind.PERSON and link.purpose is LinkPurpose.ACCOUNT:
+                fallback_team_link, _ = gate.resolve_account_link(link.tool_id, None, now=moment)
+            notice = _build_revoked_link_notice(
+                gate,
+                link,
+                fallback_team_link=fallback_team_link,
+                now=moment,
+                expires_at=expires_at,
+            )
+            if gate.links.create_notice_if_absent(notice):
+                notices_count += 1
+                _update_revoked_personal_link_setup_state(gate, link, fallback_team_link=fallback_team_link)
+        except Exception as exc:  # noqa: BLE001 - isolate each link failure
+            failures += 1
+            LOGGER.warning(
+                "Broker janitor failed to deliver a pending notice for a revoked expired credential link. "
+                "event=broker_janitor_link_revoke_failed link_id=%s tool_id=%s owner_kind=%s "
+                "owner_id=%s credential_key=%s error=%s",
+                link.link_id,
+                link.tool_id,
+                link.owner_kind.value,
+                link.owner_id,
+                link.credential_key,
+                type(exc).__name__,
+            )
     return revoked_count, notices_count, failures
+
+
+def _link_revocation_failed_result(credential_key: str) -> ToolResult:
+    return ToolResult(
+        status="error",
+        error="Failed to revoke links or send notices for expired credential; keeping row for retry.",
+        content={
+            "error_code": JANITOR_LINK_REVOCATION_FAILED,
+            "credential_key": credential_key,
+        },
+    )
+
+
+def revoke_expired_credential_links_before_delete(
+    gate: Any,
+    scope: CredentialOwnerScope,
+    credential_key: str,
+    credential: CatalogCredential,
+    *,
+    now: datetime | None = None,
+) -> ToolResult | None:
+    """Hook for hand-deleting an already-expired credential so its links are revoked with one notice."""
+
+    if credential.expires_at is None:
+        return None
+    moment = _utc_now(now)
+    try:
+        if not is_expired(credential.expires_at, now=moment):
+            return None
+    except Exception:
+        return None
+    _revoked, _noticed, failures = revoke_links_for_expired_credential(
+        gate,
+        scope,
+        credential_key,
+        expires_at=credential.expires_at,
+        now=moment,
+    )
+    if failures > 0:
+        return _link_revocation_failed_result(credential_key)
+    return None
+
+
+_MAX_CONCURRENT_DELETE_RETRIES: Final[int] = 3
 
 
 def clean_expired_credentials(
@@ -330,7 +476,8 @@ def clean_expired_credentials(
     if not db_path.is_file():
         return ExpiredCredentialsReport()
     moment = _utc_now(now)
-    rows, unreadable_rows = CredentialCatalogStore(db_path).scan_all_credentials()
+    store = CredentialCatalogStore(db_path)
+    rows, unreadable_rows = store.scan_all_credentials()
     expired = 0
     deleted = 0
     skipped_changed = 0
@@ -374,76 +521,117 @@ def clean_expired_credentials(
         expired += 1
         current_scope = row.scope
         current_key = row.credential_key
+        target_updated_at = row.updated_at
+        target_expires_at = str(raw_expires)
 
-        def _revoke_before_delete(
-            _scope: CredentialOwnerScope = current_scope,
-            _key: str = current_key,
-        ) -> ToolResult | None:
-            nonlocal links_revoked, notices_sent, link_failures
-            revoked, noticed, failures = revoke_links_for_expired_credential(
-                gate, _scope, _key, now=moment
-            )
-            links_revoked += revoked
-            notices_sent += noticed
-            link_failures += failures
-            if failures > 0:
-                return ToolResult(
-                    status="error",
-                    error="Failed to revoke links or send notices for expired credential; keeping row for retry.",
-                    content={
-                        "error_code": "janitor_link_revocation_failed",
-                        "credential_key": _key,
-                    },
+        for attempt in range(_MAX_CONCURRENT_DELETE_RETRIES):
+            attempt_expires_at = target_expires_at
+
+            def _revoke_before_delete(
+                _scope: CredentialOwnerScope = current_scope,
+                _key: str = current_key,
+                _expires_at: str = attempt_expires_at,
+            ) -> ToolResult | None:
+                nonlocal links_revoked, notices_sent, link_failures
+                revoked, noticed, failures = revoke_links_for_expired_credential(
+                    gate,
+                    _scope,
+                    _key,
+                    expires_at=_expires_at,
+                    now=moment,
                 )
-            return None
+                links_revoked += revoked
+                notices_sent += noticed
+                link_failures += failures
+                if failures > 0:
+                    return _link_revocation_failed_result(_key)
+                return None
 
-        try:
-            result = delete_credential(
-                {"credential_key": row.credential_key},
-                scope=row.scope,
-                expected_updated_at=row.updated_at,
-                expected_expires_at=str(raw_expires),
-                before_delete=_revoke_before_delete,
-            )
-        except Exception as exc:  # noqa: BLE001 - isolate each credential failure
-            failed += 1
-            LOGGER.warning(
-                "Broker janitor failed while deleting an expired credential. "
-                "event=broker_janitor_credential_delete_failed scope_kind=%s owner_id=%s "
-                "credential_key=%s error=%s",
-                row.scope.scope_kind,
-                row.scope.owner_id,
-                row.credential_key,
-                type(exc).__name__,
-            )
-            continue
+            try:
+                result = delete_credential(
+                    {"credential_key": current_key},
+                    scope=current_scope,
+                    expected_updated_at=target_updated_at,
+                    expected_expires_at=target_expires_at,
+                    before_delete=_revoke_before_delete,
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate each credential failure
+                failed += 1
+                LOGGER.warning(
+                    "Broker janitor failed while deleting an expired credential. "
+                    "event=broker_janitor_credential_delete_failed scope_kind=%s owner_id=%s "
+                    "credential_key=%s error=%s",
+                    current_scope.scope_kind,
+                    current_scope.owner_id,
+                    current_key,
+                    type(exc).__name__,
+                )
+                break
 
-        if result.status != "success":
-            failed += 1
-            LOGGER.warning(
-                "Broker janitor could not delete an expired credential. "
-                "event=broker_janitor_credential_delete_failed scope_kind=%s owner_id=%s "
-                "credential_key=%s error_code=%s error=%s",
-                row.scope.scope_kind,
-                row.scope.owner_id,
-                row.credential_key,
-                (result.content or {}).get("error_code"),
-                result.error,
-            )
-            continue
+            if result.status != "success":
+                failed += 1
+                LOGGER.warning(
+                    "Broker janitor could not delete an expired credential. "
+                    "event=broker_janitor_credential_delete_failed scope_kind=%s owner_id=%s "
+                    "credential_key=%s error_code=%s error=%s",
+                    current_scope.scope_kind,
+                    current_scope.owner_id,
+                    current_key,
+                    (result.content or {}).get("error_code"),
+                    result.error,
+                )
+                break
 
-        if not (result.content or {}).get("deleted"):
+            if (result.content or {}).get("deleted"):
+                deleted += 1
+                break
+
+            status = str((result.content or {}).get("status") or "")
+            if status == "credential_changed" and attempt + 1 < _MAX_CONCURRENT_DELETE_RETRIES:
+                reloaded = store.load_credential(current_scope, current_key)
+                reloaded_expires = reloaded.credential.get("expires_at") if reloaded is not None else None
+                if reloaded is not None and reloaded_expires is not None and not (
+                    isinstance(reloaded_expires, str) and not reloaded_expires.strip()
+                ):
+                    try:
+                        still_expired = is_expired(reloaded_expires, now=moment)
+                    except Exception as exc:  # noqa: BLE001 - malformed row must not stop other rows
+                        failed += 1
+                        LOGGER.warning(
+                            "Broker janitor encountered an unreadable expiry timestamp on reload. "
+                            "event=broker_janitor_credential_delete_failed scope_kind=%s owner_id=%s "
+                            "credential_key=%s error=%s",
+                            current_scope.scope_kind,
+                            current_scope.owner_id,
+                            current_key,
+                            type(exc).__name__,
+                        )
+                        break
+                    if still_expired:
+                        target_updated_at = reloaded.updated_at
+                        target_expires_at = str(reloaded_expires)
+                        continue
+
             skipped_changed += 1
             LOGGER.info(
                 "Skipped expired-credential deletion because the entry changed concurrently. "
                 "event=broker_janitor_credential_skipped_changed scope_kind=%s owner_id=%s credential_key=%s",
-                row.scope.scope_kind,
-                row.scope.owner_id,
-                row.credential_key,
+                current_scope.scope_kind,
+                current_scope.owner_id,
+                current_key,
             )
-            continue
+            break
 
-        deleted += 1
+    dropped_report = DroppedSealboxCleanupReport()
+    try:
+        dropped_report = retry_pending_dropped_sealbox_deletes()
+    except Exception as exc:  # noqa: BLE001 - isolate pending dropped cleanup from credential counts
+        failed += 1
+        LOGGER.warning(
+            "Broker janitor failed while retrying pending dropped Sealbox record deletions. "
+            "event=broker_janitor_dropped_sealbox_cleanup_failed error=%s",
+            type(exc).__name__,
+        )
 
     report = ExpiredCredentialsReport(
         scanned=len(rows) + len(unreadable_rows),
@@ -454,11 +642,15 @@ def clean_expired_credentials(
         links_revoked=links_revoked,
         notices_sent=notices_sent,
         link_failures=link_failures,
+        dropped_records_deleted=dropped_report.deleted,
+        dropped_records_skipped=dropped_report.skipped_referenced,
+        dropped_records_failed=dropped_report.failed,
     )
     LOGGER.info(
         "Broker janitor finished expired credential sweep. "
         "event=broker_janitor_credentials_finished scanned=%s expired=%s deleted=%s "
-        "skipped_changed=%s failed=%s links_revoked=%s notices_sent=%s link_failures=%s",
+        "skipped_changed=%s failed=%s links_revoked=%s notices_sent=%s link_failures=%s "
+        "dropped_records_deleted=%s dropped_records_skipped=%s dropped_records_failed=%s",
         report.scanned,
         report.expired,
         report.deleted,
@@ -467,6 +659,9 @@ def clean_expired_credentials(
         report.links_revoked,
         report.notices_sent,
         report.link_failures,
+        report.dropped_records_deleted,
+        report.dropped_records_skipped,
+        report.dropped_records_failed,
     )
     return report
 
@@ -770,11 +965,13 @@ __all__ = [
     "ExpiredCredentialsReport",
     "INITIAL_DELAY_SECONDS",
     "JANITOR_INTERVAL_SECONDS",
+    "JANITOR_LINK_REVOCATION_FAILED",
     "JanitorReport",
     "SEALBOX_CLEANUP_TIMEOUT_SECONDS",
     "SealboxCleanupReport",
     "clean_expired_credentials",
     "cleanup_expired_sealbox_tenants",
+    "revoke_expired_credential_links_before_delete",
     "revoke_links_for_expired_credential",
     "run_broker_janitor",
     "run_janitor_once",

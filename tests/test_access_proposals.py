@@ -67,6 +67,7 @@ RESTART = "https://portainer.example.test/api/stacks/1/restart"
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "credential_catalog.db"))
     access_runtime._runtime_access.cache_clear()
     instance = tmp_path / "instance"
     (instance / "control").mkdir(parents=True)
@@ -252,6 +253,20 @@ def test_teamlead_goes_from_no_portainer_tool_to_boa_restarting_a_stack(world) -
 
     # Until the credential is linked, BOA's restart is refused for that reason alone.
     assert boa(gate, "post", RESTART).reason_code == REASON_ACCOUNT_LINK_MISSING
+    from secure_tool_broker.credential_catalog import CatalogCredential
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        CredentialOwnerScope.team(TEAM),
+        "team_portainer",
+        CatalogCredential(display_name="Team Portainer", purpose="test link").model_dump(
+            mode="json", exclude_none=True
+        ),
+    )
     service.store.create_link(
         AccountLinkV1(
             link_id="account_link_portainer",
@@ -377,6 +392,20 @@ def test_tool_change_proposal_end_to_end_replaces_file_enforces_gate_and_outdate
         c1.raised[0]["access_request_id"], OWNER, AccessReviewChoice.APPROVE, kept_item_ids=("grant-0",)
     )
     assert r1.applied_at_utc is not None
+    from secure_tool_broker.credential_catalog import CatalogCredential
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+
+    catalog_store = CredentialCatalogStore(resolve_catalog_db_path())
+    for key in ("team_portainer", "team_portainer_gate"):
+        catalog_store.put_credential(
+            CredentialOwnerScope.team(TEAM),
+            key,
+            CatalogCredential(display_name=key, purpose="test link").model_dump(mode="json", exclude_none=True),
+        )
     service.store.create_link(
         AccountLinkV1(
             link_id="link_portainer_v1",

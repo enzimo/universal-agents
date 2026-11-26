@@ -12,13 +12,15 @@ import html
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from aiohttp import web
 
 from secure_tool_broker.auth_pages import (
+    CARD_OUTCOME_FINISHED,
     SECRET_INPUT_TOGGLE_SCRIPT,
     render_broker_auth_page,
+    render_close_page_button,
     render_credential_input,
     render_markdown_text,
     render_session_countdown,
@@ -83,6 +85,7 @@ class ExistingCredentialInfo:
 
     exists: bool = False
     expires_at: str | None = None
+    lookup_failed: bool = False
 
 
 CREDENTIAL_EXPIRY_FORM_SCRIPT = f"""
@@ -248,7 +251,7 @@ def existing_credential_info(
             credential_key,
             type(exc).__name__,
         )
-        return ExistingCredentialInfo()
+        return ExistingCredentialInfo(lookup_failed=True)
     if existing is None or is_expired(existing.expires_at):
         return ExistingCredentialInfo()
     return ExistingCredentialInfo(exists=True, expires_at=existing.expires_at)
@@ -294,6 +297,7 @@ def _render_expiry_control(
     state: ExpiryFormState,
     *,
     key_exists: bool,
+    key_exists_uncertain: bool = False,
     existing_expires_at: str | None = None,
     write_source: str = "sealbox",
 ) -> str:
@@ -333,14 +337,22 @@ def _render_expiry_control(
         if key_exists and existing_expires_at
         else ""
     )
-    existing_warning_html = (
-        '<p class="expiry-existing-warning">'
-        "This credential already exists. If you set a deletion time, the whole credential, "
-        "including earlier versions, is deleted at that time."
-        "</p>"
-        if key_exists
-        else ""
-    )
+    if key_exists:
+        existing_warning_html = (
+            '<p class="expiry-existing-warning">'
+            "This credential already exists. If you set a deletion time, the whole credential, "
+            "including earlier versions, is deleted at that time."
+            "</p>"
+        )
+    elif key_exists_uncertain:
+        existing_warning_html = (
+            '<p class="expiry-existing-warning">'
+            "Could not check whether this credential already exists. If it does and you set a "
+            "deletion time, the whole credential, including earlier versions, is deleted at that time."
+            "</p>"
+        )
+    else:
+        existing_warning_html = ""
     return (
         f'<div class="expiry-control" data-credential-expiry-control{proposed_attr}>'
         '<div class="expiry-bar">'
@@ -372,18 +384,87 @@ def _render_expiry_control(
     )
 
 
-def render_credential_collection_failed_page(details: str) -> str:
+def render_credential_collection_failed_page(details: str, *, partial_write: bool = False) -> str:
     """Render the terminal failure page after a claimed store submission fails."""
 
+    lead_text = (
+        "Could not finish saving the credential."
+        if partial_write
+        else "The credential was not stored."
+    )
     body = (
         '<section class="content-panel">'
         '<p class="eyebrow">Secure Credential Collection</p>'
         "<h1>Credential submission failed.</h1>"
-        f'<div class="status status-error" role="alert"><strong>The credential was not stored.</strong> {html.escape(details)}</div>'
+        f'<div class="status status-error" role="alert"><strong>{lead_text}</strong> {html.escape(details)}</div>'
         '<p class="lede">This form can no longer be submitted. Ask the agent for a new form to try again.</p>'
         "</section>"
     )
     return render_broker_auth_page("Credential Submission Failed", body)
+
+
+def render_credential_collection_success_page(
+    *,
+    status: str,
+    deletion: bool,
+    dropped_records_not_deleted: Sequence[str] = (),
+) -> str:
+    """Render the completion page after a credential form stores or deletes a credential.
+
+    When older Sealbox records dropped by an overwrite could not be deleted yet,
+    show a red ``.status-error`` warning and omit ``CARD_OUTCOME_FINISHED`` so
+    Web Chat cards stay open and readable instead of collapsing to a quiet pill.
+    """
+
+    if deletion:
+        body = (
+            '<section class="content-panel">'
+            '<p class="eyebrow">Secure Credential Deletion</p>'
+            "<h1>Credential deletion complete.</h1>"
+            f'<p class="lede">Status: <code>{html.escape(status)}</code>. '
+            "You can close this browser tab.</p>"
+            f"{render_close_page_button()}"
+            "</section>"
+        )
+        return render_broker_auth_page(
+            "Credential Deletion Complete", body, card_outcome=CARD_OUTCOME_FINISHED
+        )
+
+    undeleted = [str(key).strip() for key in dropped_records_not_deleted if str(key).strip()]
+    if undeleted:
+        rendered_keys = ", ".join(f"<code>{html.escape(key)}</code>" for key in undeleted)
+        warning_html = (
+            '<div class="status status-error" role="alert">'
+            "<strong>Older credential records could not be deleted yet.</strong> "
+            "Your new credential was stored, and the broker queued the replaced Sealbox record(s) "
+            f"for automatic cleanup on the next maintenance run: {rendered_keys}."
+            "</div>"
+        )
+        body = (
+            '<section class="content-panel">'
+            '<p class="eyebrow">Secure Credential Collection</p>'
+            "<h1>Credential stored with cleanup pending.</h1>"
+            f"{warning_html}"
+            f'<p class="lede">Status: <code>{html.escape(status)}</code>.</p>'
+            f"{render_close_page_button()}"
+            "</section>"
+        )
+        return render_broker_auth_page(
+            "Credential Stored With Cleanup Pending", body, card_outcome=None
+        )
+
+    body = (
+        '<section class="content-panel">'
+        '<p class="eyebrow">Secure Credential Collection</p>'
+        "<h1>Credential submission complete.</h1>"
+        f'<p class="lede">Status: <code>{html.escape(status)}</code>. '
+        "You can close this browser tab.</p>"
+        f"{render_close_page_button()}"
+        "</section>"
+    )
+    return render_broker_auth_page(
+        "Credential Submission Complete", body, card_outcome=CARD_OUTCOME_FINISHED
+    )
 
 
 def render_credential_collection_form(
@@ -394,6 +475,7 @@ def render_credential_collection_form(
     is_secret_field: Callable[[dict[str, Any]], bool] = is_secret_credential_field,
     signup_html: str = "",
     key_exists: bool = False,
+    key_exists_uncertain: bool = False,
     existing_expires_at: str | None = None,
     error_message: str | None = None,
     preserved_fields: Mapping[str, str] | None = None,
@@ -506,6 +588,7 @@ def render_credential_collection_form(
     expiry_html = _render_expiry_control(
         resolved_expiry_state,
         key_exists=key_exists,
+        key_exists_uncertain=key_exists_uncertain,
         existing_expires_at=existing_expires_at,
         write_source=write_source,
     )
@@ -640,4 +723,5 @@ __all__ = [
     "parse_credential_collection_submission",
     "render_credential_collection_failed_page",
     "render_credential_collection_form",
+    "render_credential_collection_success_page",
 ]

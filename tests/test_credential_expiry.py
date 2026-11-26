@@ -175,7 +175,16 @@ def test_validate_capture_expiry_enforces_required_min_5m_and_max_90d() -> None:
 
 def test_resolve_form_expiry_presets_and_disabled() -> None:
     assert resolve_form_expiry(enabled=False, when="1h", now=BASE_NOW) is None
-    for key, seconds in EXPIRY_PRESET_SECONDS.items():
+    expected_presets = {
+        "15m": 15 * 60,
+        "1h": 60 * 60,
+        "1d": 24 * 60 * 60,
+        "7d": 7 * 24 * 60 * 60,
+        "30d": 30 * 24 * 60 * 60,
+        "90d": 90 * 24 * 60 * 60,
+    }
+    assert dict(EXPIRY_PRESET_SECONDS) == expected_presets
+    for key, seconds in expected_presets.items():
         resolved = resolve_form_expiry(enabled=True, when=key, now=BASE_NOW)
         assert resolved == BASE_NOW + timedelta(seconds=seconds)
 
@@ -671,9 +680,23 @@ def test_c10_agent_collect_over_temporary_key_keeps_expiry_and_remaining_ttl(
     # Person stores a temporary credential via the form (allow_expiry_change=True).
     now_start = datetime.now(timezone.utc).replace(microsecond=0)
     expiry = now_start + timedelta(minutes=30)
+    single_secret_request = {
+        "credential_key": "temp_service",
+        "display_name": "Temporary Service",
+        "purpose": "Temporary API secret",
+        "store_target": "sealbox",
+        "fields": [
+            {
+                "name": "password",
+                "kind": "password",
+                "visibility": "secret",
+                "value_source": "user_input",
+            }
+        ],
+    }
     saved = collect_credential(
-        _sealbox_request(),
-        {"username": "alice", "password": "p1", "api_token": "t1", "auth_file": "f1"},
+        single_secret_request,
+        {"password": "p1"},
         scope=OWNER_SCOPE,
         expires_at=expiry,
         allow_expiry_change=True,
@@ -683,8 +706,9 @@ def test_c10_agent_collect_over_temporary_key_keeps_expiry_and_remaining_ttl(
     expected_iso = format_utc_timestamp(expiry)
     assert saved.content["expires_at"] == expected_iso
 
-    # Agent runs credential.collect with store_generated_secret and no expires_at:
-    # must preserve the person's expires_at and pass remaining --ttl on every Sealbox write.
+    # Agent runs credential.collect with store_generated_secret on the SAME Sealbox
+    # record layout and no expires_at: must preserve the person's expires_at and
+    # pass remaining --ttl on every Sealbox write.
     commands.clear()
     agent_write = execute_credential_catalog_action(
         ValidatedAction(

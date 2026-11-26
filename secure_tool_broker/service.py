@@ -81,9 +81,11 @@ from secure_tool_broker.credential_collection_form import (
     parse_credential_collection_submission,
     render_credential_collection_failed_page,
     render_credential_collection_form,
+    render_credential_collection_success_page,
 )
 from secure_tool_broker.credential_expiry import CredentialExpiryError
 from secure_tool_broker.credential_transfer_api import add_transfer_routes
+from secure_tool_broker.janitor import revoke_expired_credential_links_before_delete
 from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
     AUTH_PAGE_STATUS_ROUTE,
@@ -1850,6 +1852,7 @@ class SecureToolBrokerService:
             field_specs=SecureToolBrokerService._credential_field_specs(request_payload),
             signup_html=_render_manual_signup_action(request_payload, service_name=service_name),
             key_exists=existing.exists,
+            key_exists_uncertain=existing.lookup_failed,
             existing_expires_at=existing.expires_at,
             error_message=error_message,
             preserved_fields=preserved_fields,
@@ -1879,34 +1882,18 @@ class SecureToolBrokerService:
         result = (
             SecureToolBrokerService._credential_collection_public_result(session) or {}
         )
-        status = str(
-            result.get("content", {}).get("status")
-            if isinstance(result.get("content"), dict)
-            else session.status
+        raw_content = result.get("content")
+        content: dict[str, Any] = raw_content if isinstance(raw_content, dict) else {}
+        status = str(content.get("status") or session.status)
+        raw_undeleted = content.get("dropped_records_not_deleted")
+        dropped_not_deleted = raw_undeleted if isinstance(raw_undeleted, list) else ()
+        return render_credential_collection_success_page(
+            status=status,
+            deletion=SecureToolBrokerService._is_credential_deletion_request(
+                session.request_payload
+            ),
+            dropped_records_not_deleted=dropped_not_deleted,
         )
-        if SecureToolBrokerService._is_credential_deletion_request(
-            session.request_payload
-        ):
-            body = (
-                '<section class="content-panel">'
-                '<p class="eyebrow">Secure Credential Deletion</p>'
-                "<h1>Credential deletion complete.</h1>"
-                f'<p class="lede">Status: <code>{html.escape(status or session.status)}</code>. '
-                "You can close this browser tab.</p>"
-                f"{render_close_page_button()}"
-                "</section>"
-            )
-            return render_broker_auth_page("Credential Deletion Complete", body, card_outcome=CARD_OUTCOME_FINISHED)
-        body = (
-            '<section class="content-panel">'
-            '<p class="eyebrow">Secure Credential Collection</p>'
-            "<h1>Credential submission complete.</h1>"
-            f'<p class="lede">Status: <code>{html.escape(status or session.status)}</code>. '
-            "You can close this browser tab.</p>"
-            f"{render_close_page_button()}"
-            "</section>"
-        )
-        return render_broker_auth_page("Credential Submission Complete", body, card_outcome=CARD_OUTCOME_FINISHED)
 
     async def _handle_submit_credential_collection_form(
         self, request: web.Request
@@ -1963,6 +1950,20 @@ class SecureToolBrokerService:
                     session.request_payload,
                     team_id=session.tool_context.team_id,
                     canonical_user_id=session.tool_context.canonical_user_id,
+                ),
+                **(
+                    {
+                        "before_delete_credential": lambda delete_scope, delete_key, delete_cred: (
+                            revoke_expired_credential_links_before_delete(
+                                self._access_gate,
+                                delete_scope,
+                                delete_key,
+                                delete_cred,
+                            )
+                        )
+                    }
+                    if self._access_gate.links is not None
+                    else {}
                 ),
                 on_result=lambda done: record_credential_form_result(session, done, stored_status="credential_deleted"),
                 log_ref=f"credential_deletion {session_id[:12]}",
@@ -2042,6 +2043,7 @@ class SecureToolBrokerService:
             ),
             expires_at=parsed.resolved_expires_at,
             allow_expiry_change=True,
+            allow_drop_stored_records=True,
             on_result=lambda done: record_credential_form_result(session, done, stored_status="credential_stored"),
             log_ref=f"credential_collection {session_id[:12]}",
         )
@@ -2055,7 +2057,10 @@ class SecureToolBrokerService:
         if result.status != "success":
             details = redact_text(result.error or "Credential collection failed.")
             return web.Response(
-                text=render_credential_collection_failed_page(details),
+                text=render_credential_collection_failed_page(
+                    details,
+                    partial_write=bool((result.content or {}).get("partial_store_write")),
+                ),
                 content_type="text/html",
                 status=400,
             )

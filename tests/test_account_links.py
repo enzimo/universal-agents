@@ -168,7 +168,23 @@ def link(
     tool_id: str = "http:portainer",
     *,
     injections: tuple[CredentialInjectionV1, ...] | None = None,
+    ensure_catalog_entry: bool = True,
 ):
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
+
+    if ensure_catalog_entry:
+        scope = (
+            CredentialOwnerScope.team(owner_id)
+            if owner_kind is LinkOwnerKind.TEAM
+            else CredentialOwnerScope.user(owner_id)
+        )
+        catalog_store = CredentialCatalogStore(resolve_catalog_db_path())
+        if catalog_store.load_credential(scope, key) is None:
+            catalog_store.put_credential(
+                scope,
+                key,
+                token_credential("TEST_LINK_ENV").model_dump(mode="json", exclude_none=True),
+            )
     resolved_injections = injections
     if resolved_injections is None:
         resolved_injections = (

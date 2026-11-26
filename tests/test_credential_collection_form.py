@@ -146,7 +146,17 @@ async def test_form_renders_expiry_controls_on_standalone_and_card_view() -> Non
             assert f'name="{EXPIRY_TIMEZONE_FIELD}"' in page
             assert f'name="{EXPIRY_UTC_OFFSET_FIELD}"' in page
             assert "data-credential-expiry-control" in page
-            for value, label in EXPIRY_PRESET_OPTIONS:
+            expected_options = (
+                ("15m", "In 15 minutes"),
+                ("1h", "In 1 hour"),
+                ("1d", "In 1 day"),
+                ("7d", "In 7 days"),
+                ("30d", "In 1 month"),
+                ("90d", "In 3 months"),
+                ("custom", "Choose a date and time"),
+            )
+            assert EXPIRY_PRESET_OPTIONS == expected_options
+            for value, label in expected_options:
                 assert f'value="{value}"' in page
                 assert f">{label}</option>" in page
             # Unticked by default: When select and custom datetime-local start hidden and disabled.
@@ -707,3 +717,436 @@ process.stdout.write(JSON.stringify({
         now=datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
     )
     assert resolved_kolkata == datetime(2026, 7, 15, 18, 30, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_f2_form_overwrite_with_different_layout_deletes_dropped_sealbox_records_and_refuses_shared(
+    _isolated_broker: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: person's form save changing layout/item_id deletes dropped Sealbox records and refuses when shared."""
+
+    from secure_tool_broker.credential_catalog import CatalogCredential, CatalogCredentialField, CatalogSourceRef
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
+
+    # Seed lasting credential with username+password (uses item_key credential) + extra token field.
+    initial = collect_credential(
+        {
+            "credential_key": "layout_svc",
+            "display_name": "Layout Service",
+            "write_source": "sealbox",
+            "fields": [
+                {"name": "username", "kind": "username", "secret": False, "required": True},
+                {"name": "password", "kind": "password", "secret": True, "required": True},
+                {"name": "extra_token", "kind": "token", "secret": True, "required": True},
+            ],
+        },
+        {"username": "alice", "password": "old-password", "extra_token": "old-extra"},
+        scope=OWNER_SCOPE,
+        allow_expiry_change=True,
+    )
+    assert initial.status == "success", initial.error
+    old_cred = load_catalog(scope=OWNER_SCOPE).credentials["layout_svc"]
+    old_refs = {
+        ref.item_id
+        for field in old_cred.fields.values()
+        for ref in field.resolution_order
+    }
+    assert len(old_refs) == 2
+
+    deleted_items: list[tuple[str, str]] = []
+
+    def fake_delete_sealbox_item(*, item_key: str, item_kind: str, env: Any = None) -> dict[str, Any]:
+        deleted_items.append((item_key, item_kind))
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete_sealbox_item)
+
+    # 1. If another catalog entry references one of the dropped records, refuse BEFORE writing anything.
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        OWNER_SCOPE,
+        "other_alias",
+        CatalogCredential(
+            display_name="Other Alias",
+            purpose="References dropped record",
+            fields={
+                "extra_token": CatalogCredentialField(
+                    kind="token",
+                    visibility="secret",
+                    resolution_order=[
+                        CatalogSourceRef(
+                            source="sealbox",
+                            item_id=old_cred.fields["extra_token"].resolution_order[0].item_id,
+                            item_name=old_cred.fields["extra_token"].resolution_order[0].item_id,
+                            field_ref="value",
+                        )
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=open_gate(),
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    async with TestClient(TestServer(service.build_app())) as client:
+        _isolated_broker.clear()
+        created_conflict = await _create_session(
+            client,
+            {
+                "credential_key": "layout_svc",
+                "display_name": "Layout Service",
+                "write_source": "sealbox",
+                "item_id": "new-layout-item",
+                "fields": [{"name": "api_token", "kind": "token", "secret": True, "required": True}],
+            },
+        )
+        conflict_resp = await client.post(
+            _form_path(created_conflict),
+            data={
+                "field__api_token": "new-temp-token",
+                DELETE_AUTOMATICALLY_FIELD: "yes",
+                EXPIRY_WHEN_FIELD: "15m",
+            },
+        )
+        assert conflict_resp.status == 400
+        assert _isolated_broker == [], "must refuse before writing anything to Sealbox"
+        assert deleted_items == []
+
+        # 2. Remove the conflicting alias; now the form save succeeds and deletes EVERY dropped Sealbox record.
+        CredentialCatalogStore(resolve_catalog_db_path()).delete_credential(OWNER_SCOPE, "other_alias")
+        created_ok = await _create_session(
+            client,
+            {
+                "credential_key": "layout_svc",
+                "display_name": "Layout Service",
+                "write_source": "sealbox",
+                "item_id": "new-layout-item",
+                "fields": [{"name": "api_token", "kind": "token", "secret": True, "required": True}],
+            },
+        )
+        ok_resp = await client.post(
+            _form_path(created_ok),
+            data={
+                "field__api_token": "new-temp-token",
+                DELETE_AUTOMATICALLY_FIELD: "yes",
+                EXPIRY_WHEN_FIELD: "15m",
+            },
+        )
+        assert ok_resp.status == 200
+        assert {item_key for item_key, _kind in deleted_items} == old_refs
+        updated = load_catalog(scope=OWNER_SCOPE).credentials["layout_svc"]
+        assert updated.expires_at is not None
+        assert list(updated.fields) == ["api_token"]
+
+
+@pytest.mark.asyncio
+async def test_f6_hand_deleting_expired_credential_via_form_revokes_link_and_sends_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F6: deleting an expired credential via the deletion form revokes its active link and sends one notice."""
+
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from access_catalog.catalog import CatalogSource
+    from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessNoticeKind,
+        AccountLinkStatus,
+        AccountLinkV1,
+        AccountMode,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog import CatalogCredential, CatalogCredentialField, CatalogSourceRef
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    past_expiry = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        OWNER_SCOPE,
+        "expired_hand_delete",
+        CatalogCredential(
+            display_name="Expired Hand Delete",
+            purpose="test",
+            expires_at=past_expiry,
+            fields={
+                "api_token": CatalogCredentialField(
+                    kind="token",
+                    visibility="secret",
+                    resolution_order=[
+                        CatalogSourceRef(
+                            source="sealbox",
+                            item_id="item-expired-hand-delete:api_token",
+                            item_name="item-expired-hand-delete:api_token",
+                            field_ref="value",
+                        )
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+
+    access_store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:hand_del_demo",
+        kind=ToolKind.HTTP,
+        display_name="Hand Delete Demo",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("hand-del.example.test",),
+        credential_injections=(
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="api_token"),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    custom_catalog = replace(base_catalog, tools={**base_catalog.tools, demo_tool.tool_id: demo_tool})
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=access_store,
+    )
+    access_store.create_link(
+        AccountLinkV1(
+            link_id="link-hand-del",
+            team_id=TEST_TEAM,
+            tool_id="http:hand_del_demo",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=USER_ID,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="expired_hand_delete",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=USER_ID),
+            created_at_utc=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: {
+            "source": "sealbox",
+            "item_key": item_key,
+            "item_kind": item_kind,
+            "already_absent": False,
+        },
+    )
+
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=gate,
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    async with TestClient(TestServer(service.build_app())) as client:
+        created = await _create_session(
+            client,
+            {
+                "credential_key": "expired_hand_delete",
+                "display_name": "Expired Hand Delete",
+                "flow": "credential_deletion",
+                "fields": [],
+            },
+        )
+        submit = await client.post(_form_path(created), data={"confirm_delete": "yes"})
+        assert submit.status == 200
+
+    assert "expired_hand_delete" not in load_catalog(scope=OWNER_SCOPE).credentials
+    revoked = access_store.get_link("link-hand-del")
+    assert revoked is not None
+    assert revoked.status is AccountLinkStatus.REVOKED
+    assert revoked.revoked_by == SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEST_TEAM, AGENT_ROLE_SYSTEM))
+    notices = [n for n, _read in access_store.notices_for(TEST_TEAM, person_id=USER_ID, roles=())]
+    assert len(notices) == 1
+    assert notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert "/link http:hand_del_demo" in notices[0].summary
+
+
+@pytest.mark.asyncio
+async def test_f13_catalog_save_failure_after_sealbox_write_rolls_back_or_warns_accurately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F13: catalog save failure rolls back brand-new Sealbox writes and reports accurate wording when an overwrite cannot be rolled back."""
+
+    rolled_back: list[tuple[str, str]] = []
+
+    def fake_delete(*, item_key: str, item_kind: str, env: Any = None) -> dict[str, Any]:
+        rolled_back.append((item_key, item_kind))
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    # 1. Brand-new credential: Sealbox write succeeds, catalog save fails -> Sealbox item is rolled back,
+    #    so "The credential was not stored." is accurate.
+    def fail_save(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("sqlite disk full")
+
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=open_gate(),
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    with monkeypatch.context() as mp:
+        mp.setattr(credential_catalog, "_save_catalog_credential", fail_save)
+        async with TestClient(TestServer(service.build_app())) as client:
+            created_new = await _create_session(client, _collection_request(credential_key="brand_new_fail"))
+            resp_new = await client.post(
+                _form_path(created_new),
+                data={"field__username": "alice", "field__api_token": "SECRET-NEW"},
+            )
+            assert resp_new.status == 400
+            page_new = await resp_new.text()
+            assert "The credential was not stored." in page_new
+            assert len(rolled_back) == 1
+
+    # 2. Overwriting an existing key on the same Sealbox record: rollback must NOT delete earlier versions,
+    #    and the failure page must NOT falsely claim "The credential was not stored.".
+    seeded = collect_credential(
+        _collection_request(credential_key="existing_overwrite_fail"),
+        {"username": "alice", "api_token": "FIRST-SECRET"},
+        scope=OWNER_SCOPE,
+        allow_expiry_change=True,
+    )
+    assert seeded.status == "success", seeded.error
+
+    rolled_back.clear()
+    with monkeypatch.context() as mp:
+        mp.setattr(credential_catalog, "_save_catalog_credential", fail_save)
+        async with TestClient(TestServer(service.build_app())) as client:
+            created_over = await _create_session(client, _collection_request(credential_key="existing_overwrite_fail"))
+            resp_over = await client.post(
+                _form_path(created_over),
+                data={"field__username": "alice", "field__api_token": "SECOND-SECRET"},
+            )
+            assert resp_over.status == 400
+            page_over = await resp_over.text()
+            assert rolled_back == [], "must not delete an existing Sealbox record with earlier versions"
+            assert "Could not finish saving the credential." in page_over
+            assert "The credential was not stored." not in page_over
+
+
+@pytest.mark.asyncio
+async def test_f17_form_shows_whole_credential_warning_when_catalog_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F17: transient catalog read failure while rendering still shows the whole-credential deletion warning."""
+
+    def boom_load_catalog(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("transient catalog lock timeout")
+
+    monkeypatch.setattr("secure_tool_broker.credential_collection_form.load_catalog", boom_load_catalog)
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=open_gate(),
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    async with TestClient(TestServer(service.build_app())) as client:
+        created = await _create_session(client, _collection_request())
+        resp = await client.get(_form_path(created))
+        assert resp.status == 200
+        page = await resp.text()
+        assert 'class="expiry-existing-warning"' in page
+        assert "including earlier versions, is deleted at that time." in page
+
+
+@pytest.mark.asyncio
+async def test_c29_failed_dropped_sealbox_delete_shows_red_warning_and_queues_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C29: when deleting a dropped Sealbox record fails after commit, report it, show a red alert, and queue janitor retry."""
+
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        resolve_catalog_db_path,
+    )
+
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_kwargs: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "run_sealbox",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args=["sealbox-cli", *args], returncode=0, stdout='{"key":"k","version":1}', stderr=""
+        ),
+    )
+
+    # Seed lasting credential on item_id "old-item".
+    seeded = collect_credential(
+        {
+            **_collection_request(credential_key="drop_fail_key"),
+            "item_id": "old-item",
+        },
+        {"username": "alice", "api_token": "OLD-SECRET"},
+        scope=OWNER_SCOPE,
+        allow_expiry_change=True,
+    )
+    assert seeded.status == "success"
+
+    # Fail deletion of the dropped Sealbox record when saving onto "new-item".
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda **_kwargs: credential_catalog.ToolResult(status="error", error="sealbox timeout"),
+    )
+
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=open_gate(),
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    async with TestClient(TestServer(service.build_app())) as client:
+        created = await _create_session(
+            client,
+            {
+                **_collection_request(credential_key="drop_fail_key"),
+                "item_id": "new-item",
+            },
+        )
+        resp = await client.post(
+            _form_path(created),
+            data={
+                "field__username": "alice",
+                "field__api_token": "NEW-TEMP-SECRET",
+                "delete_automatically": "1",
+                "expiry_when": "1h",
+            },
+        )
+        assert resp.status == 200
+        page = await resp.text()
+        assert 'class="status status-error"' in page
+        assert "old-item:api_token" in page
+        assert "automatic cleanup" in page
+        # Do not auto-collapse inline Web Chat cards while the red warning must be read.
+        assert _card_outcome(page) is None
+
+        # The session result exposes dropped_records_not_deleted to callers.
+        status_resp = await client.get(
+            f"/v1/credential-collection/sessions/{created['session_id']}",
+            headers=gateway_headers(),
+        )
+        assert status_resp.status == 200
+        status_payload = await status_resp.json()
+        result_content = status_payload["result"]["content"]
+        assert result_content["dropped_records_not_deleted"] == ["old-item:api_token"]
+        assert result_content["dropped_cleanup_retry_scheduled"] is True
+
+    pending = CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(
+        scope=OWNER_SCOPE
+    )
+    assert [entry.item_key for entry in pending] == ["old-item:api_token"]

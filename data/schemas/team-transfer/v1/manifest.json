@@ -86,7 +86,7 @@
     {
       "filename": "BrokerCredentialsDocumentV1.schema.json",
       "model": "BrokerCredentialsDocumentV1",
-      "sha256": "eceb5b5b8162940d2a2673067ec5d6fa18d1ce80b939551917dcbfbc35876a93"
+      "sha256": "8627013127eba3470b93b4e3932b83c9f8d535069fcbcb8b59171b7ed5bcf433"
     },
     {
       "filename": "GatewayInstanceConfig.schema.json",
