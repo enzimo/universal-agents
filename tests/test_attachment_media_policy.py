@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,9 +30,12 @@ from assistant_gateway.attachment_media import (
 )
 from assistant_gateway.attachments import validate_user_notification_attachments
 from assistant_gateway.config import GatewayInstanceConfig
+from assistant_gateway.config_delivery_attachments import (
+    ConfigGatewayDeliveryAttachmentResolver,
+)
 from assistant_gateway.store import GatewayStateStore
 from custom_agents.task_operation_runtime import TaskOperationRuntime
-from custom_messages.contracts.delivery_v1 import UserNotificationAttachment
+from custom_messages.contracts.delivery_v1 import UserNotification, UserNotificationAttachment
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
 from custom_tools.providers.communication import notify_user
 from custom_tools.runtime_context import _agent_ctx, get_agent_ref
@@ -282,9 +286,100 @@ def test_validate_notification_attachment_heic_mismatch_points_to_omitting_kind(
     assert len(errors) == 1
     assert "does not match content type 'image/heic'" in errors[0]
     assert "kind 'document'" in errors[0]
-    assert "PNG, JPEG, GIF, and WebP" in errors[0]
+    assert "image/gif, image/jpeg, image/png, image/webp" in errors[0]
     assert "leave kind out" in errors[0]
     assert "set content_type" not in errors[0]
+
+
+@pytest.mark.parametrize("requested", ["audio", "video"])
+def test_validate_notification_attachment_audio_video_mismatch_points_to_content_type(
+    tmp_path: Path,
+    requested: str,
+) -> None:
+    layout = _layout(tmp_path)
+    clip = layout.person_dir("alice") / "voice.webm"
+    clip.write_bytes(b"webm-bytes")
+    config = SimpleNamespace(workspace_path=layout.workspaces_dir)
+    # Guessed from the suffix: .webm is video/webm, so kind audio disagrees.
+    content_type = None if requested == "audio" else "audio/webm"
+    payload: dict[str, object] = {"path": "voice.webm", "kind": requested}
+    if content_type:
+        payload["content_type"] = content_type
+    derived = "video" if requested == "audio" else "audio"
+
+    accepted, errors = validate_user_notification_attachments(
+        [payload], config=config, person_id="alice"
+    )
+
+    assert accepted == []
+    assert len(errors) == 1
+    assert f"set content_type to the file's {requested} media type" in errors[0]
+    assert f"'{requested}/webm'" in errors[0]
+    assert f"leave kind out to send it as kind {derived!r}" in errors[0]
+
+
+def test_delivery_resolver_delivers_valid_files_and_skips_old_format_ones(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Old-code shapes queued at upgrade are dropped with a warning; the rest still go."""
+
+    config = GatewayInstanceConfig.load(_write_instance_config(tmp_path))
+    person_dir = config.layout.person_dir("alice")
+    person_dir.mkdir(parents=True, exist_ok=True)
+    (person_dir / "photo.png").write_bytes(b"\x89PNG\r\n\x1a\nphoto")
+    (person_dir / "chart.svg").write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg'></svg>")
+    (person_dir / "scan.png").write_bytes(b"\x89PNG\r\n\x1a\nscan")
+    (person_dir / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\nshot")
+    # name -> (old attachment fields, expected reason in the skip warning)
+    old_shapes = {
+        # Old code labelled every image/* kind image.
+        "chart.svg": (
+            {"content_type": "image/svg+xml", "kind": "image"},
+            "kind 'image' does not match content type 'image/svg+xml'",
+        ),
+        # Old code kept an explicit kind as given.
+        "scan.png": (
+            {"content_type": "image/png", "kind": "document"},
+            "kind 'document' does not match content type 'image/png'",
+        ),
+        # Old code passed content_type through unparsed.
+        "shot.png": (
+            {"content_type": "png", "kind": "image"},
+            "content_type 'png' is not a media type",
+        ),
+    }
+    notification = UserNotification(
+        text="Files attached.",
+        attachments=[
+            UserNotificationAttachment(
+                path=str(person_dir / "photo.png"), content_type="image/png", kind="image"
+            ),
+            *(
+                UserNotificationAttachment(path=str(person_dir / name), **fields)
+                for name, (fields, _reason) in old_shapes.items()
+            ),
+        ],
+    )
+    logger = logging.getLogger("tests.delivery_resolver")
+    resolver = ConfigGatewayDeliveryAttachmentResolver(config=config, logger=logger)
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        staged = resolver.resolve(notification, person_id="alice")
+
+    assert [item.filename for item in staged] == ["photo.png"]
+    assert staged[0].kind == "image"
+    assert staged[0].sha256
+    assert "/scratch/sent/" in staged[0].path
+    skipped = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=outgoing_attachment_skipped" in record.getMessage()
+    ]
+    assert len(skipped) == len(old_shapes)
+    for index, (_fields, reason) in enumerate(old_shapes.values(), start=1):
+        assert f"attachments[{index}].{reason}" in skipped[index - 1]
+    assert all("person_id=alice" in message for message in skipped)
 
 
 def test_validate_notification_attachment_normalizes_image_jpg_to_jpeg(
@@ -431,6 +526,9 @@ def test_normalize_media_type(raw: str | None, expected: str) -> None:
         ("image/png, image/jpeg", None),
         ("image/png\r\nX-Injected: 1", None),
         ("image/png; charset=utf-8\r\nX-Injected: 1", None),
+        ("audio/mpeg\u0085", None),
+        ("\ufeffimage/png", None),
+        ("image/\u212a", None),
     ],
 )
 def test_parse_media_type(raw: str | None, expected: str | None) -> None:
@@ -491,7 +589,46 @@ def test_resolve_attachment_content_type_falls_back_to_filename_only_when_omitte
     )
 
 
-def test_chat_attachments_js_allowlist_matches_python_allowlist() -> None:
+# Inputs both media-type parsers and kind rules must treat the same way.
+_SHARED_MEDIA_TYPE_SAMPLES: tuple[str | None, ...] = (
+    None,
+    "",
+    "image/png",
+    "IMAGE/PNG; charset=utf-8",
+    "image/jpg",
+    "Image/JPG; quality=90",
+    "image/gif",
+    "image/webp ;q=1",
+    "image/svg+xml",
+    "image/heic",
+    "  audio/mpeg  ",
+    "audio/x-caf",
+    "audio/fake+xml",
+    "video/mp4",
+    "video/fake+xml",
+    "text/html; evil",
+    "application/octet-stream",
+    "png",
+    "image",
+    "image/",
+    "/png",
+    "image/ png",
+    "image /png",
+    ";image/png",
+    "image/png, image/jpeg",
+    "image/png\r\nX-Injected: 1",
+    "\taudio/mpeg",
+    "audio/mpeg\x7f",
+    # str.strip() and String.prototype.trim() disagree on these.
+    "audio/mpeg\u0085",
+    "\ufeffimage/png",
+    "image/png\u00a0",
+    # Lowercases to ASCII "k" in both languages; must not pass as a token.
+    "image/\u212a",
+)
+
+
+def test_chat_attachments_js_media_policy_matches_python() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     module_path = (
         repo_root
@@ -509,16 +646,35 @@ def test_chat_attachments_js_allowlist_matches_python_allowlist() -> None:
             "--input-type=module",
             "-e",
             (
-                f"import {{ INLINE_IMAGE_CONTENT_TYPES }} from {json.dumps(module_path.as_uri())};"
-                "console.log(JSON.stringify(INLINE_IMAGE_CONTENT_TYPES));"
+                'import { readFileSync } from "node:fs";'
+                "import { INLINE_IMAGE_CONTENT_TYPES, normalizeMediaType, inferAttachmentKind }"
+                f" from {json.dumps(module_path.as_uri())};"
+                'const samples = JSON.parse(readFileSync(0, "utf8"));'
+                "console.log(JSON.stringify({"
+                "allowlist: INLINE_IMAGE_CONTENT_TYPES,"
+                "rows: samples.map((s) => [normalizeMediaType(s),"
+                " inferAttachmentKind({ content_type: s })]),"
+                "}));"
             ),
         ],
         check=True,
         capture_output=True,
         text=True,
+        input=json.dumps(list(_SHARED_MEDIA_TYPE_SAMPLES)),
     )
-    js_allowlist = frozenset(json.loads(result.stdout.strip().splitlines()[-1]))
-    assert js_allowlist == INLINE_IMAGE_CONTENT_TYPES
+    js = json.loads(result.stdout.strip().splitlines()[-1])
+    assert frozenset(js["allowlist"]) == INLINE_IMAGE_CONTENT_TYPES
+    python_rows = [
+        [normalize_media_type(sample), attachment_kind_for_content_type(sample)]
+        for sample in _SHARED_MEDIA_TYPE_SAMPLES
+    ]
+    mismatches = [
+        (sample, py_row, js_row)
+        for sample, py_row, js_row in zip(_SHARED_MEDIA_TYPE_SAMPLES, python_rows, js["rows"])
+        if py_row != js_row
+    ]
+    assert len(js["rows"]) == len(_SHARED_MEDIA_TYPE_SAMPLES)
+    assert mismatches == []
 
 
 def test_chat_attachments_js_unit_tests() -> None:

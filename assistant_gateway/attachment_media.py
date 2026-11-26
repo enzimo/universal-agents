@@ -37,8 +37,12 @@ _MEDIA_TYPE_ALIASES: dict[str, str] = {
 }
 
 # Strict RFC 6838 type/subtype token syntax without parameters or whitespace.
+# The letters are spelled out in ASCII (no case folding) and only ASCII spaces
+# are trimmed, so Python and Web Chat's copy (chat_attachments.mjs) accept the
+# same strings: str.strip() and String.prototype.trim() disagree on
+# characters such as U+0085 and U+FEFF.
 _MEDIA_TYPE_PATTERN = re.compile(
-    r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$"
+    r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$"
 )
 
 AttachmentKind = Literal["image", "audio", "video", "document"]
@@ -51,9 +55,10 @@ def parse_media_type(content_type: str | None) -> str | None:
     raw = str(content_type or "")
     if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
         return None
-    candidate = raw.split(";", 1)[0].strip().lower()
+    candidate = raw.split(";", 1)[0].strip(" ")
     if not candidate or not _MEDIA_TYPE_PATTERN.match(candidate):
         return None
+    candidate = candidate.lower()
     return _MEDIA_TYPE_ALIASES.get(candidate, candidate)
 
 

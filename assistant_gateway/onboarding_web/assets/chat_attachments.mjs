@@ -3,8 +3,9 @@
  *
  * Mirrors ``assistant_gateway/attachment_media.py`` so the UI and server agree
  * on which media types display as inline raster thumbnails, audio/video
- * players, or downloadable file chips. ``INLINE_IMAGE_CONTENT_TYPES`` is
- * pinned against Python's allowlist by ``tests/test_attachment_media_policy.py``.
+ * players, or downloadable file chips. ``tests/test_attachment_media_policy.py``
+ * compares ``INLINE_IMAGE_CONTENT_TYPES`` with Python's list and runs a shared
+ * table of sample media types through both parsers and kind rules.
  */
 
 export const DEFAULT_ATTACHMENT_CONTENT_TYPE = "application/octet-stream";
@@ -20,7 +21,10 @@ const INLINE_IMAGE_SET = new Set(INLINE_IMAGE_CONTENT_TYPES);
 const MEDIA_TYPE_ALIASES = Object.freeze({
   "image/jpg": "image/jpeg",
 });
-const MEDIA_TYPE_PATTERN = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
+// Same rule as attachment_media.py: ASCII letters spelled out (no case
+// folding) and only ASCII spaces trimmed, because String.prototype.trim() and
+// Python's str.strip() disagree on characters such as U+0085 and U+FEFF.
+const MEDIA_TYPE_PATTERN = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/;
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 export function normalizeMediaType(contentType) {
@@ -31,10 +35,11 @@ export function normalizeMediaType(contentType) {
       return DEFAULT_ATTACHMENT_CONTENT_TYPE;
     }
   }
-  const candidate = raw.split(";", 1)[0].trim().toLowerCase();
-  if (!candidate || !MEDIA_TYPE_PATTERN.test(candidate)) {
+  const trimmed = raw.split(";", 1)[0].replace(/^ +| +$/g, "");
+  if (!trimmed || !MEDIA_TYPE_PATTERN.test(trimmed)) {
     return DEFAULT_ATTACHMENT_CONTENT_TYPE;
   }
+  const candidate = trimmed.toLowerCase();
   return MEDIA_TYPE_ALIASES[candidate] || candidate;
 }
 

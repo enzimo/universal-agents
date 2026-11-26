@@ -26,7 +26,6 @@ from assistant_gateway.interactive_apps.website_handlers.workspace import (
 from assistant_gateway.interactive_apps.website_handlers.workspace_download import (
     ByteRange,
     accepts_html_navigation,
-    build_attachment_disposition,
     build_content_disposition,
     parse_byte_range,
     safe_download_content_type,
@@ -89,15 +88,15 @@ def test_parse_byte_range_covers_valid_unsatisfiable_and_ignored_headers() -> No
         assert parse_byte_range(ignored, 100).status == "none"
 
 
-def test_build_attachment_disposition_sanitizes_and_encodes_utf8() -> None:
-    plain = build_attachment_disposition("report.pdf")
+def test_build_content_disposition_sanitizes_and_encodes_utf8() -> None:
+    plain = build_content_disposition("report.pdf")
     assert plain == 'attachment; filename="report.pdf"; filename*=UTF-8\'\'report.pdf'
 
-    utf8 = build_attachment_disposition("café résumé (final).pdf")
+    utf8 = build_content_disposition("café résumé (final).pdf")
     assert utf8.startswith('attachment; filename="caf_ r_sum_ (final).pdf"; ')
     assert "filename*=UTF-8''caf%C3%A9%20r%C3%A9sum%C3%A9%20%28final%29.pdf" in utf8
 
-    injected = build_attachment_disposition('evil\r\nX-Test: 1\x00/dir\\a"b.txt')
+    injected = build_content_disposition('evil\r\nX-Test: 1\x00/dir\\a"b.txt')
     assert "\r" not in injected
     assert "\n" not in injected
     assert "\x00" not in injected
@@ -105,21 +104,21 @@ def test_build_attachment_disposition_sanitizes_and_encodes_utf8() -> None:
     assert "\\" not in injected
     assert 'filename="evilX-Test: 1dira_b.txt"' in injected
 
-    fallback = build_attachment_disposition("\r\n\x00")
+    fallback = build_content_disposition("\r\n\x00")
     assert fallback == 'attachment; filename="download"; filename*=UTF-8\'\'download'
 
     # F4: Dot-only names and Unicode Cc/Cf control characters are neutralized in both filename and filename*.
     for dot_only in (".", "..", ".. ", "\x01..", "...\u202e"):
         assert (
-            build_attachment_disposition(dot_only)
+            build_content_disposition(dot_only)
             == 'attachment; filename="download"; filename*=UTF-8\'\'download'
         )
-    bidi = build_attachment_disposition("report\u202efdp.exe")
+    bidi = build_content_disposition("report\u202efdp.exe")
     assert "\u202e" not in bidi
     assert "%E2%80%AE" not in bidi
     assert bidi == 'attachment; filename="reportfdp.exe"; filename*=UTF-8\'\'reportfdp.exe'
 
-    c1_and_cf = build_attachment_disposition("note\x85\u200b.txt")
+    c1_and_cf = build_content_disposition("note\x85\u200b.txt")
     assert "%C2%85" not in c1_and_cf
     assert "%E2%80%8B" not in c1_and_cf
     assert c1_and_cf == 'attachment; filename="note.txt"; filename*=UTF-8\'\'note.txt'

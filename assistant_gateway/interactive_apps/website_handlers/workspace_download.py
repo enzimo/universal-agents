@@ -162,12 +162,6 @@ def build_content_disposition(
     return f'{disposition}; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_utf8}'
 
 
-def build_attachment_disposition(filename: str) -> str:
-    """Build a safe ``Content-Disposition: attachment`` header with UTF-8 filename*."""
-
-    return build_content_disposition(filename, disposition="attachment")
-
-
 def _media_range_quality(params: Sequence[str]) -> float:
     for param in params:
         if "=" not in param:

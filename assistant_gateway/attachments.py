@@ -44,6 +44,7 @@ from access_control.safe_open import UnsafePath
 from access_control.sensitive_paths import sensitive_reason
 from assistant_gateway.attachment_media import (
     DEFAULT_ATTACHMENT_CONTENT_TYPE,
+    INLINE_IMAGE_CONTENT_TYPES,
     AttachmentKind,
     attachment_kind_for_content_type,
     parse_media_type,
@@ -244,11 +245,21 @@ def _infer_attachment_kind(*, requested: str | None, content_type: str) -> Attac
                 f"(sent as kind {derived!r}); set content_type to the file's media type "
                 "or leave kind out"
             )
+        if normalized in {"audio", "video"}:
+            # Leaving kind out would send the file as ``derived`` (for example a
+            # voice.webm guessed as video/webm), so point at content_type instead.
+            raise ValueError(
+                f"kind {normalized!r} does not match content type {content_type!r} "
+                f"(sent as kind {derived!r}); set content_type to the file's "
+                f"{normalized} media type (for example '{normalized}/webm'), "
+                f"or leave kind out to send it as kind {derived!r}"
+            )
         if content_type.startswith("image/") and derived == "document":
+            inline_types = ", ".join(sorted(INLINE_IMAGE_CONTENT_TYPES))
             raise ValueError(
                 f"kind {normalized!r} does not match content type {content_type!r}: "
                 f"content type {content_type!r} is sent as kind {derived!r} "
-                "(only PNG, JPEG, GIF, and WebP are kind 'image'); leave kind out"
+                f"(only {inline_types} are kind 'image'); leave kind out"
             )
         raise ValueError(
             f"kind {normalized!r} does not match content type {content_type!r}: "
