@@ -5544,7 +5544,7 @@ async def test_web_chat_attachment_route_sandboxes_and_enforces_inline_allowlist
             b"ID3-audio-bytes",
             "audio/mpeg",
             "audio",
-            "inline",
+            "attachment",
             "audio/mpeg",
         ),
         (
@@ -5553,7 +5553,7 @@ async def test_web_chat_attachment_route_sandboxes_and_enforces_inline_allowlist
             b"ftypmp42-video-bytes",
             "video/mp4",
             "video",
-            "inline",
+            "attachment",
             "video/mp4",
         ),
         (
@@ -5582,6 +5582,10 @@ async def test_web_chat_attachment_route_sandboxes_and_enforces_inline_allowlist
         )
         session_cookie = auth_response.cookies["ua_web_chat_session"].value
         headers = {"Cookie": f"ua_web_chat_session={session_cookie}"}
+
+        asset_resp = await client.get("/chat_attachments.mjs")
+        assert asset_resp.status == 200
+        assert "INLINE_IMAGE_CONTENT_TYPES" in await asset_resp.text()
 
         for att_id, _filename, expected_body, _stored_ct, _stored_kind, expected_disp, expected_ct in cases:
             resp = await client.get(

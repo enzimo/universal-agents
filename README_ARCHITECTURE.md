@@ -1941,7 +1941,30 @@ one-link regular file of bounded size, and checks the digest. A link or changed
 bytes swapped in after staging are refused (Web Chat answers "no longer
 available"), so the file delivered is the file that was checked. The Photon
 sidecar reads a path, so it gets a private 0600 copy under `state/` that is
-removed after the call.
+removed after the call. Attachment media types and inline display follow one
+shared policy (`assistant_gateway/attachment_media.py`, mirrored in Web Chat by
+`chat_attachments.mjs` and checked for equality by tests): outgoing
+`notify_user` validation rejects malformed `content_type` strings and rejects
+explicit `kind` values that disagree with the normalized media type (only
+`image/png`, `image/jpeg`, `image/gif`, and `image/webp` have `kind="image"`),
+so an agent cannot label SVG, HTML, or arbitrary bytes as an inline image.
+Every `/api/web-chat/attachments/{attachment_id}` response sends
+`Content-Security-Policy: sandbox; default-src 'none'`,
+`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`,
+`Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`,
+and a sanitized RFC 5987 `Content-Disposition` derived from the stored
+normalized media type rather than `kind`. Only allowlisted raster images open
+with `Content-Disposition: inline`; non-XML `audio/*` and `video/*` keep their
+normalized `Content-Type` so `<audio>` and `<video>` players inside Web Chat
+play normally, while sending `Content-Disposition: attachment` so opening the
+raw attachment URL in its own tab downloads the file instead of showing a
+sandbox-blocked empty player. Every other attachment type (including
+`image/svg+xml`, `text/html`, `text/javascript`, and `text/css`) is sent with
+`Content-Disposition: attachment` and `Content-Type: application/octet-stream`
+so it cannot execute as a page, script, or stylesheet on the Web Chat origin.
+Workspace image previews (`/api/web-chat/workspace/content`) also send
+`Content-Security-Policy: sandbox; default-src 'none'` alongside `nosniff`,
+while PDF previews stay unrestricted so the browser's built-in PDF viewer works.
 
 Published pages (how-tos, articles, apps and work reports from
 `publish_single_page_site`) are deliverables too, so they are written into the

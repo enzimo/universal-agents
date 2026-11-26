@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -442,9 +445,9 @@ def test_parse_media_type(raw: str | None, expected: str | None) -> None:
         ("image/jpg", "image", "inline", "image/jpeg"),
         ("image/gif", "image", "inline", "image/gif"),
         ("image/webp", "image", "inline", "image/webp"),
-        ("audio/mpeg", "audio", "inline", "audio/mpeg"),
-        ("audio/x-caf", "audio", "inline", "audio/x-caf"),
-        ("video/mp4", "video", "inline", "video/mp4"),
+        ("audio/mpeg", "audio", "attachment", "audio/mpeg"),
+        ("audio/x-caf", "audio", "attachment", "audio/x-caf"),
+        ("video/mp4", "video", "attachment", "video/mp4"),
         ("image/svg+xml", "document", "attachment", DEFAULT_ATTACHMENT_CONTENT_TYPE),
         ("image/tiff", "document", "attachment", DEFAULT_ATTACHMENT_CONTENT_TYPE),
         ("image/heic", "document", "attachment", DEFAULT_ATTACHMENT_CONTENT_TYPE),
@@ -469,7 +472,9 @@ def test_attachment_media_allowlist_and_response_content_type(
     )
     assert attachment_kind_for_content_type(content_type) == expected_kind
     assert attachment_disposition_for_content_type(content_type) == expected_disposition
-    assert is_inline_attachment_content_type(content_type) == (expected_disposition == "inline")
+    assert is_inline_attachment_content_type(content_type) == (
+        expected_kind in {"image", "audio", "video"}
+    )
     assert attachment_response_content_type(content_type) == expected_response_ct
 
 
@@ -484,3 +489,50 @@ def test_resolve_attachment_content_type_falls_back_to_filename_only_when_omitte
         resolve_attachment_content_type(None, filename="recording.voicememo")
         == DEFAULT_ATTACHMENT_CONTENT_TYPE
     )
+
+
+def test_chat_attachments_js_allowlist_matches_python_allowlist() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    module_path = (
+        repo_root
+        / "assistant_gateway"
+        / "onboarding_web"
+        / "assets"
+        / "chat_attachments.mjs"
+    )
+    node = shutil.which("node") or "node"
+    result = subprocess.run(
+        [
+            "rtk",
+            "proxy",
+            node,
+            "--input-type=module",
+            "-e",
+            (
+                f"import {{ INLINE_IMAGE_CONTENT_TYPES }} from {json.dumps(module_path.as_uri())};"
+                "console.log(JSON.stringify(INLINE_IMAGE_CONTENT_TYPES));"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    js_allowlist = frozenset(json.loads(result.stdout.strip().splitlines()[-1]))
+    assert js_allowlist == INLINE_IMAGE_CONTENT_TYPES
+
+
+def test_chat_attachments_js_unit_tests() -> None:
+    node = shutil.which("node") or "node"
+    result = subprocess.run(
+        [
+            "rtk",
+            "proxy",
+            node,
+            "--test",
+            str(Path(__file__).with_name("chat_attachments.test.mjs")),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -1,11 +1,15 @@
 """Shared media-type policy for Web Chat and outgoing notification attachments.
 
 This module is the single source of truth for which media types may render
-inline on the Web Chat origin (a narrow raster image allowlist plus non-XML
-audio and video) and how attachment ``kind``, HTTP ``Content-Disposition``,
-and safe response ``Content-Type`` are derived from a normalized media type.
-It uses only the Python standard library so gateway application services,
-HTTP handlers, and notification validation can share it without cycles.
+inside Web Chat (a narrow raster image allowlist plus non-XML audio and video)
+and how attachment ``kind``, HTTP ``Content-Disposition``, and safe response
+``Content-Type`` are derived from a normalized media type. Only raster images
+are served with ``Content-Disposition: inline``; audio and video keep their
+normalized media type so Web Chat's media players play them, while using
+``Content-Disposition: attachment`` so direct navigation downloads the file
+instead of opening an empty sandbox-blocked player page. It uses only the
+Python standard library so gateway application services, HTTP handlers, and
+notification validation can share it without cycles.
 """
 
 from __future__ import annotations
@@ -130,9 +134,16 @@ def attachment_kind_for_content_type(content_type: str | None) -> AttachmentKind
 def attachment_disposition_for_content_type(
     content_type: str | None,
 ) -> AttachmentDisposition:
-    """Return ``inline`` only for allowlisted media types, ``attachment`` otherwise."""
+    """Return ``inline`` only for allowlisted raster images, ``attachment`` otherwise.
 
-    if is_inline_attachment_content_type(content_type):
+    Audio and video attachments keep their normalized ``Content-Type`` so
+    ``<audio>`` and ``<video>`` elements on the Web Chat page play them (media
+    elements ignore ``Content-Disposition``), while using ``attachment`` so
+    opening the raw URL in its own tab downloads the file cleanly rather than
+    rendering a Chromium player page blocked by ``sandbox; default-src 'none'``.
+    """
+
+    if is_inline_image_content_type(content_type):
         return "inline"
     return "attachment"
 

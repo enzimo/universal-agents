@@ -1459,8 +1459,12 @@ document directly in chat:
    these folders and a file with more than one hard link are refused too.
 2. Call `notify_user` with an attachment object such as
    `{"path":"...","content_type":"image/png","filename":"optional.png","caption":"optional"}`.
-   For browser Web Chat requests, the default `target="auto"` keeps the
-   attachment visible in that same Web Chat thread.
+   Leave `kind` omitted (or `"auto"`): the gateway derives `kind` from the
+   normalized `content_type` (only PNG, JPEG, GIF, and WebP are `image`; non-XML
+   `audio/*` and `video/*` are `audio`/`video`; everything else is `document`)
+   and rejects a `kind` that disagrees with the media type or a malformed
+   `content_type`. For browser Web Chat requests, the default `target="auto"`
+   keeps the attachment visible in that same Web Chat thread.
 
 Do not paste binary bytes or base64 into `notify_user`; the gateway checks
 the file for the person, copies it once when it receives the message into
