@@ -22,6 +22,7 @@ from custom_agents.pending_work_runtime import close_pending_work
 from custom_agents.task_human_interaction_blockers import (
     answer_held,
     get_human_interaction_blocker,
+    is_timed_wait_blocker,
     mark_answer_held,
     record_human_interaction_blocker,
 )
@@ -1072,10 +1073,10 @@ async def test_wind_down_early_failure_stops_pending_subtasks(manager, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_f1_wind_down_treats_wait_in_last_poll_margin_as_hopeless_and_resumes_due_before_deadline(
+async def test_f1_wind_down_treats_wait_in_last_poll_margin_as_hopeless(
     manager, monkeypatch, caplog
 ):
-    """F1: a wait due inside the final poll margin fails immediately as hopeless; an already-due wait resumes before deadline."""
+    """F1: a wait due inside the final poll margin fails immediately as hopeless."""
     monkeypatch.setattr(wind_down, "WIND_DOWN_POLL_SECONDS", 5.0)
     start = datetime.now(timezone.utc)
     _add(manager, "near_deadline", ProgressState.IN_PROGRESS)
@@ -1112,7 +1113,13 @@ async def test_f1_wind_down_treats_wait_in_last_poll_margin_as_hopeless_and_resu
     agent._send_task_error_response.assert_awaited_once()
     assert "shutting down before the wait ends" in agent._send_task_error_response.await_args.args[3]
 
-    # Part 2: an already-due wait at the moment the deadline arrives still gets resumed once before _end_at_deadline.
+
+@pytest.mark.asyncio
+async def test_wind_down_poll_after_deadline_fails_due_wait_with_timed_wait_message_without_resuming(
+    manager, monkeypatch
+):
+    """A poll that slips past the deadline fails a due timed wait with the timed-wait message; it does not resume it first."""
+    start = datetime.now(timezone.utc)
     _add(manager, "due_at_deadline", ProgressState.IN_PROGRESS)
     manager.update_main_task_state("due_at_deadline", ProgressState.WAITING, start.isoformat())
     record_human_interaction_blocker(
@@ -1129,25 +1136,24 @@ async def test_f1_wind_down_treats_wait_in_last_poll_margin_as_hopeless_and_resu
             resume_at=(start - timedelta(seconds=1)).isoformat(),
         ),
     )
-    agent2 = _worker(manager, wait_seconds=0.0, monkeypatch=monkeypatch)
-    agent2._interrupted_turn_sessions = {}
-    agent2._pending_interrupt_responses = {}
-    resumed_at_deadline = []
+    agent = _worker(manager, wait_seconds=0.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+    woken: list = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
 
-    def complete_on_resume(_agent):
-        resumed_at_deadline.append(True)
-        manager.complete_task("due_at_deadline", datetime.now(timezone.utc).isoformat())
+    state = wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    state.deadline = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await asyncio.wait_for(state.task, timeout=2.0)
 
-    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", complete_on_resume)
-    state2 = wind_down.start_lease_loss_wind_down(agent2, reason="stale_launch_lease")
-    state2.deadline = datetime.now(timezone.utc) - timedelta(seconds=1)
-    await asyncio.wait_for(state2.task, timeout=2.0)
-
-    assert resumed_at_deadline == [True]
-    assert agent2.exited
-    agent2._send_task_error_response.assert_not_awaited()
+    assert woken == []
+    assert agent.exited
     archived = manager.get_task_from_db("due_at_deadline")
-    assert archived is not None and archived["status"] == ProgressState.COMPLETED.value
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+    agent._send_task_error_response.assert_awaited_once()
+    assert agent._send_task_error_response.await_args.args[3].startswith(
+        "This task was paused on a timed wait when its worker lost its launch lease."
+    )
 
 
 @pytest.mark.asyncio
@@ -1216,3 +1222,60 @@ async def test_f5_wind_down_early_failure_finishes_followups_when_post_fail_writ
     assert "event=timed_wait_wind_down_fail_post_write_error" in caplog.text
     assert "event=worker_wind_down_timed_wait_outlasts_deadline" in caplog.text
     assert "event=worker_wind_down_timed_wait_fail_error" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wind_down_leaves_a_taken_over_timed_wait_alone_without_answering_or_stopping_subtasks(
+    manager, tmp_path, monkeypatch, caplog
+):
+    """C23: another agent of the type adopted the worker's saved work; the wind-down must not fail, answer or stop it."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "parent", ProgressState.IN_PROGRESS)
+    manager.add_subtask(
+        "parent",
+        Task(task_id="child", parent_task_id="parent", task_type=MessageMetaType.REQUEST, problem_statement="Fetch"),
+        MessageHeader(from_agent_id="worker_1", to_routing_path="team_Other"),
+        MessageMeta(to_named_agent_type="Other"),
+    )
+    manager.update_main_task_state("parent", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "parent",
+        timed_wait_record(
+            interrupt_id="int-parent",
+            call_id="call-parent",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-parent",
+            minutes=120,
+            reason="long",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+    # The real custody transfer: a second agent of the same type adopts the saved row.
+    new_owner = TaskManager(db_path=str(tmp_path / "tasks.db"))
+    new_owner.set_owner_identity("worker_2", "Worker", "team", "WebResearchAgent")
+    assert new_owner.restore_runtime_state_for_owner_ids(["worker_1"])
+    stop_requests: list[str] = []
+
+    async def record_stop(_agent, *, parent_task_id, subtask_info, reason):
+        stop_requests.append(subtask_info.task.task_id)
+
+    monkeypatch.setattr(wind_down, "request_subtask_stop", record_stop)
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    with caplog.at_level(logging.WARNING):
+        wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+        await _wait_for_exit(agent, timeout=5.0)
+
+    assert agent.exited
+    agent._send_task_error_response.assert_not_awaited()
+    assert stop_requests == []
+    assert "event=timed_wait_wind_down_custody_moved" in caplog.text
+    assert "event=timed_wait_wind_down_fail_post_write_error" not in caplog.text
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" not in caplog.text
+    assert new_owner.get_task_info("parent").state == ProgressState.WAITING
+    assert is_timed_wait_blocker(get_human_interaction_blocker(new_owner, "parent"))
+    assert new_owner.get_task_from_db("parent") is None

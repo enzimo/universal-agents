@@ -11,6 +11,8 @@ resumed turn a stub, so the tests see what is saved when the turn starts.
 
 from __future__ import annotations
 
+from typing import Any
+
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -978,6 +980,101 @@ async def test_b3_setup_run_blocker_saved_before_waiting_and_crash_recovers_to_w
     assert saved_run.pieces[0].status == "waiting"
     assert announced == ["run-b3"]
     assert opened == ["sign_in"]
+
+
+@pytest.mark.asyncio
+async def test_setup_run_pause_is_flushed_to_disk_after_its_record_and_waiting_are_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lead decision: the setup-run record and WAITING are flushed once before start_run announces or opens pages."""
+
+    import json
+
+    from custom_tools.runtime_context import task_work
+    from storage import runtime_state_repository
+    from storage.runtime_state_repository import SqliteRuntimeStateRepository
+
+    db_path = tmp_path / "setup_flush.db"
+    manager = TaskManager(db_path=str(db_path))
+    manager.set_owner_identity(AGENT_ID, "TeamArchitect", "team", "TeamArchitect")
+    task = Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Set up GitHub")
+    header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway_chat")
+    meta = MessageMeta(conversation_id="conv-1", msg_correlation_id="corr-1")
+    assert manager.add_task(task, header, meta, owner_person_id="user-1")
+    assert manager.get_next_task_to_process() == TASK
+    manager.update_main_task_state(TASK, ProgressState.IN_PROGRESS, _now())
+    agent = SimpleNamespace(
+        id=AGENT_ID,
+        name="TeamArchitect",
+        team_id="team",
+        named_agent_type="TeamArchitect",
+        task_manager=manager,
+        _interrupted_turn_sessions={},
+        _pending_interrupt_responses={},
+        _logger=logging.getLogger("test.setup_run_flush"),
+        _agent_id_by_name={},
+        named_agent_type_queue_map={},
+        mid_turn_steering_config={},
+    )
+    run_repository(agent).create(
+        ToolSetupRunV1(
+            run_id="run-flush",
+            team_id="team",
+            person_id="user-1",
+            task_id=TASK,
+            agent_id=AGENT_ID,
+            agent_type="TeamArchitect",
+            tool_ids=("cli:github",),
+            workflow_id="wf-flush",
+            workflow_announced=False,
+            interrupt_id="old-int",
+            pieces=(RunPieceV1(piece_id="sign_in", tool_id="cli:github", kind="sign_in", status="pending", attempt=0),),
+        )
+    )
+    steps: list[Any] = []
+
+    def recording_flush(_path: str) -> str | None:
+        payload = json.loads(SqliteRuntimeStateRepository(str(db_path)).load_task_runtime_by_owner(AGENT_ID)[0].runtime_state_json)
+        saved_task = next(item for item in payload["tasks"] if item["task"]["task_id"] == TASK)
+        steps.append((
+            "flush",
+            saved_task["state"],
+            payload["human_interaction_blockers"][TASK]["kind"],
+            run_repository(agent).get("run-flush").interrupt_id,
+        ))
+        return None
+
+    async def recording_start_run(_agent, *, task_id: str, run_id: str) -> None:
+        steps.append(("start_run", run_id))
+
+    monkeypatch.setattr(runtime_state_repository, "sync_sqlite_commits_to_disk", recording_flush)
+    monkeypatch.setattr(tool_setup_run_runtime, "start_run", recording_start_run)
+    fake_result = SimpleNamespace(
+        interrupts=[
+            SimpleNamespace(
+                id="int-flush",
+                name="tool_setup_run",
+                reason={"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-flush", "summary": "Set up GitHub"},
+            )
+        ]
+    )
+    with task_work(TASK) as work:
+        work.strands = SimpleNamespace(replace_before_next_turn=False)
+        await task_steering_runtime.send_interrupt_request_for_result(
+            agent,
+            result=fake_result,
+            task=task,
+            msg_header=header,
+            msg_meta=meta,
+            invoke_kwargs={},
+            callback_handler=lambda **_kw: None,
+            full_prompt="Set up GitHub",
+        )
+
+    assert steps == [
+        ("flush", ProgressState.WAITING.value, TOOL_SETUP_RUN_KIND, "int-flush"),
+        ("start_run", "run-flush"),
+    ]
 
 
 @pytest.mark.asyncio

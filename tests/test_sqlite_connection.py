@@ -562,3 +562,47 @@ def test_only_a_schema_change_is_retried_and_only_a_bounded_number_of_times():
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         sqlite_connection._execute_with_schema_retry(always("database is locked"), "x", (), db_path="x.db")
     assert len(calls) == 1, "a lock keeps its own single bounded wait"
+
+
+def _record_fsync(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    synced: list[str] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        synced.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(sqlite_connection.os, "fsync", recording_fsync)
+    return synced
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc/self/fd")
+def test_sync_commits_to_disk_flushes_the_wal_file_holding_the_commits(tmp_path, monkeypatch):
+    db_path = tmp_path / "durable.db"
+    conn = sqlite_connection.connect_sqlite(str(db_path))
+    with conn:
+        conn.execute("CREATE TABLE t (v TEXT)")
+        conn.execute("INSERT INTO t VALUES ('kept')")
+    conn.close()
+    assert (tmp_path / "durable.db-wal").exists()
+    synced = _record_fsync(monkeypatch)
+
+    assert sqlite_connection.sync_sqlite_commits_to_disk(str(db_path)) == f"{db_path}-wal"
+    assert synced == [f"{db_path}-wal"]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc/self/fd")
+def test_sync_commits_to_disk_flushes_the_database_file_when_there_is_no_wal(tmp_path, monkeypatch):
+    db_path = tmp_path / "plain.db"
+    sqlite3.connect(db_path).close()
+    synced = _record_fsync(monkeypatch)
+
+    assert sqlite_connection.sync_sqlite_commits_to_disk(str(db_path)) == str(db_path)
+    assert synced == [str(db_path)]
+
+
+def test_sync_commits_to_disk_skips_in_memory_databases(monkeypatch):
+    synced = _record_fsync(monkeypatch)
+
+    assert sqlite_connection.sync_sqlite_commits_to_disk(":memory:") is None
+    assert synced == []

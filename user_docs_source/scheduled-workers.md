@@ -673,7 +673,9 @@ While a task is in a timed wait:
 - **Restarts and power loss keep the wait and budget.** A task's wait charge
   and scheduled resume time are saved together before the task enters the
   waiting state, and the wait and its resume are each saved in one step so a
-  crash cannot leave them half done:
+  crash cannot leave them half done. Once the pause is saved it is also
+  written through to disk, so a power cut right after a task starts waiting
+  does not undo the pause:
   - If the system restarts before the scheduled resume time, the task stays
     waiting and resumes once when the timer comes due (never early).
   - If the system is down past the resume time (even for hours), the task

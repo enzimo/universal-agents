@@ -1654,6 +1654,8 @@ async def send_interrupt_request_for_result(
         ProgressState.WAITING,
         datetime.now(timezone.utc).isoformat(),
     )
+    if staged_setup_run_ids or timed_wait_decisions:
+        await _make_pause_durable(agent, task.task_id)
     for run_id in staged_setup_run_ids:
         # set_up_tools paused the turn (now waiting); trusted code announces the workflow and opens its pages.
         from custom_agents.tool_setup_run_runtime import start_run
@@ -1688,6 +1690,33 @@ async def send_interrupt_request_for_result(
     )
     await agent.team_comms.send_message(message=envelope, routing_key=routing_key)
     return steering
+
+
+async def _make_pause_durable(agent: Any, task_id: str) -> None:
+    """Flush a timed wait's or setup run's pause to disk once, after WAITING is saved.
+
+    These pauses can last hours and the work after them starts from the saved
+    record alone. SQLite commits with ``synchronous=NORMAL``, so a power cut can
+    roll back the last commits; losing this pause (the wait's charge and record,
+    the setup-run record, WAITING) would bring the task back as an interrupted
+    turn that is re-run from the start, or failed as stale after
+    ``restart_executing_task_grace_seconds``. One flush per pause is cheap. The
+    setup-run store shares the runtime store's database, so the same flush
+    covers it. A failed flush is logged and the pause stays: the commits stand,
+    they are only exposed to a power cut as every other write is.
+    """
+
+    try:
+        await agent.task_manager.operations_runtime.run(agent.task_manager.runtime_state_store.make_commits_durable)
+    except Exception as exc:  # noqa: BLE001 - the pause is saved; only its power-cut durability failed
+        logger.warning(
+            "Could not flush a saved pause to disk; it may not survive a power cut. "
+            "event=task_pause_flush_failed agent_id=%s task_id=%s error_type=%s",
+            getattr(agent, "id", "-"),
+            task_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
 
 
 def _saved_proactive_guidance(

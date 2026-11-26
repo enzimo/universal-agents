@@ -1615,6 +1615,24 @@ charge without its blocker nor leave a `WAITING` task without its wait record.
 Moving the task to `WAITING` releases the worker's main slot so other work can
 run while the timer ticks.
 
+Once the charge, the record and `WAITING` have committed, the pause is flushed
+to disk once (`task_steering_runtime._make_pause_durable`, the same for a
+setup run's record, which lives in the same database). SQLite stores commit
+with `synchronous=NORMAL` in WAL mode, which survives a process crash but can
+roll back the last commits on a power cut. Losing a pause that way would bring
+the task back as an interrupted running turn, re-run from the start or failed
+as stale after `restart_executing_task_grace_seconds`, although it was only
+waiting. The flush (`RuntimeStateRepository.make_commits_durable`) fsyncs the
+runtime store's WAL file (`sqlite_connection.sync_sqlite_commits_to_disk`),
+which makes every commit already written to it durable without changing how
+other writes commit; PostgreSQL commits are already durable when they return
+(`synchronous_commit=on`, the default). It runs before the setup run's pages
+open or anything is sent. A failed flush is logged
+(`event=task_pause_flush_failed` with agent and task) and the pause stays: it
+is saved, only as exposed to a power cut as any other write. The resume side
+needs no flush: if a power cut rolls back a resume, the task is still
+`WAITING` with its overdue record and recovery resumes it again.
+
 Each `scheduled_runtime._scheduler_pass` runs `resume_due_timed_waits` (capping
 its idle sleep to the next resume time and backing off overdue unresumable
 records) through `custom_agents/paused_wait_resume.py` and

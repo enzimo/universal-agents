@@ -1734,3 +1734,76 @@ async def test_f3_resumed_live_turn_releases_live_wait_note_when_decision_keeps_
     ]
     assert len(ended_events) == 1
     assert ended_events[0]["how"] == "live_turn"
+
+
+# -- Power-cut durability: the pause is flushed to disk once, after it is saved --------------
+
+
+def _saved_pause(db_path: Path, task_id: str) -> dict[str, Any]:
+    """Read what another process would see in the runtime store right now."""
+
+    from storage.runtime_state_repository import SqliteRuntimeStateRepository
+
+    rows = SqliteRuntimeStateRepository(str(db_path)).load_task_runtime_by_owner(AGENT_ID)
+    payload = json.loads(rows[0].runtime_state_json)
+    saved_task = next(item for item in payload["tasks"] if item["task"]["task_id"] == task_id)
+    events = [(entry.get("details") or {}).get("event") for entry in saved_task["task"]["execution_history"]]
+    return {
+        "state": saved_task["state"],
+        "blocker_kind": (payload["human_interaction_blockers"].get(task_id) or {}).get("kind"),
+        "charged": TIMED_WAIT_STARTED_EVENT in events,
+    }
+
+
+@pytest.mark.asyncio
+async def test_timed_wait_pause_is_flushed_to_disk_once_after_waiting_and_its_record_are_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lead decision: the saved pause survives a power cut; the flush runs once, after charge, record and WAITING commit."""
+
+    from storage import runtime_state_repository, sqlite_connection
+
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: BASE_TIME)
+    db_path = tmp_path / "manager.db"
+    agent = _make_runtime_agent(db_path)
+    flushes: list[tuple[dict[str, Any], str | None]] = []
+
+    def recording_flush(path: str) -> str | None:
+        flushes.append((_saved_pause(db_path, TASK_ID), sqlite_connection.sync_sqlite_commits_to_disk(path)))
+        return flushes[-1][1]
+
+    monkeypatch.setattr(runtime_state_repository, "sync_sqlite_commits_to_disk", recording_flush)
+    model = _ScriptedWaitModel([[("tu-wait-1", "wait", {"minutes": 10, "reason": "Portainer redeploy"})]])
+    result, _parts = await _invoke_and_pause(agent, Agent(model=model, tools=[wait], callback_handler=None))
+
+    assert result.stop_reason == "interrupt"
+    assert len(flushes) == 1
+    saved_at_flush, synced_file = flushes[0]
+    assert saved_at_flush == {"state": ProgressState.WAITING.value, "blocker_kind": TIMED_WAIT_KIND, "charged": True}
+    assert synced_file == f"{db_path}-wal"
+
+
+@pytest.mark.asyncio
+async def test_failed_pause_flush_is_logged_and_keeps_the_pause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed flush is logged with identifiers; the wait stays saved and the scheduler is still woken."""
+
+    from storage import runtime_state_repository
+
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: BASE_TIME)
+    agent = _make_runtime_agent(tmp_path / "manager.db")
+
+    def failing_flush(_path: str) -> str | None:
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(runtime_state_repository, "sync_sqlite_commits_to_disk", failing_flush)
+    model = _ScriptedWaitModel([[("tu-wait-1", "wait", {"minutes": 10, "reason": "Portainer redeploy"})]])
+    with caplog.at_level(logging.WARNING):
+        result, _parts = await _invoke_and_pause(agent, Agent(model=model, tools=[wait], callback_handler=None))
+
+    assert result.stop_reason == "interrupt"
+    assert f"event=task_pause_flush_failed agent_id={AGENT_ID} task_id={TASK_ID} error_type=OSError" in caplog.text
+    assert agent.task_manager.get_task_info(TASK_ID).state == ProgressState.WAITING
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID)["kind"] == TIMED_WAIT_KIND
+    assert agent._scheduler_wake.count == 1

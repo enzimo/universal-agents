@@ -65,6 +65,10 @@ class RuntimeStateStore:
             consume_deferred_message=consume_deferred_message,
         )
 
+    def make_commits_durable(self) -> None:
+        """Make every commit already made to the runtime store survive a power cut."""
+        self._repository.make_commits_durable()
+
     def get_task_custody(self, team_id: str, task_ids: Sequence[str]) -> dict[str, TaskCustodyRow]:
         return self._repository.get_task_custody(team_id, task_ids)
 
