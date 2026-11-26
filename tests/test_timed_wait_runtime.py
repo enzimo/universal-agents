@@ -1512,3 +1512,141 @@ async def test_draining_agent_start_recovery_resumes_own_due_timed_wait_and_adop
 
     # Even a pool worker drain holding back unstarted tasks may start its own resumed wait.
     assert await may_start_next_task(agent) is True
+
+
+@pytest.mark.asyncio
+async def test_b2_charge_and_blocker_saved_in_one_write_and_failure_rolls_back_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#208 / B2 / C03: charge and blocker persist in one DB write; a failed write rolls back cleanly so a re-run charges once."""
+
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda _a: None)
+
+    db_path = tmp_path / "manager.db"
+    agent = _make_runtime_agent(db_path)
+    manager = agent.task_manager
+    before_snapshot = manager._export_runtime_state()
+
+    persist_calls: list[int] = []
+    history_calls: list[int] = []
+    orig_persist = manager._persist_runtime_state
+    orig_persist_history = manager.runtime_snapshot_coordinator.persist_task_history
+    fail_once = [True]
+
+    def counting_persist(*args: Any, **kwargs: Any) -> None:
+        persist_calls.append(1)
+        if fail_once[0]:
+            fail_once[0] = False
+            raise RuntimeError("simulated power loss during single write")
+        orig_persist(*args, **kwargs)
+
+    def counting_history(*args: Any, **kwargs: Any) -> bool:
+        history_calls.append(1)
+        return orig_persist_history(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_persist_runtime_state", counting_persist)
+    monkeypatch.setattr(manager.runtime_snapshot_coordinator, "persist_task_history", counting_history)
+
+    reason = {
+        "kind": TIMED_WAIT_KIND,
+        "call_id": "call-first-attempt",
+        "tool": WAIT_TOOL_NAME,
+        "tool_use_id": "tu-1",
+        "minutes": 10,
+        "reason": "Portainer redeploy",
+    }
+    with pytest.raises(RuntimeError, match="simulated power loss during single write"):
+        await stage_timed_wait(
+            agent, task_id=TASK_ID, interrupt_id="int-1", reason=reason, msg_meta=MessageMeta()
+        )
+
+    # Exactly one write attempted (no separate history write), full in-memory rollback, nothing charged on disk.
+    assert len(persist_calls) == 1
+    assert history_calls == []
+    assert manager._export_runtime_state() == before_snapshot
+    assert WaitLedger.from_history(manager.get_task_info(TASK_ID)).total_minutes == 0
+    assert get_human_interaction_blocker(manager, TASK_ID) is None
+
+    reloaded = TaskManager(db_path=str(db_path))
+    reloaded.set_owner_identity(AGENT_ID, "Worker", TEST_TEAM, "Worker")
+    reloaded.restore_runtime_state()
+    assert WaitLedger.from_history(reloaded.get_task_info(TASK_ID)).total_minutes == 0
+    assert get_human_interaction_blocker(reloaded, TASK_ID) is None
+
+    # Re-run after crash gets a brand new call_id and persists charge + blocker in one write: charged once (10 min).
+    persist_calls.clear()
+    reason_retry = {**reason, "call_id": "call-after-restart", "tool_use_id": "tu-2"}
+    decision = await stage_timed_wait(
+        agent, task_id=TASK_ID, interrupt_id="int-2", reason=reason_retry, msg_meta=MessageMeta()
+    )
+    assert decision.action == "record"
+    assert len(persist_calls) == 1
+    assert history_calls == []
+    assert WaitLedger.from_history(manager.get_task_info(TASK_ID)).total_minutes == 10
+    saved_blocker = get_human_interaction_blocker(manager, TASK_ID)
+    assert saved_blocker is not None and saved_blocker["call_id"] == "call-after-restart"
+
+    # C11: prove both the budget charge and the blocker record arrived on disk together.
+    reloaded_after = TaskManager(db_path=str(db_path))
+    reloaded_after.set_owner_identity(AGENT_ID, "Worker", TEST_TEAM, "Worker")
+    reloaded_after.restore_runtime_state()
+    assert WaitLedger.from_history(reloaded_after.get_task_info(TASK_ID)).total_minutes == 10
+    reloaded_blocker = get_human_interaction_blocker(reloaded_after, TASK_ID)
+    assert reloaded_blocker is not None and reloaded_blocker["call_id"] == "call-after-restart"
+
+
+@pytest.mark.asyncio
+async def test_b2_custody_loss_during_stage_timed_wait_guards_rollback_and_skips_wake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C03: TaskCustodyTakenOver returns skip without start log/wake; RuntimeCustodyLost does not restore into emptied state."""
+
+    from storage.runtime_custody import CustodyStore, RuntimeCustodyLost
+
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    reason = {
+        "kind": TIMED_WAIT_KIND,
+        "call_id": "call-custody",
+        "tool": WAIT_TOOL_NAME,
+        "tool_use_id": "tu-c",
+        "minutes": 5,
+        "reason": "wait for build",
+    }
+
+    # Case A: TaskCustodyTakenOver drops just this task and returns normally.
+    agent_a = _make_runtime_agent(tmp_path / "taken.db")
+    wake_a = asyncio.Event()
+    agent_a._scheduler_wake = wake_a
+
+    def taken_over(*_args: Any, **_kwargs: Any) -> None:
+        agent_a.task_manager._forget_task(TASK_ID)
+
+    monkeypatch.setattr(agent_a.task_manager, "_persist_runtime_state", taken_over)
+    with caplog.at_level(logging.INFO):
+        decision_a = await stage_timed_wait(
+            agent_a, task_id=TASK_ID, interrupt_id="int-a", reason=reason, msg_meta=MessageMeta()
+        )
+        assert await finish_timed_wait(agent_a, decision_a) is False
+    assert decision_a.action == "skip"
+    assert not wake_a.is_set()
+    assert "event=timed_wait_started" not in caplog.text
+    assert get_human_interaction_blocker(agent_a.task_manager, TASK_ID) is None
+
+    # Case B: RuntimeCustodyLost empties the whole state and raises; rollback must not re-populate emptied state.
+    agent_b = _make_runtime_agent(tmp_path / "lost.db")
+
+    def whole_row_lost(*_args: Any, **_kwargs: Any) -> None:
+        lost = RuntimeCustodyLost(AGENT_ID, CustodyStore.TASK_RUNTIME)
+        agent_b.task_manager.runtime_snapshot_coordinator._release_lost_custody(lost)
+        raise lost
+
+    monkeypatch.setattr(agent_b.task_manager, "_persist_runtime_state", whole_row_lost)
+    with pytest.raises(RuntimeCustodyLost):
+        await stage_timed_wait(
+            agent_b, task_id=TASK_ID, interrupt_id="int-b", reason=reason, msg_meta=MessageMeta()
+        )
+    assert agent_b.task_manager.task_state.tasks == {}
+    assert agent_b.task_manager.task_state.human_interaction_blockers == {}

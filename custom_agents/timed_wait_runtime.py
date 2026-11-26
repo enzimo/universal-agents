@@ -14,10 +14,11 @@ Both tools pause the active turn with a local Strands interrupt
   history entry are the single source of truth (including for a wait deferred
   behind an earlier pause whose reused Strands ``Interrupt`` object still holds
   its first call's payload) and re-checks the recurring-schedule next-run rule
-  against that ``resume_at``. ``write_timed_wait`` writes the
-  ``timed_wait_started`` history entry (the budget charge) and saves the
-  blocker record *before* ``ProgressState.WAITING`` is persisted, so a crash
-  after pausing can never leave a ``WAITING`` task without its blocker. A
+  against that ``resume_at``. ``write_timed_wait`` persists the
+  ``timed_wait_started`` history entry (the budget charge) and the blocker
+  record together in one persisted write (``record_blocker_with_history``)
+  *before* ``ProgressState.WAITING`` is saved, so a crash can neither leave a
+  charge without a blocker nor leave a ``WAITING`` task without its blocker. A
   re-raise of an already-charged ``call_id`` adds no second charge and restores
   an unmarked blocker with the original times. After ``WAITING`` is saved,
   ``finish_timed_wait`` wakes the scheduler loop (or, if the wait was refused
@@ -68,6 +69,7 @@ from custom_agents.task_human_interaction_blockers import (
     record_human_interaction_blocker,
     remove_answer_mark,
 )
+from custom_agents.task_state_transitions import record_blocker_with_history
 from custom_agents.timed_waits import (
     TIMED_WAIT_ENDED_EVENT,
     TIMED_WAIT_REFUSED_RESPONSE_KIND,
@@ -483,38 +485,49 @@ async def decide_timed_wait(
 
 
 async def write_timed_wait(agent: Any, decision: TimedWaitDecision) -> bool:
-    """Persist the charge and blocker record for a decided timed wait (before WAITING is saved).
+    """Persist the charge and blocker record for a decided timed wait in one write (before WAITING is saved).
 
-    Caller holds ``_lock(agent, decision.task_id)``. Returns True when a record was written.
+    Caller holds ``_lock(agent, decision.task_id)``. Returns True when the
+    record was written and this agent still holds the task.
     """
 
-    if decision.action not in {"record", "restore"} or decision.record is None:
+    record = decision.record
+    if decision.action not in {"record", "restore"} or record is None:
         return False
     manager = agent.task_manager
     run_ops = manager.operations_runtime.run
     if decision.action == "record":
         assert decision.history_details is not None
-        # Charge (history) first, then save the blocker record.
-        await append_wait_history(
-            agent,
+        # Persist the budget charge (history) and the blocker record in one atomic write.
+        written = await run_ops(
+            partial(record_blocker_with_history, manager),
             decision.task_id,
-            decision.record["summary"],
-            decision.history_details,
+            record,
+            history_summary=record["summary"],
+            history_details=decision.history_details,
         )
-        await run_ops(partial(record_human_interaction_blocker, manager), decision.task_id, decision.record)
+        if not written:
+            return False
         logger.info(
             "A task paused on a timed wait. event=timed_wait_started task_id=%s interrupt_id=%s "
             "tool=%s minutes=%s resume_at=%s agent_id=%s",
             decision.task_id,
             decision.interrupt_id,
-            decision.record.get("tool"),
-            decision.record.get("minutes"),
-            decision.record.get("resume_at"),
+            record.get("tool"),
+            record.get("minutes"),
+            record.get("resume_at"),
             getattr(agent, "id", "-"),
         )
         return True
-    await run_ops(partial(record_human_interaction_blocker, manager), decision.task_id, decision.record)
-    return True
+
+    def _restore_blocker() -> bool:
+        task_info = manager.get_task_info(decision.task_id)
+        if task_info is None:
+            return False
+        record_human_interaction_blocker(manager, decision.task_id, record)
+        return bool(manager.get_task_info(decision.task_id) is task_info)
+
+    return bool(await run_ops(_restore_blocker))
 
 
 async def stage_timed_wait(
@@ -540,7 +553,8 @@ async def stage_timed_wait(
             deferred_by=deferred_by,
         )
         if decision.action in {"record", "restore"}:
-            await write_timed_wait(agent, decision)
+            if not await write_timed_wait(agent, decision):
+                return TimedWaitDecision(action="skip", task_id=task_id, interrupt_id=interrupt_id)
         return decision
 
 
