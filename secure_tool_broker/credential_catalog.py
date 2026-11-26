@@ -1525,20 +1525,29 @@ def credential_has_non_sealbox_source(credential: CatalogCredential) -> bool:
     return False
 
 
+def is_agent_capture(credential: CatalogCredential | None) -> bool:
+    """Return True when ``credential`` was created by ``credential.capture_file``.
+
+    This is the one test for capture provenance; callers that also need the
+    person add their own check (``is_agent_captured_for_person``).
+    """
+
+    if credential is None or not isinstance(credential.approval, Mapping):
+        return False
+    approval = credential.approval
+    return (
+        _string(approval.get("status")).lower() == CAPTURE_APPROVAL_STATUS
+        and _string(approval.get("source")).lower() == CAPTURE_APPROVAL_SOURCE
+    )
+
+
 def is_agent_captured_for_person(credential: CatalogCredential | None, person_id: str | None) -> bool:
     """Return True only when ``credential`` was created by ``credential.capture_file`` for ``person_id``."""
 
     target_person = _string(person_id)
-    if not target_person or credential is None:
+    if not target_person or credential is None or not is_agent_capture(credential):
         return False
-    approval = credential.approval
-    if not isinstance(approval, Mapping):
-        return False
-    return (
-        _string(approval.get("status")).lower() == CAPTURE_APPROVAL_STATUS
-        and _string(approval.get("source")).lower() == CAPTURE_APPROVAL_SOURCE
-        and _string(approval.get("captured_for_person_id")) == target_person
-    )
+    return _string(credential.approval.get("captured_for_person_id")) == target_person
 
 
 def _is_droppable_agent_capture(
@@ -1803,13 +1812,7 @@ def _agent_captured_key_refusal(
     into the key would be refused until it expires.
     """
 
-    if existing is None or not isinstance(existing.approval, Mapping):
-        return None
-    approval = existing.approval
-    if not (
-        _string(approval.get("status")).lower() == CAPTURE_APPROVAL_STATUS
-        and _string(approval.get("source")).lower() == CAPTURE_APPROVAL_SOURCE
-    ):
+    if not is_agent_capture(existing):
         return None
     return ToolResult(
         status="error",
@@ -3483,8 +3486,10 @@ def _write_bitwarden_login_item(
                 status="error",
                 error=(
                     f"A Bitwarden item named {item_name!r} already exists, so an agent cannot create "
-                    f"{credential_key} there. Choose another credential key, or ask the person to use "
-                    "the secure broker form (secure_credential_collection_request)."
+                    f"{credential_key} there. The item may belong to another saved key or be left over "
+                    "from an earlier save or a deleted key; the person can remove it in Bitwarden. "
+                    "Choose another credential key, or ask the person to use the secure broker form "
+                    "(secure_credential_collection_request)."
                 ),
                 content={
                     "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
