@@ -44,8 +44,10 @@ def plan_runtime_restart(
 
 @tool
 def get_runtime_restart_status(change_id: str) -> str:
-    """Inspect a restart plan: whether its approval still covers the tasks it would
-    interrupt (``still_applies``, ``new_interrupted_tasks``), its request to the
+    """Inspect a staged restart plan and whether its approval still applies.
+
+    Shows whether the approval still covers the tasks it would interrupt
+    (``still_applies``, ``new_interrupted_tasks``), its request to the
     supervisor, and the supervisor's receipt."""
 
     agent = get_agent_ref()

@@ -19,9 +19,18 @@ from runtime_settings.common import (
     _normalize_external_mcp_server_list,
 )
 from runtime_settings.values import whole_number
+from runtime_settings.tool_presentation_contract import DEFAULT_TOOL_PRESENTATION, TOOL_PRESENTATIONS
 
 
 TOOL_LIST_FIELDS = ("tool_allowlist", "tool_blocklist")
+
+
+def check_tool_presentation(value: Optional[str]) -> Optional[str]:
+    """``agent.tool_presentation`` must name one of the known ways of showing tools (or be unset in overrides)."""
+
+    if value is None or value in TOOL_PRESENTATIONS:
+        return value
+    raise ValueError(f"agent.tool_presentation must be one of {', '.join(TOOL_PRESENTATIONS)}, not {value!r}.")
 
 
 @lru_cache(maxsize=1)
@@ -144,6 +153,7 @@ class AgentRuntimeDefaultsSettings(BaseModel):
     )
     tool_allowlist: Optional[list[str]] = None
     tool_blocklist: list[str] = Field(default_factory=list)
+    tool_presentation: str = DEFAULT_TOOL_PRESENTATION
     external_mcp_servers: list[Dict[str, Any]] = Field(default_factory=list)
     agent_definition_paths: list[str] = Field(default_factory=list)
     prompt_skill_description_exclusions: list[str] = Field(default_factory=list)
@@ -167,6 +177,11 @@ class AgentRuntimeDefaultsSettings(BaseModel):
     @classmethod
     def _known_tool_names(cls, value: Optional[list[str]], info: Any) -> Optional[list[str]]:
         return check_tool_names(info.field_name, value)
+
+    @field_validator("tool_presentation")
+    @classmethod
+    def _known_tool_presentation(cls, value: Optional[str]) -> Optional[str]:
+        return check_tool_presentation(value)
 
     @field_validator("external_mcp_servers", mode="before")
     @classmethod
@@ -301,6 +316,7 @@ class AgentRuntimeOverrideSettings(BaseModel):
     conversation_summary_generator_type: Optional[str] = None
     tool_allowlist: Optional[list[str]] = None
     tool_blocklist: Optional[list[str]] = None
+    tool_presentation: Optional[str] = None
     external_mcp_servers: Optional[list[Dict[str, Any]]] = None
     agent_definition_paths: Optional[list[str]] = None
     prompt_skill_description_exclusions: Optional[list[str]] = None
@@ -311,6 +327,11 @@ class AgentRuntimeOverrideSettings(BaseModel):
     @classmethod
     def _known_tool_names(cls, value: Optional[list[str]], info: Any) -> Optional[list[str]]:
         return check_tool_names(info.field_name, value)
+
+    @field_validator("tool_presentation")
+    @classmethod
+    def _known_tool_presentation(cls, value: Optional[str]) -> Optional[str]:
+        return check_tool_presentation(value)
 
     @field_validator("external_mcp_servers", mode="before")
     @classmethod

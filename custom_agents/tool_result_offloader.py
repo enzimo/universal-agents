@@ -14,6 +14,8 @@ from typing import Any, Dict, Literal, Optional, Union
 
 from strands.hooks import AfterToolCallEvent, HookRegistry
 
+from custom_tools.tool_script_context import in_tool_script
+
 from custom_agents.structured_llm_messages import ModelWorkerTurnDecision
 from custom_agents.token_estimation import count_message_tokens, truncate_to_token_budget
 
@@ -256,6 +258,10 @@ class TaskAwareToolResultOffloader:
 
     def _after_tool_call(self, event: AfterToolCallEvent) -> None:
         if not self.config.enabled:
+            return
+        if in_tool_script():
+            # The result goes to the tool script, not the model; the script's
+            # own result is offloaded like any other (custom_tools.tool_script_context).
             return
         per_call_limit = _resolved_positive_int(self.config.max_tokens_per_call)
         if per_call_limit is None:

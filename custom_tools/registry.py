@@ -54,6 +54,7 @@ from custom_tools.python_env_tool import python_env
 from custom_tools.secure_cli_tool import secure_cli
 from custom_tools.single_page_site_tools import publish_single_page_site
 from custom_tools.tool_result_artifact_tools import inspect_tool_result_artifact
+from custom_tools.tool_scripts import PROVIDER as TOOL_SCRIPTS_PROVIDER
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from custom_tools.web_research_artifact_tools import (
     brave_llm_context_artifact,
@@ -110,6 +111,7 @@ TOOL_PROVIDERS = (
     EXECUTION_PLAN_PROVIDER,
     ACCESS_PROVIDER,
     TOOL_LOADING_PROVIDER,
+    TOOL_SCRIPTS_PROVIDER,
     TOOL_SETUP_PROVIDER,
     CHANGES_PROVIDER,
     ACCESS_PROPOSALS_PROVIDER,

@@ -216,6 +216,10 @@ class GrantToolSync:
         self.functions = _DynamicFunctions(agent, catalog_names)
         self.servers = MCPServerTools(agent)
         self.access_version = 0
+        # Every catalog function the grants valid now make usable, shown or not
+        # (the tool index lists those not shown, custom_agents.tool_index);
+        # None until the first comparison.
+        self.held_functions: frozenset[str] | None = None
 
     def register_hooks(self, registry: HookRegistry, **_: Any) -> None:
         registry.add_callback(BeforeModelCallEvent, self.before_model_call, order=TOOL_SYNC_HOOK_ORDER)
@@ -272,6 +276,7 @@ class GrantToolSync:
             # A block on the person stops their agents too.
             grants += [g for g in access.service.valid_grants(person.subjects(), task_id=work_id) if g.kind is GrantKind.BLOCK]
         held_tools = tool_ids_of_grants(catalog, grants)
+        self.held_functions = frozenset(functions_of_tools(catalog, held_tools))
         view = ToolView(
             functions=shown_names(self.agent, catalog, functions_of_tools(catalog, held_tools), loaded=loaded)
             - self.static_names,
@@ -302,6 +307,8 @@ class MCPServerSync:
             shows=lambda record: shown_without_authorization(record, agent_type=agent_type, configured_ids=configured),
         )
         self.functions = _DynamicFunctions(agent)
+        # With authorization off the agent holds its definition's tools (decision D8); the tool index lists those not shown.
+        self.held_functions: frozenset[str] = frozenset(tool_name(tool) for tool in getattr(agent, "tools", ()) or ())
         self._key: tuple[int, int] | None = None
         self._loaded_key: tuple[Any, ...] | None = None
         self._store: AccessRepository | None = None

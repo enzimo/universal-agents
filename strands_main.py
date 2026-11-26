@@ -1012,6 +1012,7 @@ def run_with_args(args: argparse.Namespace) -> None:
                 'conversation_summary_generator_type': agent_runtime_settings.get('conversation_summary_generator_type'),
                 'tool_allowlist': agent_runtime_settings.get('tool_allowlist'),
                 'tool_blocklist': agent_runtime_settings.get('tool_blocklist'),
+                'tool_presentation': agent_runtime_settings.get('tool_presentation'),
                 'external_mcp_servers': agent_runtime_settings.get('external_mcp_servers'),
                 'prompt_skill_description_exclusions': agent_runtime_settings.get('prompt_skill_description_exclusions'),
                 'prompt_skill_description_limit': agent_runtime_settings.get('prompt_skill_description_limit'),

@@ -104,6 +104,7 @@ AGENT_RUNTIME_TEMPLATE_KEYS = {
     "conversation_summary_generator_type",
     "tool_allowlist",
     "tool_blocklist",
+    "tool_presentation",
     "external_mcp_servers",
     "agent_definition_paths",
     "prompt_skill_description_exclusions",

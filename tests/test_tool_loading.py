@@ -96,7 +96,7 @@ def test_every_group_that_loads_on_request_is_a_function_tool_and_kept_functions
         assert tool_id in CATALOG.tools and tool_id.startswith("fn:"), tool_id
         assert kept <= functions_of_tools(CATALOG, {tool_id}), tool_id
     loading = CATALOG.tools["fn:tool_loading"]
-    assert "agent_runtime" in loading.tool_sets and {o.name for o in loading.operations} == {"find_tools", "use_tools"}
+    assert "agent_runtime" in loading.tool_sets and {o.name for o in loading.operations} == {"find_tools", "describe_tools", "use_tools"}
     assert "fn:schedule_runs" not in CATALOG.on_request, "scheduled runs must record themselves"
 
 
@@ -181,7 +181,8 @@ def test_use_tools_on_a_group_always_shown_says_it_is_in_the_list_and_find_tools
     assert memory["functions"] == ["memory", "resolve_memory_review_job", "topic_tags"]
     assert "call their functions directly" in answer["message"]
     assert found[0]["tool_id"] == "fn:memory" and found[0]["in_your_tool_list"] is True
-    assert json.loads(tool_loading.find_tools(query="no-such-word-anywhere"))["tools"] == []
+    # Words are compared one by one now (custom_tools.tool_search), so the query uses no real word.
+    assert json.loads(tool_loading.find_tools(query="zyxwv-qqqqj"))["tools"] == []
 
 
 def test_use_tools_refuses_what_does_not_load_on_request_or_is_not_held(storage, tmp_path) -> None:

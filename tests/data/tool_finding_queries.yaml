@@ -1,0 +1,320 @@
+# Plain-language requests find_tools must answer with the right catalog tool
+# (tests/test_tool_finding_recall.py). Each tool has at least three, written
+# the way a person or an agent states a need, not copied from the tool's
+# description. "also" names other tools that answer the same requests just as
+# well; the first of the expected tools in the results counts.
+#
+# When you add a catalog tool, add three requests here; the test fails for a
+# tool without them.
+tools:
+  code:python:
+    queries:
+      - run a python script to crunch these numbers
+      - make a virtual environment and install pandas
+      - execute some python code to parse a csv
+  code:shell:
+    queries:
+      - run a bash command
+      - execute grep and sed on the terminal
+      - list the files in a directory with ls
+  code:unconfined:
+    queries:
+      - run a command outside the sandbox with full host rights
+      - execute code on the host without restrictions
+      - need unrestricted host execution for a command
+  fn:access:
+    queries:
+      - ask for permission to use a tool I am missing
+      - which tools am I allowed to use right now
+      - stop a worker from using a tool for this request
+  fn:access_proposals:
+    queries:
+      - propose adding a new web api tool for administrators to review
+      - suggest a new mcp server and wait for admin approval
+      - check the status of a proposal I made
+  fn:access_workflows:
+    queries:
+      - publish a multi-step plan of the access a goal needs
+      - report progress on a step of an access workflow
+      - ask a person to approve several staged changes at once
+  fn:agent_management:
+    queries:
+      - start a new specialist agent
+      - which agents are running on the team right now
+      - send an instruction to another agent to stop
+  fn:calculator:
+    queries:
+      - what is 17 percent of 2340
+      - solve this equation for x
+      - compute the derivative of a function
+  fn:capabilities:
+    queries:
+      - create a new specialist agent type
+      - list the team's mcp connections
+      - propose an installed procedure for an administrator
+  fn:changes:
+    queries:
+      - apply the change the person approved
+      - carry out a staged plan using its change id
+      - execute an approved settings change
+  fn:communication:
+    queries:
+      - send a notification to the user
+      - tell the person something while I keep working
+      - message another agent directly
+  fn:conversations:
+    queries:
+      - read what we talked about in an earlier conversation
+      - list recent chat threads
+      - delete my old chat history
+  fn:diagnostics:
+    queries:
+      - write a note in the task log
+      - what happened earlier in this task
+      - get the context for a recovery task
+  fn:execution_control:
+    queries:
+      - connect to a remote server over ssh
+      - run a command on a remote machine
+      - create a periodic job from fixed code
+  fn:execution_plan:
+    queries:
+      - write down my plan for this task
+      - mark a plan step as done
+      - track an open question in my plan
+  fn:files:
+    queries:
+      - save text to a file
+      - read the contents of a file in my folder
+      - give the person a download link for a file
+  fn:heartbeat:
+    queries:
+      - add an item to my recurring checklist
+      - periodic proactive check items
+      - pause one of the heartbeat checks
+  fn:history_cleanup:
+    queries:
+      - let the team lead delete my old chats without asking every time
+      - permission for history clean-up
+      - allow cleaning up finished tasks and chats
+  fn:internet:
+    queries:
+      - let sandboxed code download a file from the internet
+      - allow network access for code
+      - code needs to open tcp connections
+  fn:knowledge:
+    queries:
+      - look up what the team already knows about a topic
+      - add a page to the team wiki
+      - edit a knowledge base article
+  fn:knowledge_curation:
+    queries:
+      - review proposed changes to team knowledge pages
+      - merge two duplicate wiki pages
+      - find broken links and stale pages in the knowledge base
+  fn:local_context:
+    queries:
+      - look at the image the person uploaded
+      - open the attachment from the chat
+      - read part of a saved large tool result
+  fn:memory:
+    queries:
+      - remember the person's preferred airline
+      - store a fact for later
+      - tag this conversation with a topic
+  fn:memory_review_inspection:
+    queries:
+      - list pending memory review jobs
+      - read the status of a memory review job
+      - which memory reviews are queued
+  fn:memory_review_maintenance:
+    queries:
+      - archive expired memory reviews
+      - purge old memory review content after retention
+      - clean up archived memory review records
+  fn:model_choice:
+    queries:
+      - switch an agent type to a different model
+      - change the reasoning effort of the model
+      - choose another llm provider for the team lead
+  fn:model_lookup:
+    queries:
+      - does this model accept images
+      - what is the context window of a model
+      - look up a model's capabilities before switching
+  fn:objectives:
+    queries:
+      - create a long-running objective
+      - start a recurring work session on a goal
+      - list the team's objectives
+  fn:own_context:
+    queries:
+      - list tasks I finished recently
+      - how full is my context window
+      - compact my conversation context
+  fn:publishing:
+    queries:
+      - publish a web page
+      - make a single page website with a chat box
+      - host a report as a site
+  fn:runtime_control:
+    queries:
+      - restart the runtime
+      - plan a supervised restart
+      - is the restart approval still valid
+  fn:runtime_settings:
+    queries:
+      - change a runtime setting
+      - show the team roster file
+      - raise the tool cap of a model
+  fn:runtime_status:
+    queries:
+      - what is my own status
+      - which model am I running on
+      - show my runtime configuration
+  fn:schedule_runs:
+    queries:
+      - list my scheduled jobs
+      - record the result of this scheduled run
+      - when does the next schedule run
+  fn:schedules:
+    queries:
+      - remind me every monday at nine
+      - create a recurring scheduled task
+      - pause a scheduled job for two hours
+  fn:skills:
+    queries:
+      - load the instructions of a skill
+      - open a skill's guide
+      - use one of the installed skills
+  fn:solution_variations:
+    queries:
+      - compare several different solutions before choosing
+      - record a candidate approach and evaluate it
+      - pick the best of the candidate solutions
+  fn:system_schedules:
+    queries:
+      - change a schedule the runtime manages
+      - pause a system managed schedule
+      - remove a built-in runtime schedule
+  fn:task_queue:
+    queries:
+      - what tasks are waiting in my queue
+      - pause another task of this request
+      - stop a queued task
+  fn:team_skill_plans:
+    queries:
+      - install a skill from github
+      - remove a team skill
+      - propose a new team skill from a draft
+  fn:team_skills:
+    queries:
+      - permission to install or remove team skills
+      - apply a team skill installation
+      - manage the team's skills
+  fn:tool_loading:
+    queries:
+      - find a tool for a job
+      - load a group of tools I need
+      - show the exact inputs of a function
+  fn:tool_scripts:
+    queries:
+      - chain several read-only lookups in one step
+      - run a small script that calls my tools and filters the results
+      - loop over results and return only a summary
+  fn:tool_setup:
+    queries:
+      - set up the tools this request needs for the person
+      - make sure the person is signed in to the tools
+      - prepare access and accounts for a task's tools
+  fn:web_research:
+    also: [http:exa, http:brave-search]
+    queries:
+      - search the web for recent news
+      - read the contents of a web page
+      - take a screenshot of a website
+  fn:worker_pools:
+    queries:
+      - how many workers are busy
+      - set the size of a worker pool
+      - cancel a delegated task
+  cli:bitwarden:
+    queries:
+      - get a password from bitwarden
+      - look up a credential in my bitwarden vault
+      - bitwarden login item
+  cli:github:
+    also: [http:github]
+    queries:
+      - open a pull request on github
+      - list issues in a repository
+      - check github actions workflow runs
+  cli:google:
+    queries:
+      - read my gmail
+      - add an event to my google calendar
+      - export a google doc from drive
+  cli:huggingface:
+    queries:
+      - download a model from hugging face
+      - upload a dataset to the hub
+      - get info about a huggingface model
+  cli:keepass:
+    queries:
+      - find an entry in my keepass database
+      - keepass password lookup
+      - use a keepass credential
+  cli:onepassword:
+    queries:
+      - get a secret from 1password
+      - one password vault item
+      - use a credential stored in onepassword
+  cli:sealbox:
+    queries:
+      - read a secret from sealbox
+      - sealbox credential
+      - search the sealbox store
+  cli:vault:
+    queries:
+      - read a secret from hashicorp vault
+      - vault kv secret
+      - use a credential stored in vault
+  cli:x:
+    queries:
+      - post a tweet
+      - publish a post on x
+      - share an update on twitter
+  http:brave-search:
+    also: [fn:web_research]
+    queries:
+      - search brave
+      - independent web index search results
+      - get extracted page context from brave
+  http:crawl4ai:
+    also: [fn:web_research]
+    queries:
+      - crawl a web page and render it
+      - render a javascript heavy page
+      - use the crawler to fetch a site
+  http:exa:
+    also: [fn:web_research]
+    queries:
+      - exa search
+      - search the web with exa
+      - fetch page contents through exa
+  http:github:
+    also: [cli:github]
+    queries:
+      - call the github rest api
+      - run a github graphql query
+      - github api request with my token
+  procedure:credentials:
+    queries:
+      - collect a password through the secure form
+      - save a credential for a tool
+      - use a linked account in a web request
+  procedure:tool_setup:
+    queries:
+      - has the person linked an account for this tool
+      - did the person sign in to the tools the request needs
+      - tool setup status

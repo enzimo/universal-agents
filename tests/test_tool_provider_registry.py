@@ -34,7 +34,9 @@ def test_tool_providers_have_unique_names_and_tool_ownership() -> None:
     # get_execution_ssh_command, enroll_execution_ssh_key, run_execution_ssh_sudo,
     # upload_execution_ssh_bundle).
     # workspace_file_link was added to FILES_PROVIDER (fn:files).
-    assert len(ALL_PROVIDER_TOOLS) == 180
+    # describe_tools (fn:tool_loading) and run_tool_script (fn:tool_scripts) were added
+    # for the tool index experiment (2026-11-26).
+    assert len(ALL_PROVIDER_TOOLS) == 182
 
 
 def test_agent_catalog_does_not_reexport_tool_registry_ownership() -> None:

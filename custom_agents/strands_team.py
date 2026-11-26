@@ -545,6 +545,8 @@ def create_strands_agent(config: dict):
         "skill_installation_enabled": skill_installation_enabled,
         "tool_allowlist": config.get("tool_allowlist"),
         "tool_blocklist": config.get("tool_blocklist"),
+        # How the model is shown its tools (custom_agents.tool_presentation).
+        "tool_presentation": config.get("tool_presentation"),
     }
     tools = filter_agent_tools(
         tools,

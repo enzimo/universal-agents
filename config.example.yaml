@@ -496,6 +496,7 @@ agent:
   max_deferred_messages: 100                    # Bound durable deferred admission; excess work remains with NATS for redelivery.
   tool_allowlist: null                          # Optional exact tool-name allowlist. null means no allowlist; [] means no tools. A name that is no tool function is refused.
   tool_blocklist: []                            # Optional exact tool-name blocklist applied after allowlist filtering. A name that is no tool function is refused.
+  tool_presentation: full_definitions          # How tools are shown to the model: full_definitions, index (small core + one-line index, the rest load on request) or index_and_scripts (index + read-only tool scripts). Experiment setting.
   external_mcp_servers:                         # Servers for every agent type (with authorization on, an agent uses one only with access to its mcp:<name> tool); omission configures none.
     - name: "crawl4ai"
       transport: "sse"

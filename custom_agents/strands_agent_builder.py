@@ -73,13 +73,20 @@ def build_strands_parts(agent: Any, *, agent_class: Any, loaded: Optional[Loaded
     tool_sync = install_tool_sync(agent, model_tools, parts)
     parts.sync = tool_sync
     from custom_agents.access_runtime import runtime_access
+    from custom_agents.tool_index import ToolIndexHook
     from custom_agents.tool_loading import OnRequestToolHook, ToolLimitHook, loadable_tools_text
+    from custom_agents.tool_presentation import index_enabled
 
     # The groups that load on request, listed by name and purpose, cost
     # far less than their definitions in every call (custom_agents.tool_loading).
-    loadable_text = loadable_tools_text(agent, runtime_access(agent).catalog)
-    if loadable_text:
-        full_system_prompt = f"{full_system_prompt}\n\n{loadable_text}"
+    # With a tool index (agent.tool_presentation) the index lists every held
+    # tool not shown in full instead, kept current before each model call
+    # (custom_agents.tool_index).
+    tool_index_hook = ToolIndexHook(agent, parts, full_system_prompt) if index_enabled(agent) else None
+    if tool_index_hook is None:
+        loadable_text = loadable_tools_text(agent, runtime_access(agent).catalog)
+        if loadable_text:
+            full_system_prompt = f"{full_system_prompt}\n\n{loadable_text}"
     tool_result_offloader = TaskAwareToolResultOffloader(
         max_tokens_per_call=agent.max_tool_result_tokens_per_call,
         model=model,
@@ -120,6 +127,8 @@ def build_strands_parts(agent: Any, *, agent_class: Any, loaded: Optional[Loaded
         ToolLimitHook(agent, parts),
         OnRequestToolHook(agent, parts),
     ]
+    if tool_index_hook is not None:
+        agent_hooks.append(tool_index_hook)
     if "plugins" in agent_signature.parameters:
         agent_kwargs["plugins"] = list(agent.plugins or [])
     elif agent.plugins:

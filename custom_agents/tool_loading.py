@@ -62,7 +62,9 @@ from strands.hooks import BeforeModelCallEvent, BeforeToolCallEvent, HookProvide
 
 from access_catalog.tool_functions import functions_of_tools
 from custom_agents.model_runtime_profile import DEFAULT_MAX_TOOLS_PER_REQUEST
+from custom_agents.tool_presentation import on_request_groups, withheld_functions
 from custom_tools.provider_contract import tool_name
+from custom_tools.tool_script_context import in_tool_script
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +250,7 @@ def hidden_tool_ids(
     ``loaded`` is the Strands agent's record (default: the current turn's, ``loaded_tools``).
     """
 
-    on_request = set(getattr(catalog, "on_request", {}) or {})
+    on_request = set(on_request_groups(agent, catalog))
     if not on_request:
         return set()
     hidden = on_request - definition_tool_ids(agent, catalog)
@@ -272,14 +274,15 @@ def shown_names(
     """The function names, without those of groups hidden from this agent now (or at start)."""
 
     hidden = hidden_tool_ids(agent, catalog, at_start=at_start, loaded=loaded)
-    return {name for name in names if not is_hidden(name, catalog, hidden)}
+    withheld = withheld_functions(agent, catalog)
+    return {name for name in names if name not in withheld and not is_hidden(name, catalog, hidden)}
 
 
-def group_of(name: str, catalog: Any) -> str | None:
-    """The on-request group a function belongs to, or None."""
+def group_of(agent: Any, name: str, catalog: Any) -> str | None:
+    """The group a function belongs to when that group loads on request for this agent, or None."""
 
     binding = catalog.functions.get(name)
-    if binding is None or binding.tool_id not in getattr(catalog, "on_request", {}):
+    if binding is None or binding.tool_id not in on_request_groups(agent, catalog):
         return None
     return str(binding.tool_id)
 
@@ -294,7 +297,7 @@ def loadable_tool_ids(agent: Any, catalog: Any) -> list[str]:
 
     from custom_agents.access_runtime import agent_principal, authorization_enabled
 
-    on_request = set(getattr(catalog, "on_request", {}) or {}) - definition_tool_ids(agent, catalog)
+    on_request = set(on_request_groups(agent, catalog)) - definition_tool_ids(agent, catalog)
     if authorization_enabled(getattr(agent, "authorization_config", None)):
         from access_control.standard_grants import INTERNET_SET, STANDARD_TOOL_SETS_BY_ROLE
 
@@ -514,8 +517,13 @@ class OnRequestToolHook(HookProvider):
 
         name = str(event.tool_use.get("name") or "")
         catalog = runtime_access(self.agent).catalog
-        tool_id = group_of(name, catalog)
+        if in_tool_script():
+            self._script_call(event, name)
+            return
+        tool_id = group_of(self.agent, name, catalog)
         if tool_id is None:
+            if event.selected_tool is None:
+                self._no_such_tool(event, name)
             return
         state = self.parts.loaded
         if event.selected_tool is not None:
@@ -535,6 +543,57 @@ class OnRequestToolHook(HookProvider):
             getattr(self.agent, "id", None),
             tool_id,
             name,
+        )
+
+    def _script_call(self, event: BeforeToolCallEvent, name: str) -> None:
+        """A tool script's call gets its tool without loading its group (``custom_tools.tool_script_context``).
+
+        The script runtime has already checked the call (held, offered, read
+        level; ``custom_agents.tool_script_runtime.check_call``); the access
+        hook still decides it after this hook. Nothing is loaded or marked
+        used, so a script never adds definitions to the model's tool list.
+        """
+
+        if event.selected_tool is not None:
+            return
+        from custom_agents.tool_sync import provider_tools
+
+        tool = provider_tools().get(name)
+        if tool is None or not offered(self.agent, [tool]) or not self._may_load(name):
+            return
+        event.selected_tool = tool
+
+    def _no_such_tool(self, event: BeforeToolCallEvent, name: str) -> None:
+        """A name that is no tool at all gets the closest real names instead of only "Unknown tool".
+
+        Names of real tools the agent does not have keep Strands' answer: the
+        access hook and find_tools explain those. With a tool index the model
+        sees names without definitions, so a near miss ("knowledge_lookup")
+        is worth correcting at once.
+        """
+
+        import difflib
+
+        from custom_agents.runtime_guardrails import TURN_ACTION_TYPES
+        from custom_agents.tool_sync import provider_tools
+
+        registry = getattr(getattr(event, "agent", None), "tool_registry", None)
+        known = set(provider_tools()) | (registry_names(registry) if registry is not None else set())
+        # A turn action called as a tool gets the guardrails' own explanation
+        # (custom_agents.runtime_guardrails), not a list of similar tool names.
+        if not name or name in known or name in TURN_ACTION_TYPES:
+            return
+        closest = difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.5)
+        hint = f" The closest tool names are: {', '.join(closest)}." if closest else ""
+        event.cancel_tool = (
+            f"No tool is named {name!r}.{hint} describe_tools(names=[...]) gives a function's exact inputs, "
+            "and find_tools searches for tools by purpose."
+        )
+        logger.info(
+            "The model called a tool name that does not exist. event=tool_name_unknown agent_id=%s tool=%s closest=%s",
+            getattr(self.agent, "id", None),
+            name,
+            ",".join(closest),
         )
 
 

@@ -288,6 +288,9 @@ class ToolCatalog:
     # Tools whose functions load on request (functions.yaml "on_request",
     # custom_agents.tool_loading): tool id -> the functions that stay shown.
     on_request: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Tools whose full definitions every agent keeps when its tools are shown
+    # through an index (functions.yaml "always_shown", custom_agents.tool_presentation).
+    always_shown: set[str] = field(default_factory=set)
     http_hosts: dict[str, str] = field(default_factory=dict)
     # Web API tools of services the instance runs itself: the exact origin
     # (scheme://host:port) -> tool id. Such a tool is never matched by host
@@ -423,6 +426,7 @@ class ToolCatalog:
             self.not_offered.update(str(name) for name in data.get("not_offered") or ())
             for tool_id, entry in (data.get("on_request") or {}).items():
                 self.on_request[str(tool_id)] = frozenset(str(name) for name in (entry or {}).get("keep_shown") or ())
+            self.always_shown.update(str(tool_id) for tool_id in data.get("always_shown") or ())
             for raw_set in data.get("tool_sets") or ():
                 tool_set = ToolSetDefinitionV1(**raw_set)
                 self.tool_sets[tool_set.tool_set_id] = tool_set

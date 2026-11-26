@@ -89,6 +89,7 @@ tools:
   - tool_id: cli:bitwarden
     broker_provider: bitwarden
     display_name: Bitwarden
+    description: Search and use passwords and secrets stored in Bitwarden.
     actions: &credential_source_actions
       credential.search: read
       credential.get_metadata: read
@@ -97,21 +98,25 @@ tools:
   - tool_id: cli:onepassword
     broker_provider: onepassword
     display_name: 1Password
+    description: Search and use passwords and secrets stored in 1Password (one password).
     actions: *credential_source_actions
 
   - tool_id: cli:keepass
     broker_provider: keepass
     display_name: KeePass
+    description: Search and use passwords and secrets stored in KeePass.
     actions: *credential_source_actions
 
   - tool_id: cli:vault
     broker_provider: vault
     display_name: HashiCorp Vault
+    description: Search and use passwords and secrets stored in HashiCorp Vault.
     actions: *credential_source_actions
 
   - tool_id: cli:sealbox
     broker_provider: sealbox
     display_name: Sealbox
+    description: Search and use passwords and secrets stored in Sealbox.
     actions: *credential_source_actions
 
   - tool_id: procedure:credentials

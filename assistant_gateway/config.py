@@ -762,6 +762,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "agent.conversation_summary_generator_type": 'Durable per-turn summary generator. "heuristic" is deterministic; "llm_summarizing" uses model summaries with fallback.',
     "agent.tool_allowlist": "Optional exact tool-name allowlist. null means no allowlist; [] means no tools. A name that is no tool function is refused.",
     "agent.tool_blocklist": "Optional exact tool-name blocklist applied after allowlist filtering. A name that is no tool function is refused.",
+    "agent.tool_presentation": "How agents' tools are shown to the model: full_definitions (every held tool), index (a small core plus a one-line index; the rest load on request) or index_and_scripts (index plus read-only tool scripts). An experiment setting.",
     "agent.external_mcp_servers": "Static named MCP servers for every agent type; with authorization on an agent uses one only with access to its mcp:<name> tool. Empty global values configure none. Agents start without a server that does not answer and load it when it does (mcp.load_retry_window_minutes).",
     "agent.agent_definition_paths": "Additional YAML agent-definition files or directories. Relative paths resolve under control/.",
     "agent.prompt_skill_description_exclusions": "Skill names hidden from AgentSkills menu/XML prompt content.",

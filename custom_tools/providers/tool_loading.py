@@ -25,6 +25,8 @@ from access_catalog.tool_functions import functions_of_tools, mcp_function_names
 from custom_messages.contracts.access_v2 import AccessLevel, TargetKind, TargetRefV1
 from custom_tools.provider_contract import ToolProvider, tool_name
 from custom_tools.runtime_context import get_agent_ref
+from custom_tools.tool_search import document, rank
+from custom_agents.tool_presentation import on_request_groups
 
 MAX_FIND_RESULTS = 25
 STATUS_LOADED = "loaded"
@@ -54,30 +56,30 @@ def _use_tools_call(tool_id: str) -> str:
     return f"use_tools(tool_ids=[{tool_id!r}])"
 
 
-def _match_count(tool_def: Any, functions: list[str], words: list[str]) -> int:
-    """How many of the search words appear in the tool's id, name, description, operations or functions."""
+def _function_texts(functions: list[str]) -> list[str]:
+    """The descriptions of these trusted functions (MCP tool names have none here)."""
 
-    text = " ".join(
-        [tool_def.tool_id, tool_def.display_name, tool_def.description, *(o.name for o in tool_def.operations), *functions]
-    ).lower()
-    return sum(1 for word in set(words) if word in text)
+    from custom_agents.tool_sync import provider_tools
+
+    tools = provider_tools()
+    return [str((getattr(tools[name], "tool_spec", None) or {}).get("description") or "") for name in functions if name in tools]
 
 
-def _best_matches(candidates: list[tuple[Any, list[str]]], words: list[str]) -> list[tuple[Any, list[str]]]:
-    """The (tool, functions) that match the most search words, best first; all of them without words.
+def _best_matches(candidates: list[tuple[Any, list[str]]], query: str) -> list[tuple[Any, list[str]]]:
+    """The (tool, functions) ranked for the query, best first; all of them without a query.
 
-    A tool that matches only some words still counts: a request in plain
-    words ("save a team memory fact") rarely uses only words a tool's
+    Ranking is ``custom_tools.tool_search.rank``: weighted words with rarity
+    across tools. A tool that matches only some words still counts: a request
+    in plain words ("save a team memory fact") rarely uses only words a tool's
     description has, and requiring every word found nothing, which agents
     read as having no such tool.
     """
 
-    if not words:
+    if not str(query or "").strip():
         return candidates
-    scored = [(_match_count(tool_def, functions, words), tool_def, functions) for tool_def, functions in candidates]
-    scored = [item for item in scored if item[0] > 0]
-    scored.sort(key=lambda item: (-item[0], item[1].tool_id))
-    return [(tool_def, functions) for _count, tool_def, functions in scored]
+    by_id = {tool_def.tool_id: (tool_def, functions) for tool_def, functions in candidates}
+    documents = [document(tool_def, functions, _function_texts(functions)) for tool_def, functions in candidates]
+    return [by_id[doc.tool_id] for _score, doc in rank(documents, query)]
 
 
 def _registry(agent: Any) -> Any | None:
@@ -140,7 +142,7 @@ def _found_tool(tool_def: Any, functions: list[str], held: AccessLevel | None, l
     return found
 
 
-def _find_with_authorization(agent: Any, words: list[str]) -> list[dict[str, Any]]:
+def _find_with_authorization(agent: Any, query: str) -> list[dict[str, Any]]:
     from custom_agents.mcp_server_tools import server_status
     from custom_agents.tool_loading import hidden_tool_ids
     from custom_tools.providers.access import _context
@@ -157,7 +159,7 @@ def _find_with_authorization(agent: Any, words: list[str]) -> list[dict[str, Any
         for tool_def in sorted(catalog.tools.values(), key=lambda t: t.tool_id)
     ]
     results: list[dict[str, Any]] = []
-    for tool_def, functions in _best_matches(candidates, words):
+    for tool_def, functions in _best_matches(candidates, query):
         held = _available_level(requests, principal, person, tool_def.tool_id, grants)
         found = _found_tool(tool_def, functions, held, server_status(agent, tool_def.tool_id))
         found.update(_loading_view(agent, catalog, tool_def.tool_id, functions, hidden if held else set()))
@@ -167,7 +169,7 @@ def _find_with_authorization(agent: Any, words: list[str]) -> list[dict[str, Any
     return results
 
 
-def _find_without_authorization(agent: Any, words: list[str]) -> list[dict[str, Any]]:
+def _find_without_authorization(agent: Any, query: str) -> list[dict[str, Any]]:
     """The tools the agent's definition gives it (authorization off has no access to ask for)."""
 
     from custom_agents.access_runtime import runtime_access
@@ -181,7 +183,7 @@ def _find_without_authorization(agent: Any, words: list[str]) -> list[dict[str, 
         for tool_def in sorted(catalog.tools.values(), key=lambda t: t.tool_id)
     ]
     results: list[dict[str, Any]] = []
-    for tool_def, functions in _best_matches([(t, f) for t, f in candidates if f], words):
+    for tool_def, functions in _best_matches([(t, f) for t, f in candidates if f], query):
         results.append(
             {
                 "tool_id": tool_def.tool_id,
@@ -200,7 +202,7 @@ def _find_without_authorization(agent: Any, words: list[str]) -> list[dict[str, 
 def find_tools(query: str = "") -> str:
     """Search the tool catalog by purpose or function name, including tools not in your tool list now.
 
-    Tools matching the most words of the query come first.
+    Describe what you need in plain words; the best matches come first.
     Some tool groups wait until a task needs them: a result with
     loads_on_request gives the use_tools call that adds it to your list from
     your next step. With access control on, each result also shows the levels
@@ -215,11 +217,11 @@ def find_tools(query: str = "") -> str:
 
     def run() -> str:
         agent = _agent()
-        words = [word for word in str(query or "").lower().split() if word]
+        text = str(query or "")
         try:
-            results = _find_with_authorization(agent, words) if _authorization_on(agent) else _find_without_authorization(agent, words)
+            results = _find_with_authorization(agent, text) if _authorization_on(agent) else _find_without_authorization(agent, text)
         except AuthorizationOff:
-            results = _find_without_authorization(agent, words)
+            results = _find_without_authorization(agent, text)
         return _json({"query": query, "tools": results, "truncated": len(results) >= MAX_FIND_RESULTS})
 
     return _guarded(run)
@@ -321,7 +323,7 @@ def _load_one(agent: Any, catalog: Any, tool_id: str, keep: set[str]) -> dict[st
 
     if tool_id not in catalog.tools:
         return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": "Not in the tool catalog; find_tools lists tools."}
-    if tool_id not in catalog.on_request:
+    if tool_id not in on_request_groups(agent, catalog):
         # Nothing to load. Saying "refused" here made agents conclude they had
         # no access to tools they were holding (memory, 2026-10-10).
         shown = _shown_functions(agent, catalog, tool_id)
@@ -415,7 +417,62 @@ def use_tools(tool_ids: list[str]) -> str:
     return _guarded(run)
 
 
-TOOL_LOADING_TOOLS = (find_tools, use_tools)
+MAX_DESCRIBED = 10
+
+
+def _closest_names(name: str, known: set[str]) -> list[str]:
+    import difflib
+
+    return difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.5)
+
+
+@tool
+def describe_tools(names: list[str]) -> str:
+    """Get the exact inputs of tool functions before calling them, such as names=['knowledge_search'].
+
+    For each function: its signature, its full description, the group
+    use_tools loads for it, and whether you hold it now. When tool scripts are
+    on, also whether run_tool_script may call it. A name that is no tool
+    function comes back with the closest real names. Describing a tool never
+    loads it or gives access.
+    """
+
+    from custom_agents.access_runtime import runtime_access
+    from custom_agents.strands_parts import current_parts
+    from custom_agents.tool_index import described, held_functions
+    from custom_agents.tool_presentation import scripts_enabled
+    from custom_agents.tool_sync import provider_tools
+    from custom_tools.providers.access import _guarded
+
+    def run() -> str:
+        agent = _agent()
+        wanted = list(dict.fromkeys(str(item or "").strip() for item in (names or []) if str(item or "").strip()))
+        if not wanted:
+            raise ValueError("Name at least one tool function, for example names=['knowledge_search'].")
+        catalog = runtime_access(agent).catalog
+        tools = provider_tools()
+        held = held_functions(agent, current_parts(agent))
+        scripts = scripts_enabled(agent)
+        results: list[dict[str, Any]] = []
+        for name in wanted[:MAX_DESCRIBED]:
+            tool_def = tools.get(name)
+            if tool_def is None:
+                results.append({"name": name, "error": "No tool function has this name.", "closest": _closest_names(name, set(tools))})
+                continue
+            entry = described(name, tool_def, catalog, scripts=scripts)
+            entry["you_hold_it"] = name in held
+            if not entry["you_hold_it"]:
+                entry["how_to_get"] = "find_tools shows whether you may use it and how to ask for access."
+            results.append(entry)
+        payload: dict[str, Any] = {"tools": results}
+        if len(wanted) > MAX_DESCRIBED:
+            payload["not_described"] = wanted[MAX_DESCRIBED:]
+        return _json(payload)
+
+    return _guarded(run)
+
+
+TOOL_LOADING_TOOLS = (find_tools, describe_tools, use_tools)
 PROVIDER = ToolProvider("tool_loading", TOOL_LOADING_TOOLS)
 
-__all__ = ["PROVIDER", "STATUS_ALREADY_SHOWN", "TOOL_LOADING_TOOLS", "find_tools", "use_tools"]
+__all__ = ["PROVIDER", "STATUS_ALREADY_SHOWN", "TOOL_LOADING_TOOLS", "describe_tools", "find_tools", "use_tools"]

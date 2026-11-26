@@ -17,6 +17,7 @@ from default_values import (
     TRANSPORT_DEFAULTS,
 )
 from runtime_settings.governance import ToolPolicySettings
+from runtime_settings.tool_presentation_contract import DEFAULT_TOOL_PRESENTATION
 from runtime_settings.values import deep_merge_dicts
 from runtime_settings.values import (
     _normalize_positive_float,
@@ -238,6 +239,7 @@ def _project_agent(
         ),
         "tool_allowlist": agent_cfg.get("tool_allowlist"),
         "tool_blocklist": list(agent_cfg.get("tool_blocklist", []) or []),
+        "tool_presentation": agent_cfg.get("tool_presentation", DEFAULT_TOOL_PRESENTATION),
         "network_public_origin": network_public_origin,
         "internal_website_base_url": internal_website_base_url,
         "internal_website_docs_root": internal_website_cfg.get("docs_root"),
