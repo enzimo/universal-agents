@@ -602,8 +602,8 @@ approves, the worker gets the whole folder for its task, including the path
 TeamLead is blocked from, because that block applies only to TeamLead; with
 **Keep**, TeamLead also keeps the folder for later tasks but still does not
 pass it on while the block is inside it. To keep a file from every agent,
-block it for the `worker` role as well (`--role worker`), or for the whole
-team (`--team`).
+block it for the `worker` role as well (`--role worker`), or, to keep it
+from people too, for the whole team (`--team`).
 People give and block folders (and block file paths) with `/access` and
 `assistant_cli access` (examples below).
 
