@@ -266,8 +266,9 @@ old instance, the session is imported and marked for attention, and people's
 next messages still go to the session they use now.
 Distinct credential and field names keep separate secret values, including
 names that differ only in punctuation. Importing a catalog credential does
-not overwrite a secret used by another existing catalog entry. Temporary credentials carry their expiry timestamp across the transfer, and the
-broker applies the remaining time as the Sealbox TTL on import. Entries already
+not overwrite a secret used by another existing catalog entry. Temporary
+credentials carry their expiry timestamp across the transfer, and the broker
+applies the remaining time as the Sealbox TTL on import. Entries already
 expired at export are recorded by key only (no secret values) and appear in the
 import result as `expired before import`; entries that expire between export
 and import are skipped the same way. If an active destination account link

@@ -1208,11 +1208,11 @@ def test_live_team_transfer_reuses_secrets_after_catalog_storage_failure(
     attempted_rows = []
     written_items = []
 
-    def fail_first_put(self, owner_scope, key, credential):
+    def fail_first_put(self, owner_scope, key, credential, **kwargs):
         attempted_rows.append(credential)
         if len(attempted_rows) == 1:
             raise RuntimeError("catalog storage unavailable")
-        return original_put(self, owner_scope, key, credential)
+        return original_put(self, owner_scope, key, credential, **kwargs)
 
     def record_secret_writes(args, **kwargs):
         if list(args[:2]) == ["secret", "set"]:

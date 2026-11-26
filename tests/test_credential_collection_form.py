@@ -994,60 +994,48 @@ async def test_f13_catalog_save_failure_after_sealbox_write_rolls_back_or_warns_
     def fail_save(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("sqlite disk full")
 
-    monkeypatch.setattr(credential_catalog, "_save_catalog_credential", fail_save)
     service = SecureToolBrokerService(
         token=BROKER_ROOT,
         access_gate=open_gate(),
         web_chat_origin=WEB_CHAT_ORIGIN,
     )
-    async with TestClient(TestServer(service.build_app())) as client:
-        created_new = await _create_session(client, _collection_request(credential_key="brand_new_fail"))
-        resp_new = await client.post(
-            _form_path(created_new),
-            data={"field__username": "alice", "field__api_token": "SECRET-NEW"},
-        )
-        assert resp_new.status == 400
-        page_new = await resp_new.text()
-        assert "The credential was not stored." in page_new
-        assert len(rolled_back) == 1
+    with monkeypatch.context() as mp:
+        mp.setattr(credential_catalog, "_save_catalog_credential", fail_save)
+        async with TestClient(TestServer(service.build_app())) as client:
+            created_new = await _create_session(client, _collection_request(credential_key="brand_new_fail"))
+            resp_new = await client.post(
+                _form_path(created_new),
+                data={"field__username": "alice", "field__api_token": "SECRET-NEW"},
+            )
+            assert resp_new.status == 400
+            page_new = await resp_new.text()
+            assert "The credential was not stored." in page_new
+            assert len(rolled_back) == 1
 
     # 2. Overwriting an existing key on the same Sealbox record: rollback must NOT delete earlier versions,
     #    and the failure page must NOT falsely claim "The credential was not stored.".
-    monkeypatch.undo()
-    monkeypatch.setattr(
-        credential_catalog,
-        "sealbox_tenant_environment",
-        lambda **_kwargs: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
-    )
-    monkeypatch.setattr(
-        credential_catalog,
-        "run_sealbox",
-        lambda args, **_kwargs: subprocess.CompletedProcess(
-            args=["sealbox-cli", *args], returncode=0, stdout='{"key":"k","version":1}', stderr=""
-        ),
-    )
     seeded = collect_credential(
         _collection_request(credential_key="existing_overwrite_fail"),
         {"username": "alice", "api_token": "FIRST-SECRET"},
         scope=OWNER_SCOPE,
         allow_expiry_change=True,
     )
-    assert seeded.status == "success"
+    assert seeded.status == "success", seeded.error
 
     rolled_back.clear()
-    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
-    monkeypatch.setattr(credential_catalog, "_save_catalog_credential", fail_save)
-    async with TestClient(TestServer(service.build_app())) as client:
-        created_over = await _create_session(client, _collection_request(credential_key="existing_overwrite_fail"))
-        resp_over = await client.post(
-            _form_path(created_over),
-            data={"field__username": "alice", "field__api_token": "SECOND-SECRET"},
-        )
-        assert resp_over.status == 400
-        page_over = await resp_over.text()
-        assert rolled_back == [], "must not delete an existing Sealbox record with earlier versions"
-        assert "Could not finish saving the credential." in page_over
-        assert "The credential was not stored." not in page_over
+    with monkeypatch.context() as mp:
+        mp.setattr(credential_catalog, "_save_catalog_credential", fail_save)
+        async with TestClient(TestServer(service.build_app())) as client:
+            created_over = await _create_session(client, _collection_request(credential_key="existing_overwrite_fail"))
+            resp_over = await client.post(
+                _form_path(created_over),
+                data={"field__username": "alice", "field__api_token": "SECOND-SECRET"},
+            )
+            assert resp_over.status == 400
+            page_over = await resp_over.text()
+            assert rolled_back == [], "must not delete an existing Sealbox record with earlier versions"
+            assert "Could not finish saving the credential." in page_over
+            assert "The credential was not stored." not in page_over
 
 
 @pytest.mark.asyncio

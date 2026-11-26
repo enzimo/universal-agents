@@ -102,6 +102,7 @@ class PendingDroppedSealboxDelete:
     item_kind: str
     credential_key: str
     created_at: str
+    queued_by: str = "form"
 
 
 def resolve_catalog_db_path() -> Path:
@@ -163,6 +164,7 @@ class CredentialCatalogStore:
                     item_key TEXT NOT NULL,
                     item_kind TEXT NOT NULL,
                     credential_key TEXT NOT NULL,
+                    queued_by TEXT NOT NULL DEFAULT 'form',
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (scope_kind, owner_id, item_key)
                 );
@@ -194,6 +196,7 @@ class CredentialCatalogStore:
         credential: Mapping[str, Any],
         *,
         dropped_sealbox_targets: Sequence[tuple[str, str]] = (),
+        queued_by: str = "form",
     ) -> None:
         """Atomically insert or replace one credential without touching sibling keys.
 
@@ -204,6 +207,7 @@ class CredentialCatalogStore:
         """
         now = datetime.now(timezone.utc).isoformat()
         rendered = json.dumps(dict(credential), sort_keys=True, separators=(",", ":"))
+        normalized_queued_by = str(queued_by or "form").strip() or "form"
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -232,8 +236,8 @@ class CredentialCatalogStore:
                 conn.execute(
                     """
                     INSERT INTO pending_dropped_sealbox_deletes (
-                        scope_kind, owner_id, item_key, item_kind, credential_key, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        scope_kind, owner_id, item_key, item_kind, credential_key, queued_by, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(scope_kind, owner_id, item_key) DO UPDATE SET
                         item_kind = CASE
                             WHEN pending_dropped_sealbox_deletes.item_kind = 'credential'
@@ -242,6 +246,7 @@ class CredentialCatalogStore:
                             ELSE excluded.item_kind
                         END,
                         credential_key = excluded.credential_key,
+                        queued_by = excluded.queued_by,
                         created_at = excluded.created_at
                     """,
                     (
@@ -250,6 +255,7 @@ class CredentialCatalogStore:
                         normalized_key,
                         normalized_kind,
                         str(credential_key),
+                        normalized_queued_by,
                         now,
                     ),
                 )
@@ -523,7 +529,7 @@ class CredentialCatalogStore:
         with self._connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT scope_kind, owner_id, item_key, item_kind, credential_key, created_at
+                SELECT scope_kind, owner_id, item_key, item_kind, credential_key, queued_by, created_at
                 FROM pending_dropped_sealbox_deletes
                 {where}
                 ORDER BY scope_kind, owner_id, item_key
@@ -537,6 +543,7 @@ class CredentialCatalogStore:
                 item_kind=str(row["item_kind"]),
                 credential_key=str(row["credential_key"]),
                 created_at=str(row["created_at"]),
+                queued_by=str(row["queued_by"] or "form"),
             )
             for row in rows
         ]
@@ -780,6 +787,50 @@ def expired_sealbox_record_keys(
     return expired
 
 
+def pending_dropped_sealbox_keys_readonly(
+    scope: CredentialOwnerScope,
+) -> set[str]:
+    """Read queued dropped-Sealbox record keys for ``scope`` without creating files or tables."""
+
+    opened = _open_readonly_connection(resolve_catalog_db_path())
+    if opened is None:
+        return set()
+    conn, resolved = opened
+    try:
+        try:
+            rows = conn.execute(
+                """
+                SELECT item_key
+                FROM pending_dropped_sealbox_deletes
+                WHERE scope_kind = ? AND owner_id = ?
+                """,
+                (scope.scope_kind, scope.owner_id),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return set()
+            logger.warning(
+                "Pending dropped Sealbox query failed in read-only mode. "
+                "event=credential_catalog_readonly_failed path=%s error=%s",
+                resolved,
+                exc,
+            )
+            raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
+        return {str(row["item_key"]) for row in rows}
+    except CredentialCatalogReadError:
+        raise
+    except sqlite3.Error as exc:
+        logger.warning(
+            "Pending dropped Sealbox rows could not be read in read-only mode. "
+            "event=credential_catalog_readonly_failed path=%s error=%s",
+            resolved,
+            exc,
+        )
+        raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
+    finally:
+        conn.close()
+
+
 __all__ = [
     "CatalogEntryRow",
     "CredentialCatalogReadError",
@@ -791,5 +842,6 @@ __all__ = [
     "expired_sealbox_record_keys",
     "load_credential_readonly",
     "load_scope_readonly",
+    "pending_dropped_sealbox_keys_readonly",
     "resolve_catalog_db_path",
 ]

@@ -3822,23 +3822,34 @@ non-Sealbox write sources refuse an expiry (`credential_expiry_unsupported_sourc
   in the same owner scope from referencing the same Sealbox record when either
   key is temporary, closing both alias-read leaks and janitor data loss on
   lasting credentials.
-- **Deleting dropped Sealbox records on overwrite.** Any catalog writer that
-  replaces an existing key (`collect_credential`, `register_existing_source`,
-  and team transfer import) checks under `credential_key_lock` and
-  `_scope_catalog_lock` whether the new row drops any Sealbox record referenced
-  by the previous row. It refuses before saving if another catalog entry still
-  references any dropped record (`credential_expiry_shared_record`) or if any
-  new target record is still queued for deletion
-  (`credential_dropped_cleanup_pending`). Otherwise it records the dropped
-  targets in the broker-local `pending_dropped_sealbox_deletes` table inside
-  the same SQLite transaction as the catalog commit and deletes every version
-  of those dropped records while still holding `_scope_catalog_lock` (so no
-  other key can adopt them in between and no earlier lasting version can
-  outlive a later expiry). If deleting a dropped record fails, the target stays
-  in `pending_dropped_sealbox_deletes`, the result reports
-  `dropped_records_not_deleted` (the secure form shows a red warning and keeps
-  inline cards open; team transfer import returns a retryable outcome), and the
-  janitor retries the deletion on later runs (skipping any record that a
+- **Deleting dropped Sealbox records on overwrite.** Deleting a person's stored
+  Sealbox data requires the person's own action. Direct agent-callable saves
+  (`credential.collect` with `allow_expiry_change=False` and
+  `credential.register_existing_source`) over an existing key refuse before
+  writing anything with `credential_replacement_form_only` (and a next step
+  directing the agent to request a secure form via
+  `secure_credential_collection_request`) whenever the save would drop any
+  Sealbox record referenced by the existing row (a different `item_id`, removed
+  secret field, or move to another source); saves that keep the same Sealbox
+  records proceed unchanged. The person's submitted secure form
+  (`allow_expiry_change=True`) and team transfer import check under
+  `credential_key_lock` and `_scope_catalog_lock` whether the new row drops any
+  Sealbox record referenced by the previous row: they refuse before saving if
+  another catalog entry still references any dropped record
+  (`credential_expiry_shared_record`), retry any queued target record inline
+  before writing to Sealbox (refusing with `credential_dropped_cleanup_pending`
+  only if deletion still fails), record dropped targets in the broker-local
+  `pending_dropped_sealbox_deletes` table inside the same SQLite transaction as
+  the catalog commit, and delete every version of those dropped records while
+  still holding `_scope_catalog_lock` (so no other key can adopt them in between
+  and no earlier lasting version can outlive a later expiry). If deleting a
+  dropped record fails, the target stays in `pending_dropped_sealbox_deletes`
+  (hidden from `cli:sealbox` `credential.search`, `credential.get_metadata`, and
+  `credential.use_for_action`), the result reports `dropped_records_not_deleted`
+  with `dropped_cleanup_retry_scheduled: true` (the secure form shows a red
+  warning and keeps inline cards open; team transfer import returns a retryable
+  outcome), and the janitor retries the deletion per owner scope (isolating one
+  owner's unreadable catalog from other owners, and skipping any record that a
   catalog entry references again).
 - **Expired and missing-row link semantics.** From the expiry instant onward,
   an expired personal link behaves identically to a missing link: if the team
@@ -3846,16 +3857,15 @@ non-Sealbox write sources refuse an expiry (`credential_expiry_unsupported_sourc
   to the team's shared account; otherwise calls fail with
   `account_link_credential_expired` and the `/link` command. Likewise, a link
   whose `credential_key` has no catalog row counts as a missing link on use
-  (`account_link_credential_missing`, falling back to a shared team account
-  when the service is shared). There is deliberately no janitor job that
-  auto-revokes links with no catalog row: a catalog entry may be absent
-  legitimately during migration, before a credential transfer batch runs, or
-  while an operator is recreating a manually deleted entry, so auto-revoking
-  missing-row links would destroy valid links before their credentials arrive.
-  Deleting an already-expired credential by hand through `delete_credential`
-  runs the same `revoke_expired_credential_links_before_delete` hook before
-  removing the Sealbox records and catalog row so hand deletion never leaves
-  active links dangling without an expiry notice.
+  (`account_link_missing`, falling back to a shared team account when the
+  service is shared). There is deliberately no janitor job that auto-revokes
+  links with no catalog row: during a team transfer, links are imported before
+  credentials arrive in a later batch, so auto-revoking missing-row links would
+  destroy valid links before their credentials arrive. Deleting an
+  already-expired credential by hand through `delete_credential` runs the same
+  `revoke_expired_credential_links_before_delete` hook before removing the
+  Sealbox records and catalog row so hand deletion never leaves active links
+  dangling without an expiry notice.
 - **Team transfer of temporary and expired credentials.** `broker_credentials/3`
   carries `expires_at` on active `catalog_entry` records (import applies the
   remaining TTL to Sealbox and refuses or retries if dropped-record deletion

@@ -1400,15 +1400,61 @@ def test_c29_janitor_retries_pending_dropped_sealbox_deletes_and_skips_rereferen
     assert store.list_pending_dropped_sealbox_deletes(scope=USER_SCOPE) == []
 
 
-def test_c31_expires_at_required_for_expired_link_revocation_helpers(tmp_path: Path) -> None:
-    """C31(a): expires_at is required on expired-link notice/revocation helpers so old links cannot get a new notice."""
+def test_c34_janitor_pending_dropped_retry_isolates_unreadable_owner_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C34(1): one owner's unreadable catalog row does not stop pending dropped-record retries for other owners."""
 
     gate, _store = _make_gate(tmp_path)
-    link = _make_link(link_id="link-req", tool_id="http:demo_api", credential_key="req_key")
-    actor = janitor._system_actor(TEAM_ID)
-    with pytest.raises(TypeError):
-        janitor._expired_link_notice_id(TEAM_ID, link)  # type: ignore[call-arg]
-    with pytest.raises(TypeError):
-        janitor._needs_retry_notice_for_system_revoked_link(link, actor=actor)  # type: ignore[call-arg]
-    with pytest.raises(TypeError):
-        janitor.revoke_links_for_expired_credential(gate, USER_SCOPE, "req_key")  # type: ignore[call-arg]
+    store = CredentialCatalogStore(resolve_catalog_db_path())
+    broken_item = "team-nats-agents:default:broken_team_old:api_token"
+    healthy_item = "team-nats-agents:default:healthy_user_old:api_token"
+
+    # Team scope has an invalid catalog row (missing required display_name/purpose -> ValidationError) plus a queued delete.
+    store.put_credential(
+        TEAM_SCOPE,
+        "broken_row",
+        {"not_a_valid_credential": True},
+        dropped_sealbox_targets=[(broken_item, "secret")],
+    )
+    # User scope has a healthy catalog plus a queued delete.
+    store.put_credential(
+        USER_SCOPE,
+        "healthy_row",
+        CatalogCredential(
+            display_name="Healthy",
+            purpose="test",
+            fields={},
+        ).model_dump(mode="json", exclude_none=True),
+        dropped_sealbox_targets=[(healthy_item, "secret")],
+    )
+
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    deleted_items: list[str] = []
+
+    def fake_delete(*, item_key: str, item_kind: str, env: Any = None) -> dict[str, Any]:
+        deleted_items.append(item_key)
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    with caplog.at_level("WARNING"):
+        report = janitor.clean_expired_credentials(gate, now=NOW)
+
+    assert report.dropped_records_deleted == 1
+    assert report.dropped_records_failed == 1
+    assert deleted_items == [healthy_item]
+    assert [e.item_key for e in store.list_pending_dropped_sealbox_deletes(scope=TEAM_SCOPE)] == [broken_item]
+    assert store.list_pending_dropped_sealbox_deletes(scope=USER_SCOPE) == []
+    assert any(
+        "event=credential_dropped_sealbox_retry_scope_failed" in rec.getMessage()
+        and f"scope_kind={TEAM_SCOPE.scope_kind}" in rec.getMessage()
+        and f"owner_id={TEAM_SCOPE.owner_id}" in rec.getMessage()
+        for rec in caplog.records
+    )

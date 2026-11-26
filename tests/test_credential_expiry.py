@@ -616,9 +616,23 @@ def test_c10_agent_collect_over_temporary_key_keeps_expiry_and_remaining_ttl(
     # Person stores a temporary credential via the form (allow_expiry_change=True).
     now_start = datetime.now(timezone.utc).replace(microsecond=0)
     expiry = now_start + timedelta(minutes=30)
+    single_secret_request = {
+        "credential_key": "temp_service",
+        "display_name": "Temporary Service",
+        "purpose": "Temporary API secret",
+        "store_target": "sealbox",
+        "fields": [
+            {
+                "name": "password",
+                "kind": "password",
+                "visibility": "secret",
+                "value_source": "user_input",
+            }
+        ],
+    }
     saved = collect_credential(
-        _sealbox_request(),
-        {"username": "alice", "password": "p1", "api_token": "t1", "auth_file": "f1"},
+        single_secret_request,
+        {"password": "p1"},
         scope=OWNER_SCOPE,
         expires_at=expiry,
         allow_expiry_change=True,
@@ -628,8 +642,9 @@ def test_c10_agent_collect_over_temporary_key_keeps_expiry_and_remaining_ttl(
     expected_iso = format_utc_timestamp(expiry)
     assert saved.content["expires_at"] == expected_iso
 
-    # Agent runs credential.collect with store_generated_secret and no expires_at:
-    # must preserve the person's expires_at and pass remaining --ttl on every Sealbox write.
+    # Agent runs credential.collect with store_generated_secret on the SAME Sealbox
+    # record layout and no expires_at: must preserve the person's expires_at and
+    # pass remaining --ttl on every Sealbox write.
     commands.clear()
     agent_write = execute_credential_catalog_action(
         ValidatedAction(

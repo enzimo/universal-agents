@@ -1005,24 +1005,29 @@ def test_c21_note_broker_result_maps_gate_only_failures_to_gate_link_and_single_
     assert linked_credential_expired(link) is True
 
 
-def test_f1_agent_collect_with_different_item_id_deletes_dropped_sealbox_records_and_refuses_shared(
+def test_f1_agent_collect_refuses_dropped_sealbox_records_while_same_layout_and_form_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F1: agent credential.collect over a temporary key changing item_id/fields deletes dropped Sealbox records and refuses when shared."""
+    """C33 + F1: agent credential.collect refuses layout changes that drop Sealbox records before writing; same layout and person form still work."""
 
     from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
-    from secure_tool_broker.credential_expiry import CREDENTIAL_EXPIRY_SHARED_RECORD
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_EXPIRY_SHARED_RECORD,
+        CREDENTIAL_REPLACEMENT_FORM_ONLY,
+    )
 
     monkeypatch.setattr(
         credential_catalog,
         "sealbox_tenant_environment",
         lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
     )
-    monkeypatch.setattr(
-        credential_catalog,
-        "run_sealbox",
-        lambda args, **_k: SimpleNamespace(returncode=0, stdout='{"key":"k","version":1,"password":"gen-password"}', stderr=""),
-    )
+    sealbox_writes: list[list[str]] = []
+
+    def fake_run_sealbox(args: list[str], **_k: Any) -> Any:
+        sealbox_writes.append(list(args))
+        return SimpleNamespace(returncode=0, stdout='{"key":"k","version":1,"password":"gen-password"}', stderr="")
+
+    monkeypatch.setattr(credential_catalog, "run_sealbox", fake_run_sealbox)
 
     # Seed temporary credential on original Sealbox record.
     _save_temp_credential("temp_move", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
@@ -1035,8 +1040,8 @@ def test_f1_agent_collect_with_different_item_id_deletes_dropped_sealbox_records
 
     monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
 
-    # Agent collect moves item_id elsewhere -> old record is deleted under key lock and expiry is preserved.
-    moved = credential_catalog.collect_credential(
+    # 1. Agent collect changing item_id (dropping old_record_key) is refused BEFORE writing anything.
+    refused_move = credential_catalog.collect_credential(
         {
             "credential_key": "temp_move",
             "write_source": "sealbox",
@@ -1047,11 +1052,49 @@ def test_f1_agent_collect_with_different_item_id_deletes_dropped_sealbox_records
         scope=USER_SCOPE,
         now=BASE_NOW,
     )
-    assert moved.status == "success", moved.error
-    assert moved.content["expires_at"] == FUTURE_EXPIRY
+    assert refused_move.status == "error"
+    assert refused_move.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert refused_move.content["dropped_sealbox_records"] == [old_record_key]
+    assert refused_move.content["form_creation_action"] == "secure_credential_collection_request"
+    assert "secure_credential_collection_request" in (refused_move.error or "")
+    assert sealbox_writes == []
+    assert deleted_items == []
+
+    # 2. Agent collect keeping the SAME Sealbox record layout still succeeds and preserves expiry.
+    same_layout = credential_catalog.collect_credential(
+        {
+            "credential_key": "temp_move",
+            "write_source": "sealbox",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "store_generated_secret"}],
+        },
+        {},
+        scope=USER_SCOPE,
+        now=BASE_NOW,
+    )
+    assert same_layout.status == "success", same_layout.error
+    assert same_layout.content["expires_at"] == FUTURE_EXPIRY
+    assert len(sealbox_writes) >= 1
+    assert deleted_items == []
+
+    # 3. Person's submitted form (allow_expiry_change=True) changing item_id deletes dropped Sealbox records.
+    moved_by_form = credential_catalog.collect_credential(
+        {
+            "credential_key": "temp_move",
+            "write_source": "sealbox",
+            "item_id": "relocated-temp-move",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "user_input"}],
+        },
+        {"api_token": "person-submitted-secret"},
+        scope=USER_SCOPE,
+        expires_at=FUTURE_EXPIRY,
+        allow_expiry_change=True,
+        now=BASE_NOW,
+    )
+    assert moved_by_form.status == "success", moved_by_form.error
+    assert moved_by_form.content["expires_at"] == FUTURE_EXPIRY
     assert deleted_items == [(old_record_key, "secret")]
 
-    # If another entry references a dropped record, agent collect refuses BEFORE writing anything.
+    # 4. Person's form still refuses BEFORE writing anything when another catalog entry references a dropped record.
     _save_temp_credential("lasting_shared_owner", scope=USER_SCOPE, expires_at=None)
     shared_key = "team-nats-agents:default:lasting_shared_owner:api_token"
     CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
@@ -1082,10 +1125,11 @@ def test_f1_agent_collect_with_different_item_id_deletes_dropped_sealbox_records
             "credential_key": "lasting_shared_owner",
             "write_source": "sealbox",
             "item_id": "different-item-id",
-            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "store_generated_secret"}],
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "user_input"}],
         },
-        {},
+        {"api_token": "new-secret"},
         scope=USER_SCOPE,
+        allow_expiry_change=True,
     )
     assert refused.status == "error"
     assert refused.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
@@ -1259,20 +1303,13 @@ def test_f5_f6_missing_catalog_row_counts_as_missing_link_and_allows_team_fallba
     assert f"/link {demo_tool.tool_id}" in refused.next_step
 
 
-def test_c28_register_existing_source_deletes_dropped_sealbox_records_and_refuses_shared(
+def test_c33_register_existing_source_refuses_dropping_sealbox_records_and_allows_same_layout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """C28 + C29: register_existing_source deletes dropped Sealbox records, refuses shared drops, and blocks pending-delete reuse."""
+    """C33: register_existing_source refuses any save over an existing key that would drop its Sealbox record(s); same layout still works."""
 
     from secure_tool_broker.credential_catalog import register_existing_source
-    from secure_tool_broker.credential_catalog_store import (
-        CredentialCatalogStore,
-        resolve_catalog_db_path,
-    )
-    from secure_tool_broker.credential_expiry import (
-        CREDENTIAL_DROPPED_CLEANUP_PENDING,
-        CREDENTIAL_EXPIRY_SHARED_RECORD,
-    )
+    from secure_tool_broker.credential_expiry import CREDENTIAL_REPLACEMENT_FORM_ONLY
 
     monkeypatch.setenv("C28_ENV_SECRET", "env-token-value")
     monkeypatch.setattr(
@@ -1281,20 +1318,22 @@ def test_c28_register_existing_source_deletes_dropped_sealbox_records_and_refuse
         lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
     )
     deleted_items: list[tuple[str, str]] = []
-    fail_delete_for: set[str] = set()
 
     def fake_delete(*, item_key: str, item_kind: str, env: Any = None) -> Any:
-        if item_key in fail_delete_for:
-            return credential_catalog.ToolResult(status="error", error="sealbox timeout")
         deleted_items.append((item_key, item_kind))
         return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
 
     monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+    monkeypatch.setattr(
+        credential_catalog,
+        "_resolve_source_ref",
+        lambda source_ref, **_k: "resolved-secret-value",
+    )
 
-    # 1. Overwriting a lasting Sealbox key with an env-var source deletes the dropped Sealbox record R1.
+    # 1. Moving a lasting Sealbox-backed key to an env-var source is refused BEFORE writing or deleting anything.
     _save_temp_credential("svc", scope=USER_SCOPE, expires_at=None)
     r1_key = "team-nats-agents:default:svc:api_token"
-    res = register_existing_source(
+    refused_env = register_existing_source(
         {
             "credential_key": "svc",
             "field_name": "api_token",
@@ -1302,71 +1341,232 @@ def test_c28_register_existing_source_deletes_dropped_sealbox_records_and_refuse
         },
         scope=USER_SCOPE,
     )
-    assert res.status == "success"
-    assert "dropped_records_not_deleted" not in (res.content or {})
-    assert deleted_items == [(r1_key, "secret")]
-    assert CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=USER_SCOPE) == []
-
-    # 2. If another catalog entry still references the dropped record, register_existing_source refuses before saving.
-    deleted_items.clear()
-    _save_temp_credential("shared_a", scope=USER_SCOPE, expires_at=None)
-    shared_r2 = "team-nats-agents:default:shared_a:api_token"
-    cred_b = CatalogCredential(
-        display_name="shared_b",
-        purpose="test",
-        fields={
-            "api_token": CatalogCredentialField(
-                kind="token",
-                visibility="secret",
-                value_source="existing_source",
-                resolution_order=[
-                    CatalogSourceRef(source="sealbox", item_id=shared_r2, item_name=shared_r2, field_ref="value")
-                ],
-            )
-        },
-    )
-    credential_catalog._save_catalog_credential("shared_b", cred_b, scope=USER_SCOPE)
-    refused = register_existing_source(
-        {
-            "credential_key": "shared_a",
-            "field_name": "api_token",
-            "env_var": "C28_ENV_SECRET",
-        },
-        scope=USER_SCOPE,
-    )
-    assert refused.status == "error"
-    assert (refused.content or {}).get("error_code") == CREDENTIAL_EXPIRY_SHARED_RECORD
-    assert (refused.content or {}).get("conflicting_credential_key") == "shared_b"
+    assert refused_env.status == "error"
+    assert (refused_env.content or {}).get("error_code") == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert (refused_env.content or {}).get("dropped_sealbox_records") == [r1_key]
+    assert (refused_env.content or {}).get("form_creation_action") == "secure_credential_collection_request"
     assert deleted_items == []
+    # Catalog entry remains unchanged on its Sealbox record.
+    still_there = credential_catalog.load_catalog(scope=USER_SCOPE).credentials["svc"]
+    assert still_there.fields["api_token"].resolution_order[0].source == "sealbox"
 
-    # 3. If deleting the dropped record fails, the failure is reported, queued for janitor retry,
-    #    and another key cannot adopt the pending-delete Sealbox record.
-    _save_temp_credential("fail_drop_svc", scope=USER_SCOPE, expires_at=None)
-    r3_key = "team-nats-agents:default:fail_drop_svc:api_token"
-    fail_delete_for.add(r3_key)
-    partial = register_existing_source(
+    # 2. Moving a lasting Sealbox-backed key to a DIFFERENT Sealbox item_id is also refused.
+    refused_other_item = register_existing_source(
         {
-            "credential_key": "fail_drop_svc",
-            "field_name": "api_token",
-            "env_var": "C28_ENV_SECRET",
-        },
-        scope=USER_SCOPE,
-    )
-    assert partial.status == "success"
-    assert (partial.content or {}).get("dropped_records_not_deleted") == [r3_key]
-    assert (partial.content or {}).get("dropped_cleanup_retry_scheduled") is True
-    pending = CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=USER_SCOPE)
-    assert [entry.item_key for entry in pending] == [r3_key]
-
-    adopt_refused = register_existing_source(
-        {
-            "credential_key": "svc_alias",
+            "credential_key": "svc",
             "field_name": "api_token",
             "source": "sealbox",
-            "item_id": r3_key,
+            "item_id": "other-sealbox-item",
             "field_ref": "value",
         },
         scope=USER_SCOPE,
     )
-    assert adopt_refused.status == "error"
-    assert (adopt_refused.content or {}).get("error_code") == CREDENTIAL_DROPPED_CLEANUP_PENDING
+    assert refused_other_item.status == "error"
+    assert (refused_other_item.content or {}).get("error_code") == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert deleted_items == []
+
+    # 3. Re-registering over the SAME Sealbox record (no dropped records) still succeeds.
+    same_layout = register_existing_source(
+        {
+            "credential_key": "svc",
+            "display_name": "Service Renamed",
+            "field_name": "api_token",
+            "source": "sealbox",
+            "item_id": r1_key,
+            "field_ref": "value",
+        },
+        scope=USER_SCOPE,
+    )
+    assert same_layout.status == "success", same_layout.error
+    assert credential_catalog.load_catalog(scope=USER_SCOPE).credentials["svc"].display_name == "Service Renamed"
+    assert deleted_items == []
+
+
+def test_c34_c35_pending_dropped_record_inline_retry_and_collect_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C34(2) + C35(a): collect_credential and register_existing_source retry queued dropped deletes inline before writing, refusing only if deletion still fails."""
+
+    from secure_tool_broker.credential_catalog import register_existing_source
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        resolve_catalog_db_path,
+    )
+    from secure_tool_broker.credential_expiry import CREDENTIAL_DROPPED_CLEANUP_PENDING
+
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    writes: list[Any] = []
+
+    def fake_run_sealbox(args: list[str], **_k: Any) -> Any:
+        writes.append(list(args))
+        return SimpleNamespace(returncode=0, stdout='{"key":"k","version":1}', stderr="")
+
+    monkeypatch.setattr(credential_catalog, "run_sealbox", fake_run_sealbox)
+    monkeypatch.setattr(
+        credential_catalog,
+        "_resolve_source_ref",
+        lambda source_ref, **_k: "resolved-secret-value",
+    )
+
+    # Seed key via form onto item_id "orig-item", then move it via form onto "moved-item" while Sealbox delete fails.
+    _save_temp_credential("k1", scope=USER_SCOPE, expires_at=None)
+    orig_record = "team-nats-agents:default:k1:api_token"
+    fail_delete = True
+    deleted_items: list[str] = []
+
+    def fake_delete(*, item_key: str, item_kind: str, env: Any = None) -> Any:
+        if fail_delete:
+            return credential_catalog.ToolResult(status="error", error="sealbox timeout")
+        deleted_items.append(item_key)
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    form_move = credential_catalog.collect_credential(
+        {
+            "credential_key": "k1",
+            "write_source": "sealbox",
+            "item_id": "moved-item",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "user_input"}],
+        },
+        {"api_token": "new-secret"},
+        scope=USER_SCOPE,
+        allow_expiry_change=True,
+    )
+    assert form_move.status == "success"
+    assert (form_move.content or {}).get("dropped_records_not_deleted") == [orig_record]
+    assert (form_move.content or {}).get("dropped_cleanup_retry_scheduled") is True
+
+    # 1. While Sealbox delete still fails, collect_credential targeting orig_record refuses BEFORE any Sealbox write.
+    writes.clear()
+    refused_collect = credential_catalog.collect_credential(
+        {
+            "credential_key": "k1",
+            "write_source": "sealbox",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "user_input"}],
+        },
+        {"api_token": "another-secret"},
+        scope=USER_SCOPE,
+        allow_expiry_change=True,
+    )
+    assert refused_collect.status == "error"
+    assert (refused_collect.content or {}).get("error_code") == CREDENTIAL_DROPPED_CLEANUP_PENDING
+    assert "6 hours" in (refused_collect.error or "")
+    assert writes == []
+
+    # 2. register_existing_source for a new key targeting orig_record also refuses while deletion still fails.
+    refused_reg = register_existing_source(
+        {
+            "credential_key": "k_alias",
+            "field_name": "api_token",
+            "source": "sealbox",
+            "item_id": orig_record,
+            "field_ref": "value",
+        },
+        scope=USER_SCOPE,
+    )
+    assert refused_reg.status == "error"
+    assert (refused_reg.content or {}).get("error_code") == CREDENTIAL_DROPPED_CLEANUP_PENDING
+    assert "6 hours" in (refused_reg.error or "")
+
+    # 3. Once Sealbox works again, collect_credential retries the queued deletion inline and succeeds immediately.
+    fail_delete = False
+    recovered = credential_catalog.collect_credential(
+        {
+            "credential_key": "k1",
+            "write_source": "sealbox",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "user_input"}],
+        },
+        {"api_token": "restored-secret"},
+        scope=USER_SCOPE,
+        allow_expiry_change=True,
+    )
+    assert recovered.status == "success", recovered.error
+    assert orig_record in deleted_items
+    assert CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=USER_SCOPE) == []
+
+
+def test_c35c_cli_sealbox_hides_records_queued_for_dropped_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C35(c): cli:sealbox search, get_metadata, and use_for_action hide records queued in pending_dropped_sealbox_deletes."""
+
+    import json as json_mod
+    from secure_tool_broker.credential_automations import use_credential_for_action
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
+    from secure_tool_broker.credential_sources.base import CredentialRef, CredentialSearchRequest
+    from secure_tool_broker.credential_sources.sealbox import SealboxCredentialSource
+    from secure_tools.providers import ToolContext
+
+    queued_key = "team-nats-agents:default:queued_dropped_login"
+    active_key = "team-nats-agents:default:active_login"
+    store = CredentialCatalogStore(resolve_catalog_db_path())
+    store.put_credential(
+        USER_SCOPE,
+        "active_login",
+        CatalogCredential(
+            display_name="active_login",
+            purpose="test",
+            fields={
+                "password": CatalogCredentialField(
+                    kind="password",
+                    visibility="secret",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id=active_key, item_name=active_key, field_ref="password")
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+        dropped_sealbox_targets=[(queued_key, "credential")],
+    )
+
+    def fake_run_sealbox(args: list[str], **_k: Any) -> Any:
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json_mod.dumps(
+                [
+                    {"key": queued_key, "username": "old-replaced-user"},
+                    {"key": active_key, "username": "active-user"},
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("secure_tool_broker.credential_sources.sealbox.run_sealbox", fake_run_sealbox)
+    monkeypatch.setattr(
+        "secure_tool_broker.credential_sources.sealbox.sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+
+    source = SealboxCredentialSource()
+    search_result = source.search(CredentialSearchRequest(owner_scope_kind="user", owner_id=PERSON_ID))
+    assert search_result.status == "success"
+    assert [item["credential_ref"]["item_id"] for item in search_result.content["credentials"]] == [active_key]
+
+    meta_queued = source.get_metadata(
+        CredentialRef(
+            source_provider="sealbox",
+            item_id=queued_key,
+            owner_scope_kind="user",
+            owner_id=PERSON_ID,
+        )
+    )
+    assert meta_queued.status == "error"
+    assert (meta_queued.content or {}).get("error_code") == "credential_not_found"
+
+    auto_queued = use_credential_for_action(
+        credential_provider="sealbox",
+        target_provider="github",
+        target_action="auth.login",
+        item_id=queued_key,
+        item_name=None,
+        field_ref="password",
+        context=ToolContext(team_id=TEAM_ID, canonical_user_id=PERSON_ID),
+        github_token_login=lambda token, hostname=None: credential_catalog.ToolResult(status="success"),
+    )
+    assert auto_queued.status == "error"
+    assert (auto_queued.content or {}).get("error_code") == "credential_not_found"

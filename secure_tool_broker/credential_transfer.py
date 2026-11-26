@@ -538,12 +538,15 @@ def _import_record(
                 if _already_stored(record, now=moment):
                     if isinstance(record, CatalogEntryV1):
                         db_path = resolve_catalog_db_path()
-                        if db_path.is_file() and CredentialCatalogStore(
-                            db_path
-                        ).list_pending_dropped_sealbox_deletes(
-                            scope=scope,
-                            credential_key=record.credential_key,
-                        ):
+                        pending_for_key = (
+                            CredentialCatalogStore(db_path).list_pending_dropped_sealbox_deletes(
+                                scope=scope,
+                                credential_key=record.credential_key,
+                            )
+                            if db_path.is_file()
+                            else []
+                        )
+                        if any(entry.queued_by == "transfer_import" for entry in pending_for_key):
                             retry_report = retry_pending_dropped_sealbox_deletes(
                                 scope=scope,
                                 credential_key=record.credential_key,
@@ -716,6 +719,7 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
         _find_shared_sealbox_record,
         _normalize_field_specs,
         _pending_dropped_sealbox_conflict,
+        _resolve_pending_dropped_sealbox_conflict,
         _save_credential_and_cleanup_dropped,
         _scope_catalog_lock,
         load_catalog,
@@ -736,13 +740,19 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
         # checking and cleaning any Sealbox records dropped from an expired destination row.
         new_keys = _credential_sealbox_record_keys(original)
         with _scope_catalog_lock(scope):
-            pending_conflict = _pending_dropped_sealbox_conflict(scope, new_keys)
+            catalog = load_catalog(scope=scope)
+            pending_conflict = _resolve_pending_dropped_sealbox_conflict(
+                scope,
+                new_keys,
+                catalog=catalog,
+                credential_key=record.credential_key,
+            )
             if pending_conflict is not None:
                 raise CredentialImportRefused(
                     f"Cannot import {record.credential_key} onto Sealbox record {pending_conflict} "
-                    "because an earlier value is still waiting to be deleted."
+                    "because an earlier value is still waiting to be deleted. "
+                    "The broker retries deletion automatically within 6 hours."
                 )
-            catalog = load_catalog(scope=scope)
             existing_row = catalog.credentials.get(record.credential_key)
             if existing_row is not None:
                 dropped_keys = _credential_sealbox_record_keys(existing_row) - new_keys
@@ -763,6 +773,7 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
                 original,
                 existing_credential=existing_row,
                 scope=scope,
+                queued_by="transfer_import",
             )
         if failed_dropped:
             raise _DroppedSealboxDeleteFailed(failed_dropped)
@@ -773,13 +784,19 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
     request = _collection_request(record, original)
     planned_targets = {f"{request['item_id']}:{field['field_ref']}" for field in request["fields"]}
     with _scope_catalog_lock(scope):
-        pending_conflict = _pending_dropped_sealbox_conflict(scope, planned_targets)
+        catalog = load_catalog(scope=scope)
+        pending_conflict = _resolve_pending_dropped_sealbox_conflict(
+            scope,
+            planned_targets,
+            catalog=catalog,
+            credential_key=record.credential_key,
+        )
         if pending_conflict is not None:
             raise CredentialImportRefused(
                 f"Cannot import {record.credential_key} onto Sealbox record {pending_conflict} "
-                "because an earlier value is still waiting to be deleted."
+                "because an earlier value is still waiting to be deleted. "
+                "The broker retries deletion automatically within 6 hours."
             )
-        catalog = load_catalog(scope=scope)
         _require_unreferenced_import_items(
             record.owner, request, scope=scope, catalog=catalog, exclude_key=record.credential_key
         )
@@ -824,7 +841,8 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
             if pending_conflict is not None:
                 raise CredentialImportRefused(
                     f"Cannot import {record.credential_key} onto Sealbox record {pending_conflict} "
-                    "because an earlier value is still waiting to be deleted."
+                    "because an earlier value is still waiting to be deleted. "
+                    "The broker retries deletion automatically within 6 hours."
                 )
             latest_catalog = load_catalog(scope=scope)
             _require_unreferenced_import_items(
@@ -850,6 +868,7 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
                 saved_credential,
                 existing_credential=latest_existing,
                 scope=scope,
+                queued_by="transfer_import",
             )
         if failed_dropped:
             raise _DroppedSealboxDeleteFailed(failed_dropped)

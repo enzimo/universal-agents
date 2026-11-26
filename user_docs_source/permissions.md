@@ -1407,7 +1407,7 @@ using it immediately before any background cleanup runs. For a shared service,
 your expired personal link (and any personal link whose stored credential was
 deleted) is treated as absent so your work falls back to the team's shared
 account; otherwise requests are refused with
-`account_link_credential_expired` (or `account_link_credential_missing`) and
+`account_link_credential_expired` (or `account_link_missing`) and
 the `/link` command. The broker's 6-hour maintenance janitor — and deleting an
 already-expired credential by hand — deletes the expired credential, revokes
 every active link that used it, and sends one Inbox notice per revoked link (to

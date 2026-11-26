@@ -588,11 +588,11 @@ def test_catalog_save_failure_retries_without_losing_metadata_or_leaving_duplica
     original_put = CredentialCatalogStore.put_credential
     attempted_rows = []
 
-    def fail_first_put(self, owner_scope, key, credential):
+    def fail_first_put(self, owner_scope, key, credential, **kwargs):
         attempted_rows.append(credential)
         if len(attempted_rows) == 1:
             raise RuntimeError("catalog storage unavailable")
-        return original_put(self, owner_scope, key, credential)
+        return original_put(self, owner_scope, key, credential, **kwargs)
 
     monkeypatch.setattr(CredentialCatalogStore, "put_credential", fail_first_put)
     [failed] = import_credentials(records, team_id=TEST_TEAM)
@@ -1557,3 +1557,117 @@ def test_c29_import_failed_dropped_sealbox_delete_is_retryable_and_cleans_up_on_
     assert second.imported is True
     assert deleted_items == [old_item]
     assert CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=scope) == []
+
+
+def test_c35_import_pending_dropped_refusal_inline_retry_and_form_queued_already_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C34(2) + C35(a) + C35(b): import refuses queued target when delete still fails, retries inline when Sealbox recovers, and reports already-stored when a form save queued deletions."""
+
+    from datetime import timedelta
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        collect_credential,
+        load_catalog,
+    )
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+    from secure_tool_broker.credential_transfer import (
+        _collection_request,
+        export_credentials,
+        import_credentials,
+    )
+    from secure_tool_broker.credential_transfer import CatalogEntryV1
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    future_expiry = (now + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "src", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "queued_target_key",
+            "display_name": "Queued Target",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "imported-secret"},
+        scope=scope,
+        expires_at=future_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success"
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+    entry = CatalogEntryV1.model_validate(records[0])
+    req = _collection_request(entry, CatalogCredential.model_validate(entry.credential))
+    planned_key = f"{req['item_id']}:{req['fields'][0]['field_ref']}"
+
+    # 1. Destination has planned_key queued in pending_dropped_sealbox_deletes; while delete fails, import refuses before writing.
+    _use_store(tmp_path / "dst1", monkeypatch)
+    dst1_sealbox = _FakeSealboxCli()
+    _use_sealbox(dst1_sealbox, monkeypatch)
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        "other_existing",
+        CatalogCredential(display_name="Other", purpose="test", fields={}).model_dump(mode="json", exclude_none=True),
+        dropped_sealbox_targets=[(planned_key, "secret")],
+        queued_by="form",
+    )
+    fail_delete = True
+    deleted_items: list[str] = []
+
+    def fake_delete(*, item_key: str, item_kind: str, env: object = None) -> object:
+        if fail_delete:
+            return credential_catalog.ToolResult(status="error", error="sealbox unavailable")
+        deleted_items.append(item_key)
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    [refused] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert refused.imported is False
+    assert refused.retryable is False
+    assert dst1_sealbox.secrets == {}
+    assert "queued_target_key" not in load_catalog(scope=scope).credentials
+
+    # 2. Once Sealbox recovers, import retries the queued deletion inline and succeeds immediately.
+    fail_delete = False
+    [recovered] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert recovered.imported is True, recovered.reason
+    assert deleted_items == [planned_key]
+    assert "queued_target_key" in load_catalog(scope=scope).credentials
+
+    # 3. C35(b): When destination already holds queued_target_key with a queued deletion from a person's form save,
+    #    import keeps the current credential and reports already-stored (NOT imported=True).
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        "queued_target_key",
+        CatalogCredential(
+            display_name="Person Form Save",
+            purpose="test",
+            fields={
+                "api_key": CatalogCredentialField(
+                    kind="api_key",
+                    visibility="secret",
+                    value_source="user_input",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id="current-item:api_key", item_name="current-item:api_key", field_ref="value")
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+        dropped_sealbox_targets=[("person-old-item:api_key", "secret")],
+        queued_by="form",
+    )
+    [kept] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert kept.imported is False
+    assert kept.reason == "already stored in this instance; kept the current credential"
+    assert load_catalog(scope=scope).credentials["queued_target_key"].display_name == "Person Form Save"

@@ -116,6 +116,13 @@ Once the expiry time passes:
   administrators for team or gate links). No notice is sent if no link used it.
 - Replacing a temporary credential through the secure form with **Delete
   automatically** unticked saves a lasting credential and clears its expiry.
+- Saving over an existing credential through the secure form under a different
+  layout or moving it to another source permanently deletes every version of
+  the earlier stored Sealbox record(s); direct agent saves cannot drop earlier
+  stored records without your form submission. If the form shows a red
+  "cleanup pending" warning after saving, your new credential is already stored
+  and working, and the broker queued the earlier record(s) for automatic
+  deletion within 6 hours.
 
 ## What Is Sent to the Agent
 
