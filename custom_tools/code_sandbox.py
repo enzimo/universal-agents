@@ -548,9 +548,9 @@ def sandbox_link_refusal_path(command: SandboxedCommand, exit_code: int, stderr:
         return None
     if not command.policy_paths:
         return None
-    for line in stderr.splitlines():
+    for line in stderr.split("\n"):
         if line.startswith(SANDBOX_LINK_REFUSAL_PREFIX):
-            candidate = line[len(SANDBOX_LINK_REFUSAL_PREFIX) :].strip()
+            candidate = line[len(SANDBOX_LINK_REFUSAL_PREFIX) :]
             if candidate in command.policy_paths:
                 return candidate
     return None

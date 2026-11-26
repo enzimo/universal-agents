@@ -639,6 +639,27 @@ def test_full_chain_post_planning_symlink_swap_exits_126_and_logs_warning(
             frozenset({"/allowed/team"}),
             None,
         ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team/a\x0cb\n",
+            frozenset({"/allowed/team/a\x0cb"}),
+            "/allowed/team/a\x0cb",
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team/a\u2028b\n",
+            frozenset({"/allowed/team/a\u2028b"}),
+            "/allowed/team/a\u2028b",
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team/trailing \n",
+            frozenset({"/allowed/team/trailing "}),
+            "/allowed/team/trailing ",
+        ),
     ],
     ids=[
         "mounted_path_refusal",
@@ -647,6 +668,9 @@ def test_full_chain_post_planning_symlink_swap_exits_126_and_logs_warning(
         "sandbox_off",
         "sandbox_unconfined",
         "no_prefix_line",
+        "form_feed_in_path",
+        "unicode_line_separator_in_path",
+        "trailing_whitespace_in_path",
     ],
 )
 def test_sandbox_link_refusal_path_validates_exit_mode_prefix_and_policy_paths(
@@ -656,7 +680,7 @@ def test_sandbox_link_refusal_path_validates_exit_mode_prefix_and_policy_paths(
     policy_paths: frozenset[str],
     expected: str | None,
 ) -> None:
-    """C07 + C08: sandbox_link_refusal_path only accepts a mounted policy path on Landlock exit 126."""
+    """C07 + C08 + C09: sandbox_link_refusal_path only accepts an exact mounted policy path on Landlock exit 126."""
 
     cmd = code_sandbox.SandboxedCommand(
         argv=("true",),
