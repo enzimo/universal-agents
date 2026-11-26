@@ -52,6 +52,7 @@ from assistant_gateway.application.proactive_delivery import (
     GatewayProactiveSessionResolver,
 )
 from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
     GatewayRequestContextService,
     GatewayRequestRoute,
 )
@@ -232,6 +233,7 @@ class GatewayMaintenanceScheduleApplication:
     async def ensure_all(self) -> None:
         """Ensure every enabled manager-owned maintenance schedule."""
 
+        await self._request_context.ensure_signer_ready()
         await self.ensure_heartbeat()
         await self.ensure_specialist_schedules()
         await self.refresh_internal_improvement()
@@ -463,17 +465,38 @@ class GatewayMaintenanceScheduleApplication:
         manager_id = self._manager.manager_id
         if manager_id is None:
             raise RuntimeError("The manager route became unavailable.")
+        await self._request_context.ensure_signer_ready()
         correlation_id = self._id_generator.new_correlation_id()
         payload_header = self._manager_header(manager_id)
-        payload_meta = self._message_meta(
-            session=session,
-            manager_id=manager_id,
-            owner_canonical_user_id=owner_canonical_user_id,
-            correlation_id=correlation_id,
-            definition=definition,
-            requester_type=RequesterType.TIMER_REQUESTER,
-            response_requested=definition.response_requested,
-        )
+        try:
+            payload_meta = self._message_meta(
+                session=session,
+                manager_id=manager_id,
+                owner_canonical_user_id=owner_canonical_user_id,
+                correlation_id=correlation_id,
+                definition=definition,
+                requester_type=RequesterType.TIMER_REQUESTER,
+                response_requested=definition.response_requested,
+            )
+            envelope_meta = self._message_meta(
+                session=session,
+                manager_id=manager_id,
+                owner_canonical_user_id=owner_canonical_user_id,
+                correlation_id=correlation_id,
+                definition=definition,
+                requester_type=RequesterType.USER_REQUESTER,
+                response_requested=False,
+            )
+        except GatewayAuthorityTokenUnavailable:
+            self._logger.warning(
+                "Gateway skipped publishing maintenance schedule because its host could not sign "
+                "an authority token yet. event=gateway_maintenance_schedule_signer_unavailable "
+                "schedule_id=%s install_mode=%s person_id=%s",
+                definition.schedule_id,
+                definition.install_mode,
+                owner_canonical_user_id,
+            )
+            return
         if definition.target_agent_type:
             payload_meta.to_named_agent_type = definition.target_agent_type
             payload_meta.to_agent_name = None
@@ -495,15 +518,7 @@ class GatewayMaintenanceScheduleApplication:
         )
         envelope = MessageEnvelope(
             msg_content=schedule_message,
-            msg_meta=self._message_meta(
-                session=session,
-                manager_id=manager_id,
-                owner_canonical_user_id=owner_canonical_user_id,
-                correlation_id=correlation_id,
-                definition=definition,
-                requester_type=RequesterType.USER_REQUESTER,
-                response_requested=False,
-            ),
+            msg_meta=envelope_meta,
             msg_header=self._manager_header(manager_id),
         )
         self._delivery.upsert_scheduled_target(

@@ -347,6 +347,17 @@ class BrokerGatewayTokenSigner:
         )
 
 
+def bind_gateway_test_signer(gateway: Any) -> Any:
+    """Wire the shared protocol 1 gateway test signer and people store into a test ``UserGateway``."""
+
+    team_id = gateway.config.manager.team_id
+    gateway._request_context_service._token_signer = BrokerGatewayTokenSigner(team_id=team_id)
+    gateway._request_context_service._person_ref_resolver = (
+        lambda person_id: broker_people_store().register(team_id, person_id, roles=("owner",)).person_ref
+    )
+    return gateway
+
+
 def signed_scheduler_task_context(
     person_id: str | None = "user-1",
     *,

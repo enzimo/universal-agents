@@ -233,18 +233,14 @@ class _Schedules:
 def scheduled_runs_gate(links: AccessRepository):
     """A gate that verifies the scheduler's signed runs: Alice's job and a system timer that serves nobody."""
 
-    import json
-
-    from access_control.identity import ISSUER_SCHEDULER, ContextSigner, ContextVerifier, verify_keys_value
     from access_control.task_identity import ScheduleFacts, ScheduleRunLookup
     from custom_messages.enums import SystemScheduleKind
     from secure_tool_broker.access_gate import BrokerAccessGate
-    from tests.broker_access_support import _scheduler_key, context_verify_keys
+    from tests.broker_access_support import broker_authority_verifier, signed_scheduler_task_context
 
-    private, public = _scheduler_key()
     gate = BrokerAccessGate(
         catalogs=CatalogSource(None),
-        verifier=ContextVerifier.from_value(verify_keys_value([*json.loads(context_verify_keys()), public])),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=None,
         links=links,
@@ -256,13 +252,22 @@ def scheduled_runs_gate(links: AccessRepository):
             object(),
         ),
     )
-    scheduler = ContextSigner.from_value(ISSUER_SCHEDULER, private)
 
     def run(schedule_id: str, person_id: str | None) -> dict:
-        signed = scheduler.issue(
-            team_id=TEST_TEAM, person_id=person_id, person_roles=("member",) if person_id else (), schedule_id=schedule_id
+        signed = signed_scheduler_task_context(
+            person_id,
+            team_id=TEST_TEAM,
+            roles=("member",) if person_id else (),
+            schedule_id=schedule_id,
         )
-        return {**agent_context(person_id or ""), "canonical_user_id": person_id, "task_context": signed.model_dump(mode="json")}
+        return {
+            "canonical_user_id": person_id,
+            "principal_type": "user" if person_id else "system",
+            "team_id": TEST_TEAM,
+            "agent_id": "agent-1",
+            "named_agent_type": "GeneralAssistant",
+            "task_context": signed,
+        }
 
     return gate, run
 

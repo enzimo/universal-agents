@@ -746,14 +746,14 @@ async def test_broker_dispatches_exact_hosted_operation_through_final_mcp_pep(
     )
 
     gate_checks = []
-    check = gate.check
+    check_async = gate.check_async
 
-    def recording_check(caller, resolution, context):
-        result = check(caller, resolution, context)
+    async def recording_check(caller, resolution, context):
+        result = await check_async(caller, resolution, context)
         gate_checks.append(result)
         return result
 
-    gate.check = recording_check
+    gate.check_async = recording_check
     task_context = signed_task_context(config.user.canonical_user_id, team_id=config.manager.team_id)
     manager = BrokerCaller(CALLER_MANAGER)
     try:

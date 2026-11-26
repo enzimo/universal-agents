@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from custom_agents import access_runtime
 from custom_tools.path_policy import (
     PERSON_WORKSPACE_DENIED,
     PROTECTED_RUNTIME_CONTROL_DENIED,
@@ -28,7 +27,11 @@ from tests.task_work_support import set_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import InstanceLayout, person_folder_name
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 TEAM = "team-files"
 
@@ -40,7 +43,7 @@ def task_agent(layout: InstanceLayout, person: str | None, *, signed: bool = Tru
     forged or damaged message would.
     """
 
-    context = context_signer().issue(team_id=TEAM, person_id=person, person_roles=("member",)) if person else None
+    context = signed_task_token(person, team_id=TEAM, roles=("member",)) if person else None
     meta = SimpleNamespace(
         gateway_context=(
             SimpleNamespace(canonical_user_id=person, task_context=context if signed else None) if person else None
@@ -78,11 +81,11 @@ def layout(tmp_path: Path, monkeypatch) -> InstanceLayout:
     (layout.skill_installation_dir / "plans").mkdir(parents=True)
     for name in ("TEAM_INSTANCE_ROOT", "TEAM_INSTANCE_CONFIG", "TOOL_DENY_PATHS"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield layout
     set_agent_ref(None)
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
 
 
 def as_person(layout: InstanceLayout, person: str | None) -> None:

@@ -51,7 +51,7 @@ from secure_tool_broker.tool_setup_tracking import note_broker_result
 from secure_tools.providers import ToolContext, ToolResult, ValidatedAction
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import BROKER_ROOT, agent_context, caller_headers, context_signer
+from tests.broker_access_support import BROKER_ROOT, agent_context, caller_headers
 from tests.test_account_links import (  # noqa: F401 - pytest fixtures
     PORTAINER_TOOL,
     _isolated_credentials,
@@ -82,9 +82,8 @@ def links_world(tmp_path: Path):
     """The broker's gate with authorization off and a Portainer web API tool (as in test_account_links)."""
 
     from access_catalog.catalog import CatalogSource
-    from access_control.identity import ContextVerifier
     from secure_tool_broker.access_gate import BrokerAccessGate
-    from tests.broker_access_support import context_verify_keys
+    from tests.broker_access_support import broker_authority_verifier
 
     tools = tmp_path / "instance" / "control" / "access" / "tools"
     tools.mkdir(parents=True)
@@ -94,7 +93,7 @@ def links_world(tmp_path: Path):
     )
     gate = BrokerAccessGate(
         catalogs=CatalogSource(tmp_path / "instance"),
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEAM,
         access=None,
         links=access,
@@ -274,9 +273,11 @@ def _lead(tmp_path: Path, storage_path: Path, *, person: str | None, lead: bool 
     from custom_agents import access_runtime
     from custom_agents.task_manager import TaskManager
 
+    from tests.broker_access_support import signed_task_token
+
     access_runtime._runtime_access.cache_clear()
     manager = TaskManager(db_path=str(storage_path))
-    signed = context_signer().issue(team_id=TEAM, person_id=person, person_roles=("member",)) if person else None
+    signed = signed_task_token(person, team_id=TEAM, roles=("member",)) if person else None
     meta = SimpleNamespace(gateway_context=SimpleNamespace(task_context=signed, schedule_run=None))
     agent = SimpleNamespace(
         id="agent-lead",
@@ -291,9 +292,10 @@ def _lead(tmp_path: Path, storage_path: Path, *, person: str | None, lead: bool 
 
 
 def test_teamleads_context_lists_only_the_task_persons_states(tmp_path, monkeypatch) -> None:
-    from tests.broker_access_support import context_verify_keys
+    from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     db = tmp_path / "manager.db"
     agent, meta = _lead(tmp_path, db, person=PERSON)
     states = ToolSetupStates(AccessRepository(agent.task_manager.storage_settings))
@@ -435,7 +437,6 @@ def test_teamlead_uses_a_ready_tool_and_sets_up_the_rest_without_asking() -> Non
 
 def test_gate_only_tool_status_tracking_and_recheck_notice(tmp_path: Path) -> None:
     from access_catalog.catalog import CatalogSource
-    from access_control.identity import ContextVerifier
     from access_control.tool_setup_states import FIXED_BY_ADMINISTRATOR, HOW_GATE_LINK, STEP_GATE_LINK
     from custom_messages.contracts.access_v2 import (
         AccountLinkV1,
@@ -447,7 +448,7 @@ def test_gate_only_tool_status_tracking_and_recheck_notice(tmp_path: Path) -> No
     )
     from secure_tool_broker.access_gate import BrokerAccessGate
     from secure_tool_broker.tool_setup_status import tool_status_entry
-    from tests.broker_access_support import context_verify_keys
+    from tests.broker_access_support import broker_authority_verifier
 
     tools = tmp_path / "instance" / "control" / "access" / "tools"
     tools.mkdir(parents=True)
@@ -468,7 +469,7 @@ tools:
     )
     gate = BrokerAccessGate(
         catalogs=CatalogSource(tmp_path / "instance"),
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEAM,
         access=None,
         links=access,

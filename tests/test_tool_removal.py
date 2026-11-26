@@ -1549,20 +1549,23 @@ def _build_real_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from access_control.data_folders import DataFolderRegistry
     from access_control.decisions import AccessService
     from access_control.entities import agent_role_resolver
-    from access_control.identity import ContextVerifier
     from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalApplier
     from access_control.requests import AccessRequests
     from custom_agents import access_runtime
     from secure_tool_broker.access_gate import BrokerAccessGate
-    from tests.broker_access_support import context_verify_keys
+    from tests.broker_access_support import (
+        broker_authority_verifier,
+        forget_task_context_keys,
+        use_broker_authority_verifier,
+    )
     from tests.task_work_support import set_agent_ref
     from tests.test_access_request_tools import BINARY, OWNER as REQ_OWNER, TEAM as REQ_TEAM, make_agent
 
     if not BINARY.is_file():
         pytest.skip("build ua-cedar-authorizer first (cargo build)")
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     instance = tmp_path / "instance"
     (instance / "control").mkdir(parents=True)
     lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
@@ -1600,7 +1603,7 @@ def _build_real_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     gate = BrokerAccessGate(
         catalogs=catalogs,
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=REQ_TEAM,
         access=service,
         links=service.store,
@@ -2268,12 +2271,12 @@ def test_tool_removal_with_authorization_off_previews_applies_revokes_links_and_
 
     from custom_agents import access_runtime
     from custom_tools.providers.access_proposals import propose_access_change
-    from tests.broker_access_support import context_verify_keys
+    from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
     from tests.task_work_support import set_agent_ref
     from tests.test_access_request_tools import TEAM as REQ_TEAM, Context, make_agent
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     instance = tmp_path / "instance"
     (instance / "control").mkdir(parents=True)
     lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
@@ -2744,12 +2747,12 @@ def test_f5_auth_off_rollback_isolates_step_errors_and_restores_mcp_servers(
         descriptor_from_server_config,
         resolve_mcp_connection_paths,
     )
-    from tests.broker_access_support import context_verify_keys
+    from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
     from tests.task_work_support import set_agent_ref
     from tests.test_access_request_tools import TEAM as REQ_TEAM, Context, make_agent
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     instance = tmp_path / "instance"
     (instance / "control").mkdir(parents=True)
     lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
@@ -2848,12 +2851,12 @@ def test_c13_auth_off_multi_mcp_failure_and_mcp_store_rollback_isolation(
         descriptor_from_server_config,
         resolve_mcp_connection_paths,
     )
-    from tests.broker_access_support import context_verify_keys
+    from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
     from tests.task_work_support import set_agent_ref
     from tests.test_access_request_tools import TEAM as REQ_TEAM, Context, make_agent
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     instance = tmp_path / "instance"
     (instance / "control").mkdir(parents=True)
     lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)

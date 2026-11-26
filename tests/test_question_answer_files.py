@@ -77,7 +77,12 @@ from custom_messages.enums import (
 from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer, forget_task_context_keys, use_gateway_key
+from tests.broker_access_support import (
+    bind_gateway_test_signer,
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 from tests.task_work_support import use_agent
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, TEAM, _admit, _answer, _lead
 from tests.test_gateway_parallel_threads import WEB_CHAT_TOKEN, _send, _web_chat_thread
@@ -103,8 +108,9 @@ QUESTION = "Which shopping list should I use?"
 
 @pytest.fixture(autouse=True)
 def _keys(monkeypatch: pytest.MonkeyPatch):
-    # The gateway signs with the test gateway key; agents trust it.
-    use_gateway_key(monkeypatch)
+    # The gateway signs with the test protocol 1 gateway certificate; agents trust it.
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -256,6 +262,7 @@ def _web_chat_gateway(tmp_path: Path, layout: InstanceLayout, lead: _TeamLead, m
     gateway = UserGateway(
         config, output_sink=None, state_store=GatewayStateStore(str(tmp_path / "gateway.db")), manager_transport=lead
     )
+    bind_gateway_test_signer(gateway)
     lead.gateway = gateway
     return gateway
 
@@ -287,10 +294,13 @@ async def test_a_web_chat_answer_with_a_file_reaches_the_request_named_by_id_and
     [notes] = answer.attachments
     assert (answer.query_type, answer.parent_task_id, answer.message) == (MessageMetaType.RESPONSE, task_id, "Use this list.")
     # The answer's own context vouches for exactly this answer and file, as the lead derives it.
-    signed = context_verifier().verify(answer_envelope.msg_meta.gateway_context.task_context)
-    assert (signed.root_task_id, signed.conversation_id) == (task_id, thread["conversation_id"])
-    assert signed.context_id == answer_context_id(answer)
-    assert signed.context_id != request_context_id(request_envelope.msg_content)
+    signed = context_verifier().verify_root_task(
+        answer_envelope.msg_meta.gateway_context.task_context, team_id=TEAM, require_issuer="gateway"
+    )
+    assert signed.root_task_id == task_id
+    assert answer_envelope.msg_meta.conversation_id == thread["conversation_id"]
+    assert signed.request_id == answer_context_id(answer)
+    assert signed.request_id != request_context_id(request_envelope.msg_content)
     # The person's answer shows its file in Web Chat.
     [shown] = [message for message in transcript["messages"] if message["content"] == "Use this list."]
     assert [item["attachment_id"] for item in shown["attachments"]] == [notes.attachment_id]
@@ -348,9 +358,12 @@ async def test_the_chat_bridge_sends_the_files_of_an_answer_with_it(tmp_path: Pa
     [answer] = chat.lead.answers()
     assert (answer.task_query_id, answer.message, answer.attachments) == (first.task_query_id, "This pan.", [photo])
     envelope = chat.lead.durable[-1]
-    signed = context_verifier().verify(envelope.msg_meta.gateway_context.task_context)
-    assert (signed.root_task_id, signed.conversation_id) == (first.parent_task_id, chat.session.conversation_id)
-    assert signed.context_id == answer_context_id(decode_envelope(encode_envelope(envelope)).msg_content)
+    signed = context_verifier().verify_root_task(
+        envelope.msg_meta.gateway_context.task_context, team_id=chat.config.manager.team_id, require_issuer="gateway"
+    )
+    assert signed.root_task_id == first.parent_task_id
+    assert envelope.msg_meta.conversation_id == chat.session.conversation_id
+    assert signed.request_id == answer_context_id(decode_envelope(encode_envelope(envelope)).msg_content)
 
 
 @pytest.mark.asyncio
@@ -498,13 +511,12 @@ def _answer_to(files: list[UserTaskAttachment], *, text: str = "Use this list.",
 def _answer_meta(signed_for: TaskQuery, *, task_id: str = TASK) -> MessageMeta:
     """Message meta as the gateway sends an answer: a context bound to ``signed_for`` and its files."""
 
-    signed = context_signer().issue(
+    signed = signed_task_token(
+        ANN,
         team_id=TEAM,
-        person_id=ANN,
-        person_roles=("member",),
+        roles=("member",),
         root_task_id=task_id,
-        conversation_id=CONVERSATION,
-        context_id=answer_context_id(signed_for),
+        request_id=answer_context_id(signed_for),
     )
     return MessageMeta(
         conversation_id=CONVERSATION,
@@ -772,13 +784,12 @@ async def _answer_the_question_of(agent: Any, asking: Any, files: list[UserTaskA
     question = _asked().model_copy(update={"parent_task_id": task_id})
     agent.task_manager.add_task_query(task_id, question, agent_name="Lead", agent_id=LEAD_ID)
     answer = _answer_to(files, task_id=task_id)
-    signed = context_signer().issue(
+    signed = signed_task_token(
+        ANN,
         team_id=TEAM,
-        person_id=ANN,
-        person_roles=("member",),
+        roles=("member",),
         root_task_id=task_id,
-        conversation_id=asking.meta.conversation_id,
-        context_id=answer_context_id(answer),
+        request_id=answer_context_id(answer),
     )
     meta = MessageMeta(
         conversation_id=asking.meta.conversation_id,

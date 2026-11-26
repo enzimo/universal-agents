@@ -447,7 +447,9 @@ class GatewayResponseCoordinator:
             user_approved=content.user_approved,
         )
 
-    async def queue_manager_unavailable(self, correlation_id: str) -> None:
+    async def queue_manager_unavailable(
+        self, correlation_id: str, *, message: str | None = None
+    ) -> None:
         if not self._manager_client.has_pending_response(correlation_id):
             return
         request_record = self._request_service.mark_manager_unavailable(correlation_id)
@@ -455,7 +457,7 @@ class GatewayResponseCoordinator:
             correlation_id,
             MessageEnvelope(
                 msg_content=SystemStatusMessage(
-                    system_status=self._manager_unavailable_text()
+                    system_status=message or self._manager_unavailable_text()
                 ),
                 msg_meta=MessageMeta(
                     from_agent_name=(f"{self._settings.gateway_instance_name}_gateway"),

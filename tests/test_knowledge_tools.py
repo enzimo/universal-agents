@@ -24,7 +24,7 @@ from storage.config import resolve_storage_settings
 from storage.change_ledger import ChangeRequestStore
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 
 TEAM = "team_test"
@@ -44,7 +44,7 @@ class _TaskManager:
         self._signed_for = signed_for
         self._claimed = claimed
         self.signed = (
-            context_signer().issue(team_id=TEAM, person_id=self._signed_for, person_roles=("member",))
+            signed_task_token(self._signed_for, team_id=TEAM, roles=("member",))
             if self._signed_for
             else None
         )
@@ -74,10 +74,12 @@ class _Agent:
         self.task_manager = _TaskManager(signed_for=signed_for, claimed=claimed or (signed_for or ""))
         self.task_manager.storage_settings = settings
         self.task_manager._db_path = str(db_path)
-        if self.task_manager.signed is not None:
-            context = self.task_manager.signed.context
+        if self.task_manager.signed is not None and signed_for is not None:
             ChangeRequestStore(settings).open(
-                team_id=TEAM, request_id=context.context_id, person_id=context.person_id, now=datetime.now(timezone.utc),
+                team_id=TEAM,
+                request_id=self.task_manager.signed.bound_to.request_id,
+                person_id=signed_for,
+                now=datetime.now(timezone.utc),
             )
 
 

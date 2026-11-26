@@ -56,7 +56,7 @@ from custom_messages.system_schedules import COREMEM_AUDIT_SCHEDULE_NAME_PREFIX,
 from storage.access_repository import AccessRepository
 from storage.person_departure_repository import PersonDepartureRepository
 from tests import test_person_memory_review_schedules as _gateway_schedules
-from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import forget_task_context_keys, use_scheduler_key
 from tests.test_conversation_owner_verified_person import ANN, BOB, _admit, _lead
 from tests.test_knowledge_curation_schedules import TEAM_ID as CURATION_TEAM_ID
 from tests.test_knowledge_curation_schedules import _config
@@ -247,11 +247,20 @@ def test_only_the_owner_continues_a_conversation(person, owner, allowed) -> None
 
 @pytest.mark.asyncio
 async def test_a_task_for_someone_else_is_refused_and_the_owners_follow_up_joins(tmp_path, caplog, signing_keys) -> None:
+    from tests.broker_access_support import (
+        forget_task_context_keys,
+        signed_scheduler_token,
+        signed_task_token,
+        use_broker_authority_verifier,
+    )
+
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     agent = _lead(tmp_path)
     store = agent._conversation_store
-    for_ann = context_signer().issue(team_id=ADMISSION_TEAM, person_id=ANN, person_roles=("member",))
-    for_bob = context_signer().issue(team_id=ADMISSION_TEAM, person_id=BOB, person_roles=("member",))
-    for_nobody = context_signer().issue(team_id=ADMISSION_TEAM, person_id=None)
+    for_ann = signed_task_token(ANN, team_id=ADMISSION_TEAM, roles=("member",), root_task_id="t1")
+    for_bob = signed_task_token(BOB, team_id=ADMISSION_TEAM, roles=("member",), root_task_id="t2")
+    for_nobody = signed_scheduler_token(None, team_id=ADMISSION_TEAM, root_task_id="t3", schedule_id="sched_nobody")
     await _admit(agent, GatewayContext(canonical_user_id=ANN, task_context=for_ann), task_id="t1", conversation_id="c1")
 
     with caplog.at_level(logging.WARNING, logger=RUNTIME_LOGGER):

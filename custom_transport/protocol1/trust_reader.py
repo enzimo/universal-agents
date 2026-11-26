@@ -46,7 +46,11 @@ _UPKEEP_CHECK_INTERVAL = timedelta(seconds=10)
 
 
 def trust_reader_transport_config(config: Any, *, reader_id: str) -> NatsTransportConfig:
-    """Build a read-only NATS transport config identifying ``reader_id`` (not ``team-services``)."""
+    """Build a read-only NATS transport config identifying ``reader_id`` (not ``team-services``).
+
+    Uses a short connect timeout and single attempt so an unreachable NATS server fails fast
+    while ``TrustReader`` handles background retries and reconnects after connection close (C18).
+    """
 
     transport = config.transport
     servers = list(transport.nats_servers or ([transport.nats_url] if transport.nats_url else []))
@@ -59,6 +63,9 @@ def trust_reader_transport_config(config: Any, *, reader_id: str) -> NatsTranspo
         password=transport.nats_password,
         credentials_file=transport.credentials_file,
         reply_inbox_runtime=reader_id,
+        connect_timeout=2.0,
+        max_reconnect_attempts=1,
+        reconnect_time_wait=0.2,
     )
 
 
@@ -75,12 +82,14 @@ class TrustReader:
         records: Optional[StateRecords],
         *,
         reader_id: str,
+        nc: Any = None,
         connect: Optional[Callable[[], Awaitable[Any]]] = None,
         clock: Callable[[], datetime] = utc_now,
         logger: logging.Logger = _LOGGER,
     ) -> None:
         self.trust = trust
         self.records = records
+        self._nc = nc
         self.reader_id = reader_id
         self._connect = connect
         self.clock = clock
@@ -109,17 +118,34 @@ class TrustReader:
         bundle = read_bundle(layout.trust_bootstrap_path)
         trust = PersistentTrustStore.open(bundle, layout.reader_trust_dir(reader_id), clock())
         records = StateRecords.on_connection(nc, _no_signing_identity, trust) if nc is not None else None
-        return cls(trust, records, reader_id=reader_id, connect=connect, clock=clock, logger=logger)
+        return cls(trust, records, reader_id=reader_id, nc=nc, connect=connect, clock=clock, logger=logger)
 
     def attach_connection(self, nc: Any) -> StateRecords:
         """Bind a live NATS connection to this reader once connected."""
 
+        self._nc = nc
         self.records = StateRecords.on_connection(nc, _no_signing_identity, self.trust)
         return self.records
 
+    def detach_connection(self) -> None:
+        """Drop a closed NATS connection so background upkeep reconnects via ``connect``."""
+
+        self.records = None
+        self._nc = None
+
+    def _is_connection_closed(self) -> bool:
+        return self._nc is not None and bool(getattr(self._nc, "is_closed", False))
+
+    def _looks_closed_error(self, error: Exception) -> bool:
+        if self._is_connection_closed():
+            return True
+        name = type(error).__name__.lower()
+        text = str(error).lower()
+        return "connectionclosed" in name or "connection closed" in text
+
     @property
     def connected(self) -> bool:
-        return self.records is not None
+        return self.records is not None and not self._is_connection_closed()
 
     @classmethod
     async def snapshot(
@@ -228,6 +254,8 @@ class TrustReader:
     async def fetch_token_issuer(self, token: Any) -> bool:
         """Fetch the issuer certificate named by ``token`` (and revocations if not current)."""
 
+        if self._is_connection_closed():
+            self.detach_connection()
         if self.records is None:
             return False
         extracted = extract_token_issuer(token)
@@ -265,8 +293,10 @@ class TrustReader:
         return taken
 
     async def _ensure_connected(self, stop: asyncio.Event) -> bool:
-        """Connect in the background when started offline; returns False if stopped before connecting."""
+        """Connect in the background when offline or after a closed connection; False if stopped."""
 
+        if self._is_connection_closed():
+            self.detach_connection()
         if self.records is not None:
             return True
         if self._connect is None:
@@ -284,6 +314,7 @@ class TrustReader:
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - keep retrying while NATS is unreachable
+                self.detach_connection()
                 self.logger.warning(
                     "Trust reader could not connect to NATS; retrying. event=trust_reader_connect_failed "
                     "reader=%s error=%s: %s",
@@ -296,35 +327,77 @@ class TrustReader:
         return False
 
     async def watch_and_refresh(self, stop: asyncio.Event) -> None:
-        """Connect if offline, watch ``UA1_CERTS`` for changes, and refresh periodically until ``stop``."""
+        """Connect if offline, watch ``UA1_CERTS`` for changes, and reconnect if NATS closes permanently."""
 
-        if not await self._ensure_connected(stop):
-            return
         installation = self.installation
-        cert_task = asyncio.create_task(self._watch_pattern("certificate", f"host.{installation}.>", stop))
-        rev_task = asyncio.create_task(self._watch_pattern("revocations", f"revocations.{installation}", stop))
-        refresh_task = asyncio.create_task(self._refresh_loop(stop))
-        tasks = (cert_task, rev_task, refresh_task)
-        try:
-            await stop.wait()
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    async def _watch_pattern(self, record: str, pattern: str, stop: asyncio.Event) -> None:
         while not stop.is_set():
+            if not await self._ensure_connected(stop):
+                return
+            connection_lost = asyncio.Event()
+            cert_task = asyncio.create_task(
+                self._watch_pattern("certificate", f"host.{installation}.>", stop, connection_lost)
+            )
+            rev_task = asyncio.create_task(
+                self._watch_pattern("revocations", f"revocations.{installation}", stop, connection_lost)
+            )
+            refresh_task = asyncio.create_task(self._refresh_loop(stop, connection_lost))
+            stop_wait = asyncio.create_task(stop.wait())
+            lost_wait = asyncio.create_task(connection_lost.wait())
+            tasks = (cert_task, rev_task, refresh_task)
+            try:
+                await asyncio.wait({stop_wait, lost_wait}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in (stop_wait, lost_wait):
+                    waiter.cancel()
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(stop_wait, lost_wait, *tasks, return_exceptions=True)
+            if stop.is_set():
+                return
+            self.detach_connection()
+            if self._connect is None:
+                return
+            if await _stopped_within(stop, timedelta(seconds=_WATCH_RETRY_SECONDS)):
+                return
+
+    async def _watch_pattern(
+        self, record: str, pattern: str, stop: asyncio.Event, connection_lost: asyncio.Event
+    ) -> None:
+        while not stop.is_set() and not connection_lost.is_set():
+            if self._is_connection_closed():
+                self.logger.warning(
+                    "Trust reader NATS connection closed; scheduling reconnect. "
+                    "event=trust_reader_connection_closed reader=%s pattern=%s",
+                    self.reader_id,
+                    pattern,
+                )
+                self.detach_connection()
+                connection_lost.set()
+                return
             if self.records is None:
+                connection_lost.set()
                 return
             try:
                 async for key, raw in self.records.watch(record, pattern):
-                    if stop.is_set():
+                    if stop.is_set() or connection_lost.is_set():
                         return
                     if raw is not None:
                         await self._take_watch_bytes(key, raw)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - retry watch on transient NATS errors
+                if self._looks_closed_error(error):
+                    self.logger.warning(
+                        "Trust reader NATS connection closed during watch; scheduling reconnect. "
+                        "event=trust_reader_connection_closed reader=%s pattern=%s error=%s: %s",
+                        self.reader_id,
+                        pattern,
+                        type(error).__name__,
+                        error,
+                    )
+                    self.detach_connection()
+                    connection_lost.set()
+                    return
                 self.logger.warning(
                     "Trust reader watch failed; retrying. event=trust_reader_watch_failed "
                     "reader=%s pattern=%s error=%s: %s",
@@ -333,16 +406,35 @@ class TrustReader:
                     type(error).__name__,
                     error,
                 )
+            if self._is_connection_closed():
+                self.detach_connection()
+                connection_lost.set()
+                return
             if await _stopped_within(stop, timedelta(seconds=_WATCH_RETRY_SECONDS)):
                 return
 
-    async def _refresh_loop(self, stop: asyncio.Event) -> None:
-        while not await _stopped_within(stop, _UPKEEP_CHECK_INTERVAL):
+    async def _refresh_loop(self, stop: asyncio.Event, connection_lost: asyncio.Event) -> None:
+        while not stop.is_set() and not connection_lost.is_set():
+            if await _stopped_within(stop, _UPKEEP_CHECK_INTERVAL):
+                return
+            if self._is_connection_closed():
+                self.logger.warning(
+                    "Trust reader NATS connection closed; scheduling reconnect. "
+                    "event=trust_reader_connection_closed reader=%s",
+                    self.reader_id,
+                )
+                self.detach_connection()
+                connection_lost.set()
+                return
             now = self.clock()
             if self._last_refresh is None or now - self._last_refresh >= TRUST_REFRESH_INTERVAL:
                 try:
                     await self.refresh_revocations()
-                except Exception:
+                except Exception as error:  # noqa: BLE001 - reconnect on closed connection, log otherwise
+                    if self._looks_closed_error(error):
+                        self.detach_connection()
+                        connection_lost.set()
+                        return
                     self.logger.exception(
                         "Periodic revocations refresh failed. event=trust_reader_refresh_failed reader=%s",
                         self.reader_id,

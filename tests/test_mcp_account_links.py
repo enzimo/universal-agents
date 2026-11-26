@@ -19,7 +19,6 @@ from aiohttp.test_utils import TestServer
 
 from access_catalog.catalog import CatalogSource, load_catalog
 from access_control.caller_tokens import CALLER_MANAGER, BrokerCaller
-from access_control.identity import ContextVerifier
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.contracts.access_v2 import (
     AccountLinkV1,
@@ -45,7 +44,7 @@ from secure_tool_broker.mcp_config import BrokerMCPConfig
 from secure_tool_broker.mcp_runtime import BrokerMCPRuntime
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_verify_keys, signed_task_context
+from tests.broker_access_support import signed_task_context
 from tests.test_strands_mcp import _MockMcpSseService
 
 TOKEN = "synthetic-crawl4ai-token-$not-an-environment-reference"
@@ -153,9 +152,11 @@ def prepare(tmp_path: Path, monkeypatch, endpoint: str):
 
 
 def gate_for(config, store: AccessRepository) -> BrokerAccessGate:
+    from tests.broker_access_support import broker_authority_verifier
+
     return BrokerAccessGate(
         catalogs=CatalogSource(config.instance_root),
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=config.manager.team_id,
         access=None,
         links=store,

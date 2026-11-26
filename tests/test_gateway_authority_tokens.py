@@ -842,3 +842,387 @@ async def test_trust_reader_starts_without_nats_fails_closed_and_connects_in_bac
         stop.set()
         await asyncio.wait_for(task, timeout=2.0)
         tr_mod._WATCH_RETRY_SECONDS = old_retry
+
+
+# -- C17: Admitted non-terminal root task resave after restart -------------------------------------
+
+
+@pytest.mark.parametrize("case", ["cert_not_held", "no_verifier_yet"])
+def test_admitted_non_terminal_resave_succeeds_without_issuer_cert_or_verifier_c17(
+    tmp_path: Path, case: str
+) -> None:
+    """C17: re-saving an already-admitted running task after restart never aborts on missing trust."""
+
+    gateway, _transport, gw_host, _verifier, person_id, person_ref = _build_real_gateway(tmp_path)
+    access_repo = AccessRepository(gateway.config.manager_storage_settings)
+    db_path = tmp_path / "admitted_resave.db"
+    storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(db_path)}})
+    full_verifier = AuthorityTokenVerifier(fixtures.trust_store(), people=access_repo, clock=lambda: fixtures.NOW)
+    token = gw_host.sign_root_task_token(
+        person_ref=person_ref,
+        root_task_id="task_admitted_run",
+        request_id="task_context_admitted_run",
+    )
+
+    def _snap(state: ProgressState, text: str, tok: Any) -> str:
+        rec = TaskSnapshotRecord(
+            task_id="task_admitted_run",
+            state=state,
+            task=Task(task_id="task_admitted_run", task_type=MessageMetaType.REQUEST, problem_statement=text),
+            header=MessageHeader(message_id="m1", timestamp=fixtures.NOW.isoformat()),
+            meta=MessageMeta(gateway_context=GatewayContext(source="test", task_context=tok)),
+            owner_person_id=person_id,
+        )
+        return RuntimeSnapshotV3(schema_version=3, tasks=[rec], task_queue=["task_admitted_run"]).model_dump_json()
+
+    set_process_verifier(None)
+    repo = create_runtime_state_repository(storage, authority_verifier=full_verifier)
+    kw = dict(owner_agent_id="lead", owner_agent_name="Lead", team_id=tv.TEAM, owner_named_agent_type="TeamArchitect")
+    repo.save_task_runtime(
+        runtime_state_json=_snap(ProgressState.ACCEPTED, "v1", token),
+        expect_existing=False,
+        **kw,
+    )
+
+    # Simulate a restarted process whose trust store does not hold gateway-1 yet, or has no verifier bound yet.
+    restarted_verifier = (
+        AuthorityTokenVerifier(
+            fixtures.trust_store(remove=("certificates/gateway-1.json",)),
+            people=access_repo,
+            clock=lambda: fixtures.NOW,
+        )
+        if case == "cert_not_held"
+        else None
+    )
+    repo2 = create_runtime_state_repository(storage, authority_verifier=restarted_verifier)
+    repo2.save_task_runtime(
+        runtime_state_json=_snap(ProgressState.IN_PROGRESS, "v2", token),
+        expect_existing=True,
+        **kw,
+    )
+
+    with connect_sqlite(db_path) as conn:
+        rows = {
+            str(r[0]): str(r[1])
+            for r in conn.execute("SELECT request_id, state FROM change_requests").fetchall()
+        }
+    assert rows == {"task_context_admitted_run": "open"}
+
+    # Security invariant: a task originally saved WITHOUT a token cannot sneak in a forged token on resave.
+    unverified_rec = TaskSnapshotRecord(
+        task_id="task_unsigned",
+        state=ProgressState.ACCEPTED,
+        task=Task(task_id="task_unsigned", task_type=MessageMetaType.REQUEST, problem_statement="v1"),
+        header=MessageHeader(message_id="m2", timestamp=fixtures.NOW.isoformat()),
+        meta=MessageMeta(gateway_context=GatewayContext(source="test", task_context=None)),
+        owner_person_id=person_id,
+    )
+    repo.save_task_runtime(
+        owner_agent_id="lead_unsigned",
+        owner_agent_name="Lead",
+        team_id=tv.TEAM,
+        owner_named_agent_type="TeamArchitect",
+        runtime_state_json=RuntimeSnapshotV3(
+            schema_version=3, tasks=[unverified_rec], task_queue=["task_unsigned"]
+        ).model_dump_json(),
+        expect_existing=False,
+    )
+    forged = token.model_copy(update={"signature": "A" * 86})
+    sneaky_rec = unverified_rec.model_copy(
+        update={
+            "state": ProgressState.IN_PROGRESS,
+            "meta": MessageMeta(gateway_context=GatewayContext(source="test", task_context=forged)),
+        }
+    )
+    with pytest.raises(IdentityRejected):
+        repo2.save_task_runtime(
+            owner_agent_id="lead_unsigned",
+            owner_agent_name="Lead",
+            team_id=tv.TEAM,
+            owner_named_agent_type="TeamArchitect",
+            runtime_state_json=RuntimeSnapshotV3(
+                schema_version=3, tasks=[sneaky_rec], task_queue=["task_unsigned"]
+            ).model_dump_json(),
+            expect_existing=True,
+        )
+
+
+# -- C18: Non-blocking broker startup against closed NATS port and post-close reconnect ------------
+
+
+@pytest.mark.asyncio
+async def test_broker_startup_does_not_block_on_unreachable_nats_and_recovers_after_close_c18(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C18: broker startup does not block 120s when NATS is down, and TrustReader reconnects after close."""
+
+    import socket
+    import time
+
+    import assistant_cli
+    import custom_transport.protocol1.trust_reader as tr_mod
+    from custom_transport.nats_adapter import NatsTransportAdapter
+    from custom_transport.protocol1.bootstrap import write_bundle
+    from custom_transport.subjects import NatsSubjectMapper
+
+    # Pick an unbound local TCP port that immediately refuses connections.
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    closed_port = sock.getsockname()[1]
+    sock.close()
+
+    inst_root = tmp_path / "inst"
+    config = GatewayInstanceConfig.create(
+        instance_name="acme-c18",
+        instance_root=str(inst_root),
+        team_id="team_c18",
+        timezone="UTC",
+        display_name="Owner",
+    )
+    config.transport.nats_servers = [f"nats://127.0.0.1:{closed_port}"]
+    config.layout.ensure_directories()
+    config_path = config.save(inst_root / "instance_config.yaml")
+    write_bundle(config.layout.trust_bootstrap_path, tv._bootstrap_bundle_for_example())
+
+    # 1. Real NatsTransportAdapter.connect with trust_reader_transport_config fails fast (< 5s, not 120s).
+    adapter = NatsTransportAdapter(
+        config=trust_reader_transport_config(config, reader_id="secure-tool-broker"),
+        mapper=NatsSubjectMapper(team_id="team_c18"),
+    )
+    t0 = time.monotonic()
+    with pytest.raises(Exception):
+        await adapter.connect(reconcile_topology=False)
+    assert time.monotonic() - t0 < 5.0
+
+    # 2. Broker service startup builds its gate and hands off to run_secure_tool_broker immediately (< 3s).
+    observed: dict[str, Any] = {}
+
+    async def _fake_run_broker(**kwargs: Any) -> None:
+        observed.update(kwargs)
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", "test-token")
+    monkeypatch.setattr(assistant_cli, "run_secure_tool_broker", _fake_run_broker)
+    t1 = time.monotonic()
+    await assistant_cli._run_secure_tool_broker_service(
+        str(config_path),
+        host="127.0.0.1",
+        port=18767,
+    )
+    assert time.monotonic() - t1 < 3.0
+    assert observed["access_gate"] is not None
+    assert observed["trust_reader"] is not None
+    assert observed["trust_reader"].connected is False
+
+    # 3. Once connected, if the NATS connection permanently closes, watch_and_refresh resets records and reconnects.
+    gw_cert_raw = (fixtures.TRUST / "certificates" / "gateway-1.json").read_bytes()
+    rev_raw = (fixtures.TRUST / "revocations" / "install_example.json").read_bytes()
+    entries: dict[str, bytes] = {f"revocations.{tv.INSTALLATION}": rev_raw}
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.is_closed = False
+
+    class _ClosingRecords(tv._TestStateRecords):
+        def __init__(self, nc: _FakeConn, data: dict[str, bytes], trust: Any) -> None:
+            super().__init__(data, trust)
+            self._nc = nc
+
+        async def watch(self, record: str, pattern: str):  # type: ignore[override]
+            while not self._nc.is_closed:
+                await asyncio.sleep(0.01)
+            raise RuntimeError("nats: connection closed")
+            yield  # pragma: no cover
+
+    conns: list[_FakeConn] = []
+    reconnected = asyncio.Event()
+
+    async def _connect_twice() -> Any:
+        conn = _FakeConn()
+        conns.append(conn)
+        if len(conns) >= 2:
+            entries[f"host.{tv.INSTALLATION}.gateway-1.1"] = gw_cert_raw
+            reconnected.set()
+        return conn
+
+    monkeypatch.setattr(
+        tr_mod.StateRecords,
+        "on_connection",
+        classmethod(lambda cls, nc, _id, trust: _ClosingRecords(nc, entries, trust)),
+    )
+
+    reader = TrustReader.open(
+        config.layout,
+        "secure-tool-broker-reconnect",
+        nc=None,
+        connect=_connect_twice,
+        clock=lambda: fixtures.NOW,
+    )
+    old_retry = tr_mod._WATCH_RETRY_SECONDS
+    old_upkeep = tr_mod._UPKEEP_CHECK_INTERVAL
+    tr_mod._WATCH_RETRY_SECONDS = 0.02
+    tr_mod._UPKEEP_CHECK_INTERVAL = timedelta(milliseconds=20)
+    stop = asyncio.Event()
+    watch_task = asyncio.create_task(reader.watch_and_refresh(stop))
+    try:
+        for _ in range(50):
+            if len(conns) == 1 and reader.connected:
+                break
+            await asyncio.sleep(0.01)
+        assert len(conns) == 1 and reader.connected
+        # Simulate permanent NATS connection close after a long outage.
+        conns[0].is_closed = True
+        await asyncio.wait_for(reconnected.wait(), timeout=2.0)
+        token = root_task_token(
+            tv._identity_for("gateway-1", "test-gateway-key-1"),
+            team=tv.TEAM,
+            root_task_id="t_reconn",
+            request_id="task_context_reconn",
+            person_ref=tv.ALICE_REF,
+            issued=fixtures.NOW,
+        )
+        verifier = AuthorityTokenVerifier(reader, people=tv._default_people(), clock=lambda: fixtures.NOW)
+        for _ in range(50):
+            try:
+                verified = verifier.verify_root_task(token, team_id=tv.TEAM, now=fixtures.NOW, require_issuer="gateway")
+                assert verified.person_id == "usr_alice"
+                break
+            except IdentityRejected:
+                await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("TrustReader did not re-sync gateway-1 after reconnecting")
+    finally:
+        stop.set()
+        await asyncio.wait_for(watch_task, timeout=2.0)
+        tr_mod._WATCH_RETRY_SECONDS = old_retry
+        tr_mod._UPKEEP_CHECK_INTERVAL = old_upkeep
+
+
+# -- C19: Never publish unsigned person requests; maintenance installs wait for host join ----------
+
+
+@pytest.mark.asyncio
+async def test_gateway_refuses_unsigned_person_request_and_maintenance_waits_for_join_c19(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C19: an unjoined host refuses to publish a person's request and returns a plain notice; maintenance waits."""
+
+    from assistant_gateway.application.request_context import SIGNER_UNAVAILABLE_USER_MESSAGE
+    from assistant_gateway.application.thread_guidance import GuidanceDelivery
+
+    # 1. Host that never joins: interactive request is NOT published and person gets a plain notice.
+    (tmp_path / "unjoined").mkdir(parents=True, exist_ok=True)
+    gateway, transport, _gw_host, _verifier, person_id, _person_ref = _build_real_gateway(tmp_path / "unjoined")
+
+    class _NeverReadySigner:
+        async def ready(self, timeout: float = 5.0) -> None:
+            raise TimeoutError("host never joined")
+
+        def sign_root_task_token(self, **_kwargs: Any) -> AuthorityTokenRecord:
+            raise GatewayHostUnavailable("gateway host is not joined yet")
+
+    gateway._request_context_service._token_signer = _NeverReadySigner()
+    route = GatewayRequestRoute(
+        channel_name="telegram",
+        user_id="tg_alice",
+        chat_id="chat_alice",
+        canonical_user_id=person_id,
+    )
+    session = gateway._session_service.resolve_session(
+        requested_session_key="telegram:chat_alice",
+        default_session_key="telegram:chat_alice",
+        manager_agent_id="agent_lead_1",
+        owner_canonical_user_id=person_id,
+        default_owner_canonical_user_id=person_id,
+        enforce_owner_scope=False,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="assistant_gateway.application.request_context"):
+        response = await gateway._interactive_submission_service.submit(
+            GatewayInteractiveSubmissionRequest(
+                text="Please run my report.",
+                session_key=session.session_key,
+                route=route,
+            )
+        )
+
+    assert transport.durable == [], "unsigned person request must never be published"
+    assert SIGNER_UNAVAILABLE_USER_MESSAGE in response.text
+    assert "event=gateway_authority_token_unavailable" in caplog.text
+    assert f"person_id={person_id}" in caplog.text
+
+    # Held guidance also stays held (never published unsigned) when host is unavailable.
+    steering = TaskSteering(
+        steering_type=TaskSteeringType.PROACTIVE_GUIDANCE,
+        message="Wait, use Q2 instead.",
+        target_task_id="task_running",
+        target_correlation_id="corr_running",
+    )
+    gateway.state_store.record_request(
+        correlation_id="corr_running",
+        session_key=session.session_key,
+        request_kind="interactive",
+        request_text="Original",
+        conversation_id=session.conversation_id,
+        followup_to_task_id=None,
+        active_task_id="task_running",
+        run_state="running",
+    )
+    held = SimpleNamespace(
+        correlation_id="corr_steer_c19",
+        target_correlation_id="corr_running",
+        session_key=session.session_key,
+        conversation_id=session.conversation_id,
+        steering_json=steering.model_dump_json(),
+    )
+    attempt = await gateway._thread_guidance._send_attempt(held)  # type: ignore[arg-type]
+    assert attempt.outcome is GuidanceDelivery.UNCONFIRMED
+    assert transport.operational == []
+
+    # 2. Maintenance installs wait for the host join and publish signed envelopes.
+    (tmp_path / "delayed").mkdir(parents=True, exist_ok=True)
+    gw2, transport2, gw_host2, verifier2, person_id2, _person_ref2 = _build_real_gateway(tmp_path / "delayed")
+    gw2.config.heartbeat.enabled = True
+    gw2._maintenance_schedules._settings = gw2._maintenance_schedules._settings.__class__(
+        instance_name=gw2._maintenance_schedules._settings.instance_name,
+        response_route=gw2._maintenance_schedules._settings.response_route,
+        user_display_name=gw2._maintenance_schedules._settings.user_display_name,
+        request_timezone=gw2._maintenance_schedules._settings.request_timezone,
+        default_owner_canonical_user_id=gw2._maintenance_schedules._settings.default_owner_canonical_user_id,
+        heartbeat=gw2._maintenance_schedules._settings.heartbeat.__class__(
+            enabled=True,
+            schedule_id="heartbeat_launcher_test",
+            interval_seconds=60,
+            source_id="hb_src",
+        ),
+        specialist_schedules=(),
+        internal_improvement=gw2._maintenance_schedules._settings.internal_improvement,
+    )
+    joined_gate = asyncio.Event()
+
+    class _DelayedJoinSigner:
+        async def ready(self, timeout: float = 5.0) -> None:
+            await asyncio.wait_for(joined_gate.wait(), timeout=timeout)
+
+        def sign_root_task_token(self, **kwargs: Any) -> AuthorityTokenRecord:
+            if not joined_gate.is_set():
+                raise GatewayHostUnavailable("not joined yet")
+            return gw_host2.sign_root_task_token(**kwargs)
+
+    gw2._request_context_service._token_signer = _DelayedJoinSigner()
+
+    async def _finish_join() -> None:
+        await asyncio.sleep(0.05)
+        joined_gate.set()
+
+    join_task = asyncio.create_task(_finish_join())
+    try:
+        await gw2._maintenance_schedules.ensure_all()
+    finally:
+        await join_task
+
+    assert len(transport2.durable) >= 1
+    for env, _route in transport2.durable:
+        tok = env.msg_meta.gateway_context.task_context
+        assert isinstance(tok, AuthorityTokenRecord)
+        verified = verifier2.verify_root_task(tok, team_id=tv.TEAM, now=fixtures.NOW, require_issuer="gateway")
+        assert verified.person_id == person_id2

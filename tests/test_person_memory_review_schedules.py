@@ -31,7 +31,6 @@ from typing import Any
 
 import pytest
 
-from access_control.identity import ContextVerifier
 from assistant_gateway.application.delivery_service import GatewayDeliveryService
 from assistant_gateway.application.identity_service import (
     GatewayIdentityService,
@@ -96,7 +95,9 @@ from id_generation import (
 )
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import (
-    context_signer,
+    BrokerGatewayTokenSigner,
+    broker_authority_verifier,
+    broker_people_store,
     forget_task_context_keys,
     use_scheduler_key,
 )
@@ -278,7 +279,8 @@ def _gateway(
                 users_enabled=users_enabled,
             ),
             identity=_identity_service(store),
-            context_signer=context_signer(),
+            token_signer=BrokerGatewayTokenSigner(team_id=TEAM),
+            person_ref_resolver=lambda pid: broker_people_store().register(TEAM, pid, roles=("owner",)).person_ref,
         ),
         delivery=GatewayDeliveryService(repository=store.delivery_repository, unit_of_work_factory=store),
         manager=world.route,  # type: ignore[arg-type]
@@ -315,13 +317,13 @@ def test_gateway_start_installs_a_pair_owned_by_each_active_person_only(world) -
 
     expected = {CORE_ID} | {_usermem_id(p) for p in ACTIVE} | {_stale_id(p) for p in ACTIVE}
     assert set(stored) == expected  # nothing for Dora (disabled) or Remy (removed)
-    verifier = ContextVerifier.from_env()
+    verifier = broker_authority_verifier()
     for person in ACTIVE:
         for schedule_id in (_usermem_id(person), _stale_id(person)):
             schedule = stored[schedule_id]
             context = schedule.payload_meta.gateway_context
             assert context.canonical_user_id == person
-            assert verifier.verify(context.task_context, team_id=TEAM).person_id == person
+            assert verifier.verify_root_task(context.task_context, team_id=TEAM, require_issuer="gateway").person_id == person
             assert schedule.management_class == ScheduleManagementClass.SYSTEM
             assert schedule.claim_named_agent_type == "MemReviewAgent"
             assert is_person_system_schedule(schedule)
@@ -572,7 +574,7 @@ def test_a_new_per_person_kind_is_installed_for_each_active_person_like_memory_r
 
     curation = {person_system_schedule_id(CURATION_ID_PREFIX, INSTANCE, person) for person in ACTIVE}
     assert set(stored) == {CORE_ID} | {_usermem_id(p) for p in ACTIVE} | {_stale_id(p) for p in ACTIVE} | curation
-    verifier = ContextVerifier.from_env()
+    verifier = broker_authority_verifier()
     for person in ACTIVE:
         schedule = stored[person_system_schedule_id(CURATION_ID_PREFIX, INSTANCE, person)]
         context = schedule.payload_meta.gateway_context
@@ -580,7 +582,7 @@ def test_a_new_per_person_kind_is_installed_for_each_active_person_like_memory_r
         assert (schedule.management_class, schedule.system_schedule_kind) == (ScheduleManagementClass.SYSTEM, STAND_IN_KIND)
         assert schedule.claim_named_agent_type == schedule.payload_meta.to_named_agent_type == CURATOR_AGENT_TYPE
         assert (context.canonical_user_id, context.delivery_mode) == (person, CURATOR_DELIVERY_MODE)
-        assert verifier.verify(context.task_context, team_id=TEAM).person_id == person
+        assert verifier.verify_root_task(context.task_context, team_id=TEAM, require_issuer="gateway").person_id == person
         assert context.session_key == person_maintenance_session_key(person)
         assert is_person_system_schedule(schedule)
 

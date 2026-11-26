@@ -125,12 +125,21 @@ class _Chat:
         )
 
     def _start(self) -> UserGateway:
+        from tests.broker_access_support import bind_gateway_test_signer
+
         gateway = UserGateway(
             self.config,
             output_sink=None,
             state_store=GatewayStateStore(str(self.tmp_path / "state.db")),
             event_sink=self.shown.append,
             manager_transport=self.lead,
+        )
+        bind_gateway_test_signer(gateway)
+        gateway.state_store.replace_channel_binding(
+            canonical_user_id=self.config.user.canonical_user_id,
+            channel_name="telegram",
+            external_user_id=TELEGRAM_ID,
+            chat_scope="",
         )
         gateway._manager_client.set_runtime(self.lead, use_for_outbound=False)
         self.lead.gateway = gateway

@@ -177,6 +177,7 @@ def test_every_process_gets_the_instance_zone_unless_the_environment_sets_tz(tmp
 @pytest.mark.asyncio
 async def test_a_schedule_made_in_chat_carries_the_persons_own_zone() -> None:
     from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
     from assistant_gateway.application.schedule_management import (
         GatewayScheduleApplication,
@@ -206,6 +207,7 @@ async def test_a_schedule_made_in_chat_carries_the_persons_own_zone() -> None:
             canonical_user_id=lambda route: "usr_ann",
             users_enabled=True,
             requester_presentation_for_session=lambda session, route: SimpleNamespace(timezone=BERLIN),
+            ensure_signer_ready=AsyncMock(),
             build_gateway_context=lambda **_kwargs: GatewayContext(canonical_user_id="usr_ann"),
         ),
         delivery=SimpleNamespace(register_scheduled_request=lambda **_kwargs: None),

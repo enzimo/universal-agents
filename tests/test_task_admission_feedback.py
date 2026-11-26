@@ -49,7 +49,7 @@ async def test_new_thread_is_visible_and_durable_before_the_active_turn_finishes
     from custom_agents.manager_control_runtime import _runtime_work_roots
     from custom_agents.pending_work_runtime import close_pending_work
     from custom_messages.contracts.envelope_v1 import MessageEnvelope
-    from tests.broker_access_support import context_signer
+    from tests.broker_access_support import signed_task_token
     from tests.change_approval_support import use_signed_contexts
 
     use_signed_contexts(monkeypatch)
@@ -57,8 +57,8 @@ async def test_new_thread_is_visible_and_durable_before_the_active_turn_finishes
     agent.paused = paused
     monkeypatch.setattr(agent, "_refresh_self_agent_state", AsyncMock())
     task, header, meta = _request("new-thread")
-    meta.gateway_context.task_context = context_signer().issue(
-        team_id=agent.team_id, person_id="alice", person_roles=("member",),
+    meta.gateway_context.task_context = signed_task_token(
+        "alice", team_id=agent.team_id, roles=("member",), root_task_id=task.task_id,
     )
     header.to_routing_path = agent.id
     envelope = MessageEnvelope(msg_content=task, msg_header=header, msg_meta=meta)

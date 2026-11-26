@@ -23,7 +23,7 @@ from tests.live_skill_installation_canary import DEFAULT_BINARY, _lead, _told, r
 @pytest.fixture
 def lead(tmp_path: Path):
     config = GatewayInstanceConfig.create(instance_name="skill-installation-canary", instance_root=str(tmp_path / "instance"),
-                                          team_id="team_skill_installation_canary", timezone="UTC")
+                                          team_id="team_skill_canary", timezone="UTC")
     config_path = config.save(tmp_path / "instance" / "instance_config.yaml")
     return _lead(config, config_path, DEFAULT_BINARY)
 

@@ -23,7 +23,7 @@ from custom_tools.runtime_context import _agent_ctx, get_agent_ref
 from tests.task_work_support import set_agent_ref
 from custom_tools.providers.communication import notify_user
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 from tests.pending_work_support import call_tool_on_agent_loop
 
@@ -222,10 +222,12 @@ def test_notify_user_records_scheduled_notification_in_memory(
             schedule_memory=ScheduleTaskMemory(schedule_kind="live_sports_monitor"),
         )
     )
+    from tests.broker_access_support import signed_task_token
+
     active_context = GatewayContext(
         canonical_user_id="usr_notify_owner",
-        task_context=context_signer().issue(
-            team_id="test_team", person_id="usr_notify_owner", person_roles=("member",)
+        task_context=signed_task_token(
+            "usr_notify_owner", team_id="test_team", roles=("member",)
         ),
         session_key="source_session",
         channel_name="telegram",
@@ -320,8 +322,8 @@ def test_notify_user_auto_targets_active_web_chat_thread(tmp_path: Path, monkeyp
         chat_id="web-chat",
         delivery_mode="interactive",
         original_message_id="browser_msg_1",
-        task_context=context_signer().issue(
-            team_id="test_team", person_id="canonical_test_user", person_roles=("member",)
+        task_context=signed_task_token(
+            "canonical_test_user", team_id="test_team", roles=("member",)
         ),
     )
     team_comms = SimpleNamespace(send_message=AsyncMock())

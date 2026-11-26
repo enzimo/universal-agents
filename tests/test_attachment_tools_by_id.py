@@ -44,7 +44,6 @@ import pytest
 import pytest_asyncio
 
 from access_control import safe_open
-from access_control.identity import ENV_VERIFY_KEYS
 from assistant_gateway.inbound_attachments import (
     InboundAttachmentStoragePolicy,
     store_inbound_attachment_bytes_with_policy,
@@ -66,7 +65,7 @@ from custom_tools import user_attachment_tools
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
 from tests.task_work_support import use_agent
 from tests.test_conversation_attachments import saved_before_upgrade
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, SESSION, _admit, _answer, _lead, _payload
@@ -84,8 +83,8 @@ TOOLS_LOGGER = "custom_tools.task_uploads"
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 

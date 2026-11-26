@@ -64,7 +64,7 @@ from custom_tools.providers.context_memory import (
 from tests.task_work_support import bind_task, set_agent_ref
 from storage.access_repository import AccessRepository
 from storage.knowledge_repository import create_knowledge_repository
-from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import context_signer, forget_task_context_keys
 from tests.knowledge_support import BACKENDS, knowledge_storage
 from tests.scheduled_run_support import NOW
 
@@ -138,9 +138,12 @@ def _record_people(tasks: TaskManager, standings: dict[str, PersonStanding]) -> 
 
 @pytest.fixture
 def keys(monkeypatch: pytest.MonkeyPatch):
-    """This process holds the scheduler key and trusts the gateway's, as the manager process does."""
+    """Trust the test protocol 1 authority (gateway + scheduler)."""
 
-    use_scheduler_key(monkeypatch)
+    from tests.broker_access_support import use_broker_authority_verifier
+
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
     set_agent_ref(None)
@@ -157,11 +160,13 @@ def world(tmp_path: Path, keys):
 def _person_meta(person_id: str) -> MessageMeta:
     """A request's meta as the gateway sends it: the person and their signed context."""
 
+    from tests.broker_access_support import signed_task_token
+
     return MessageMeta(
         from_agent_name="gateway",
         gateway_context=GatewayContext(
             canonical_user_id=person_id,
-            task_context=context_signer().issue(team_id=TEAM, person_id=person_id, person_roles=("admin",)),
+            task_context=signed_task_token(person_id, team_id=TEAM, roles=("admin",)),
         ),
     )
 
@@ -169,12 +174,12 @@ def _person_meta(person_id: str) -> MessageMeta:
 def _system_meta() -> MessageMeta:
     """A maintenance run's meta: signed by the scheduler for no person."""
 
-    signer = scheduler_signer()
-    assert signer is not None
+    from tests.broker_access_support import signed_scheduler_token
+
     return MessageMeta(
         from_agent_name="scheduler",
         gateway_context=GatewayContext(
-            task_context=signer.issue(team_id=TEAM, person_id=None, schedule_id="sched_maintenance")
+            task_context=signed_scheduler_token(None, team_id=TEAM, schedule_id="sched_maintenance")
         ),
     )
 

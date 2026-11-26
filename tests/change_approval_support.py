@@ -31,6 +31,7 @@ from custom_tools.providers.changes import apply_change
 from tests.task_work_support import bind_task, set_agent_ref
 from tests.broker_access_support import (
     forget_task_context_keys,
+    signed_scheduler_token,
     signed_task_token,
     use_broker_authority_verifier,
 )
@@ -92,7 +93,10 @@ class SignedTaskManager:
         self.storage_settings = storage_settings
         self.current_task_id = task_id
         self.person_id = person_id
-        signed = signed_task_token(person_id, team_id=team_id, roles=roles, root_task_id=task_id)
+        if person_id is not None:
+            signed = signed_task_token(person_id, team_id=team_id, roles=roles, root_task_id=task_id)
+        else:
+            signed = signed_scheduler_token(None, team_id=team_id, root_task_id=task_id, schedule_id=f"sched_{task_id}")
         # canonical_user_id locates the person's task folders (workspace scope).
         self.meta = SimpleNamespace(
             gateway_context=SimpleNamespace(task_context=signed, canonical_user_id=person_id),

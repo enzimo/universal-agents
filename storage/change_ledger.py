@@ -97,10 +97,6 @@ from pydantic import MISSING
 from access_control.authority_verifier import (
     AuthorityTokenVerifier,
     IdentityRejected,
-    REFUSAL_NO_PEOPLE_STORE,
-    REFUSAL_NO_TRUST_STORE,
-    REFUSAL_PERSON_UNKNOWN,
-    REFUSAL_UNKNOWN_ISSUER,
     get_process_verifier,
 )
 from custom_messages.wire.authority_bindings import (
@@ -453,14 +449,6 @@ def close_request(
     )
 
 
-_ADMITTED_CLOSE_TRUST_GAP_CODES = frozenset({
-    REFUSAL_NO_TRUST_STORE,
-    REFUSAL_UNKNOWN_ISSUER,
-    REFUSAL_NO_PEOPLE_STORE,
-    REFUSAL_PERSON_UNKNOWN,
-})
-
-
 def record_task_request_state(
     conn: Any,
     dialect: SqlDialect,
@@ -494,6 +482,39 @@ def record_task_request_state(
     terminal = task.state in {
         ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED,
     }
+    if admitted:
+        # Already admitted in this store with this exact token and owner
+        # (require_same_request_identity already verified immutability against
+        # the saved snapshot). Reuse its request id directly so restarts before
+        # certificate sync or verifier binding never abort snapshot saves (C17).
+        if (
+            not isinstance(signed.bound_to, AuthorityTokenBoundToRootTaskRecord)
+            or signed.schedule_id is not MISSING
+            or signed.person is MISSING
+            or is_schedule_permit_binding(signed.bound_to.id)
+        ):
+            return
+        request_id = signed.bound_to.request_id
+        logger.debug(
+            "Reusing admitted root request identity for snapshot update. "
+            "event=change_ledger_admitted_token_reused task_id=%s team_id=%s request_id=%s terminal=%s",
+            task.task_id,
+            team_id,
+            request_id,
+            terminal,
+        )
+        if terminal:
+            state = RequestState.STOPPED if task.state is ProgressState.CANCELLED else RequestState.ENDED
+            close_request(
+                conn, dialect, team_id=team_id, request_id=request_id,
+                person_id=task.owner_person_id, now=now, state=state,
+            )
+            prune(conn, dialect, team_id=team_id, before=now - LEDGER_RETENTION)
+        else:
+            open_request(
+                conn, dialect, team_id=team_id, request_id=request_id, person_id=task.owner_person_id, now=now
+            )
+        return
     active_verifier = verifier or get_process_verifier() or AuthorityTokenVerifier(None)
     try:
         verified = active_verifier.verify_historical_root_task(
@@ -502,31 +523,6 @@ def record_task_request_state(
             now=now,
         )
     except IdentityRejected as exc:
-        if (
-            admitted
-            and terminal
-            and exc.code in _ADMITTED_CLOSE_TRUST_GAP_CODES
-            and isinstance(signed.bound_to, AuthorityTokenBoundToRootTaskRecord)
-            and signed.schedule_id is MISSING
-            and signed.person is not MISSING
-            and not is_schedule_permit_binding(signed.bound_to.id)
-        ):
-            logger.warning(
-                "Closing an already-admitted root request without its issuer trust record so "
-                "terminalization and stop commands can complete; this grants no access. "
-                "event=change_ledger_close_admitted_without_trust task_id=%s team_id=%s code=%s request_id=%s",
-                task.task_id,
-                team_id,
-                exc.code,
-                signed.bound_to.request_id,
-            )
-            state = RequestState.STOPPED if task.state is ProgressState.CANCELLED else RequestState.ENDED
-            close_request(
-                conn, dialect, team_id=team_id, request_id=signed.bound_to.request_id,
-                person_id=task.owner_person_id, now=now, state=state,
-            )
-            prune(conn, dialect, team_id=team_id, before=now - LEDGER_RETENTION)
-            return
         logger.warning(
             "Ignored unverified request identity while saving a task. "
             "event=change_ledger_task_identity_rejected task_id=%s team_id=%s code=%s",

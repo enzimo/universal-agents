@@ -88,11 +88,20 @@ class AuthorizationOff(RuntimeError):
 
 
 def _default_agent_trust_source() -> Any:
-    """Resolve the active ``AgentProcessHost`` dynamically so cached ``RuntimeAccess`` picks up host startup."""
+    """Resolve the active ``AgentProcessHost`` dynamically so cached ``RuntimeAccess`` picks up host startup.
+
+    Ignores messaging-only process host doubles that do not expose a trust store
+    (``trust_state()`` or ``host_certificate``), so an explicit process verifier can supply trust.
+    """
 
     from custom_agents.agent_requests import process_host
 
-    return process_host()
+    host = process_host()
+    if host is None:
+        return None
+    if callable(getattr(host, "trust_state", None)) or hasattr(host, "host_certificate"):
+        return host
+    return None
 
 
 @dataclass

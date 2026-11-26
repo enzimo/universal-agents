@@ -28,7 +28,7 @@ from custom_tools.providers.schedules import (
 from tests.task_work_support import bind_task, set_agent_ref
 from custom_messages.records.objectives import objective_version
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 from tests.tool_result_support import tool_json
 
@@ -110,8 +110,8 @@ def _add_person_task(
                 session_key=f"session_{person_id}",
                 canonical_user_id=person_id,
                 heartbeat_source_id="hb_source_objective",
-                task_context=context_signer().issue(
-                    team_id="team_1", person_id=person_id, person_roles=roles
+                task_context=signed_task_token(
+                    person_id, team_id="team_1", roles=roles, root_task_id=task_id
                 ),
             ),
         ),
@@ -409,11 +409,15 @@ def test_objective_lifecycle_cannot_disable_linked_system_schedule(
 def _add_no_person_task(manager: TaskManager, task_id: str, *, signed: bool = True) -> Task:
     """A task that works for no person; unsigned, it has no verified identity at all."""
 
+    from tests.broker_access_support import signed_scheduler_token
+
     task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="System work.")
     gateway_context = (
         GatewayContext(
             session_key="session_system",
-            task_context=context_signer().issue(team_id="team_1", person_id=None),
+            task_context=signed_scheduler_token(
+                None, team_id="team_1", root_task_id=task_id, schedule_id=f"sched_{task_id}"
+            ),
         )
         if signed
         else None

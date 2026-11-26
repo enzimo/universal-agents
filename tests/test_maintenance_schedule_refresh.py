@@ -71,7 +71,8 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, RequesterType, SystemScheduleKind
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import (
-    context_signer,
+    BrokerGatewayTokenSigner,
+    broker_people_store,
     forget_task_context_keys,
     use_scheduler_key,
 )
@@ -176,7 +177,8 @@ def _gateway(identity: _Identity, route: _ManagerRoute, *, memory_review: bool =
                 users_enabled=True,
             ),
             identity=identity,  # type: ignore[arg-type]
-            context_signer=context_signer(),
+            token_signer=BrokerGatewayTokenSigner(team_id=TEAM),
+            person_ref_resolver=lambda pid: broker_people_store().register(TEAM, pid, roles=("owner",)).person_ref,
         ),
         delivery=SimpleNamespace(upsert_scheduled_target=lambda **_: None),
         manager=route,  # type: ignore[arg-type]

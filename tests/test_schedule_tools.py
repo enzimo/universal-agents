@@ -62,7 +62,6 @@ from custom_tools.providers.schedules import (
 )
 from tests.task_work_support import set_agent_ref
 from tests.pending_work_support import call_tool_on_agent_loop
-from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
 
 
@@ -76,10 +75,12 @@ def signed_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
 def signed_gateway_context(canonical_user_id: str, **fields) -> GatewayContext:
     """A gateway context signed for the person, as the gateway sends it."""
 
+    from tests.broker_access_support import signed_task_token
+
     return GatewayContext(
         canonical_user_id=canonical_user_id,
-        task_context=context_signer().issue(
-            team_id="team_1", person_id=canonical_user_id, person_roles=("owner",)
+        task_context=signed_task_token(
+            canonical_user_id, team_id="team_1", roles=("owner",)
         ),
         **fields,
     )

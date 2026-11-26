@@ -11,7 +11,7 @@ from custom_messages.contracts.routing_v1 import GatewayContext
 from custom_tools.providers.context_memory import create_focused_conversation
 from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 
 TEAM = "team_test"
@@ -51,8 +51,8 @@ class _FakeTaskManager:
                     canonical_user_id=self._canonical_user_id,
                     channel_name="telegram",
                     chat_id="chat_test",
-                    task_context=context_signer().issue(
-                        team_id=TEAM, person_id=self._canonical_user_id, person_roles=("member",)
+                    task_context=signed_task_token(
+                        self._canonical_user_id, team_id=TEAM, roles=("member",)
                     ),
                 ),
             )

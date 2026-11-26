@@ -50,6 +50,7 @@ from assistant_gateway.application.local_responses import GatewayLocalResponseFa
 from assistant_gateway.application.manager_client import GatewayManagerClient
 from assistant_gateway.application.ports import GatewayClock, GatewayEventOutput
 from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
     GatewayRequestContextService,
     GatewayRequestRoute,
 )
@@ -265,7 +266,16 @@ class GatewayThreadGuidance:
         if not manager_id:
             return _Attempt(GuidanceDelivery.NO_LEAD, target_task_id=target.active_task_id)
         await self._request_context.ensure_signer_ready()
-        envelope = await asyncio.to_thread(self._envelope, held, target, manager_id)
+        try:
+            envelope = await asyncio.to_thread(self._envelope, held, target, manager_id)
+        except GatewayAuthorityTokenUnavailable:
+            self._logger.warning(
+                "Held guidance could not be signed yet; keeping it held to retry once the gateway host joins. "
+                "event=gateway_held_guidance_signer_unavailable correlation_id=%s target_task_id=%s",
+                held.correlation_id,
+                target.active_task_id or "-",
+            )
+            return _Attempt(GuidanceDelivery.UNCONFIRMED, target_task_id=target.active_task_id)
         if envelope is None:
             return _Attempt(GuidanceDelivery.REQUEST_FINISHED)
         status_envelope = await self._publish_and_wait(held, envelope, target)

@@ -37,7 +37,6 @@ from tests.task_work_support import set_agent_ref
 from runtime_settings.schedule_workers import ScheduleWorkersConfig
 from strands.interrupt import InterruptException
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_verify_keys
 from storage.worker_handback_repository import WorkerHandbackRepository
 
 NOW = lambda: datetime.now(timezone.utc).isoformat()  # noqa: E731
@@ -563,10 +562,12 @@ async def test_lead_rejects_handbacks_it_cannot_attribute(lead, handback, sender
 def access_storage(tmp_path, monkeypatch):
     """The manager database the access store shares, as in test_access_request_tools."""
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
+
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
     set_agent_ref(None)
 
 

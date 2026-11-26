@@ -320,17 +320,14 @@ async def test_the_real_universal_agent_reports_its_running_turns_request_to_its
     """A1 agent side (critique C13): a real agent's turn for a person's request reaches its host through
     report_agent_state, with the request's root task id at the turn's start and none at its end."""
 
-    from access_control.identity import ISSUER_GATEWAY, ContextSigner, ContextVerifier, generate_signing_key
-    from access_control.identity import verify_keys_value
     from custom_agents.strands_agent import UniversalAgent
     from custom_messages.contracts.routing_v1 import GatewayContext
     from custom_tools.runtime_context import task_work
+    from tests.broker_access_support import broker_authority_verifier, signed_task_token
 
-    private, public = generate_signing_key(ISSUER_GATEWAY)
-    signed = ContextSigner.from_value(ISSUER_GATEWAY, private).issue(
-        team_id="team_one", person_id="person_ann", root_task_id="task_request_1")
+    signed = signed_task_token("person_ann", team_id="team_one", root_task_id="task_request_1")
     monkeypatch.setattr("custom_agents.access_runtime.runtime_access", lambda agent: SimpleNamespace(
-        verifier=ContextVerifier.from_value(verify_keys_value([public])), team_id="team_one"))
+        verifier=broker_authority_verifier(), team_id="team_one"))
     reports = []
     monkeypatch.setattr(agent_requests, "_PROCESS_HOST", SimpleNamespace(report=lambda *args: reports.append(args)))
     meta = SimpleNamespace(gateway_context=GatewayContext(task_context=signed))

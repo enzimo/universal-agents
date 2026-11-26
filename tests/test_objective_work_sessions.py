@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
-from access_control.identity import ContextSigner, ISSUER_SCHEDULER
 from custom_agents.objective_work_config import load_objective_work_execution_config
 from custom_agents.sdk.strands.turn import (
     _finalize_objective_work_invocation,
@@ -58,7 +57,7 @@ from custom_tools.providers.objectives import objectives
 from tests.task_work_support import bind_task, set_agent_ref
 from custom_tools.tool_stop import ToolStop
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_scheduler_token, signed_task_token
 from tests.change_approval_support import use_signed_contexts
 from tests.tool_result_support import sdk_tool_result, tool_json, tool_yaml
 
@@ -71,7 +70,7 @@ def _signed_task_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _signed(person_id: str, *, team_id: str = "team"):
-    return context_signer().issue(team_id=team_id, person_id=person_id, person_roles=("owner",))
+    return signed_task_token(person_id, team_id=team_id, roles=("owner",))
 
 
 def _write_policy(path: Path, **overrides: object) -> Path:
@@ -139,12 +138,11 @@ def _objective(manager: TaskManager, *, schedule_id: str | None = None):
     if schedule_id is None:
         task_context = _signed("objective-user", team_id=manager.identity.team_id)
     else:
-        signer = ContextSigner.from_env(ISSUER_SCHEDULER)
-        assert signer is not None
-        task_context = signer.issue(
+        task_context = signed_scheduler_token(
+            "objective-user",
             team_id=manager.identity.team_id,
-            person_id="objective-user",
-            person_roles=("owner",),
+            roles=("owner",),
+            root_task_id=task.task_id,
             schedule_id=schedule_id,
         )
     assert manager.add_task(
@@ -1019,7 +1017,7 @@ def test_team_profile_application_rechecks_current_administrator_authority(
     assert manager.add_task(
         system, MessageHeader(from_agent_id="system"),
         MessageMeta(from_agent_name="system", conversation_id="team_work", gateway_context=GatewayContext(
-            task_context=context_signer().issue(team_id="team", person_id=None),
+            task_context=signed_scheduler_token(None, team_id="team", root_task_id=system.task_id),
         )), owner_person_id=None,
     )
     team = manager.create_objective(task_id=system.task_id, title="Team outcome", desired_outcome="x", why="y")
@@ -1041,8 +1039,8 @@ def test_team_profile_application_rechecks_current_administrator_authority(
     before = manager.get_objective(team.objective_id).model_dump(mode="json")
     schedule_count = len(store.get_all())
     meta = manager.get_task_info(source.task_id).meta.model_copy(deep=True)
-    meta.gateway_context.task_context = context_signer().issue(
-        team_id="team", person_id="objective-user", person_roles=("member",),
+    meta.gateway_context.task_context = signed_task_token(
+        "objective-user", team_id="team", roles=("member",), root_task_id="member_acceptance",
     )
     member = Task(task_id="member_acceptance", task_type=MessageMetaType.REQUEST, problem_statement="Apply profile.")
     assert manager.add_task(member, manager.get_task_info(source.task_id).header, meta, owner_person_id="objective-user")

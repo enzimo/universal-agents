@@ -356,6 +356,11 @@ class NatsTransportConfig:
     # reply_inbox_prefix) so a host's credential can grant it only its own replies.
     # None keeps nats-py's shared _INBOX prefix.
     reply_inbox_runtime: Optional[str] = None
+    # Optional nats-py connection tuning (used by TrustReader so an unreachable
+    # NATS server fails fast instead of blocking ~120s on default 60x2s retries).
+    connect_timeout: Optional[float] = None
+    max_reconnect_attempts: Optional[int] = None
+    reconnect_time_wait: Optional[float] = None
 
 
 class NatsTransportAdapter:
@@ -421,6 +426,12 @@ class NatsTransportAdapter:
             from custom_messages.wire.kinds import REPLY_INBOX_PREFIX
 
             kwargs["inbox_prefix"] = REPLY_INBOX_PREFIX.format(runtime=self.config.reply_inbox_runtime).encode("ascii")
+        if self.config.connect_timeout is not None:
+            kwargs["connect_timeout"] = self.config.connect_timeout
+        if self.config.max_reconnect_attempts is not None:
+            kwargs["max_reconnect_attempts"] = self.config.max_reconnect_attempts
+        if self.config.reconnect_time_wait is not None:
+            kwargs["reconnect_time_wait"] = self.config.reconnect_time_wait
         self._closing = False
         self._nc = await nats.connect(**kwargs)
         try:

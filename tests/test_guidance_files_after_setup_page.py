@@ -386,8 +386,12 @@ async def test_guidance_after_the_page_is_addressed_and_signed_to_the_request_an
     steering = guidance.msg_content
     assert steering.target_task_id == scenario.root_id
     assert steering.target_correlation_id == scenario.request.msg_meta.msg_correlation_id
-    signed = context_verifier().verify(guidance.msg_meta.gateway_context.task_context)
-    assert (signed.root_task_id, signed.context_id) == (scenario.root_id, steering_context_id(steering))
+    signed = context_verifier().verify_root_task(
+        guidance.msg_meta.gateway_context.task_context,
+        team_id=scenario.request.msg_meta.gateway_context.task_context.audience.team,
+        require_issuer="gateway",
+    )
+    assert (signed.root_task_id, signed.request_id) == (scenario.root_id, steering_context_id(steering))
     status = scenario.guidance_statuses[0]
     assert (status.status, status.target_task_id) == (TaskSteeringStatus.ACCEPTED, scenario.root_id)
 

@@ -18,6 +18,14 @@ from custom_messages.wire.authority_bindings import AuthorityTokenRecord
 
 logger = logging.getLogger(__name__)
 
+SIGNER_UNAVAILABLE_USER_MESSAGE = (
+    "The team is still starting; please send that again in a moment."
+)
+
+
+class GatewayAuthorityTokenUnavailable(RuntimeError):
+    """Raised when the gateway has a host signer configured but cannot sign a person's token."""
+
 
 class GatewayTokenSigner(Protocol):
     """Protocol 1 gateway host capability that signs root-task authority tokens."""
@@ -374,27 +382,44 @@ class GatewayRequestContextService:
         # only, signed with the gateway host's certificate key (never schedule_id).
         task_context: AuthorityTokenRecord | None = None
         if self._token_signer is not None and canonical_user_id:
+            resolved_request_id = context_id or f"task_context_{uuid4().hex}"
+            resolved_root_task_id = root_task_id or resolved_request_id
             person_ref = self._resolve_person_ref(canonical_user_id)
-            if person_ref is not None:
-                resolved_request_id = context_id or f"task_context_{uuid4().hex}"
-                resolved_root_task_id = root_task_id or resolved_request_id
-                try:
-                    task_context = self._token_signer.sign_root_task_token(
-                        person_ref=person_ref,
-                        root_task_id=resolved_root_task_id,
-                        request_id=resolved_request_id,
-                        team=self.settings.team_id,
-                    )
-                except Exception as exc:  # noqa: BLE001 - receiving verifier fails closed on missing token
-                    logger.warning(
-                        "Gateway could not sign a protocol 1 root-task authority token; "
-                        "verifiers will refuse this task. event=gateway_authority_token_unavailable "
-                        "team_id=%s delivery_mode=%s error=%s: %s",
-                        self.settings.team_id,
-                        delivery_mode,
-                        type(exc).__name__,
-                        exc,
-                    )
+            if person_ref is None:
+                logger.warning(
+                    "Gateway could not sign a protocol 1 root-task authority token because no "
+                    "opaque person reference was available; refusing to publish unsigned. "
+                    "event=gateway_authority_token_unavailable team_id=%s delivery_mode=%s "
+                    "request_id=%s root_task_id=%s person_id=%s",
+                    self.settings.team_id,
+                    delivery_mode,
+                    resolved_request_id,
+                    resolved_root_task_id,
+                    canonical_user_id,
+                )
+                raise GatewayAuthorityTokenUnavailable(SIGNER_UNAVAILABLE_USER_MESSAGE)
+            try:
+                task_context = self._token_signer.sign_root_task_token(
+                    person_ref=person_ref,
+                    root_task_id=resolved_root_task_id,
+                    request_id=resolved_request_id,
+                    team=self.settings.team_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - never publish an unsigned person request (C19)
+                logger.warning(
+                    "Gateway could not sign a protocol 1 root-task authority token; refusing to "
+                    "publish unsigned. event=gateway_authority_token_unavailable "
+                    "team_id=%s delivery_mode=%s request_id=%s root_task_id=%s person_id=%s "
+                    "error=%s: %s",
+                    self.settings.team_id,
+                    delivery_mode,
+                    resolved_request_id,
+                    resolved_root_task_id,
+                    canonical_user_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise GatewayAuthorityTokenUnavailable(SIGNER_UNAVAILABLE_USER_MESSAGE) from exc
         return GatewayContext(
             gateway_instance_name=self.settings.instance_name,
             session_key=session_key,

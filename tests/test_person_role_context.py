@@ -15,7 +15,11 @@ from types import SimpleNamespace
 import pytest
 
 from custom_agents.person_role_context import PERSON_ROLE_CONTEXT_PREFIX, describe_person_role, person_role_context
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 TEAM = "team-1"
 PERSON = "usr_alice"
@@ -26,7 +30,7 @@ def _agent_and_meta(tmp_path: Path, *, roles: tuple[str, ...] | None, lead: bool
     from custom_agents.task_manager import TaskManager
 
     access_runtime._runtime_access.cache_clear()
-    signed = context_signer().issue(team_id=TEAM, person_id=PERSON, person_roles=roles) if roles is not None else None
+    signed = signed_task_token(PERSON, team_id=TEAM, roles=roles) if roles is not None else None
     meta = SimpleNamespace(
         gateway_context=SimpleNamespace(task_context=signed, schedule_run=None, canonical_user_id=claimed)
     )
@@ -44,7 +48,10 @@ def _agent_and_meta(tmp_path: Path, *, roles: tuple[str, ...] | None, lead: bool
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch) -> None:
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    forget_task_context_keys()
+    use_broker_authority_verifier()
+    yield
+    forget_task_context_keys()
 
 
 @pytest.mark.parametrize(

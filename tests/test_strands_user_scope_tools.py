@@ -17,7 +17,7 @@ from custom_tools.tool_results import result_text
 from storage.change_ledger import ChangeRequestStore
 from storage.config import resolve_storage_settings
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 
 TEAM = "team_test"
@@ -40,7 +40,11 @@ class _FakeTaskManager:
         self._canonical_user_id = canonical_user_id
         self._db_path = "task_history.db"
         # Signed once, as the gateway signs a request: every call is the same request.
-        self.task_context = context_signer().issue(team_id=TEAM, person_id=canonical_user_id, person_roles=("member",))
+        self.task_context = (
+            signed_task_token(canonical_user_id, team_id=TEAM, roles=("member",), root_task_id=self.current_task_id)
+            if canonical_user_id
+            else None
+        )
 
     def get_task_info(self, task_id: str):
         if task_id != self.current_task_id:
@@ -78,11 +82,13 @@ class _FakeAgent:
         self.task_manager.storage_settings = resolve_storage_settings(
             {"backend": "sqlite", "sqlite": {"path": str(db_path)}}
         )
-        if canonical_user_id:
+        if canonical_user_id and self.task_manager.task_context is not None:
             # The person's request was admitted, as the team lead records it (storage.change_ledger).
-            context = self.task_manager.task_context.context
             ChangeRequestStore(self.task_manager.storage_settings).open(
-                team_id=TEAM, request_id=context.context_id, person_id=context.person_id, now=datetime.now(timezone.utc)
+                team_id=TEAM,
+                request_id=self.task_manager.task_context.bound_to.request_id,
+                person_id=canonical_user_id,
+                now=datetime.now(timezone.utc),
             )
 
 

@@ -4330,35 +4330,21 @@ async def _run_secure_tool_broker_service(
 
             async def _connect_trust_nats() -> Any:
                 assert trust_adapter is not None
+                if trust_adapter.connected:
+                    await trust_adapter.close()
                 await trust_adapter.connect(reconcile_topology=False)
                 return trust_adapter.nats_connection
 
-            connected_nc: Any = None
-            try:
-                connected_nc = await _connect_trust_nats()
-            except Exception:
-                trust_logger.warning(
-                    "Could not reach NATS at broker startup; starting anyway (tool calls that need "
-                    "protocol 1 trust will fail closed until NATS is reachable and UA1_CERTS syncs). "
-                    "event=broker_trust_nats_connect_failed",
-                    exc_info=True,
-                )
+            # Open offline so broker HTTP serving starts immediately even if NATS is down;
+            # run_secure_tool_broker starts TrustReader.watch_and_refresh to connect and sync
+            # UA1_CERTS in the background while trust checks fail closed until synced (C18).
             trust_reader = TrustReader.open(
                 config.layout,
                 "secure-tool-broker",
-                connected_nc,
+                None,
                 connect=_connect_trust_nats,
                 logger=trust_logger,
             )
-            if connected_nc is not None:
-                try:
-                    await trust_reader.sync_once()
-                except Exception:
-                    trust_logger.warning(
-                        "Initial UA1_CERTS sync did not finish; broker will fetch certificates on demand. "
-                        "event=broker_trust_initial_sync_failed",
-                        exc_info=True,
-                    )
         try:
             access_gate = build_broker_access_gate(
                 instance_root=config.instance_root_path,

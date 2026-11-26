@@ -16,11 +16,10 @@ from types import SimpleNamespace
 import pytest
 
 import python_env_lifecycle as lifecycle
-from access_control.identity import ContextSigner, ISSUER_SCHEDULER
 from custom_agents import access_runtime
 from custom_tools import python_env_tool
 from custom_tools.tool_stop import ToolStop
-from tests.broker_access_support import use_scheduler_key
+from tests.broker_access_support import signed_scheduler_token
 from tests.task_work_support import set_agent_ref, use_agent
 from tests.test_workspace_scope_policy import layout as _scope_layout, task_agent
 from tests.tool_stop_support import tool_context
@@ -96,13 +95,15 @@ def test_helpers_share_one_default_but_separate_runs_do_not(layout, monkeypatch,
     monkeypatch.setattr(python_env_tool, "_create_env", _fake_create)
     first, second = task_agent(layout, person), task_agent(layout, person)
     if scheduled:
-        use_scheduler_key(monkeypatch)
         access_runtime._runtime_access.cache_clear()
-        signer = ContextSigner.from_env(ISSUER_SCHEDULER)
         for agent in (first, second):
-            agent.task_manager.get_task_info("task-1").meta.gateway_context = SimpleNamespace(task_context=signer.issue(
-                team_id=agent.team_id, person_id=person, schedule_id="same-schedule",
-            ))
+            agent.task_manager.get_task_info("task-1").meta.gateway_context = SimpleNamespace(
+                task_context=signed_scheduler_token(
+                    person,
+                    team_id=agent.team_id,
+                    schedule_id="same-schedule",
+                )
+            )
     first_path = _write(first)
     worker = SimpleNamespace(**vars(first))
     worker.id = "helper"

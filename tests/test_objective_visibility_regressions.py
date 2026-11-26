@@ -34,7 +34,7 @@ from custom_tools.providers.objectives import create_objective, objectives, upda
 from custom_tools.providers.schedules import create_scheduled_job
 from custom_tools.runtime_context import get_agent_ref
 from storage.access_repository import AccessRepository
-from tests.broker_access_support import context_signer, use_scheduler_key
+from tests.broker_access_support import signed_task_token, use_scheduler_key
 from tests.test_objective_tools import (
     _act_as,
     _add_no_person_task,
@@ -88,8 +88,8 @@ def _team_timer(manager, tasks, team, *, roles: tuple[str, ...] = ("member",)) -
     assert "error" not in created
     schedule = get_agent_ref()._schedule_store.get_scheduled_message(created["schedule_id"])
     meta = schedule.payload_meta.model_copy(deep=True)
-    meta.gateway_context.task_context = context_signer().issue(
-        team_id="team_1", person_id="usr_admin", person_roles=roles,
+    meta.gateway_context.task_context = signed_task_token(
+        "usr_admin", team_id="team_1", roles=roles, root_task_id="demoted_timer_run",
     )
     run = Task(task_id="demoted_timer_run", task_type=MessageMetaType.REQUEST, problem_statement="Check team work.")
     assert manager.add_task(run, schedule.payload_header, meta, owner_person_id="usr_admin")
@@ -108,8 +108,8 @@ def test_creation_cannot_move_a_team_plan_into_personal_ownership(_people_and_ob
     assert "error" in result
     assert manager.get_plan(team.current_plan_id).model_dump(mode="json") == before
     # Future member work still cannot control the team's original Plan.
-    manager.get_task_info(run.task_id).meta.gateway_context.task_context = context_signer().issue(
-        team_id="team_1", person_id="usr_admin", person_roles=("member",),
+    manager.get_task_info(run.task_id).meta.gateway_context.task_context = signed_task_token(
+        "usr_admin", team_id="team_1", roles=("member",), root_task_id=run.task_id,
     )
     cancelled = tool_json(update_execution_plan_status("cancelled", "x", plan_id=team.current_plan_id))
     assert "error" in cancelled

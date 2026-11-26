@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from access_control.identity import ContextVerifier
+from tests.broker_access_support import broker_authority_verifier
 from assistant_gateway.gateway import _knowledge_curation_schedules
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
 from custom_agents.scheduled_runtime import _runs_for_nobody, _sign_for_nobody
@@ -47,12 +48,17 @@ def test_the_gateway_installs_a_run_per_person_and_one_team_run(world) -> None:
     _deliver(world)
     stored = _stored(world)
 
-    verifier = ContextVerifier.from_env()
+    verifier = broker_authority_verifier()
     for person in ACTIVE:
         schedule = stored[_person_id(person)]
         assert schedule.system_schedule_kind == SystemScheduleKind.KNOWLEDGE_CURATION_PERSON
         assert schedule.claim_named_agent_type == "KnowledgeCuratorAgent"
-        assert verifier.verify(schedule.payload_meta.gateway_context.task_context, team_id=TEAM).person_id == person
+        assert (
+            verifier.verify_root_task(
+                schedule.payload_meta.gateway_context.task_context, team_id=TEAM, require_issuer="gateway"
+            ).person_id
+            == person
+        )
         assert is_person_system_schedule(schedule)
     team = stored[TEAM_ID]
     assert (team.management_class, team.system_schedule_kind) == (

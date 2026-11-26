@@ -8,7 +8,6 @@ import pytest
 
 from tests.task_work_support import bind_task
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
 
 
@@ -192,8 +191,10 @@ def test_prior_task_artifacts_are_isolated_by_user(tmp_path, monkeypatch, own_ag
     manager = TaskManager(db_path=str(tmp_path / "tasks.db"))
     manager.set_owner_identity("agent-1", "Worker", "team-1", "Worker")
     own_agent.task_manager = manager
+    from tests.broker_access_support import signed_task_token
+
     for task_id, task_owner in [("past", owner), ("task-1", "alice")]:
-        signed = context_signer().issue(team_id="team-1", person_id=task_owner, person_roles=("member",))
+        signed = signed_task_token(task_owner, team_id="team-1", roles=("member",), root_task_id=task_id)
         manager.add_task(Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="Work"), MessageHeader(), MessageMeta(gateway_context=GatewayContext(canonical_user_id=task_owner, task_context=signed)), owner_person_id=task_owner)
     manager.update_main_task_state("task-1", ProgressState.IN_PROGRESS, "2026-09-21T00:00:00Z")
     manifest = _write_manifest(tmp_path)

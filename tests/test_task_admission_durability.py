@@ -12,7 +12,7 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
 from storage.config import resolve_storage_settings
 from storage.runtime_custody import RuntimeRecoveryConflict
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 
 
@@ -79,7 +79,7 @@ def test_failed_terminal_request_save_keeps_memory_and_durable_state_retryable(
     manager, monkeypatch, terminal, running, caplog
 ):
     use_signed_contexts(monkeypatch)
-    signed = context_signer().issue(team_id="team", person_id="alice", person_roles=("member",))
+    signed = signed_task_token("alice", team_id="team", roles=("member",), root_task_id="incoming")
     manager.add_task(
         task(), MessageHeader(), MessageMeta(gateway_context=GatewayContext(task_context=signed)),
         owner_person_id="alice",
@@ -106,7 +106,7 @@ def test_failed_terminal_request_save_keeps_memory_and_durable_state_retryable(
     def request_state():
         with sqlite3.connect(manager.storage_settings.sqlite_path) as conn:
             return conn.execute(
-                "SELECT state FROM change_requests WHERE request_id=?", (signed.context.context_id,),
+                "SELECT state FROM change_requests WHERE request_id=?", (signed.bound_to.request_id,),
             ).fetchone()[0]
 
     with monkeypatch.context() as failure:
@@ -142,7 +142,7 @@ def test_failed_terminal_request_save_keeps_memory_and_durable_state_retryable(
 
 def test_later_snapshot_failure_does_not_restore_a_committed_terminal_state(manager, monkeypatch):
     use_signed_contexts(monkeypatch)
-    signed = context_signer().issue(team_id="team", person_id="alice", person_roles=("member",))
+    signed = signed_task_token("alice", team_id="team", roles=("member",), root_task_id="incoming")
     manager.add_task(
         task(), MessageHeader(), MessageMeta(gateway_context=GatewayContext(task_context=signed)),
         owner_person_id="alice",
@@ -164,7 +164,7 @@ def test_later_snapshot_failure_does_not_restore_a_committed_terminal_state(mana
     assert RuntimeSnapshotV3.model_validate_json(saved[0].runtime_state_json).tasks[0].state is ProgressState.COMPLETED
     with sqlite3.connect(manager.storage_settings.sqlite_path) as conn:
         assert conn.execute(
-            "SELECT state FROM change_requests WHERE request_id=?", (signed.context.context_id,),
+            "SELECT state FROM change_requests WHERE request_id=?", (signed.bound_to.request_id,),
         ).fetchone()[0] == "ended"
 
 

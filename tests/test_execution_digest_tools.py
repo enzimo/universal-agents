@@ -34,7 +34,7 @@ from custom_tools.providers.objectives import (
 )
 from tests.task_work_support import bind_task, set_agent_ref
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_scheduler_token, signed_task_token
 from tests.change_approval_support import use_signed_contexts
 from tests.tool_result_support import tool_json
 
@@ -1233,8 +1233,10 @@ def _signed_task(manager: TaskManager, task_id: str, person_id: str | None, *, s
         GatewayContext(
             session_key=f"session_{task_id}",
             canonical_user_id=person_id,
-            task_context=context_signer().issue(
-                team_id="team_1", person_id=person_id, person_roles=("member",) if person_id else ()
+            task_context=(
+                signed_task_token(person_id, team_id="team_1", roles=("member",), root_task_id=task_id)
+                if person_id
+                else signed_scheduler_token(None, team_id="team_1", root_task_id=task_id, schedule_id=f"sched_{task_id}")
             ),
         )
         if signed
