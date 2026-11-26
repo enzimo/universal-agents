@@ -151,7 +151,12 @@ def _prune_warned_anomalies(agent: Any, active_records: set[tuple[str, str, str]
         warned.intersection_update({key for key in warned if key[:3] in active_records})
 
 
-# -- recurring-schedule next-run check (shared by tools and begin_timed_wait) ----------------
+# -- recurring-schedule next-run check (shared by tools and decide_timed_wait) ---------------
+
+_UNVERIFIABLE_IDENTITY_REFUSAL = (
+    "This task's signed identity could not be verified, so the wait was refused: "
+    "a recurring schedule's next run time could not be ruled out."
+)
 
 
 def _verified_scheduler_schedule_id(
@@ -185,16 +190,12 @@ def _verified_scheduler_schedule_id(
             error_detail = type(exc).__name__
             if not has_meta_identity:
                 logger.warning(
-                    "Timed wait refused because the active task's schedule identity could not be verified. "
+                    "Timed wait refused because the active task's signed identity could not be verified. "
                     "event=timed_wait_refused reason=identity_unverifiable task_id=%s error=%s",
                     task_id,
                     exc,
                 )
-                return (
-                    None,
-                    "Could not verify this task's schedule identity, so this wait was refused to avoid "
-                    "overlapping a recurring schedule's next run.",
-                )
+                return None, _UNVERIFIABLE_IDENTITY_REFUSAL
     if context is None and has_meta_identity:
         context = resolve_meta_identity(agent, meta)
     if context is None:
@@ -204,11 +205,7 @@ def _verified_scheduler_schedule_id(
             task_id,
             error_detail,
         )
-        return (
-            None,
-            "Could not verify this task's schedule identity, so this wait was refused to avoid "
-            "overlapping a recurring schedule's next run.",
-        )
+        return None, _UNVERIFIABLE_IDENTITY_REFUSAL
     if not context.schedule_id:
         return None, None
     if context.issuer != ISSUER_SCHEDULER:
@@ -562,30 +559,6 @@ async def finish_timed_wait(agent: Any, decision: TimedWaitDecision) -> bool:
                 refusal=decision.refusal or "The timed wait was refused at start time.",
             )
     return False
-
-
-async def begin_timed_wait(
-    agent: Any,
-    *,
-    task_id: str,
-    interrupt_id: str,
-    reason: dict[str, Any],
-    msg_meta: Any,
-    defer_for_other_wait: bool = False,
-    deferred_by: str = "upstream_interrupt",
-) -> bool:
-    """Stage and finish a timed wait in one call (convenience wrapper; True when a record was saved)."""
-
-    decision = await stage_timed_wait(
-        agent,
-        task_id=task_id,
-        interrupt_id=interrupt_id,
-        reason=reason,
-        msg_meta=msg_meta,
-        defer_for_other_wait=defer_for_other_wait,
-        deferred_by=deferred_by,
-    )
-    return await finish_timed_wait(agent, decision)
 
 
 # -- resume ----------------------------------------------------------------------------------
@@ -970,7 +943,6 @@ async def seconds_until_next_resume(agent: Any, *, now: datetime | None = None) 
 
 __all__ = [
     "TimedWaitDecision",
-    "begin_timed_wait",
     "check_schedule_next_run",
     "decide_timed_wait",
     "finish_timed_wait",

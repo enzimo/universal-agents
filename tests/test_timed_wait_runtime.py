@@ -44,10 +44,11 @@ from custom_agents.task_steering_runtime import (
     send_interrupt_request_for_result,
 )
 from custom_agents.timed_wait_runtime import (
-    begin_timed_wait,
+    finish_timed_wait,
     resume_due_timed_waits,
     resume_without_paused_turn,
     seconds_until_next_resume,
+    stage_timed_wait,
 )
 from custom_agents.timed_waits import (
     TIMED_WAIT_ENDED_EVENT,
@@ -714,7 +715,7 @@ async def test_c01_c15_wait_deferred_behind_setup_run_starts_at_setup_completion
 
 
 @pytest.mark.asyncio
-async def test_c15_begin_timed_wait_refuses_without_charging_when_next_run_no_longer_fits(
+async def test_c15_stage_timed_wait_refuses_without_charging_when_next_run_no_longer_fits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import os
@@ -767,7 +768,7 @@ async def test_c15_begin_timed_wait_refuses_without_charging_when_next_run_no_lo
                 work.strands = parts
                 result = await strands_agent.invoke_async("wait 10m")
                 assert result.stop_reason == "interrupt"
-                # Clock advances 2 minutes before begin_timed_wait runs -> t+12m >= t+11m -> refused at start!
+                # Clock advances 2 minutes before stage_timed_wait runs -> t+12m >= t+11m -> refused at start!
                 now_box[0] = now_box[0] + timedelta(minutes=2)
                 task_info = agent.task_manager.get_task_info(TASK_ID)
                 await send_interrupt_request_for_result(
@@ -816,12 +817,20 @@ async def test_c01_reraise_keeps_original_times_clears_held_mark_and_never_doubl
         "minutes": 10,
         "reason": "redeploy",
     }
-    assert await begin_timed_wait(agent, task_id=TASK_ID, interrupt_id="int-1", reason=reason, msg_meta=MessageMeta())
+    first_decision = await stage_timed_wait(
+        agent, task_id=TASK_ID, interrupt_id="int-1", reason=reason, msg_meta=MessageMeta()
+    )
+    assert first_decision.action == "record"
+    assert await finish_timed_wait(agent, first_decision)
     mark_answer_held(agent.task_manager, TASK_ID, TIMED_WAIT_BLOCKER, "int-1", holder_id=AGENT_ID, at=BASE_TIME.isoformat())
 
     # 3 minutes later the same call_id re-raises -> no second charge, original resume_at kept, held mark cleared.
     now_box[0] = BASE_TIME + timedelta(minutes=3)
-    assert await begin_timed_wait(agent, task_id=TASK_ID, interrupt_id="int-1", reason=reason, msg_meta=MessageMeta())
+    second_decision = await stage_timed_wait(
+        agent, task_id=TASK_ID, interrupt_id="int-1", reason=reason, msg_meta=MessageMeta()
+    )
+    assert second_decision.action == "restore"
+    assert await finish_timed_wait(agent, second_decision)
     assert WaitLedger.from_history(agent.task_manager.get_task_info(TASK_ID)).total_minutes == 10
     blocker = get_human_interaction_blocker(agent.task_manager, TASK_ID)
     assert blocker is not None

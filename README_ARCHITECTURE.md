@@ -1521,7 +1521,10 @@ or publish after it. The final status write still marks this agent exiting
 after delivery callbacks have settled. A turn in progress at shutdown is
 cancelled; restart recovery queues its task again if
 the agent restarts within `restart_executing_task_grace_seconds` (900 s by
-default) and otherwise fails the task and tells the requester.
+default) and otherwise fails the task and tells the requester. A running task
+that already saved a wait record (an access request, a setup run, or a timed
+wait) returns to `WAITING` instead of being re-queued or failed, because its
+pause was already durable and the pending decision or timer will resume it.
 
 A turn reads the note left for its task's next turn (an access decision, a
 delegation decision, a restart notice) and the requester's partial tool-call
@@ -1593,10 +1596,12 @@ pure rules in `custom_agents/timed_waits.py`, runtime in
 
 Both tools pause the task with a local Strands interrupt (`timed_wait`, listed
 in `task_steering_runtime._LOCAL_WAIT_KINDS` so nothing is sent to a
-requester), charge the wait once in task history (`timed_wait_started`, keyed
-by `access_runtime.step_tool_call_id`), and save one `timed_wait` record in
+requester). Before `ProgressState.WAITING` is saved (matching access requests),
+trusted code charges the wait once in task history (`timed_wait_started`, keyed
+by `access_runtime.step_tool_call_id`) and saves one `timed_wait` record in
 `TaskRuntimeState.human_interaction_blockers` whose `resume_at` UTC timestamp
-is the single source of truth. Moving the task to `WAITING` releases the
+is the single source of truth, so a crash right after `WAITING` cannot leave a
+waiting task without its wait record. Moving the task to `WAITING` releases the
 worker's main slot so other work can run while the timer ticks. Each
 `scheduled_runtime._scheduler_pass` runs `resume_due_timed_waits` (capping its
 idle sleep to the next resume time and backing off overdue unresumable

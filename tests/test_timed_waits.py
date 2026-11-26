@@ -382,7 +382,7 @@ async def test_wait_raises_interrupt_and_resumed_call_returns_waited_time(
     assert interrupt.reason["requested_at"] == BASE_TIME.isoformat()
     assert interrupt.reason["resume_at"] == (BASE_TIME + timedelta(minutes=10)).isoformat()
 
-    # Simulate begin_timed_wait recording the start entry and the timer answering the interrupt 10m later.
+    # Simulate stage_timed_wait recording the start entry and the timer answering the interrupt 10m later.
     _record_started_wait(
         mgr,
         TASK_ID,
@@ -938,18 +938,17 @@ async def test_unverifiable_task_identity_refuses_wait(
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now)
 
-    # 1. Context signed with a key unknown to the runtime verifier (bad/unverifiable signature).
+    # 1. Context signed with a key unknown to the runtime verifier (chat task with unverifiable gateway context).
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    unknown_signer = ContextSigner(ISSUER_SCHEDULER, "unknown-key", Ed25519PrivateKey.generate())
+    unknown_signer = ContextSigner(ISSUER_GATEWAY, "unknown-key", Ed25519PrivateKey.generate())
     bad_signed = unknown_signer.sign(
         TaskContextV1(
             context_id="ctx-bad-sig",
-            issuer=ISSUER_SCHEDULER,
+            issuer=ISSUER_GATEWAY,
             team_id=TEST_TEAM,
             person_id="alice",
             person_roles=("member",),
-            schedule_id="sched-recurring",
             issued_at_utc=now,
             expires_at_utc=now + timedelta(hours=1),
         )
@@ -965,7 +964,8 @@ async def test_unverifiable_task_identity_refuses_wait(
             with task_work("task-bad-id"), caplog.at_level(logging.WARNING):
                 refused = json.loads(await wait(10, "wait with bad context", _make_tool_context("tu-bad-id")))
             assert refused["status"] == "refused"
-            assert "verify" in refused["reason"].lower()
+            assert "signed identity could not be verified" in refused["reason"].lower()
+            assert "schedule identity" not in refused["reason"].lower()
             assert "event=timed_wait_refused" in caplog.text
             assert "reason=identity_unverifiable" in caplog.text
 
@@ -980,6 +980,8 @@ async def test_unverifiable_task_identity_refuses_wait(
             with task_work("task-bad-id"), caplog.at_level(logging.WARNING):
                 refused_err = json.loads(await wait(10, "wait with broken verifier", _make_tool_context("tu-err-id")))
             assert refused_err["status"] == "refused"
+            assert "signed identity could not be verified" in refused_err["reason"].lower()
+            assert "schedule identity" not in refused_err["reason"].lower()
             assert "event=timed_wait_refused" in caplog.text
             assert "reason=identity_unverifiable" in caplog.text
         finally:
