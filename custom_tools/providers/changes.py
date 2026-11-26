@@ -251,9 +251,7 @@ def _apply_approved(
     assert change is not None
     note = request.decision_note or None
     if change.change_id != proposal.change_id:
-        mismatch_reason = (
-            "The plan changed after it was approved. Stage it again and call apply_change for the new change_id."
-        )
+        mismatch_reason = "This approval belongs to another change. Call apply_change again for this change_id."
         # This request belongs to a different change_id whose approval may still
         # be valid, so refuse without consuming or modifying it.
         logger.warning(

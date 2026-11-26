@@ -489,7 +489,7 @@ def test_approved_request_for_different_change_id_is_refused_without_claiming(
         refused = run_apply_change(agent, second_plan["change_id"], call, reason="Apply second plan with reused toolUseId")
 
     assert refused["status"] == "refused", refused
-    assert "plan changed after it was approved" in refused["reason"].lower()
+    assert "approval belongs to another change" in refused["reason"].lower()
     assert config_path.read_bytes() == before_bytes
     expected_log = (
         f"mismatch=change_id stored_change_id={first_plan['change_id']} "
@@ -505,6 +505,60 @@ def test_approved_request_for_different_change_id_is_refused_without_claiming(
     assert still_valid.status is AccessRequestStatus.GRANTED
     assert still_valid.applied_at_utc is None
     assert still_valid.apply_error == ""
+
+    applied = run_apply_change(agent, first_plan["change_id"], call, reason="Apply first plan")
+    assert applied["status"] == "applied", applied
+    assert GatewayInstanceConfig.load(config_path).agent.debug["context_dump"]["mode"] == "always"
+
+
+@needs_cedar
+def test_failed_describe_for_another_change_keeps_the_first_approval(tmp_path: Path) -> None:
+    """A reused toolUseId whose new change cannot be described leaves the other change's approval unused.
+
+    Covers the guard in ``_close_stale_request``: the request found by the call id
+    belongs to another change, so the failure of this change must not use it up.
+    """
+
+    config, config_path = _make_config(tmp_path)
+    agent = _member_agent(config, config_path)
+    member = PersonPrincipal("member_1", config.gateway.team_id, ("member",))
+    service = RuntimeSettingsService(agent)
+    first_plan = service.stage(
+        [{"path": "agent.debug.context_dump.mode", "value": "always"}],
+        reason="First user-authorized plan.",
+    )
+    second_plan = service.stage(
+        [{"path": "agent.debug.context_dump.enabled", "value": True}],
+        reason="Second user-authorized plan.",
+    )
+
+    call = ToolCall(tool_use_id="tooluse_reused_id")
+    with pytest.raises(InterruptException):
+        run_apply_change(agent, first_plan["change_id"], call, reason="Apply first plan")
+    request = stored_request(agent, call)
+    requests = access_runtime.runtime_requests(agent)
+    decided = requests.decide(request.request_id, member, AccessReviewChoice.APPROVE)
+    assert decided.status is AccessRequestStatus.GRANTED
+    call.response = {"kind": "access_request_decision", "status": decided.status.value}
+
+    # Remove the second plan's stored file so describing it fails.
+    plan_dir = Path(service._plan_dir(service._load_canonical_config()))
+    second_files = list(plan_dir.rglob(f"{second_plan['change_id']}*"))
+    assert second_files
+    for path in second_files:
+        path.unlink()
+
+    before_bytes = config_path.read_bytes()
+    refused = run_apply_change(agent, second_plan["change_id"], call, reason="Second plan with reused toolUseId")
+    assert refused["status"] == "refused", refused
+    assert "plan not found" in refused["reason"].lower()
+    assert config_path.read_bytes() == before_bytes
+
+    untouched = requests.service.store.get_request(request.request_id)
+    assert untouched is not None
+    assert untouched.status is AccessRequestStatus.GRANTED
+    assert untouched.applied_at_utc is None
+    assert untouched.apply_error == ""
 
     applied = run_apply_change(agent, first_plan["change_id"], call, reason="Apply first plan")
     assert applied["status"] == "applied", applied
