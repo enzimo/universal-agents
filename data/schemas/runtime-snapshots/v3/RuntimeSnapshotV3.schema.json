@@ -58,6 +58,211 @@
       "title": "AttachmentStorageRef",
       "type": "object"
     },
+    "AuthorityTokenAudienceRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "installation": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$",
+          "title": "Installation",
+          "type": "string"
+        },
+        "team": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$",
+          "title": "Team",
+          "type": "string"
+        }
+      },
+      "required": [
+        "installation",
+        "team"
+      ],
+      "title": "AuthorityTokenAudienceRecord",
+      "type": "object"
+    },
+    "AuthorityTokenBoundToAccessRequestRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "access_request",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "title": "AuthorityTokenBoundToAccessRequestRecord",
+      "type": "object"
+    },
+    "AuthorityTokenBoundToCommandRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "command",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "title": "AuthorityTokenBoundToCommandRecord",
+      "type": "object"
+    },
+    "AuthorityTokenBoundToRootTaskRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "root_task",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "request_id"
+      ],
+      "title": "AuthorityTokenBoundToRootTaskRecord",
+      "type": "object"
+    },
+    "AuthorityTokenIssuerRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "installation": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,61}$",
+          "title": "Installation",
+          "type": "string"
+        },
+        "key_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Key Id",
+          "type": "string"
+        },
+        "membership_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Membership Epoch",
+          "type": "integer"
+        },
+        "runtime": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+          "title": "Runtime",
+          "type": "string"
+        }
+      },
+      "required": [
+        "installation",
+        "runtime",
+        "membership_epoch",
+        "key_id"
+      ],
+      "title": "AuthorityTokenIssuerRecord",
+      "type": "object"
+    },
+    "AuthorityTokenRecord": {
+      "additionalProperties": false,
+      "description": "Lightweight Pydantic model with the exact wire shape of ``custom_messages.wire.models.AuthorityToken``.\n\nUsed on old-wrapper contracts (``GatewayContext.task_context``, ``ScheduleRunIdentityV1.permit``,\n``MCPInvocationRequestV1.task_context``) so importing gateway or CLI modules does not load the\nfull generated ``custom_messages.wire.models`` module while still rejecting legacy signed\ncontexts and preserving exact protocol 1 JSON serialization.",
+      "properties": {
+        "algorithm": {
+          "const": "ed25519",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "audience": {
+          "$ref": "#/$defs/AuthorityTokenAudienceRecord"
+        },
+        "bound_to": {
+          "discriminator": {
+            "mapping": {
+              "access_request": "#/$defs/AuthorityTokenBoundToAccessRequestRecord",
+              "command": "#/$defs/AuthorityTokenBoundToCommandRecord",
+              "root_task": "#/$defs/AuthorityTokenBoundToRootTaskRecord"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AuthorityTokenBoundToRootTaskRecord"
+            },
+            {
+              "$ref": "#/$defs/AuthorityTokenBoundToCommandRecord"
+            },
+            {
+              "$ref": "#/$defs/AuthorityTokenBoundToAccessRequestRecord"
+            }
+          ],
+          "title": "Bound To"
+        },
+        "expires_at": {
+          "pattern": "^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "issued_at": {
+          "pattern": "^(19[7-9][0-9]|[2-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+          "title": "Issued At",
+          "type": "string"
+        },
+        "issuer": {
+          "$ref": "#/$defs/AuthorityTokenIssuerRecord"
+        },
+        "person": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Person",
+          "type": "string"
+        },
+        "schedule_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$",
+          "title": "Schedule Id",
+          "type": "string"
+        },
+        "signature": {
+          "pattern": "^[A-Za-z0-9_-]{86}$",
+          "title": "Signature",
+          "type": "string"
+        },
+        "token_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "title": "Token Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "token_id",
+        "issuer",
+        "audience",
+        "bound_to",
+        "issued_at",
+        "expires_at",
+        "algorithm",
+        "signature"
+      ],
+      "title": "AuthorityTokenRecord",
+      "type": "object"
+    },
     "DispatchedActionNoteV1": {
       "additionalProperties": false,
       "description": "One action an interrupted run had already sent before it was stopped.",
@@ -473,7 +678,7 @@
             }
           ],
           "default": null,
-          "description": "Who a scheduled run works for when the agent that started it holds no scheduler key: the schedule's manager-signed permit and this run's own fields (access_control.task_identity). Set instead of task_context, never with it; copied unchanged onto delegated tasks and never saved on a schedule."
+          "description": "Who a scheduled run works for using the schedule's scheduler-signed permit token plus this run's own fields (access_control.task_identity). Set instead of task_context, never with it; copied unchanged onto delegated tasks and never saved on a schedule."
         },
         "scheduled_job_id": {
           "anyOf": [
@@ -504,14 +709,14 @@
         "task_context": {
           "anyOf": [
             {
-              "$ref": "#/$defs/SignedTaskContextV1"
+              "$ref": "#/$defs/AuthorityTokenRecord"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Signed statement of the person (and roles) this work is for, from the gateway or scheduler (access_control.identity). Copied unchanged onto delegated tasks; enforcement points trust only this, not canonical_user_id."
+          "description": "Protocol 1 authority token proving who this work acts for, signed by the gateway or scheduler host certificate (access_control.authority_verifier). Copied unchanged onto delegated tasks; enforcement points trust only this, not canonical_user_id."
         },
         "thread_id": {
           "anyOf": [
@@ -1599,86 +1804,12 @@
       "title": "RuntimeMailboxEventRecord",
       "type": "object"
     },
-    "SchedulePermitV1": {
-      "additionalProperties": false,
-      "description": "The manager's signed statement that one schedule's runs work for one person.\n\nThe scheduler signs it once per schedule and renews it before it expires\n(``custom_agents.schedule_permits``), so a worker that holds no key can\nstart the schedule's runs without asking the manager each time. It names\nno roles: whoever checks a run reads the person's current roles and\nstanding, and the schedule row's current owner (``access_control.task_identity``).\n``person_id`` None is system work for no person, only for the runtime's\nmaintenance schedule of a built-in system agent. ``record_kind`` and the\nsignature's own domain keep a permit from ever passing as a task context.",
-      "properties": {
-        "expires_at_utc": {
-          "format": "date-time",
-          "title": "Expires At Utc",
-          "type": "string"
-        },
-        "issued_at_utc": {
-          "format": "date-time",
-          "title": "Issued At Utc",
-          "type": "string"
-        },
-        "issuer": {
-          "const": "scheduler",
-          "title": "Issuer",
-          "type": "string"
-        },
-        "permit_id": {
-          "maxLength": 120,
-          "minLength": 1,
-          "title": "Permit Id",
-          "type": "string"
-        },
-        "person_id": {
-          "anyOf": [
-            {
-              "maxLength": 240,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Person Id"
-        },
-        "record_kind": {
-          "const": "schedule_permit",
-          "default": "schedule_permit",
-          "title": "Record Kind",
-          "type": "string"
-        },
-        "schedule_id": {
-          "maxLength": 240,
-          "minLength": 1,
-          "title": "Schedule Id",
-          "type": "string"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "team_id": {
-          "maxLength": 120,
-          "minLength": 1,
-          "title": "Team Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "permit_id",
-        "issuer",
-        "team_id",
-        "schedule_id",
-        "issued_at_utc",
-        "expires_at_utc"
-      ],
-      "title": "SchedulePermitV1",
-      "type": "object"
-    },
     "ScheduleRunIdentityV1": {
       "additionalProperties": false,
-      "description": "Who one scheduled run works for: its schedule's signed permit and this run's own fields.\n\nTravels in ``GatewayContext.schedule_run`` instead of a signed task\ncontext when the agent that started the run holds no scheduler key.\n``context_id``, ``conversation_id`` and ``started_at_utc`` are not signed:\nthey tie the run's tasks together and date the run, and grant nothing.",
+      "description": "Who one scheduled run works for: its schedule's protocol 1 permit token and this run's own fields.\n\nTravels in ``GatewayContext.schedule_run`` on the old wrapper (Step 5) when a scheduled\nrun uses its schedule's standing scheduler-signed permit token. ``context_id``,\n``conversation_id`` and ``started_at_utc`` are not signed: they tie the run's tasks\ntogether and date the run, and grant nothing. Steps 6–7 will replace this wrapper once\nqueued work moves onto protocol 1 ``task.request`` frames whose ``verify_frame`` binds\n``/body/work/root_task_id`` directly to ``token.bound_to.id``.",
       "properties": {
         "context_id": {
-          "maxLength": 120,
+          "maxLength": 128,
           "minLength": 1,
           "pattern": "^schedule_run_",
           "title": "Context Id",
@@ -1698,7 +1829,7 @@
           "title": "Conversation Id"
         },
         "permit": {
-          "$ref": "#/$defs/SignedSchedulePermitV1"
+          "$ref": "#/$defs/AuthorityTokenRecord"
         },
         "started_at_utc": {
           "format": "date-time",
@@ -1712,60 +1843,6 @@
         "started_at_utc"
       ],
       "title": "ScheduleRunIdentityV1",
-      "type": "object"
-    },
-    "SignedSchedulePermitV1": {
-      "additionalProperties": false,
-      "properties": {
-        "key_id": {
-          "maxLength": 120,
-          "minLength": 1,
-          "title": "Key Id",
-          "type": "string"
-        },
-        "permit": {
-          "$ref": "#/$defs/SchedulePermitV1"
-        },
-        "signature": {
-          "maxLength": 400,
-          "minLength": 1,
-          "title": "Signature",
-          "type": "string"
-        }
-      },
-      "required": [
-        "permit",
-        "key_id",
-        "signature"
-      ],
-      "title": "SignedSchedulePermitV1",
-      "type": "object"
-    },
-    "SignedTaskContextV1": {
-      "additionalProperties": false,
-      "properties": {
-        "context": {
-          "$ref": "#/$defs/TaskContextV1"
-        },
-        "key_id": {
-          "maxLength": 120,
-          "minLength": 1,
-          "title": "Key Id",
-          "type": "string"
-        },
-        "signature": {
-          "maxLength": 400,
-          "minLength": 1,
-          "title": "Signature",
-          "type": "string"
-        }
-      },
-      "required": [
-        "context",
-        "key_id",
-        "signature"
-      ],
-      "title": "SignedTaskContextV1",
       "type": "object"
     },
     "Task": {
@@ -1980,117 +2057,6 @@
         "answer"
       ],
       "title": "TaskAnswer",
-      "type": "object"
-    },
-    "TaskContextV1": {
-      "additionalProperties": false,
-      "description": "Who an agent task works for, signed by a trusted issuer.\n\nThe gateway signs a context when it admits a person's task; the scheduler\nsigns one for a schedule's owner; delegated child tasks carry their root\ncontext unchanged, so later hops cannot widen it.",
-      "properties": {
-        "context_id": {
-          "maxLength": 120,
-          "minLength": 1,
-          "title": "Context Id",
-          "type": "string"
-        },
-        "conversation_id": {
-          "anyOf": [
-            {
-              "maxLength": 240,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Conversation Id"
-        },
-        "expires_at_utc": {
-          "format": "date-time",
-          "title": "Expires At Utc",
-          "type": "string"
-        },
-        "issued_at_utc": {
-          "format": "date-time",
-          "title": "Issued At Utc",
-          "type": "string"
-        },
-        "issuer": {
-          "enum": [
-            "gateway",
-            "scheduler"
-          ],
-          "title": "Issuer",
-          "type": "string"
-        },
-        "person_id": {
-          "anyOf": [
-            {
-              "maxLength": 240,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Person Id"
-        },
-        "person_roles": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "title": "Person Roles",
-          "type": "array"
-        },
-        "root_task_id": {
-          "anyOf": [
-            {
-              "maxLength": 240,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Root Task Id"
-        },
-        "schedule_id": {
-          "anyOf": [
-            {
-              "maxLength": 240,
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Schedule Id"
-        },
-        "schema_version": {
-          "const": 1,
-          "default": 1,
-          "title": "Schema Version",
-          "type": "integer"
-        },
-        "team_id": {
-          "maxLength": 120,
-          "minLength": 1,
-          "title": "Team Id",
-          "type": "string"
-        }
-      },
-      "required": [
-        "context_id",
-        "issuer",
-        "team_id",
-        "issued_at_utc",
-        "expires_at_utc"
-      ],
-      "title": "TaskContextV1",
       "type": "object"
     },
     "TaskFailureCategory": {

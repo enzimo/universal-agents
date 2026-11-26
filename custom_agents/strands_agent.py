@@ -3997,7 +3997,11 @@ class UniversalAgent(BaseModel):
         *,
         message_handled_at: Optional[str] = None,
         source_queue_name: Optional[str] = None,
+        message_stored_at: Optional[datetime] = None,
     ) -> None:
+        from custom_agents.access_runtime import ensure_meta_issuer_known
+
+        await ensure_meta_issuer_known(self, msg_meta)
         if isinstance(msg_content, ControlInstruction):
             await self.handle_control_message(
                 control_instruction=msg_content,
@@ -4054,6 +4058,7 @@ class UniversalAgent(BaseModel):
                 steering=msg_content,
                 msg_header=msg_header,
                 msg_meta=msg_meta,
+                message_stored_at=message_stored_at,
             )
         elif isinstance(msg_content, AfterActionReport):
             await self._handle_after_action_report(
@@ -4107,6 +4112,7 @@ class UniversalAgent(BaseModel):
                     msg_meta=msg_meta,
                     message_handled_at=message_handled_at,
                     source_queue_name=source_queue_name,
+                    message_stored_at=message_stored_at,
                 )
             else:
                 self._logger.warning(
@@ -4117,6 +4123,7 @@ class UniversalAgent(BaseModel):
                 task_query_msg=msg_content,
                 incoming_msg_header=msg_header,
                 incoming_msg_meta=msg_meta,
+                message_stored_at=message_stored_at,
             )
         elif isinstance(msg_content, SecureCredentialCollectionResult):
             await self._handle_secure_credential_collection_result(
@@ -5181,6 +5188,7 @@ class UniversalAgent(BaseModel):
                     msg_meta=msg_meta,
                     message_handled_at=datetime.now(timezone.utc).isoformat(),
                     source_queue_name=delivery.source_queue_name or delivery.logical_route,
+                    message_stored_at=delivery.stored_at,
                 )
             await delivery.ack()
         except Exception as exc:

@@ -43,8 +43,17 @@ from access_control.caller_tokens import BrokerCaller
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService
 from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
-from access_control.identity import ContextVerifier, IdentityRejected
-from access_control.task_identity import ScheduleRunLookup, job_schedule_id, resolve_task_identity
+from access_control.authority_verifier import (
+    AuthorityTokenVerifier,
+    IdentityRejected,
+    TrustProvider,
+)
+from access_control.task_identity import (
+    ScheduleRunLookup,
+    job_schedule_id,
+    resolve_task_identity,
+    resolve_task_identity_async,
+)
 from custom_messages.contracts.access_v2 import (
     REASON_ACCOUNT_LINK_MISSING,
     REASON_ACCOUNT_LINK_OUTDATED,
@@ -104,7 +113,7 @@ def _text(context: Mapping[str, Any], key: str) -> str | None:
 @dataclass
 class BrokerAccessGate:
     catalogs: CatalogSource
-    verifier: ContextVerifier
+    verifier: AuthorityTokenVerifier
     team_id: str
     access: AccessService | None  # None when authorization is disabled
     links: AccessRepository | None = None  # account links; used in both modes
@@ -147,21 +156,11 @@ class BrokerAccessGate:
             return "The request names another team."
         return None
 
-    def _person(self, context: Mapping[str, Any]) -> tuple[PersonPrincipal | None, str | None, str]:
-        """The verified person (None for verified work without one), the scheduled job the task
-        is a run of (None outside job runs, ``task_identity.job_schedule_id``), and the request
-        it works on (the signed context id, which access for one task is bound to); raises when
-        nothing verifies them."""
-
-        verified = resolve_task_identity(
-            verifier=self.verifier,
-            team_id=self.team_id,
-            task_context=context.get("task_context"),
-            schedule_run=context.get("schedule_run"),
-            schedule_runs=self.schedule_runs,
-        )
+    def _person_from_verified(
+        self, verified: Any, context: Mapping[str, Any]
+    ) -> tuple[PersonPrincipal | None, str | None, str]:
         if _text(context, "canonical_user_id") != verified.person_id:
-            raise IdentityRejected("The request names a different person than its signed task context.")
+            raise IdentityRejected("The request names a different person than its authority token.")
         schedule_id = (
             job_schedule_id(verified, self.schedule_runs, lead_agent_type=self.access.lead_agent_type)
             if self.access is not None
@@ -175,12 +174,39 @@ class BrokerAccessGate:
             verified.context_id,
         )
 
+    def _person(self, context: Mapping[str, Any]) -> tuple[PersonPrincipal | None, str | None, str]:
+        """The verified person (None for verified work without one), the scheduled job the task
+        is a run of (None outside job runs, ``task_identity.job_schedule_id``), and the request
+        it works on (the token's request id, which access for one task is bound to); raises when
+        nothing verifies them."""
+
+        verified = resolve_task_identity(
+            verifier=self.verifier,
+            team_id=self.team_id,
+            task_context=context.get("task_context"),
+            schedule_run=context.get("schedule_run"),
+            schedule_runs=self.schedule_runs,
+        )
+        return self._person_from_verified(verified, context)
+
+    async def _person_async(self, context: Mapping[str, Any]) -> tuple[PersonPrincipal | None, str | None, str]:
+        """Async variant of ``_person`` that fetches missing issuer trust records once before verifying (C12)."""
+
+        verified = await resolve_task_identity_async(
+            verifier=self.verifier,
+            team_id=self.team_id,
+            task_context=context.get("task_context"),
+            schedule_run=context.get("schedule_run"),
+            schedule_runs=self.schedule_runs,
+        )
+        return self._person_from_verified(verified, context)
+
     def verified_person_id(self, caller: BrokerCaller, context: Mapping[str, Any]) -> str | None:
         """The person a model call's task works for, verified like a tool call's; None for work for nobody.
 
         Used by the model key lookup (``secure_tool_broker.model_keys``) to
         give a person's own key only to their own tasks. Raises
-        ``IdentityRejected`` when the caller or the signed context does not check out.
+        ``IdentityRejected`` when the caller or the authority token does not check out.
         """
 
         problem = self._identity_problem(caller, context)
@@ -189,29 +215,43 @@ class BrokerAccessGate:
         person, _schedule_id, _context_id = self._person(context)
         return person.person_id if person is not None else None
 
+    async def verified_person_id_async(self, caller: BrokerCaller, context: Mapping[str, Any]) -> str | None:
+        """Async variant of ``verified_person_id`` with on-demand issuer certificate fetching (C12)."""
+
+        problem = self._identity_problem(caller, context)
+        if problem is not None:
+            raise IdentityRejected(problem)
+        person, _schedule_id, _context_id = await self._person_async(context)
+        return person.person_id if person is not None else None
+
     def check_broker_action(
         self, caller: BrokerCaller, provider: str, action: str, params: Mapping[str, Any], context: Mapping[str, Any]
     ) -> GateResult:
         return self.check(caller, self.catalog.resolve_broker_action(provider, action, params), context)
+
+    async def check_broker_action_async(
+        self, caller: BrokerCaller, provider: str, action: str, params: Mapping[str, Any], context: Mapping[str, Any]
+    ) -> GateResult:
+        return await self.check_async(caller, self.catalog.resolve_broker_action(provider, action, params), context)
 
     def check_mcp(
         self, caller: BrokerCaller, connection_name: str, operation: str, context: Mapping[str, Any]
     ) -> GateResult:
         return self.check(caller, self.catalog.resolve_mcp(mcp_tool_id(connection_name), operation), context)
 
-    def check(
-        self, caller: BrokerCaller, resolution: OperationResolutionV1, context: Mapping[str, Any]
+    async def check_mcp_async(
+        self, caller: BrokerCaller, connection_name: str, operation: str, context: Mapping[str, Any]
     ) -> GateResult:
-        """Check one resolved operation; resolve it from ``self.catalog`` so the
-        access service decides against the same catalog."""
+        return await self.check_async(caller, self.catalog.resolve_mcp(mcp_tool_id(connection_name), operation), context)
 
-        problem = self._identity_problem(caller, context)
-        if problem is not None:
-            return self._refuse(REASON_IDENTITY_REJECTED, problem, context, resolution=resolution)
-        try:
-            person, schedule_id, work_id = self._person(context)
-        except (IdentityRejected, ValueError) as exc:
-            return self._refuse(REASON_IDENTITY_REJECTED, str(exc), context, resolution=resolution)
+    def _decide_with_verified_person(
+        self,
+        resolution: OperationResolutionV1,
+        context: Mapping[str, Any],
+        person: PersonPrincipal | None,
+        schedule_id: str | None,
+        work_id: str,
+    ) -> GateResult:
         if resolution.tool_id == UNLISTED_WEB_TOOL:
             return self._refuse(
                 REASON_UNLISTED_HOST,
@@ -238,13 +278,42 @@ class BrokerAccessGate:
                 agent=agent,
                 person=person,
                 resolution=resolution,
-                # The signed request id, never the task id the caller names.
+                # The verified token request id, never the task id the caller names.
                 task_id=work_id,
                 hand_on_for_task=True,
             )
             if not decision.allowed:
                 return GateResult(False, REASON_ACCESS_DENIED, decision.reason, decision.next_step, resolution)
         return self._with_account(resolution, person_id, context, work_id=work_id)
+
+    def check(
+        self, caller: BrokerCaller, resolution: OperationResolutionV1, context: Mapping[str, Any]
+    ) -> GateResult:
+        """Check one resolved operation; resolve it from ``self.catalog`` so the
+        access service decides against the same catalog."""
+
+        problem = self._identity_problem(caller, context)
+        if problem is not None:
+            return self._refuse(REASON_IDENTITY_REJECTED, problem, context, resolution=resolution)
+        try:
+            person, schedule_id, work_id = self._person(context)
+        except (IdentityRejected, ValueError) as exc:
+            return self._refuse(REASON_IDENTITY_REJECTED, str(exc), context, resolution=resolution)
+        return self._decide_with_verified_person(resolution, context, person, schedule_id, work_id)
+
+    async def check_async(
+        self, caller: BrokerCaller, resolution: OperationResolutionV1, context: Mapping[str, Any]
+    ) -> GateResult:
+        """Async variant of ``check`` that fetches missing issuer trust records once before verifying (C12)."""
+
+        problem = self._identity_problem(caller, context)
+        if problem is not None:
+            return self._refuse(REASON_IDENTITY_REJECTED, problem, context, resolution=resolution)
+        try:
+            person, schedule_id, work_id = await self._person_async(context)
+        except (IdentityRejected, ValueError) as exc:
+            return self._refuse(REASON_IDENTITY_REJECTED, str(exc), context, resolution=resolution)
+        return self._decide_with_verified_person(resolution, context, person, schedule_id, work_id)
 
     def account_sharing(self) -> TeamAccountSharing | None:
         """The team's sharing choices, from the access store the links are in (both authorization modes).
@@ -489,25 +558,27 @@ def build_broker_access_gate(
     authorization_enabled: bool,
     storage_settings: StorageSettings | None = None,
     cedar_binary: str | None = None,
-    verify_keys: str | None = None,
+    trust: TrustProvider = None,
+    verifier: AuthorityTokenVerifier | None = None,
     lead_agent_type: str = "TeamArchitect",
     service_urls: Mapping[str, str] | None = None,
 ) -> BrokerAccessGate:
-    """The broker's gate: identity and catalog always, grants when enabled.
+    """The broker's gate: protocol 1 authority-token identity and catalog always, grants when enabled.
 
     ``service_urls`` gives the configured address of each service the
     instance runs itself (``access_catalog.catalog.CRAWL4AI_URL_SETTING``),
     so the Crawl4AI web tool matches the server the agents' tools call.
     """
 
-    verifier = ContextVerifier.from_env() if verify_keys is None else ContextVerifier.from_value(verify_keys)
-    if not verifier.keys:
-        logger.error(
-            "No task-context verification keys are configured, so the broker refuses every agent tool use. "
-            "Regenerate internal credentials. event=task_context_verify_keys_missing"
-        )
     catalogs = CatalogSource(instance_root, service_urls=service_urls)
     store = AccessRepository(storage_settings) if storage_settings is not None else None
+    if verifier is None:
+        if trust is None:
+            logger.error(
+                "No protocol 1 trust source is configured for the broker, so it refuses every agent tool use. "
+                "event=broker_trust_source_missing"
+            )
+        verifier = AuthorityTokenVerifier(trust, people=store)
     access: AccessService | None = None
     if authorization_enabled:
         if store is None:

@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from access_control.identity import ISSUER_GATEWAY
+from custom_messages.wire.authority_bindings import GATEWAY_ISSUER_ROLE
 from storage.change_ledger import ChangeWriter, work_writer
 
 
@@ -42,7 +42,13 @@ def verified_work(agent: Any) -> VerifiedWork:
     context = verified_task_context(agent)
     person_id = str(getattr(context, "person_id", "") or "") if context is not None else ""
     work_id = str(getattr(context, "context_id", "") or "") if context is not None else ""
-    is_request = context is not None and context.issuer == ISSUER_GATEWAY and bool(person_id)
+    is_request = (
+        context is not None
+        and context.issuer == GATEWAY_ISSUER_ROLE
+        and (not context.issuer_roles or GATEWAY_ISSUER_ROLE in context.issuer_roles)
+        and context.schedule_id is None
+        and bool(person_id)
+    )
     return VerifiedWork(
         person_id=person_id,
         work_id=work_id,

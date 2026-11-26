@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from access_control.identity import IdentityRejected
+from access_control.authority_verifier import IdentityRejected
 from access_control.task_identity import ReportedScheduleRun, reported_schedule_run
 from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents.schedule_store import is_finishing
@@ -103,7 +103,7 @@ class FailingScheduledRuns:
         gateway = record.meta.gateway_context
         try:
             run = reported_schedule_run(
-                verifier=context_verifier(),
+                verifier=context_verifier(self.agent),
                 team_id=self.team_id,
                 task_context=gateway.task_context if gateway is not None else None,
                 schedule_run=gateway.schedule_run if gateway is not None else None,

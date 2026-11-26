@@ -1,7 +1,7 @@
 """routing v1 contracts, independent of runtime hosts and SDKs."""
 
 from custom_messages.contracts.access_v2 import ScheduleRunIdentityV1
-from custom_messages.contracts.access_v2 import SignedTaskContextV1
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
 from custom_messages.contracts.redispatch_v1 import TaskRedispatchNoticeV1
 from custom_messages.contracts.task_v1 import TaskQueryChoiceOption
 from custom_messages.enums import RequesterType
@@ -296,21 +296,22 @@ class GatewayContext(BaseModel):
         default=None,
         description="Optional channel message identifier that originated the request.",
     )
-    task_context: Optional[SignedTaskContextV1] = Field(
+    task_context: Optional[AuthorityTokenRecord] = Field(
         default=None,
         description=(
-            "Signed statement of the person (and roles) this work is for, from the "
-            "gateway or scheduler (access_control.identity). Copied unchanged onto "
-            "delegated tasks; enforcement points trust only this, not canonical_user_id."
+            "Protocol 1 authority token proving who this work acts for, signed by the "
+            "gateway or scheduler host certificate (access_control.authority_verifier). "
+            "Copied unchanged onto delegated tasks; enforcement points trust only this, "
+            "not canonical_user_id."
         ),
     )
     schedule_run: Optional[ScheduleRunIdentityV1] = Field(
         default=None,
         description=(
-            "Who a scheduled run works for when the agent that started it holds no "
-            "scheduler key: the schedule's manager-signed permit and this run's own "
-            "fields (access_control.task_identity). Set instead of task_context, never "
-            "with it; copied unchanged onto delegated tasks and never saved on a schedule."
+            "Who a scheduled run works for using the schedule's scheduler-signed permit "
+            "token plus this run's own fields (access_control.task_identity). Set instead "
+            "of task_context, never with it; copied unchanged onto delegated tasks and "
+            "never saved on a schedule."
         ),
     )
     # The description still names the switch's old label (now Run

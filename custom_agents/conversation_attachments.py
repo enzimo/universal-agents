@@ -137,13 +137,14 @@ import stat
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Optional
 
 from pydantic import ValidationError
 
 from access_control import safe_open
-from access_control.identity import IdentityRejected
+from access_control.authority_verifier import IdentityRejected
 from access_control.ownership import (
     CONTEXT_NAMES_NO_TASK,
     OwnershipDecision,
@@ -1041,6 +1042,9 @@ def admit_request_files(
     team_id: str,
     person_id: Optional[str],
     upload_folder: Callable[[], UploadFolder],
+    agent: Any = None,
+    valid_at: Optional[datetime] = None,
+    reached_at: Optional[datetime] = None,
 ) -> AdmittedRequestFiles:
     """The one admission rule for a top-level request's files (module docstring).
 
@@ -1049,8 +1053,8 @@ def admit_request_files(
     them (``sent_files_access``) and each lies in this host's upload folder
     (``keep_upload_files``; ``upload_folder`` finds it, only when files are left
     to check). Each dropped file is logged with why. The task's own files and
-    its turn then hold the same records. Blocking (it verifies the signed
-    context and resolves each record's path on the file system): run it in a
+    its turn then hold the same records. Blocking (it verifies the authority
+    token and resolves each record's path on the file system): run it in a
     thread from async code.
     """
 
@@ -1058,7 +1062,16 @@ def admit_request_files(
     if not sent:
         return AdmittedRequestFiles(task)
     conversation_id = _text(getattr(meta, "conversation_id", None))
-    vouched = _vouched_request_files(task, meta, team_id=team_id, person_id=person_id, conversation_id=conversation_id)
+    vouched = _vouched_request_files(
+        task,
+        meta,
+        team_id=team_id,
+        person_id=person_id,
+        conversation_id=conversation_id,
+        agent=agent,
+        valid_at=valid_at,
+        reached_at=reached_at,
+    )
     kept = keep_upload_files(vouched, upload_folder() if vouched else None, task_id=task.task_id, conversation_id=conversation_id)
     not_kept = len(sent) - len(kept)
     if not not_kept:
@@ -1083,16 +1096,25 @@ def admit_request_files(
 
 
 def _vouched_request_files(
-    task: Task, meta: Any, *, team_id: str, person_id: Optional[str], conversation_id: Optional[str]
+    task: Task,
+    meta: Any,
+    *,
+    team_id: str,
+    person_id: Optional[str],
+    conversation_id: Optional[str],
+    agent: Any = None,
+    valid_at: Optional[datetime] = None,
+    reached_at: Optional[datetime] = None,
 ) -> list[UserTaskAttachment]:
     """The request's files when the gateway vouches it sent them for this request; none (logged) otherwise."""
 
     decision = sent_files_access(
-        sender=_verified_sender(meta, team_id),
+        sender=_verified_sender(meta, team_id, agent=agent, valid_at=valid_at, reached_at=reached_at),
         task_id=task.task_id,
         conversation_id=conversation_id,
         person_id=person_id,
         message_context_id=request_context_id(task),
+        message_conversation_id=conversation_id,
     )
     if decision.allowed:
         return list(task.attachments)
@@ -1102,45 +1124,86 @@ def _vouched_request_files(
     return []
 
 
-def steering_files_check(task_info: Any, steering: TaskSteering, meta: Any, *, team_id: str) -> OwnershipDecision:
+def steering_files_check(
+    task_info: Any,
+    steering: TaskSteering,
+    meta: Any,
+    *,
+    team_id: str,
+    agent: Any = None,
+    valid_at: Optional[datetime] = None,
+    reached_at: Optional[datetime] = None,
+) -> OwnershipDecision:
     """Whether the files on ``steering`` (a guidance or an answer, with message meta ``meta``) may become the task's.
 
     A delegated task keeps none (module docstring). For a top-level task the
-    message must carry a context the gateway signed for this message and
-    these files; ``steering`` is the message as it arrived.
+    message must carry a gateway-signed authority token bound to this message
+    and these files; ``steering`` is the message as it arrived.
     """
 
     if task_info.task.parent_task_id is not None:
         return OwnershipDecision(False, DELEGATED_TASK_REASON)
-    return _sent_to_task_check(task_info, meta, team_id, steering_context_id(steering))
+    return _sent_to_task_check(
+        task_info,
+        meta,
+        team_id,
+        steering_context_id(steering),
+        agent=agent,
+        valid_at=valid_at,
+        reached_at=reached_at,
+    )
 
 
-def answer_files_check(task_info: Any, answer: TaskQuery, meta: Any, *, team_id: str) -> OwnershipDecision:
+def answer_files_check(
+    task_info: Any,
+    answer: TaskQuery,
+    meta: Any,
+    *,
+    team_id: str,
+    agent: Any = None,
+    valid_at: Optional[datetime] = None,
+    reached_at: Optional[datetime] = None,
+) -> OwnershipDecision:
     """Whether the files on ``answer`` (a ``TaskQuery`` with message meta ``meta``) may become the task's.
 
     Only a person's answer to a question (a RESPONSE, which the gateway
     sends) brings files; a question an agent asks keeps none. The message
-    must carry a context the gateway signed for this answer and these files,
-    naming the task the question was asked in (``answer`` is the message as
-    it arrived). That task may be delegated: the team lead's record of a
-    worker's escalation, whose question it asked the person. Which delegated
-    tasks keep them is decided by ``sent_files_runtime.keep_sent_files``
-    (module docstring).
+    must carry a gateway-signed authority token bound to this answer and these
+    files, naming the task the question was asked in (``answer`` is the message
+    as it arrived).
     """
 
     if answer.query_type != MessageMetaType.RESPONSE:
         return OwnershipDecision(False, NOT_AN_ANSWER_REASON)
-    return _sent_to_task_check(task_info, meta, team_id, answer_context_id(answer))
+    return _sent_to_task_check(
+        task_info,
+        meta,
+        team_id,
+        answer_context_id(answer),
+        agent=agent,
+        valid_at=valid_at,
+        reached_at=reached_at,
+    )
 
 
-def _sent_to_task_check(task_info: Any, meta: Any, team_id: str, message_context_id: str) -> OwnershipDecision:
+def _sent_to_task_check(
+    task_info: Any,
+    meta: Any,
+    team_id: str,
+    message_context_id: str,
+    *,
+    agent: Any = None,
+    valid_at: Optional[datetime] = None,
+    reached_at: Optional[datetime] = None,
+) -> OwnershipDecision:
     task = task_info.task
     return sent_files_access(
-        sender=_verified_sender(meta, team_id),
+        sender=_verified_sender(meta, team_id, agent=agent, valid_at=valid_at, reached_at=reached_at),
         task_id=task.task_id,
         conversation_id=_text(getattr(task_info.meta, "conversation_id", None)),
         person_id=getattr(task_info, "owner_person_id", None),
         message_context_id=message_context_id,
+        message_conversation_id=_text(getattr(meta, "conversation_id", None)),
     )
 
 
@@ -1200,16 +1263,31 @@ def without_incoming_files_entries(task: Task) -> Task:
     return task.model_copy(update={"execution_history": kept})
 
 
-def _verified_sender(meta: Any, team_id: str) -> Optional[TaskContextV1]:
-    """The message's own signed context, verified with this process's keys; None when missing or invalid."""
+def _verified_sender(
+    meta: Any,
+    team_id: str,
+    *,
+    agent: Any = None,
+    valid_at: Optional[datetime] = None,
+    reached_at: Optional[datetime] = None,
+) -> Optional[TaskContextV1]:
+    """The message's own authority token, verified with this process's trust store; None when missing or invalid."""
+
+    from access_control.task_identity import verified_token_to_task_context
 
     signed = getattr(getattr(meta, "gateway_context", None), "task_context", None)
     if signed is None:
         return None
     try:
-        return context_verifier().verify(signed, team_id=team_id or None)
+        verified = context_verifier(agent).verify_root_task(
+            signed,
+            team_id=team_id,
+            valid_at=valid_at,
+            reached_at=reached_at,
+        )
+        return verified_token_to_task_context(verified)
     except (IdentityRejected, ValueError) as exc:
-        logger.info("A message's signed context was not accepted. event=sent_files_context_rejected error=%s", exc)
+        logger.info("A message's authority token was not accepted. event=sent_files_context_rejected error=%s", exc)
         return None
 
 

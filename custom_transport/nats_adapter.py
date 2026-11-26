@@ -46,9 +46,12 @@ from custom_transport.dead_letters import (
 from custom_transport.jetstream_account import reported_bytes, request_account_info
 from custom_transport.nats_pull import (
     CONSUMER_METADATA_SCHEMA,
+    ENDED,
     POOL_ACK_WAIT_SECONDS,
     POOL_MAX_DELIVER,
     PullRunner,
+    RETURNED,
+    UNHANDLED_RETURN_DELAY_SECONDS,
     delivery_count,
     ensure_pull_consumer,
     return_or_end,
@@ -92,6 +95,50 @@ def _undecodable_identity(data: Any) -> tuple[Optional[str], Optional[str]]:
         str(message_id)[:_LOGGED_TEXT_LIMIT] if message_id is not None else None,
         str(message_class)[:_LOGGED_TEXT_LIMIT] if message_class is not None else None,
     )
+
+
+def _has_legacy_signed_context(data: Any) -> bool:
+    """Whether unreadable envelope bytes carry a pre-protocol-1 SignedTaskContextV1 or SignedSchedulePermitV1 (C07)."""
+
+    try:
+        document = json.loads(data)
+    except Exception:
+        return False
+    if not isinstance(document, dict):
+        return False
+    meta = document.get("msg_meta")
+    gateway = meta.get("gateway_context") if isinstance(meta, dict) else None
+    if not isinstance(gateway, dict):
+        return False
+    task_context = gateway.get("task_context")
+    if (
+        isinstance(task_context, dict)
+        and "context" in task_context
+        and "key_id" in task_context
+        and "signature" in task_context
+        and "token_id" not in task_context
+    ):
+        return True
+    schedule_run = gateway.get("schedule_run")
+    permit = schedule_run.get("permit") if isinstance(schedule_run, dict) else None
+    return (
+        isinstance(permit, dict)
+        and "permit" in permit
+        and "key_id" in permit
+        and "signature" in permit
+        and "token_id" not in permit
+    )
+
+
+def _metadata_stored_at(metadata: Any) -> Optional[datetime]:
+    """Server-assigned UTC timestamp when JetStream stored a message (Decision 52), or ``None``."""
+
+    raw = getattr(metadata, "timestamp", None) if metadata is not None else None
+    if not isinstance(raw, datetime):
+        return None
+    if raw.tzinfo is None:
+        return raw.replace(tzinfo=timezone.utc)
+    return raw.astimezone(timezone.utc)
 
 
 def _decode_error_summary(exc: ValueError) -> str:
@@ -1343,23 +1390,51 @@ class NatsTransportAdapter:
             # ValueError covers JSON errors, Pydantic validation errors and the
             # codec's missing-identity check.
             summary = _decode_error_summary(exc)
-            outcome = (
-                await return_or_end(
+            raw_data = getattr(msg, "data", b"")
+            legacy_context = jetstream and _has_legacy_signed_context(raw_data)
+            if legacy_context:
+                # Pre-protocol-1 signed contexts can never decode on this release; set
+                # aside once on first delivery instead of redelivering in a loop (C07).
+                stored = await self._set_aside(
                     msg,
-                    max_deliver=max_deliver,
-                    set_aside=lambda: self._set_aside(
-                        msg, reason=REASON_UNDECODABLE, error=summary, subscription_name=subscription_name
-                    ),
+                    reason=REASON_UNDECODABLE,
+                    error=f"legacy_signed_context: {summary}",
+                    subscription_name=subscription_name,
                 )
-                if jetstream
-                else _DROPPED
-            )
-            message_id, message_class = _undecodable_identity(getattr(msg, "data", b""))
+                if stored:
+                    try:
+                        await before_send()
+                    except Exception:
+                        with contextlib.suppress(Exception):
+                            await msg.nak(delay=UNHANDLED_RETURN_DELAY_SECONDS)
+                        outcome = RETURNED
+                    else:
+                        with contextlib.suppress(Exception):
+                            await msg.term()
+                        outcome = ENDED
+                else:
+                    with contextlib.suppress(Exception):
+                        await msg.nak(delay=UNHANDLED_RETURN_DELAY_SECONDS)
+                    outcome = RETURNED
+            else:
+                outcome = (
+                    await return_or_end(
+                        msg,
+                        max_deliver=max_deliver,
+                        set_aside=lambda: self._set_aside(
+                            msg, reason=REASON_UNDECODABLE, error=summary, subscription_name=subscription_name
+                        ),
+                    )
+                    if jetstream
+                    else _DROPPED
+                )
+            message_id, message_class = _undecodable_identity(raw_data)
             self._logger.error(
                 "Received a message this release cannot read. "
-                "event=nats_message_undecodable subscription=%s subject=%s "
+                "event=%s subscription=%s subject=%s "
                 "message_id=%s message_class=%s delivery=%s max_deliver=%s "
                 "outcome=%s error=%s",
+                "nats_message_legacy_context_set_aside" if legacy_context else "nats_message_undecodable",
                 subscription_name,
                 getattr(msg, "subject", ""),
                 message_id,
@@ -1597,6 +1672,7 @@ class NatsTransportAdapter:
             source_queue_name=logical_route,
             max_deliver=max_deliver,
             ack_wait_seconds=ack_wait_seconds,
+            stored_at=_metadata_stored_at(metadata),
             _ack=_ack,
             _nak=_nak,
             _term=_term,

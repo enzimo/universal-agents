@@ -1981,8 +1981,10 @@ def raw_copy_names_person(
     """Whether raw copy ``data`` names any departing person (protocol 1 frame or legacy ``MessageEnvelope``).
 
     Matches:
-    - Protocol 1 frames (identified by a ``protocol`` string plus a ``body`` or ``authority`` object):
-      ``authority.person`` and any ``person_ref`` value inside ``body``.
+    - Protocol 1 frames and old-wrapper ``MessageEnvelope`` objects carrying protocol 1
+      authority tokens (``gateway_context.task_context.person``,
+      ``gateway_context.schedule_run.permit.person``): ``authority.person`` and any
+      opaque ``person_ref`` value anywhere in the JSON document.
     - Legacy ``MessageEnvelope`` objects (``msg_meta`` / ``msg_content``): only the closed set of
       person-id fields documented in ``contracts/messages/v1/README.md`` ("People's content", C13).
     - When JSON parsing fails (truncated, deeply nested, or corrupt bytes, F4/EA-3): matches

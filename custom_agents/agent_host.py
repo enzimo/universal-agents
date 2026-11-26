@@ -746,6 +746,11 @@ class AgentProcessHost:
             return await coroutine
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, self.loop))  # type: ignore[arg-type]
 
+    def trust_state(self) -> Optional[tuple[Any, Any]]:
+        """This process host's ``TrustStore`` and lock once started, or ``None``."""
+
+        return self.host.trust_state() if self.host is not None else None
+
     async def fetch_token_issuer(self, token: Any) -> bool:
         """Fetch an authority token's issuer certificate on this process's host loop (safe from any worker thread)."""
 

@@ -30,8 +30,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import nullcontext
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 from access_control.people_directory import PeopleDirectory, PeopleStore, PersonNow
 from custom_messages.contracts.access_v2 import is_person_ref
 from custom_messages.wire.authority_bindings import (
+    AuthorityTokenRecord,
     GATEWAY_ISSUER_ROLE,
     ROOT_TASK_BINDING,
     SCHEDULER_ISSUER_ROLE,
@@ -46,6 +47,7 @@ from custom_messages.wire.authority_bindings import (
     SCHEDULE_PERMIT_PREFIX,
     SCHEDULE_RUN_CONTEXT_PREFIX,
     extract_token_issuer,
+    extract_token_log_fields,
     is_schedule_permit_binding,
     schedule_permit_binding_id,
 )
@@ -144,36 +146,32 @@ def _utc_now() -> datetime:
 def _resolve_trust_source(
     source: TrustProvider,
     *,
-    explicit_lock: Optional[threading.RLock],
     explicit_fetcher: Optional[IssuerFetcher],
 ) -> tuple[Optional[TrustStore], Optional[threading.RLock], Optional[IssuerFetcher]]:
-    """Unwrap TrustStore, PersistentTrustStore, TrustReader, LiveHost, MessageHost, or AgentProcessHost."""
+    """Resolve ``(TrustStore, RLock | None, IssuerFetcher | None)`` via the explicit ``trust_state()`` interface (C11).
+
+    Accepts ``PersistentTrustStore``, ``TrustReader``, ``LiveHost``, ``MessageHost``,
+    ``AgentProcessHost`` (each exposing ``trust_state() -> (TrustStore, PersistentTrustStore.lock)``
+    or ``None`` before start), a zero-arg callable returning one of them, or a bare ``TrustStore``
+    for tests. Never guesses attribute names or substitutes a different lock than the store's own.
+    """
 
     resolved = source() if callable(source) else source
     if resolved is None:
-        return None, explicit_lock, explicit_fetcher
+        return None, None, explicit_fetcher
     fetcher = explicit_fetcher
     if fetcher is None and callable(getattr(resolved, "fetch_token_issuer", None)):
         fetcher = cast(IssuerFetcher, resolved.fetch_token_issuer)
-    candidate: Any = resolved
-    lock = explicit_lock
-    for _ in range(5):
-        if lock is None:
-            cand_lock = getattr(candidate, "lock", None)
-            if cand_lock is not None and hasattr(cand_lock, "__enter__"):
-                lock = cand_lock
-        if hasattr(candidate, "host_certificate"):
-            return cast("TrustStore", candidate), lock, fetcher
-        next_obj = None
-        for attr in ("store", "trust", "live", "host", "_trust"):
-            value = getattr(candidate, attr, None)
-            if value is not None and value is not candidate:
-                next_obj = value
-                break
-        if next_obj is None:
-            break
-        candidate = next_obj
-    return None, lock, fetcher
+    trust_state = getattr(resolved, "trust_state", None)
+    if callable(trust_state):
+        state = trust_state()
+        if state is None:
+            return None, None, fetcher
+        store, lock = state
+        return cast("TrustStore", store), cast(Optional[threading.RLock], lock), fetcher
+    if hasattr(resolved, "host_certificate"):
+        return cast("TrustStore", resolved), None, fetcher
+    return None, None, fetcher
 
 
 def _unwrap_people_store(source: Optional[PeopleProvider]) -> Optional[PeopleStore]:
@@ -194,6 +192,9 @@ def _parse_token(raw_token: Any) -> tuple[AuthorityToken, Mapping[str, Any]]:
         )
     if isinstance(raw_token, AuthorityToken):
         return raw_token, raw_token.model_dump(mode="json")
+    if isinstance(raw_token, AuthorityTokenRecord):
+        dumped = raw_token.model_dump(mode="json")
+        return AuthorityToken.model_validate(dumped), dumped
     if not isinstance(raw_token, Mapping):
         raise IdentityRejected("The authority token is not a valid token object.", code=REFUSAL_MALFORMED)
     try:
@@ -263,22 +264,28 @@ class AuthorityTokenVerifier:
         people: Optional[PeopleProvider] = None,
         installation: Optional[str] = None,
         clock: Callable[[], datetime] = _utc_now,
-        read_lock: Optional[threading.RLock] = None,
         fetch_issuer: Optional[IssuerFetcher] = None,
     ) -> None:
         self._trust = trust
         self._people = people
         self._installation = installation
         self._clock = clock
-        self._read_lock = read_lock
         self._fetch_issuer = fetch_issuer
 
+    @property
+    def has_people(self) -> bool:
+        return self._people is not None
+
+    def now(self) -> datetime:
+        """Current time according to this verifier's clock."""
+
+        return self._clock()
+
+    def _resolve(self) -> tuple[Optional[TrustStore], Optional[threading.RLock], Optional[IssuerFetcher]]:
+        return _resolve_trust_source(self._trust, explicit_fetcher=self._fetch_issuer)
+
     def _require_trust(self) -> tuple[TrustStore, str, Optional[threading.RLock]]:
-        store, lock, _ = _resolve_trust_source(
-            self._trust,
-            explicit_lock=self._read_lock,
-            explicit_fetcher=self._fetch_issuer,
-        )
+        store, lock, _ = self._resolve()
         if store is None:
             raise IdentityRejected(
                 "No protocol 1 trust store is available to verify authority tokens.",
@@ -286,14 +293,6 @@ class AuthorityTokenVerifier:
             )
         expected_installation = self._installation or store.installation
         return store, expected_installation, lock
-
-    def _resolve_fetcher(self) -> Optional[IssuerFetcher]:
-        _, _, fetcher = _resolve_trust_source(
-            self._trust,
-            explicit_lock=self._read_lock,
-            explicit_fetcher=self._fetch_issuer,
-        )
-        return fetcher
 
     def _resolve_person(
         self,
@@ -485,11 +484,7 @@ class AuthorityTokenVerifier:
         if extracted is None:
             return False
         installation, runtime, epoch = extracted
-        store, lock, fetcher = _resolve_trust_source(
-            self._trust,
-            explicit_lock=self._read_lock,
-            explicit_fetcher=self._fetch_issuer,
-        )
+        store, lock, fetcher = self._resolve()
         if store is None or fetcher is None:
             return False
         expected_installation = self._installation or store.installation
@@ -515,26 +510,42 @@ class AuthorityTokenVerifier:
         except IdentityRejected as refused:
             if refused.code not in FETCHABLE_REFUSAL_CODES:
                 raise
-            fetcher = self._resolve_fetcher()
+            issuer_runtime, membership_epoch, team, request_id = extract_token_log_fields(raw_token)
+            _, _, fetcher = self._resolve()
             if fetcher is None:
                 logger.warning(
                     "Authority token refused because a trust record is missing and no fetcher is available. "
-                    "event=authority_token_refused code=%s",
+                    "event=authority_token_refused code=%s issuer_runtime=%s membership_epoch=%s "
+                    "team=%s request_id=%s",
                     refused.code,
+                    issuer_runtime,
+                    membership_epoch,
+                    team,
+                    request_id,
                 )
                 raise
             fetched = await fetcher(raw_token)
             if not fetched:
                 logger.warning(
                     "Authority token refused; fetching trust records produced nothing new. "
-                    "event=authority_token_refused code=%s",
+                    "event=authority_token_refused code=%s issuer_runtime=%s membership_epoch=%s "
+                    "team=%s request_id=%s",
                     refused.code,
+                    issuer_runtime,
+                    membership_epoch,
+                    team,
+                    request_id,
                 )
                 raise
             logger.info(
                 "Fetched missing trust record for authority token issuer; retrying verification once. "
-                "event=authority_token_issuer_fetched code=%s",
+                "event=authority_token_issuer_fetched code=%s issuer_runtime=%s membership_epoch=%s "
+                "team=%s request_id=%s",
                 refused.code,
+                issuer_runtime,
+                membership_epoch,
+                team,
+                request_id,
             )
             return verify_fn(raw_token, **kwargs)
 
@@ -650,6 +661,38 @@ class AuthorityTokenVerifier:
         )
 
 
+_PROCESS_VERIFIER_LOCK = threading.RLock()
+_PROCESS_VERIFIER: Optional[AuthorityTokenVerifier] = None
+
+
+def set_process_verifier(verifier: Optional[AuthorityTokenVerifier]) -> None:
+    """Register or clear this process's active ``AuthorityTokenVerifier`` (hosts, change ledger, tests)."""
+
+    global _PROCESS_VERIFIER
+    with _PROCESS_VERIFIER_LOCK:
+        _PROCESS_VERIFIER = verifier
+
+
+def get_process_verifier() -> Optional[AuthorityTokenVerifier]:
+    """Return this process's active ``AuthorityTokenVerifier``, or ``None`` if none is registered."""
+
+    with _PROCESS_VERIFIER_LOCK:
+        return _PROCESS_VERIFIER
+
+
+@contextmanager
+def use_process_verifier(verifier: Optional[AuthorityTokenVerifier]) -> Iterator[Optional[AuthorityTokenVerifier]]:
+    """Temporarily bind the process verifier for one scope (useful in tests and one-shot commands)."""
+
+    with _PROCESS_VERIFIER_LOCK:
+        previous = _PROCESS_VERIFIER
+        set_process_verifier(verifier)
+    try:
+        yield verifier
+    finally:
+        set_process_verifier(previous)
+
+
 __all__ = [
     "AuthorityTokenVerifier",
     "FETCHABLE_REFUSAL_CODES",
@@ -683,6 +726,9 @@ __all__ = [
     "SCHEDULE_PERMIT_PREFIX",
     "SCHEDULE_RUN_CONTEXT_PREFIX",
     "VerifiedTaskToken",
+    "get_process_verifier",
     "is_schedule_permit_binding",
     "schedule_permit_binding_id",
+    "set_process_verifier",
+    "use_process_verifier",
 ]

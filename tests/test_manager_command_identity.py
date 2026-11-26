@@ -20,14 +20,13 @@ from pathlib import Path
 
 import pytest
 
-from access_control.identity import ContextSigner
 from custom_agents.manager_control_runtime import (
     handle_manager_runtime_work_command,
     verified_command_person,
 )
 from custom_messages.contracts.control_v1 import ManagerRuntimeWorkCommand
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
-from tests.broker_access_support import context_signer, use_scheduler_key
+from tests.broker_access_support import signed_scheduler_task_context, signed_task_context
 from tests.test_manager_control_runtime import (  # noqa: F401
     _bootstrap_agent,
     _CaptureComms,
@@ -73,16 +72,13 @@ async def test_an_unsigned_command_is_refused_whoever_it_claims_to_be(manager) -
 @pytest.mark.asyncio
 async def test_a_context_the_gateway_did_not_sign_for_this_team_is_refused(manager, monkeypatch) -> None:
     agent, config = manager
-    use_scheduler_key(monkeypatch)
-    scheduler = ContextSigner.from_env("scheduler")
-    assert scheduler is not None
 
     by_scheduler = await _send(
         agent,
         _list_objectives(),
         GatewayContext(
             canonical_user_id="Owner",
-            task_context=scheduler.issue(team_id=agent.team_id, person_id="Owner", person_roles=("owner",)),
+            task_context=signed_scheduler_task_context("Owner", team_id=agent.team_id, roles=("owner",)),
         ),
     )
     other_team = await _send(
@@ -90,7 +86,7 @@ async def test_a_context_the_gateway_did_not_sign_for_this_team_is_refused(manag
         _list_objectives(),
         GatewayContext(
             canonical_user_id="Owner",
-            task_context=context_signer().issue(team_id="another_team", person_id="Owner", person_roles=("owner",)),
+            task_context=signed_task_context("Owner", team_id="another_team", roles=("owner",)),
         ),
     )
 

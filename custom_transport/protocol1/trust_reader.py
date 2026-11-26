@@ -113,6 +113,11 @@ class TrustReader:
     def lock(self) -> threading.RLock:
         return self.trust.lock
 
+    def trust_state(self) -> tuple[TrustStore, threading.RLock]:
+        """The underlying ``TrustStore`` paired with the lock that serializes its mutations."""
+
+        return self.trust.trust_state()
+
     @contextmanager
     def read_lock(self) -> Iterator[TrustStore]:
         """Acquire the trust store lock while inspecting ``TrustStore`` from another thread."""

@@ -71,6 +71,10 @@ def configure_process_host(host: Optional[Any]) -> None:
 
     global _PROCESS_HOST
     _PROCESS_HOST = host
+    if host is None:
+        from access_control.authority_verifier import set_process_verifier
+
+        set_process_verifier(None)
 
 
 def process_host() -> Optional[Any]:

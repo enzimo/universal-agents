@@ -4720,12 +4720,12 @@ def test_secure_cli_preserves_structured_gate_refusal_from_http_error(
 
 
 def test_secure_cli_sends_the_signed_task_context_from_the_active_task() -> None:
-    from custom_messages.contracts.access_v2 import SignedTaskContextV1
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord
     from custom_tools.secure_cli_tool import _trusted_runtime_context
     from tests.task_work_support import set_agent_ref
     from tests.broker_access_support import signed_task_context
 
-    signed = SignedTaskContextV1.model_validate(signed_task_context("user_bound"))
+    signed = AuthorityTokenRecord.model_validate(signed_task_context("user_bound"))
     task_meta = SimpleNamespace(
         gateway_context=SimpleNamespace(
             canonical_user_id="user_bound", task_context=signed

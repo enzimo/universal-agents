@@ -130,6 +130,11 @@ class PersistentTrustStore:
             persistent._save()
         return persistent
 
+    def trust_state(self) -> tuple[TrustStore, threading.RLock]:
+        """The underlying ``TrustStore`` paired with the lock that serializes its mutations."""
+
+        return self.store, self.lock
+
     # -- trust records ------------------------------------------------------------------------------
 
     def add(self, data: bytes, *, now: datetime) -> bool:

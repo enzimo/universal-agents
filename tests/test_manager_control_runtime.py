@@ -55,9 +55,9 @@ from storage.config import resolve_storage_settings
 from storage.sqlite_connection import connect_sqlite
 from storage.task_archive_repository import SqliteTaskArchiveRepository
 from tests.broker_access_support import (
-    context_signer,
-    context_verify_keys,
     forget_task_context_keys,
+    signed_task_context,
+    use_broker_authority_verifier,
 )
 from custom_agents import manager_control_runtime
 from tests import scheduled_run_support as scheduled_runs
@@ -65,10 +65,10 @@ from tests import scheduled_run_support as scheduled_runs
 
 @pytest.fixture(autouse=True)
 def _gateway_signing_keys(monkeypatch: pytest.MonkeyPatch):
-    """Gateway commands name their person only through a gateway-signed context."""
+    """Gateway commands name their person only through a gateway-signed authority token."""
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -76,8 +76,8 @@ def _gateway_signing_keys(monkeypatch: pytest.MonkeyPatch):
 def _signed(context: GatewayContext, *, team_id: str, roles: list[str]) -> GatewayContext:
     """The gateway context with the signed-in person signed, as the gateway sends it."""
 
-    signed = context_signer().issue(
-        team_id=team_id, person_id=context.canonical_user_id, person_roles=tuple(roles)
+    signed = signed_task_context(
+        context.canonical_user_id, team_id=team_id, roles=tuple(roles)
     )
     return context.model_copy(update={"task_context": signed})
 

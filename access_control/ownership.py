@@ -69,11 +69,11 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from access_control.entities import AGENT_ROLE_SYSTEM
-from access_control.identity import ISSUER_GATEWAY
 from access_control.people import is_administrator, normalized_roles
 from custom_messages.contracts.access_v2 import MESSAGE_CONTEXT_ID_PREFIX, TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.task_v1 import Task, TaskQuery, TaskSteering
+from custom_messages.wire.authority_bindings import GATEWAY_ISSUER_ROLE
 
 logger = logging.getLogger(__name__)
 
@@ -232,55 +232,38 @@ def sent_files_access(
     conversation_id: str | None,
     person_id: str | None,
     message_context_id: str,
+    message_conversation_id: str | None = None,
 ) -> OwnershipDecision:
     """Whether the gateway vouches for the files on a message a person sent to one task.
 
     Uploads are the person's private records, and the agent side cannot read
     the gateway's upload records, so it keeps a message's files only when the
     gateway vouches that it sent exactly those files with this message, for
-    this task: ``sender`` is the message's own signed context, already
-    verified by the caller (None when missing, forged or expired). It must be
-    the gateway's, name the person the task verifiably works for
-    (``person_id``, decided at admission), name the task as ``root_task_id``,
-    name its conversation, and have the id the caller derived from the
-    message as it arrived (``message_context_id``: ``request_context_id``,
-    ``steering_context_id`` or ``answer_context_id``). The gateway signs
-    ``root_task_id`` and ``conversation_id``, and an id derived the same way,
-    only on a new request's context, on the context of each guidance or
-    interrupt answer it sends to that request, and on the context of each
-    answer to a question, which names the task that asked: the request, a
-    plan step or isolated recovery task of it, or the team lead's record of
-    a worker's escalation (``assistant_gateway.application.request_context``,
-    ``assistant_gateway.application.clarification``). A gateway context that
-    names no task is refused as ``CONTEXT_NAMES_NO_TASK`` rather than
-    ``another_task``, because the gateway never signs one for a message with
-    files: on a request it is the context a gateway from before this rule
-    signed, for a request still queued when the instance was updated, whose
-    files the person must send again. Guidance and interrupt answers are
-    signed again each time they are sent, and that gateway sent no files with
-    answers to questions, so on those it is a context taken from another
-    message, such as the gateway's status check. This rule decides only
-    whether the gateway vouches for the files; which tasks then keep them is
-    the agent runtime's decision (``custom_agents.sent_files_runtime``).
-
-    Why the id: other agent processes hold or see valid gateway contexts for
-    the task. Delegation copies the request's admitted context into every
-    subtask, and guidance and answers travel on the operational subject that
-    every agent process of the team receives, so any of them can see each
-    guidance's context. Signed contexts are bearer proofs, so a process
-    could send one again with other files. The id names one message (the
-    request's task id, or the key the lead deduplicates guidance and answers
-    on) and digests its file records exactly as the gateway sent them. A
-    context reused on another message, or with any other file, has the wrong
-    id. Sent again on the same message with the same files, it brings only
-    files the gateway sent for the task, and recording them again adds
-    nothing. A request's own context has a request id, so a worker's copy
-    never passes for a guidance or an answer.
+    this task: ``sender`` is the message's own verified gateway authority token
+    (None when missing, forged or expired). It must be signed by a gateway host
+    certificate (never a scheduler certificate), name the person the task
+    verifiably works for (``person_id``, decided at admission), bind
+    ``root_task_id`` to ``task_id``, match the task's admitted conversation
+    (``message_conversation_id == conversation_id`` since protocol 1 authority
+    tokens carry no conversation field, C05), and have ``context_id`` equal to
+    the digest derived from the message and its files (``request_context_id``,
+    ``steering_context_id`` or ``answer_context_id``).
     """
 
+    sender_is_gateway = (
+        sender is not None
+        and sender.issuer == GATEWAY_ISSUER_ROLE
+        and (not sender.issuer_roles or GATEWAY_ISSUER_ROLE in sender.issuer_roles)
+        and sender.schedule_id is None
+    )
+    sender_conversation = (
+        sender.conversation_id
+        if (sender is not None and sender.conversation_id is not None)
+        else message_conversation_id
+    )
     if sender is None:
         reason = "gateway_context_required"
-    elif sender.issuer != ISSUER_GATEWAY:
+    elif not sender_is_gateway:
         reason = "sender_not_gateway"
     elif _person(sender.person_id) != _person(person_id):
         reason = "another_person"
@@ -288,7 +271,7 @@ def sent_files_access(
         reason = CONTEXT_NAMES_NO_TASK
     elif not task_id or sender.root_task_id != task_id:
         reason = "another_task"
-    elif not conversation_id or sender.conversation_id != conversation_id:
+    elif not conversation_id or not sender_conversation or sender_conversation != conversation_id:
         reason = "another_conversation"
     elif sender.context_id != message_context_id:
         reason = "context_not_for_message"

@@ -610,7 +610,12 @@ async def _pending_delegated_subtasks(agent: Any, task_id: str) -> list[tuple[An
 
 
 async def _accept_sent_files(
-    agent: Any, task_info: Any, steering: TaskSteering, msg_meta: MessageMeta
+    agent: Any,
+    task_info: Any,
+    steering: TaskSteering,
+    msg_meta: MessageMeta,
+    *,
+    message_stored_at: Optional[datetime] = None,
 ) -> Optional[TaskSteering]:
     """``steering`` with only the files that were kept, after recording them; None when the task is gone.
 
@@ -622,7 +627,18 @@ async def _accept_sent_files(
 
     if not steering.attachments:
         return steering
-    decision = steering_files_check(task_info, steering, msg_meta, team_id=str(getattr(agent, "team_id", "") or ""))
+    from custom_agents.access_runtime import ensure_meta_issuer_known
+
+    await ensure_meta_issuer_known(agent, msg_meta)
+    decision = steering_files_check(
+        task_info,
+        steering,
+        msg_meta,
+        team_id=str(getattr(agent, "team_id", "") or ""),
+        agent=agent,
+        valid_at=message_stored_at,
+        reached_at=message_stored_at,
+    )
     kept = await keep_sent_files(
         agent,
         task_info,
@@ -636,7 +652,12 @@ async def _accept_sent_files(
 
 
 async def _keep_guidance(
-    agent: Any, task_info: Any, steering: TaskSteering, msg_meta: MessageMeta
+    agent: Any,
+    task_info: Any,
+    steering: TaskSteering,
+    msg_meta: MessageMeta,
+    *,
+    message_stored_at: Optional[datetime] = None,
 ) -> tuple[Optional[TaskSteering], list[UserTaskAttachment]]:
     """The guidance as taken (None when its task is gone), and the files this delivery kept for it.
 
@@ -646,7 +667,9 @@ async def _keep_guidance(
     """
 
     task_id = task_info.task.task_id
-    accepted = await _accept_sent_files(agent, task_info, steering, msg_meta)
+    accepted = await _accept_sent_files(
+        agent, task_info, steering, msg_meta, message_stored_at=message_stored_at
+    )
     if accepted is None:
         return None, []
     if not await _record_guidance_history(agent, task_id, accepted, applied=False):
@@ -929,6 +952,8 @@ async def handle_task_steering_message(
     steering: TaskSteering,
     msg_header: MessageHeader,
     msg_meta: MessageMeta,
+    *,
+    message_stored_at: Optional[datetime] = None,
 ) -> None:
     """Apply steering to one of this agent's tasks, or answer why it cannot."""
 
@@ -1083,7 +1108,9 @@ async def handle_task_steering_message(
             return
         # Acknowledge only after the complete guidance is in the task's durable
         # history. Restart reconstructs pending guidance and deduplication there.
-        accepted, kept_now = await _keep_guidance(agent, task_info, steering, msg_meta)
+        accepted, kept_now = await _keep_guidance(
+            agent, task_info, steering, msg_meta, message_stored_at=message_stored_at
+        )
         if accepted is None:
             await _refuse_steering(
                 agent, steering, msg_header, msg_meta,
@@ -1100,7 +1127,15 @@ async def handle_task_steering_message(
         return
 
     if steering.steering_type == TaskSteeringType.INTERRUPT_RESPONSE:
-        await _take_interrupt_response(agent, task_info, steering, msg_header, msg_meta, dedupe_key)
+        await _take_interrupt_response(
+            agent,
+            task_info,
+            steering,
+            msg_header,
+            msg_meta,
+            dedupe_key,
+            message_stored_at=message_stored_at,
+        )
         return
 
     await _send_steering_status_response(
@@ -1120,6 +1155,8 @@ async def _take_interrupt_response(
     msg_header: MessageHeader,
     msg_meta: MessageMeta,
     dedupe_key: str,
+    *,
+    message_stored_at: Optional[datetime] = None,
 ) -> None:
     """Resume the task's live turn with an answer, or record it for a restarted turn.
 
@@ -1146,7 +1183,9 @@ async def _take_interrupt_response(
             task_info=task_info,
         )
         return
-    answer = await _accept_sent_files(agent, task_info, steering, msg_meta)
+    answer = await _accept_sent_files(
+        agent, task_info, steering, msg_meta, message_stored_at=message_stored_at
+    )
     if answer is None:
         await _refuse_steering(
             agent, steering, msg_header, msg_meta,

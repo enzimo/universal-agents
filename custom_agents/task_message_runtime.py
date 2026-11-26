@@ -53,7 +53,10 @@ from custom_agents.message_routing import (
 )
 from custom_agents.model_failover_runtime import ProviderFailoverRequeued
 from custom_agents.runtime_budget_policy import runtime_pause_identity
-from custom_agents.access_runtime import verified_meta_person_id
+from custom_agents.access_runtime import (
+    ensure_meta_issuer_known,
+    verified_meta_person_id_async,
+)
 from custom_agents.task_context_runtime import sign_system_escalation
 from custom_agents.provider_error_runtime import (
     PROVIDER_TIMEOUT_USER_MESSAGE,
@@ -788,6 +791,7 @@ async def _handle_task_query_message(
     incoming_msg_meta: MessageMeta,
     *,
     from_runtime_mailbox: bool = False,
+    message_stored_at: Optional[datetime] = None,
 ) -> None:
     """Handle a TaskQuery as the handling of its parent task (``runtime_context.task_work``)."""
 
@@ -798,6 +802,7 @@ async def _handle_task_query_message(
             incoming_msg_header,
             incoming_msg_meta,
             from_runtime_mailbox=from_runtime_mailbox,
+            message_stored_at=message_stored_at,
         )
 
 
@@ -808,6 +813,7 @@ async def _handle_task_query_for_parent(
     incoming_msg_meta: MessageMeta,
     *,
     from_runtime_mailbox: bool = False,
+    message_stored_at: Optional[datetime] = None,
 ):
     """
     Receives and handles a TaskQuery message.
@@ -878,7 +884,13 @@ async def _handle_task_query_for_parent(
 
     # Files on the message are kept with its text, and only those the gateway
     # sent with this answer: the stored query and everything after use the copy.
-    accepted_query = await _accept_answer_files(self, parent_task_info, task_query_msg, incoming_msg_meta)
+    accepted_query = await _accept_answer_files(
+        self,
+        parent_task_info,
+        task_query_msg,
+        incoming_msg_meta,
+        message_stored_at=message_stored_at,
+    )
     if accepted_query is None:
         self._logger.warning(
             "A TaskQuery's task ended while its files were recorded; the message was not handled. "
@@ -1213,7 +1225,12 @@ async def _handle_task_query_for_parent(
 
 
 async def _accept_answer_files(
-    self: Any, task_info: TaskInfo, task_query: TaskQuery, msg_meta: MessageMeta
+    self: Any,
+    task_info: TaskInfo,
+    task_query: TaskQuery,
+    msg_meta: MessageMeta,
+    *,
+    message_stored_at: Optional[datetime] = None,
 ) -> Optional[TaskQuery]:
     """``task_query`` with only the files that were kept, after recording them; None when the task is gone.
 
@@ -1226,7 +1243,16 @@ async def _accept_answer_files(
 
     if not task_query.attachments:
         return task_query
-    decision = answer_files_check(task_info, task_query, msg_meta, team_id=str(getattr(self, "team_id", "") or ""))
+    await ensure_meta_issuer_known(self, msg_meta)
+    decision = answer_files_check(
+        task_info,
+        task_query,
+        msg_meta,
+        team_id=str(getattr(self, "team_id", "") or ""),
+        agent=self,
+        valid_at=message_stored_at,
+        reached_at=message_stored_at,
+    )
     kept = await keep_sent_files(
         self,
         task_info,
@@ -1367,6 +1393,7 @@ async def _handle_task_request(
     *,
     message_handled_at: Optional[str] = None,
     source_queue_name: Optional[str] = None,
+    message_stored_at: Optional[datetime] = None,
 ) -> None:
     """
     Handles a new incoming task request using the TaskManager.
@@ -1417,13 +1444,24 @@ async def _handle_task_request(
         msg_meta,
         top_level_request=task_request.parent_task_id is None,
     )
-    # Decided once, at admission, from verified identity only: the task record
-    # and its conversation belong to this person (None: work for nobody). It
-    # may read storage (schedule run identities), so it runs in a thread.
-    owner_person_id = await asyncio.to_thread(verified_meta_person_id, self, normalized_meta)
+    # Decided once, at admission, from verified identity only: fetch any missing
+    # issuer certificate or stale revocations once on the host loop (C12), then
+    # verify against the JetStream stored timestamp (Decision 52).
+    owner_person_id = await verified_meta_person_id_async(
+        self,
+        normalized_meta,
+        valid_at=message_stored_at,
+        reached_at=message_stored_at,
+    )
     if task_request.parent_task_id is None:
         admitted_request = await _admit_request_turn(
-            self, task_request, msg_header, msg_meta, normalized_meta, owner_person_id
+            self,
+            task_request,
+            msg_header,
+            msg_meta,
+            normalized_meta,
+            owner_person_id,
+            message_stored_at=message_stored_at,
         )
         if admitted_request is None:
             return
@@ -1485,12 +1523,14 @@ async def _admit_request_turn(
     msg_meta: MessageMeta,
     normalized_meta: MessageMeta,
     owner_person_id: Optional[str],
+    *,
+    message_stored_at: Optional[datetime] = None,
 ) -> Optional[tuple[Task, MessageMeta]]:
     """A top-level request with the files admission keeps, and its meta once its turn is recorded.
 
     The files go through the one admission rule
     (``conversation_attachments.admit_request_files``) in a thread, because
-    it verifies the signed context and resolves each record's path on the
+    it verifies the authority token and resolves each record's path on the
     file system.
     The task then holds only the kept files, plus the record of how many
     were dropped, which ``add_task`` saves with it; the turn records exactly
@@ -1507,6 +1547,9 @@ async def _admit_request_turn(
         team_id=str(self.team_id or ""),
         person_id=owner_person_id,
         upload_folder=partial(UploadFolder.for_agent, self),
+        agent=self,
+        valid_at=message_stored_at,
+        reached_at=message_stored_at,
     )
 
     def join_conversation() -> Any:

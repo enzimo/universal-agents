@@ -358,6 +358,15 @@ class MessageHost:
                                     self.profile.runtime, key, type(error).__name__, error)
         return taken
 
+    def trust_state(self) -> Optional[tuple[Any, Any]]:
+        """This host's ``TrustStore`` and lock once started, or ``None`` before ``start()``."""
+
+        if self.live is not None:
+            return self.live.trust_state()
+        if self._trust is not None:
+            return self._trust.trust_state()
+        return None
+
     async def fetch_token_issuer(self, token: Any) -> bool:
         """Fetch the issuer certificate named by an authority token (and revocations if stale).
 

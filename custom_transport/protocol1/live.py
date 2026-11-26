@@ -258,6 +258,11 @@ class LiveHost:
         self._handling: set[asyncio.Task[None]] = set()
         self._inbox_checked = False
 
+    def trust_state(self) -> tuple[Any, Any]:
+        """The host's ``TrustStore`` paired with the lock that serializes its mutations."""
+
+        return self.trust.trust_state()
+
     async def fetch_token_issuer(self, token: Any) -> bool:
         """Fetch an authority token's issuer certificate (and stale revocations) via ``fetch_trust``."""
 

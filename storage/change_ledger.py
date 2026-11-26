@@ -92,7 +92,14 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any
 
-from access_control.identity import ContextVerifier, ISSUER_GATEWAY, IdentityRejected
+from pydantic import MISSING
+
+from access_control.authority_verifier import (
+    AuthorityTokenVerifier,
+    IdentityRejected,
+    get_process_verifier,
+)
+from custom_messages.wire.authority_bindings import is_schedule_permit_binding
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal, ProgressState
 from knowledge_base.sensitive_content import SensitiveContentRules
@@ -446,14 +453,16 @@ def record_task_request_state(
     team_id: str | None,
     task: TaskSnapshotRecord,
     now: datetime,
+    verifier: AuthorityTokenVerifier | None = None,
 ) -> None:
     """Save a root request's lifecycle with its task, never in a later callback.
 
-    The stored owner was verified at admission. Recheck the original signature
-    and team before attributing the request id, including when the context has
-    since expired. This reads historical identity only and grants no authority.
-    A failed lifecycle write aborts the task save, so recovery cannot expose a
-    queued or terminal task whose request state was lost.
+    The stored owner was verified at admission. Recheck the original authority
+    token's signature, issuer certificate, team, installation, and current
+    revocations before attributing the request id, including when the token
+    has since expired. This reads historical identity only and grants no
+    authority. A failed lifecycle write aborts the task save, so recovery
+    cannot expose a queued or terminal task whose request state was lost.
     """
 
     if not team_id or task.task.parent_task_id or not task.owner_person_id:
@@ -461,11 +470,18 @@ def record_task_request_state(
     gateway = task.meta.gateway_context
     signed = gateway.task_context if gateway is not None else None
     if gateway is not None and signed is not None and gateway.schedule_run is not None:
-        raise IdentityRejected("A task cannot carry both a signed context and a scheduled run identity.")
+        raise IdentityRejected("A task cannot carry both an authority token and a scheduled run identity.")
     if signed is None:
         return
+    active_verifier = verifier or get_process_verifier() or AuthorityTokenVerifier(None)
     try:
-        context = ContextVerifier.from_env().verify(signed, team_id=team_id, check_expiry=False)
+        verified = active_verifier.verify_root_task(
+            signed,
+            team_id=team_id,
+            now=now,
+            check_expiry=False,
+            require_active_person=False,
+        )
     except (IdentityRejected, ValueError):
         logger.warning(
             "Ignored unverified request identity while saving a task. "
@@ -473,9 +489,9 @@ def record_task_request_state(
             task.task_id, team_id,
         )
         raise
-    if context.issuer != ISSUER_GATEWAY:
+    if not verified.is_gateway_issued:
         return
-    if context.person_id != task.owner_person_id:
+    if verified.person_id != task.owner_person_id:
         logger.warning(
             "Ignored request identity that does not match the admitted task owner. "
             "event=change_ledger_task_owner_mismatch task_id=%s team_id=%s",
@@ -488,27 +504,34 @@ def record_task_request_state(
     if terminal:
         state = RequestState.STOPPED if task.state is ProgressState.CANCELLED else RequestState.ENDED
         close_request(
-            conn, dialect, team_id=team_id, request_id=context.context_id,
+            conn, dialect, team_id=team_id, request_id=verified.request_id,
             person_id=task.owner_person_id, now=now, state=state,
         )
         prune(conn, dialect, team_id=team_id, before=now - LEDGER_RETENTION)
     else:
-        open_request(conn, dialect, team_id=team_id, request_id=context.context_id, person_id=task.owner_person_id, now=now)
+        open_request(
+            conn, dialect, team_id=team_id, request_id=verified.request_id, person_id=task.owner_person_id, now=now
+        )
 
 
 def require_same_request_identity(previous: TaskSnapshotRecord, current: TaskSnapshotRecord) -> None:
     """An admitted root cannot lose or replace the identity its ledger records.
 
-    The previous snapshot is the trusted admission record. Removing its signed
-    context, changing its owner or turning it into a child must abort the save,
-    rather than persisting a terminal task without closing its real request.
+    The previous snapshot is the trusted admission record. Removing its
+    authority token, changing its owner or turning it into a child must abort
+    the save, rather than persisting a terminal task without closing its real
+    request.
     """
 
     gateway = previous.meta.gateway_context
     original = gateway.task_context if gateway is not None else None
     if previous.task.parent_task_id or not previous.owner_person_id or original is None:
         return
-    if original.context.issuer != ISSUER_GATEWAY:
+    # Scheduled run tokens name a schedule_id (or permit binding); only person requests open a ledger request.
+    if original.schedule_id is not MISSING or original.person is MISSING:
+        return
+    bound_id = getattr(original.bound_to, "id", "")
+    if isinstance(bound_id, str) and is_schedule_permit_binding(bound_id):
         return
     current_gateway = current.meta.gateway_context
     if (

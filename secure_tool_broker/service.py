@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import dataclasses
 import hashlib
 import hmac
@@ -1033,21 +1034,22 @@ class SecureToolBrokerService:
             raise web.HTTPForbidden(text="A trusted registered user context is required.")
         return context
 
-    def _admitted_context(
+    async def _admitted_context(
         self, caller: BrokerCaller, validated: Any, context: ToolContext, trusted_context: dict[str, Any]
     ) -> ToolContext:
         """The context executors may use, after the caller's check.
 
         The gateway runs only actions a person approved directly; every agent
-        request passes the access gate, which verifies the team and chooses the
-        account. Executors use these, never request fields.
+        request passes the access gate, which fetches any unknown issuer
+        certificate once on demand, verifies the authority token and team,
+        and chooses the account. Executors use these, never request fields.
         """
 
         if caller.is_gateway:
             if (validated.provider, validated.action) not in GATEWAY_DIRECT_ACTIONS:
                 raise web.HTTPForbidden(text="The gateway runs only actions a person approved directly.")
             return dataclasses.replace(context, api_request_user_agent=self._api_request_user_agent)
-        gate = self._access_gate.check_broker_action(
+        gate = await self._access_gate.check_broker_action_async(
             caller, validated.provider, validated.action, validated.params, trusted_context
         )
         if not gate.allowed:
@@ -1073,7 +1075,7 @@ class SecureToolBrokerService:
             payload = await request.json()
         validated = self._validated_action(provider_param, payload)
         trusted_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-        context = self._admitted_context(
+        context = await self._admitted_context(
             request[BROKER_CALLER_KEY],
             validated,
             self._request_tool_context(payload, trusted_context, provider=validated.provider),
@@ -2998,6 +3000,7 @@ async def run_secure_tool_broker(
     tool_setup_recheck_days: int = 0,
     web_chat_origin: str | None = None,
     api_request_user_agent: str = DEFAULT_API_REQUEST_USER_AGENT,
+    trust_reader: Any = None,
 ) -> None:
     # A token left in the environment would be a team-wide credential for a
     # per-person tool; refuse to start and name the sign-in that replaces it.
@@ -3086,9 +3089,20 @@ async def run_secure_tool_broker(
         hosted_site.base_url,
         __file__,
     )
+    trust_stop = asyncio.Event()
+    trust_task = (
+        asyncio.create_task(trust_reader.watch_and_refresh(trust_stop), name="broker-trust-reader")
+        if trust_reader is not None
+        else None
+    )
     try:
         # Runs forever: the periodic re-check of ready tool setups
         # (security_layer.tool_setup_recheck_days; 0 only sleeps).
         await run_rechecks(access_gate, every_days=tool_setup_recheck_days)
     finally:
+        trust_stop.set()
+        if trust_task is not None:
+            trust_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await trust_task
         await hosted_site.cleanup()

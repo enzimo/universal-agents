@@ -29,8 +29,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from access_control.identity import ISSUER_GATEWAY, IdentityRejected
+from access_control.authority_verifier import IdentityRejected
 from access_control.task_identity import resolve_task_identity
+from custom_messages.wire.authority_bindings import GATEWAY_ISSUER_ROLE
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +56,14 @@ def turn_request_id(agent: Any, task_id: str | None) -> str | None:
         from custom_agents.access_runtime import runtime_access
 
         access = runtime_access(agent)
-        # With no schedule run the resolver checks only the signature, the team and the expiry.
+        # Gateway-only: scheduler-signed tokens never represent a person's gateway request (C04).
         context = resolve_task_identity(
             verifier=access.verifier,
             team_id=access.team_id,
             task_context=signed,
             schedule_run=None,
             schedule_runs=None,
+            require_issuer="gateway",
         )
     except (IdentityRejected, ValueError):
         return None
@@ -74,7 +76,12 @@ def turn_request_id(agent: Any, task_id: str | None) -> str | None:
             exc_info=True,
         )
         return None
-    if context.issuer != ISSUER_GATEWAY or context.person_id is None or context.schedule_id is not None:
+    if (
+        context.issuer != GATEWAY_ISSUER_ROLE
+        or (context.issuer_roles and GATEWAY_ISSUER_ROLE not in context.issuer_roles)
+        or context.person_id is None
+        or context.schedule_id is not None
+    ):
         return None
     return context.root_task_id or None
 

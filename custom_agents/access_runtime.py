@@ -48,10 +48,21 @@ from access_control.entities import (
     PersonPrincipal,
     agent_role_resolver,
 )
-from access_control.identity import DEFAULT_CONTEXT_LIFETIME, ContextVerifier, IdentityRejected
+from access_control.authority_verifier import (
+    AuthorityTokenVerifier,
+    IdentityRejected,
+    get_process_verifier,
+    set_process_verifier,
+)
 from access_control.inbox import StoredAccessInbox
 from access_control.requests import AccessRequests
-from access_control.task_identity import ScheduleRunLookup, job_schedule_id, resolve_task_identity
+from access_control.task_identity import (
+    DEFAULT_RUN_LIFETIME,
+    ScheduleRunLookup,
+    job_schedule_id,
+    resolve_task_identity,
+    resolve_task_identity_async,
+)
 from custom_messages.contracts.access_v2 import (
     AccessDecisionV1,
     AccessNoticeKind,
@@ -77,6 +88,14 @@ class AuthorizationOff(RuntimeError):
     """Access requests and hand-downs do not exist with authorization off (D8)."""
 
 
+def _default_agent_trust_source() -> Any:
+    """Resolve the active ``AgentProcessHost`` dynamically so cached ``RuntimeAccess`` picks up host startup."""
+
+    from custom_agents.agent_requests import process_host
+
+    return process_host()
+
+
 @dataclass
 class RuntimeAccess:
     """Access decisions for one team in this process (shared by its agents)."""
@@ -84,7 +103,7 @@ class RuntimeAccess:
     team_id: str
     enabled: bool
     catalogs: CatalogSource
-    verifier: ContextVerifier
+    verifier: AuthorityTokenVerifier
     service: AccessService | None
     # Live checks of scheduled runs that carry a schedule permit (task_identity).
     schedule_runs: ScheduleRunLookup | None = None
@@ -116,9 +135,9 @@ def _runtime_access(
             agent_role_of=agent_role_resolver(TEAM_ARCHITECT_AGENT_TYPE),
             lead_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
         )
-    return RuntimeAccess(
-        team_id, enabled, catalogs, ContextVerifier.from_env(), service, ScheduleRunLookup.from_storage(storage)
-    )
+    schedule_runs = ScheduleRunLookup.from_storage(storage)
+    verifier = AuthorityTokenVerifier(_default_agent_trust_source, people=schedule_runs.people)
+    return RuntimeAccess(team_id, enabled, catalogs, verifier, service, schedule_runs)
 
 
 _TRUE_WORDS = frozenset({"1", "true", "yes", "on"})
@@ -151,13 +170,22 @@ def runtime_access(agent: Any) -> RuntimeAccess:
     storage = getattr(getattr(agent, "task_manager", None), "storage_settings", None)
     if storage is None:
         raise RuntimeError("The agent has no task storage, so its access cannot be decided.")
-    return _runtime_access(
+    access = _runtime_access(
         str(getattr(agent, "team_id", "") or ""),
         authorization_enabled(config),
         str(getattr(agent, "instance_root", "") or "") or None,
         storage,
         str(config.get("cedar_binary_path") or "") or None,
     )
+    override = get_process_verifier()
+    if _default_agent_trust_source() is not None:
+        if override is None:
+            # Expose this live verifier to storage/change_ledger.py in the same process.
+            set_process_verifier(access.verifier)
+        return access
+    if override is not None:
+        return replace(access, verifier=override)
+    return access
 
 
 def agent_principal(agent: Any) -> AgentPrincipal:
@@ -288,12 +316,18 @@ def verified_person_id(agent: Any) -> str | None:
     return person_id
 
 
-def verified_meta_person_id(agent: Any, meta: Any) -> str | None:
+def verified_meta_person_id(
+    agent: Any,
+    meta: Any,
+    *,
+    valid_at: Any = None,
+    reached_at: Any = None,
+) -> str | None:
     """The person a task with this message meta works for, from its verified identity only.
 
     For trusted code that reads a task's message outside a tool call, such as
     context assembly and after-turn memory upkeep (``custom_agents.memory_plugins``).
-    It checks the meta like ``resolve_meta_identity`` (the signed task context
+    It checks the meta like ``resolve_meta_identity`` (the authority token
     or the schedule run identity, ``access_control.task_identity``), so it gives
     the same person ``verified_person_id`` gives the task's tools, in both
     authorization modes. None for system work and when nothing valid proves
@@ -303,12 +337,41 @@ def verified_meta_person_id(agent: Any, meta: Any) -> str | None:
     """
 
     try:
-        identity = _resolve_meta(runtime_access(agent), meta)
+        identity = _resolve_meta(runtime_access(agent), meta, valid_at=valid_at, reached_at=reached_at)
     except (IdentityRejected, ValueError, RuntimeError) as exc:
         _report_person_claim(agent, meta, verified_person_id=None, unverified_reason=exc)
         return None
     _report_person_claim(agent, meta, verified_person_id=identity.person_id, context_id=identity.context_id)
     return identity.person_id
+
+
+async def ensure_meta_issuer_known(agent: Any, meta: Any) -> bool:
+    """Fetch any missing issuer certificate or stale revocations for ``meta``'s token/permit before sync checks (C12)."""
+
+    gateway_context = getattr(meta, "gateway_context", None)
+    if gateway_context is None:
+        return False
+    raw = getattr(gateway_context, "schedule_run", None) or getattr(gateway_context, "task_context", None)
+    if raw is None:
+        return False
+    try:
+        access = runtime_access(agent)
+    except RuntimeError:
+        return False
+    return await access.verifier.ensure_issuer_known(raw)
+
+
+async def verified_meta_person_id_async(
+    agent: Any,
+    meta: Any,
+    *,
+    valid_at: Any = None,
+    reached_at: Any = None,
+) -> str | None:
+    """Async admission helper: fetches missing issuer trust records once, then resolves the verified person (C12)."""
+
+    await ensure_meta_issuer_known(agent, meta)
+    return await asyncio.to_thread(verified_meta_person_id, agent, meta, valid_at=valid_at, reached_at=reached_at)
 
 
 @dataclass(frozen=True)
@@ -451,7 +514,13 @@ def verified_task_context(agent: Any, access: RuntimeAccess | None = None) -> Ta
         return None
 
 
-def resolve_meta_identity(agent: Any, meta: Any) -> TaskContextV1 | None:
+def resolve_meta_identity(
+    agent: Any,
+    meta: Any,
+    *,
+    valid_at: Any = None,
+    reached_at: Any = None,
+) -> TaskContextV1 | None:
     """Who a task with this message meta works for, checked like the active task's, or None.
 
     For trusted code that handles a message before it becomes the active task
@@ -464,12 +533,47 @@ def resolve_meta_identity(agent: Any, meta: Any) -> TaskContextV1 | None:
         logger.warning("Could not check whom a message's task works for. event=task_identity_unchecked reason=%s", exc)
         return None
     try:
-        return _resolve_meta(access, meta)
+        return _resolve_meta(access, meta, valid_at=valid_at, reached_at=reached_at)
     except (IdentityRejected, ValueError):
         return None
 
 
-def _resolve_meta(access: RuntimeAccess, meta: Any) -> TaskContextV1:
+async def resolve_meta_identity_async(
+    agent: Any,
+    meta: Any,
+    *,
+    valid_at: Any = None,
+    reached_at: Any = None,
+) -> TaskContextV1 | None:
+    """Async variant of ``resolve_meta_identity`` that fetches missing issuer trust records once first (C12)."""
+
+    try:
+        access = runtime_access(agent)
+    except RuntimeError as exc:
+        logger.warning("Could not check whom a message's task works for. event=task_identity_unchecked reason=%s", exc)
+        return None
+    gateway_context = getattr(meta, "gateway_context", None)
+    try:
+        return await resolve_task_identity_async(
+            verifier=access.verifier,
+            team_id=access.team_id,
+            task_context=getattr(gateway_context, "task_context", None),
+            schedule_run=getattr(gateway_context, "schedule_run", None),
+            schedule_runs=access.schedule_runs,
+            valid_at=valid_at,
+            reached_at=reached_at,
+        )
+    except (IdentityRejected, ValueError):
+        return None
+
+
+def _resolve_meta(
+    access: RuntimeAccess,
+    meta: Any,
+    *,
+    valid_at: Any = None,
+    reached_at: Any = None,
+) -> TaskContextV1:
     """Who a task with this message meta works for (``resolve_task_identity``); raises when nothing proves it."""
 
     gateway_context = getattr(meta, "gateway_context", None)
@@ -479,6 +583,8 @@ def _resolve_meta(access: RuntimeAccess, meta: Any) -> TaskContextV1:
         task_context=getattr(gateway_context, "task_context", None),
         schedule_run=getattr(gateway_context, "schedule_run", None),
         schedule_runs=access.schedule_runs,
+        valid_at=valid_at,
+        reached_at=reached_at,
     )
 
 
@@ -646,20 +752,29 @@ def _ended_request_id(agent: Any, task_id: str) -> str | None:
 
 
 def request_id_of(meta: Any) -> str | None:
-    """The request a stored task belongs to: its signed context id, or its schedule run's; None without one.
+    """The request a stored task belongs to: its authority token's request id, or its schedule run's; None without one.
 
-    Every task of a request carries the request's context unchanged, so the
+    Every task of a request carries the request's token unchanged, so the
     id ties a worker's task, or a plan step, to the person's request. It is
     read without checking the signature again: the runtime checked the
-    context when it admitted the task, and callers only compare it with the
+    token when it admitted the task, and callers only compare it with the
     verified id of the active task (``verified_context_id``) or end what the
-    request was given, which must work after the context expired too.
+    request was given, which must work after the token expired too.
     """
 
     gateway_context = getattr(meta, "gateway_context", None)
-    signed = getattr(gateway_context, "task_context", None)  # SignedTaskContextV1
-    if signed is not None:
-        return str(signed.context.context_id)
+    token = getattr(gateway_context, "task_context", None)
+    if token is not None:
+        if isinstance(token, Mapping):
+            bound = token.get("bound_to")
+            if isinstance(bound, Mapping):
+                req_id = bound.get("request_id") or bound.get("id")
+                return str(req_id) if req_id else None
+        else:
+            bound = getattr(token, "bound_to", None)
+            req_id = getattr(bound, "request_id", None) or getattr(bound, "id", None)
+            if req_id:
+                return str(req_id)
     run = getattr(gateway_context, "schedule_run", None)  # ScheduleRunIdentityV1
     return str(run.context_id) if run is not None else None
 
@@ -728,12 +843,12 @@ def end_grants_of_finished_tasks(service: AccessService, archive: Any) -> list[s
     (``_clean_up_ended_task``). This catches what it missed: a process that
     stopped before the callback, grants bound to one agent task (before access
     for one task covered the whole request) whose task the archive has as
-    finished, and access older than a signed task context lives
-    (``DEFAULT_CONTEXT_LIFETIME``), which no task can use any more. Each one is
+    finished, and access older than an authority token lives
+    (``DEFAULT_RUN_LIFETIME``), which no task can use any more. Each one is
     logged as a warning, because a missed callback is an anomaly worth seeing.
     """
 
-    oldest = service.clock() - DEFAULT_CONTEXT_LIFETIME
+    oldest = service.clock() - DEFAULT_RUN_LIFETIME
     finished: list[str] = []
     for grant in service.store.task_grants(service.team_id):
         if grant.created_at_utc <= oldest:

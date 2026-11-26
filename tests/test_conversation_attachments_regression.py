@@ -40,7 +40,6 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from access_control.identity import ENV_VERIFY_KEYS
 from access_control.ownership import request_context_id
 from assistant_gateway.inbound_attachments import (
     InboundAttachmentStoragePolicy,
@@ -60,7 +59,11 @@ from custom_tools.local_media_context_tool import load_local_media_for_model_con
 from custom_tools.providers.context_memory import get_conversation_context_slice
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_context,
+    use_broker_authority_verifier,
+)
 from tests.task_work_support import use_agent
 
 pytestmark = pytest.mark.integration
@@ -77,8 +80,8 @@ PHOTO_BYTES = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -117,13 +120,12 @@ async def _admit(
     task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement=text, attachments=attachments)
     # As the gateway signs a new request: naming its task and conversation, with
     # an id bound to the request and its files, vouches for those files.
-    signed = context_signer().issue(
+    signed = signed_task_context(
+        ANN,
         team_id=TEAM,
-        person_id=ANN,
-        person_roles=("member",),
+        roles=("member",),
         root_task_id=task_id,
-        conversation_id=conversation_id,
-        context_id=request_context_id(task),
+        request_id=request_context_id(task),
     )
     await task_message_runtime._handle_task_request(
         agent,

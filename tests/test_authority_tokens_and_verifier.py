@@ -943,3 +943,227 @@ def test_custom_transport_does_not_import_access_control_c09() -> None:
                     if alias.name.startswith("access_control"):
                         offenders.append(f"{path.relative_to(transport_root)}:{node.lineno} ({alias.name})")
     assert offenders == []
+
+
+# -- C10, C11, C13 tests --------------------------------------------------------------------------
+
+
+def test_agent_process_host_fetches_issuer_from_worker_thread_c10(tmp_path: Path) -> None:
+    """C10: AgentProcessHost verifies a gateway token from a worker thread by fetching once on the host loop."""
+
+    import threading
+
+    from custom_agents.agent_host import AgentProcessHost
+
+    gw_raw = (fixtures.TRUST / "certificates" / "gateway-1.json").read_bytes()
+    gw_key = json.loads(gw_raw)["key"]
+    entries = {gw_key: gw_raw}
+    host, live, records = _build_bootstrap_live_host(tmp_path / "h", entries, clock_fn=lambda: fixtures.NOW)
+    profile = HostProfile("lead", (TEAM,), ("lead_host",), agent_types=("TeamLead",), session_limit=4)
+    proc = AgentProcessHost(InstanceLayout.at(tmp_path / "h"), profile, TEAM)
+    proc.host = host
+
+    state = proc.trust_state()
+    assert state is not None
+    assert state[0] is live.trust.store
+    assert state[1] is live.trust.lock
+
+    gateway = _identity_for("gateway-1", "test-gateway-key-1")
+    token = root_task_token(
+        gateway,
+        team=TEAM,
+        root_task_id="task_worker_thread",
+        request_id="message_context_worker_thread",
+        person_ref=ALICE_REF,
+        issued=fixtures.NOW,
+    )
+    verifier = AuthorityTokenVerifier(proc, people=_default_people(), clock=lambda: fixtures.NOW)
+
+    async def _run() -> dict[str, Any]:
+        proc.loop = asyncio.get_running_loop()
+        result: dict[str, Any] = {}
+
+        def _worker() -> None:
+            try:
+                verified = asyncio.run(verifier.verify_root_task_async(token, team_id=TEAM, now=fixtures.NOW))
+                result["person_id"] = verified.person_id
+                result["gateway"] = verified.is_gateway_issued
+            except Exception as exc:  # noqa: BLE001
+                result["err"] = repr(exc)
+
+        thread = threading.Thread(target=_worker)
+        thread.start()
+        while thread.is_alive():
+            await asyncio.sleep(0.01)
+        thread.join()
+        return result
+
+    outcome = asyncio.run(_run())
+    assert outcome == {"person_id": "usr_alice", "gateway": True}
+    assert records.reads == [gw_key]
+
+
+def test_verify_schedule_permit_async_fetches_scheduler_cert_c10(tmp_path: Path) -> None:
+    """C10: verify_schedule_permit_async fetches a missing scheduler certificate once and verifies the permit."""
+
+    sched_raw = (fixtures.TRUST / "certificates" / "scheduler-1.json").read_bytes()
+    sched_key = json.loads(sched_raw)["key"]
+    entries = {sched_key: sched_raw}
+    _host, live, records = _build_bootstrap_live_host(tmp_path / "h", entries, clock_fn=lambda: fixtures.NOW)
+
+    scheduler = _identity_for("scheduler-1", "test-scheduler-key-1")
+    permit = schedule_permit_token(
+        scheduler, team=TEAM, schedule_id="sched_async_1", person_ref=ALICE_REF, issued=fixtures.NOW
+    )
+    verifier = AuthorityTokenVerifier(live, people=_default_people(), clock=lambda: fixtures.NOW)
+    with pytest.raises(IdentityRejected) as exc_sync:
+        verifier.verify_schedule_permit(permit, team_id=TEAM, now=fixtures.NOW)
+    assert exc_sync.value.code == REFUSAL_UNKNOWN_ISSUER
+
+    verified = asyncio.run(verifier.verify_schedule_permit_async(permit, team_id=TEAM, now=fixtures.NOW))
+    assert verified.is_permit is True
+    assert verified.is_scheduler_issued is True
+    assert verified.schedule_id == "sched_async_1"
+    assert verified.person_id == "usr_alice"
+    assert records.reads == [sched_key]
+
+
+def test_fetch_found_nothing_logs_identifiers_without_person_and_refuses_after_one_read_c10(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C10: missing issuer triggers exactly one UA1_CERTS read, refuses unknown_issuer, and logs safe identifiers."""
+
+    import logging
+
+    # Empty UA1_CERTS: gateway-1 certificate is absent.
+    _host, live, records = _build_bootstrap_live_host(tmp_path / "h", {}, clock_fn=lambda: fixtures.NOW)
+    gateway = _identity_for("gateway-1", "test-gateway-key-1")
+    token = root_task_token(
+        gateway,
+        team=TEAM,
+        root_task_id="task_missing_issuer",
+        request_id="message_context_missing_issuer",
+        person_ref=ALICE_REF,
+        issued=fixtures.NOW,
+    )
+    verifier = AuthorityTokenVerifier(live, people=_default_people(), clock=lambda: fixtures.NOW)
+
+    with caplog.at_level(logging.WARNING, logger="access_control.authority_verifier"):
+        with pytest.raises(IdentityRejected) as exc:
+            asyncio.run(verifier.verify_root_task_async(token, team_id=TEAM, now=fixtures.NOW))
+    assert exc.value.code == REFUSAL_UNKNOWN_ISSUER
+    assert records.reads == [f"host.{INSTALLATION}.gateway-1.1"]
+    assert "event=authority_token_refused" in caplog.text
+    assert "code=unknown_issuer" in caplog.text
+    assert "issuer_runtime=gateway-1" in caplog.text
+    assert "membership_epoch=1" in caplog.text
+    assert f"team={TEAM}" in caplog.text
+    assert "request_id=message_context_missing_issuer" in caplog.text
+    # Person reference must NEVER appear in refusal logs (C10).
+    assert ALICE_REF not in caplog.text
+
+
+def test_non_fetchable_refusal_codes_do_not_read_certs_c10(tmp_path: Path) -> None:
+    """C10: bad_signature, revoked_issuer, and expired never trigger a UA1_CERTS read."""
+
+    gw_raw = (fixtures.TRUST / "certificates" / "gateway-1.json").read_bytes()
+    _host, live, records = _build_bootstrap_live_host(tmp_path / "h", {}, clock_fn=lambda: fixtures.NOW)
+    live.trust.add(gw_raw, now=fixtures.NOW)
+
+    gateway = _identity_for("gateway-1", "test-gateway-key-1")
+    valid = root_task_token(
+        gateway,
+        team=TEAM,
+        root_task_id="task_nf",
+        request_id="message_context_nf",
+        person_ref=ALICE_REF,
+        issued=fixtures.NOW,
+        expires_at=fixtures.NOW + timedelta(minutes=30),
+    )
+    verifier = AuthorityTokenVerifier(live, people=_default_people(), clock=lambda: fixtures.NOW)
+
+    # 1. bad_signature -> 0 reads
+    tampered = dict(valid, person=ADMIN_REF)
+    with pytest.raises(IdentityRejected) as exc_sig:
+        asyncio.run(verifier.verify_root_task_async(tampered, team_id=TEAM, now=fixtures.NOW))
+    assert exc_sig.value.code == REFUSAL_BAD_SIGNATURE
+    assert records.reads == []
+
+    # 2. expired -> 0 reads
+    after_expiry = fixtures.NOW + timedelta(hours=2)
+    live.trust.add(fixtures.current_revocations(after_expiry, sequence=210), now=after_expiry)
+    with pytest.raises(IdentityRejected) as exc_exp:
+        asyncio.run(verifier.verify_root_task_async(valid, team_id=TEAM, now=after_expiry))
+    assert exc_exp.value.code == REFUSAL_EXPIRED
+    assert records.reads == []
+
+    # 3. revoked_issuer -> 0 reads (use a fresh host so step 2's future revocations sequence does not supersede the fixture)
+    _host_rev, live_rev, records_rev = _build_bootstrap_live_host(tmp_path / "h_rev", {}, clock_fn=lambda: fixtures.NOW)
+    live_rev.trust.add(gw_raw, now=fixtures.NOW)
+    live_rev.trust.add((fixtures.TRUST / "extra" / "gateway-revoked.json").read_bytes(), now=fixtures.NOW)
+    verifier_rev = AuthorityTokenVerifier(live_rev, people=_default_people(), clock=lambda: fixtures.NOW)
+    with pytest.raises(IdentityRejected) as exc_rev:
+        asyncio.run(verifier_rev.verify_root_task_async(valid, team_id=TEAM, now=fixtures.NOW))
+    assert exc_rev.value.code == REFUSAL_REVOKED_ISSUER
+    assert records_rev.reads == []
+
+
+def test_explicit_trust_state_interface_and_no_read_lock_arg_c11(tmp_path: Path) -> None:
+    """C11: trust resolution uses explicit trust_state() and ignores decoy .lock/.store attributes."""
+
+    import inspect
+    import threading
+
+    from access_control.authority_verifier import _resolve_trust_source
+    from custom_agents.agent_host import AgentProcessHost
+
+    assert "read_lock" not in inspect.signature(AuthorityTokenVerifier.__init__).parameters
+
+    host, live, _records = _build_bootstrap_live_host(tmp_path / "h", {}, clock_fn=lambda: fixtures.NOW)
+    profile = HostProfile("lead", (TEAM,), ("lead_host",), agent_types=("TeamLead",), session_limit=4)
+    proc = AgentProcessHost(InstanceLayout.at(tmp_path / "h"), profile, TEAM)
+    proc.host = host
+    reader = TrustReader(live.trust, _TestStateRecords({}, live.trust), reader_id="broker", clock=lambda: fixtures.NOW)
+
+    for source in (live.trust, reader, live, host, proc):
+        store, lock, _fetcher = _resolve_trust_source(source, explicit_fetcher=None)
+        assert store is live.trust.store
+        assert lock is live.trust.lock
+
+    # Bare TrustStore still works for tests with lock=None.
+    bare_store, bare_lock, bare_fetcher = _resolve_trust_source(live.trust.store, explicit_fetcher=None)
+    assert bare_store is live.trust.store and bare_lock is None and bare_fetcher is None
+
+    # A decoy object with .lock and .store but no trust_state() is NOT silently duck-walked.
+    class _Decoy:
+        lock = threading.Lock()
+        store = live.trust.store
+
+    decoy_store, decoy_lock, _ = _resolve_trust_source(_Decoy(), explicit_fetcher=None)
+    assert decoy_store is None and decoy_lock is None
+
+
+def test_authority_bindings_shared_constants_and_record_parity_c13() -> None:
+    """C13: frame.py reuses authority_bindings role constants, and AuthorityTokenRecord matches wire AuthorityToken."""
+
+    from custom_messages.wire import authority_bindings, frame
+
+    assert frame.AUTHORITY_ISSUER_ROLES is authority_bindings.AUTHORITY_ISSUER_ROLES
+    assert frame.SCHEDULE_ISSUER_ROLE == authority_bindings.SCHEDULER_ISSUER_ROLE
+    assert authority_bindings.AUTHORITY_TOKEN_MAX_LIFETIME_SECONDS == AUTHORITY_TOKEN_MAX_SECONDS
+
+    gateway = _identity_for("gateway-1", "test-gateway-key-1")
+    raw = root_task_token(
+        gateway,
+        team=TEAM,
+        root_task_id="task_parity",
+        request_id="message_context_parity",
+        person_ref=ALICE_REF,
+        issued=fixtures.NOW,
+    )
+    wire_model = AuthorityToken.model_validate(raw)
+    record_from_dict = authority_bindings.AuthorityTokenRecord.model_validate(raw)
+    record_from_wire = authority_bindings.AuthorityTokenRecord.model_validate(wire_model)
+    assert record_from_dict.model_dump(mode="json") == wire_model.model_dump(mode="json")
+    assert record_from_wire.model_dump(mode="json") == wire_model.model_dump(mode="json")
+    assert set(authority_bindings.AuthorityTokenRecord.model_fields) == set(AuthorityToken.model_fields)

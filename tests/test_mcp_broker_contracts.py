@@ -23,8 +23,7 @@ from custom_messages.contracts.mcp_v1 import (
     MCPToolResultV1,
 )
 from scripts.export_mcp_schemas import DEFAULT_OUTPUT_DIR, render_schema_files
-from access_control.identity import ContextVerifier
-from tests.broker_access_support import context_verify_keys, signed_task_context
+from tests.broker_access_support import broker_authority_verifier, signed_task_context
 
 
 def test_tracked_mcp_schemas_match_neutral_contract_models() -> None:
@@ -120,7 +119,7 @@ def test_mcp_invocation_contract_carries_the_signed_task_context_only() -> None:
     wire = json.loads(request.model_dump_json(by_alias=True, exclude_none=True))
 
     # The broker verifies this signature, so it must still verify after the wire.
-    verified = ContextVerifier.from_value(context_verify_keys()).verify(
+    verified = broker_authority_verifier().verify_root_task(
         wire["task_context"], team_id="team-1"
     )
     assert verified.person_id == "user-1"

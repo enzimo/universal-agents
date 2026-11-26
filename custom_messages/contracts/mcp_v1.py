@@ -6,7 +6,8 @@ from typing import Any, Literal, Optional, TypeAlias
 
 from pydantic import ConfigDict, Field, JsonValue
 
-from custom_messages.contracts.access_v2 import ScheduleRunIdentityV1, SignedTaskContextV1
+from custom_messages.contracts.access_v2 import ScheduleRunIdentityV1
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
 from custom_messages.contracts.common_v1 import (
     ContractModel,
     PrincipalDescriptorV1,
@@ -71,10 +72,10 @@ class MCPInvocationRequestV1(MCPBrokerMessageV1):
     tool_use_id: str = Field(min_length=1, max_length=MCP_TOOL_USE_ID_MAX_LENGTH)
     task_id: str = Field(default="", max_length=240)
     principal: PrincipalDescriptorV1
-    # Who the task works for, signed by the gateway or scheduler, or a
-    # scheduled run's permit-backed identity; the broker trusts the person only
-    # from one of these (access_control.task_identity).
-    task_context: Optional[SignedTaskContextV1] = None
+    # Who the task works for: a protocol 1 authority token signed by the gateway or
+    # scheduler host certificate, or a scheduled run's permit-backed identity; the
+    # broker trusts the person only from one of these (access_control.task_identity).
+    task_context: Optional[AuthorityTokenRecord] = None
     schedule_run: Optional[ScheduleRunIdentityV1] = None
 
 

@@ -19,7 +19,6 @@ import pytest
 
 from access_control.people import PERSON_ROLE_ADMIN, PERSON_ROLE_OWNER
 import custom_agents.stuck_tasks as stuck_tasks_module
-from custom_agents import task_context_runtime
 from custom_agents.agent_state_store import AgentStateStore
 from custom_agents.conversation_attachments import (
     ESCALATION_RESULT_MESSAGE_TYPE,
@@ -109,8 +108,12 @@ from storage.access_repository import AccessRepository
 from storage.stuck_work_repository import StuckWorkRepository
 from storage.tool_setup_run_repository import ToolSetupRunRepository
 from storage.worker_handback_repository import HANDBACK_STATUS_REDISPATCHED, WorkerHandbackRepository
-from tests.broker_access_support import context_signer, use_scheduler_key
-from tests.change_approval_support import use_signed_contexts
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_scheduler_task_context,
+    signed_task_context,
+    use_broker_authority_verifier,
+)
 from time_presentation import format_user_timestamp
 
 GATEWAY_ROUTE = "gateway.instance.responses"
@@ -119,8 +122,8 @@ REQUEST = "Compare ETH/BTC momentum strategies and report the backtest results"
 
 @pytest.fixture
 def lead(tmp_path, monkeypatch):
-    use_signed_contexts(monkeypatch)
-    task_context_runtime._verifier.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     manager = TaskManager(db_path=str(tmp_path / "runtime.db"))
     manager.set_owner_identity(agent_id="lead", agent_name="lead", team_id="team", named_agent_type="TeamArchitect")
     yield SimpleNamespace(
@@ -137,7 +140,7 @@ def lead(tmp_path, monkeypatch):
         team_comms=SimpleNamespace(send_message=AsyncMock()),
         _logger=logging.getLogger("stuck-tasks-test"),
     )
-    task_context_runtime._verifier.cache_clear()
+    forget_task_context_keys()
 
 
 def iso(moment: datetime) -> str:
@@ -153,7 +156,7 @@ def record(
         session_key="telegram:jordan",
         channel_name="telegram",
         chat_id="42",
-        task_context=context_signer().issue(team_id="team", person_id="jordan") if signed else None,
+        task_context=signed_task_context("jordan", team_id="team", root_task_id=task_id) if signed else None,
     )
     task = Task(
         task_id=task_id,
@@ -365,10 +368,20 @@ async def test_the_check_can_be_turned_off(lead):
 
 
 def maintenance_record(monkeypatch, at):
-    use_scheduler_key(monkeypatch)
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+
     held = record("maintenance", signed=False, route="lead", at=at)
     held.meta.requester_type = RequesterType.TIMER_REQUESTER
-    task_context_runtime.sign_system_context(held.meta, team_id="team", schedule_id="maintenance-schedule")
+    held.meta.gateway_context = held.meta.gateway_context.model_copy(
+        update={
+            "canonical_user_id": None,
+            "task_context": AuthorityTokenRecord.model_validate(
+                signed_scheduler_task_context(
+                    None, team_id="team", schedule_id="maintenance-schedule", root_task_id="maintenance"
+                )
+            ),
+        }
+    )
     return held
 
 
@@ -726,10 +739,16 @@ def verified_for_nobody(task_record, sender):
     person.
     """
     if sender == "signed_for_nobody":
+        from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+
         task_record.meta.gateway_context = task_record.meta.gateway_context.model_copy(
             update={
                 "canonical_user_id": None,
-                "task_context": context_signer().issue(team_id="team", person_id=None, person_roles=()),
+                "task_context": AuthorityTokenRecord.model_validate(
+                    signed_scheduler_task_context(
+                        None, team_id="team", schedule_id="system-schedule", root_task_id=task_record.task_id
+                    )
+                ),
             }
         )
     return task_record

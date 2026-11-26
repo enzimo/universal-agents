@@ -8,14 +8,16 @@ fixed root, one test signing key, and ready-made request contexts.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from access_catalog.catalog import CatalogSource
 from access_control.account_sharing import TeamAccountSharing
+from access_control.authority_verifier import AuthorityTokenVerifier, set_process_verifier
 from access_control.caller_tokens import CALLER_GATEWAY, CALLER_MANAGER, derive_caller_token
 from access_control.identity import (
     ENV_GATEWAY_SIGNING_KEY,
@@ -24,7 +26,6 @@ from access_control.identity import (
     ISSUER_GATEWAY,
     ISSUER_SCHEDULER,
     ContextSigner,
-    ContextVerifier,
     generate_signing_key,
     verify_keys_value,
 )
@@ -33,17 +34,221 @@ from custom_messages.contracts.access_v2 import (
     AccountSharing,
     CredentialInjectionV1,
     LinkOwnerKind,
+    PersonStanding,
     SubjectKind,
     SubjectRefV1,
+    TeamPersonV1,
 )
 from secure_tool_broker.access_gate import BrokerAccessGate
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
 
 BROKER_ROOT = "test-token"
+TEST_INSTALLATION = "inst-test-broker"
 TEST_TEAM = "team-1"
 TEST_AGENT_ID = "agent-1"
 TEST_AGENT_TYPE = "GeneralAssistant"
+
+
+def broker_person_ref(person_id: str) -> str:
+    """Deterministic opaque ``person_ref`` for test helpers (matches ``^p-[A-Za-z0-9_-]{22}$``)."""
+
+    digest = hashlib.sha256(f"test-person-ref:{person_id}".encode("utf-8")).hexdigest()[:22]
+    return f"p-{digest}"
+
+
+class _InMemoryBrokerPeople:
+    """Minimal ``PeopleStore`` mapping test ``person_ref``s to ``TeamPersonV1`` records."""
+
+    def __init__(self) -> None:
+        self._by_id: dict[tuple[str, str], TeamPersonV1] = {}
+        self._by_ref: dict[tuple[str, str], TeamPersonV1] = {}
+
+    def register(
+        self,
+        team_id: str,
+        person_id: str,
+        *,
+        roles: tuple[str, ...] = ("member",),
+        standing: PersonStanding = PersonStanding.ACTIVE,
+        person_ref: str | None = None,
+    ) -> TeamPersonV1:
+        ref = person_ref or broker_person_ref(person_id)
+        record = TeamPersonV1(
+            team_id=team_id,
+            person_id=person_id,
+            person_ref=ref,
+            standing=standing,
+            roles=tuple(sorted(set(roles))),
+            changed_at_utc=datetime.now(timezone.utc),
+        )
+        self._by_id[(team_id, person_id)] = record
+        self._by_ref[(team_id, ref)] = record
+        return record
+
+    def team_person(self, team_id: str, person_id: str) -> TeamPersonV1 | None:
+        return self._by_id.get((team_id, person_id))
+
+    def team_person_by_ref(self, team_id: str, person_ref: str) -> TeamPersonV1 | None:
+        return self._by_ref.get((team_id, person_ref))
+
+    def team_people(self, team_id: str) -> list[TeamPersonV1]:
+        return [record for (tid, _pid), record in self._by_id.items() if tid == team_id]
+
+    def people_synced_at(self, _team_id: str) -> datetime:
+        return datetime.now(timezone.utc)
+
+
+@lru_cache(maxsize=1)
+def _protocol1_test_authority() -> dict[str, Any]:
+    """One self-contained protocol 1 test installation (gateway + scheduler certs, revocations, TrustStore)."""
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from custom_messages.wire.encoding import b64url, format_timestamp
+    from custom_messages.wire.trust import AuthorityKey, TrustStore, sign_state
+    from custom_transport.protocol1.host_keys import HostKeys
+    from custom_transport.protocol1.identity import HostIdentity
+
+    now = datetime.now(timezone.utc)
+    auth_key = Ed25519PrivateKey.generate()
+    store = TrustStore(
+        TEST_INSTALLATION,
+        [AuthorityKey(TEST_INSTALLATION, "inst-auth-1", auth_key.public_key())],
+        partition_count=16,
+    )
+
+    def _sign_authority_record(record_type: str, key: str, body: dict[str, Any], *, sequence: int) -> bytes:
+        doc = {
+            "protocol": "1.0-pre",
+            "record": record_type,
+            "key": key,
+            "sequence": sequence,
+            "issued_at": format_timestamp(now - timedelta(minutes=5)),
+            "writer": {
+                "type": "authority",
+                "installation": TEST_INSTALLATION,
+                "key_id": "inst-auth-1",
+            },
+            "body": body,
+        }
+        signed = sign_state(doc, auth_key)
+        return json.dumps(signed, separators=(",", ":")).encode("utf-8")
+
+    def _make_host(runtime: str, roles: list[str]) -> HostIdentity:
+        app_key = Ed25519PrivateKey.generate()
+        app_pub = b64url(app_key.public_key().public_bytes_raw())
+        key_id = f"k-{runtime}-1"
+        cert_body = {
+            "certificate_id": f"cert-{runtime}-1",
+            "installation": TEST_INSTALLATION,
+            "runtime": runtime,
+            "membership_epoch": 1,
+            "roles": roles,
+            "teams": [TEST_TEAM, "team-other", "team_other", "team", "team_control", "test_team", "another_team"],
+            "agent_types": [],
+            "session_limit": 0,
+            "revocation_epoch": 1,
+            "application_key": {"key_id": key_id, "public_key": app_pub},
+            "nats_public_key": "U" + ("A" * 55),
+            "connection_class": "connected",
+            "protocol": "1.0-pre",
+            "deployment": "local",
+            "profile_sha256": "A" * 43,
+            "issued_at": format_timestamp(now - timedelta(hours=1)),
+            "expires_at": format_timestamp(now + timedelta(days=30)),
+            "software": {"name": "universal-agents-test", "version": "0.10.0"},
+        }
+        raw_cert = _sign_authority_record(
+            "certificate",
+            f"host.{TEST_INSTALLATION}.{runtime}.1",
+            cert_body,
+            sequence=1,
+        )
+        store.add(raw_cert, now=now)
+        cert_obj = store.host_certificate(TEST_INSTALLATION, runtime, 1)
+        assert cert_obj is not None
+        keys = HostKeys(runtime, key_id, app_key, b"0" * 32)
+        return HostIdentity(keys, cert_obj)
+
+    gw_identity = _make_host("gateway-test-1", ["gateway"])
+    sched_identity = _make_host("team-services-test-1", ["team_services", "scheduler"])
+    rev_body = {
+        "installation": TEST_INSTALLATION,
+        "revocation_epoch": 1,
+        "expires_at": format_timestamp(now + timedelta(hours=23)),
+        "entries": [],
+    }
+    raw_rev = _sign_authority_record("revocations", f"revocations.{TEST_INSTALLATION}", rev_body, sequence=1)
+    store.add(raw_rev, now=now)
+    people = _InMemoryBrokerPeople()
+    people.register(TEST_TEAM, "user-1", roles=("member",))
+    return {
+        "store": store,
+        "gateway": gw_identity,
+        "scheduler": sched_identity,
+        "people": people,
+    }
+
+
+def broker_trust_store() -> Any:
+    return _protocol1_test_authority()["store"]
+
+
+def broker_people_store() -> _InMemoryBrokerPeople:
+    return _protocol1_test_authority()["people"]
+
+
+def broker_gateway_identity() -> Any:
+    return _protocol1_test_authority()["gateway"]
+
+
+def broker_scheduler_identity() -> Any:
+    return _protocol1_test_authority()["scheduler"]
+
+
+def broker_authority_verifier(*, people: Any = None) -> AuthorityTokenVerifier:
+    return AuthorityTokenVerifier(
+        broker_trust_store(),
+        people=people if people is not None else broker_people_store(),
+    )
+
+
+def use_broker_authority_verifier(*, people: Any = None) -> AuthorityTokenVerifier:
+    """Install the test protocol 1 authority verifier as the process verifier."""
+
+    verifier = broker_authority_verifier(people=people)
+    set_process_verifier(verifier)
+    return verifier
+
+
+def signed_scheduler_task_context(
+    person_id: str | None = "user-1",
+    *,
+    team_id: str = TEST_TEAM,
+    roles: tuple[str, ...] = ("member",),
+    root_task_id: str = "task-sched-1",
+    request_id: str | None = None,
+    schedule_id: str = "sched-1",
+) -> dict[str, Any]:
+    """Return a real protocol 1 scheduler-signed root-task authority token as JSON."""
+
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from id_generation import new_id
+
+    person_ref: str | None = None
+    if person_id is not None:
+        record = broker_people_store().register(team_id, person_id, roles=roles)
+        person_ref = record.person_ref
+    return root_task_token(
+        broker_scheduler_identity(),
+        team=team_id,
+        root_task_id=root_task_id,
+        request_id=request_id or new_id("task_context"),
+        person_ref=person_ref,
+        schedule_id=schedule_id,
+        issued=datetime.now(timezone.utc),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -94,13 +299,13 @@ def use_gateway_key(monkeypatch: Any) -> None:
 
 
 def forget_task_context_keys() -> None:
-    """Drop the cached scheduler signer, verifier and access services so keys are read again."""
+    """Drop cached signers, process verifier, and access services between tests."""
 
     from custom_agents import access_runtime, task_context_runtime
 
     task_context_runtime._scheduler_signer.cache_clear()
-    task_context_runtime._verifier.cache_clear()
     access_runtime._runtime_access.cache_clear()
+    set_process_verifier(None)
 
 
 def caller_token(label: str = CALLER_MANAGER, *, root: str = BROKER_ROOT) -> str:
@@ -116,9 +321,30 @@ def gateway_headers(*, root: str = BROKER_ROOT) -> dict[str, str]:
 
 
 def signed_task_context(
-    person_id: str | None = "user-1", *, team_id: str = TEST_TEAM, roles: tuple[str, ...] = ("member",)
+    person_id: str | None = "user-1",
+    *,
+    team_id: str = TEST_TEAM,
+    roles: tuple[str, ...] = ("member",),
+    root_task_id: str = "task-1",
+    request_id: str | None = None,
 ) -> dict[str, Any]:
-    return context_signer().issue(team_id=team_id, person_id=person_id, person_roles=roles).model_dump(mode="json")
+    """Return a real protocol 1 gateway-signed root-task authority token as JSON."""
+
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from id_generation import new_id
+
+    person_ref: str | None = None
+    if person_id is not None:
+        record = broker_people_store().register(team_id, person_id, roles=roles)
+        person_ref = record.person_ref
+    return root_task_token(
+        broker_gateway_identity(),
+        team=team_id,
+        root_task_id=root_task_id,
+        request_id=request_id or new_id("task_context"),
+        person_ref=person_ref,
+        issued=datetime.now(timezone.utc),
+    )
 
 
 def agent_context(
@@ -146,11 +372,11 @@ def agent_context(
 def open_gate(
     *, team_id: str = TEST_TEAM, instance_root: str | Path | None = None
 ) -> BrokerAccessGate:
-    """A gate with authorization disabled: identity and catalog checks only."""
+    """A gate with authorization disabled: protocol 1 authority-token identity and catalog checks only."""
 
     return BrokerAccessGate(
         catalogs=CatalogSource(instance_root),
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=team_id,
         access=None,
     )

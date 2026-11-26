@@ -45,12 +45,14 @@ import logging
 from functools import lru_cache
 from typing import Any
 
+from access_control.authority_verifier import (
+    AuthorityTokenVerifier,
+    IdentityRejected,
+    get_process_verifier,
+)
 from access_control.identity import (
-    ISSUER_GATEWAY,
     ISSUER_SCHEDULER,
     ContextSigner,
-    ContextVerifier,
-    IdentityRejected,
 )
 from access_control.people_directory import PeopleDirectory, PersonNow
 from custom_messages.contracts.access_v2 import PersonStanding, SignedTaskContextV1, TaskContextV1
@@ -60,14 +62,10 @@ from storage.config import StorageSettings
 
 logger = logging.getLogger(__name__)
 
+
 @lru_cache(maxsize=1)
 def _scheduler_signer() -> ContextSigner | None:
     return ContextSigner.from_env(ISSUER_SCHEDULER)
-
-
-@lru_cache(maxsize=1)
-def _verifier() -> ContextVerifier:
-    return ContextVerifier.from_env()
 
 
 def scheduler_signer() -> ContextSigner | None:
@@ -76,16 +74,28 @@ def scheduler_signer() -> ContextSigner | None:
     return _scheduler_signer()
 
 
-def context_verifier() -> ContextVerifier:
-    """This process's task-context verifier (public keys from ``ACCESS_CONTEXT_VERIFY_KEYS``)."""
+def context_verifier(agent: Any = None) -> AuthorityTokenVerifier:
+    """This process's protocol 1 authority-token verifier (backed by the live host trust store)."""
 
-    return _verifier()
+    if agent is not None:
+        try:
+            from custom_agents.access_runtime import runtime_access
+
+            return runtime_access(agent).verifier
+        except RuntimeError:
+            pass
+    process_verifier = get_process_verifier()
+    if process_verifier is not None:
+        return process_verifier
+    from custom_agents.agent_requests import process_host
+
+    return AuthorityTokenVerifier(process_host)
 
 
 def scheduler_contexts_verified() -> bool:
-    """Whether this process trusts a scheduler key, so its scheduled runs need a scheduler-signed context."""
+    """Whether this process verifies protocol 1 authority tokens (always true once trust is active)."""
 
-    return any(issuer == ISSUER_SCHEDULER for issuer, _key in _verifier().keys.values())
+    return True
 
 
 @lru_cache(maxsize=4)
@@ -107,18 +117,32 @@ def _run_person(meta: Any) -> str | None:
     return str(getattr(gateway_context, "canonical_user_id", "") or "").strip() or None
 
 
-def gateway_vouches(gateway_context: Any, person_id: str) -> bool:
-    """Whether the context saved with the schedule was signed by the gateway for this same person."""
+def gateway_vouches(gateway_context: Any, person_id: str, *, team_id: str = "", agent: Any = None) -> bool:
+    """Whether the token saved with the schedule was signed by the gateway for this same person."""
 
     signed = getattr(gateway_context, "task_context", None)
     if signed is None:
         return False
-    try:
-        context = _verifier().verify(signed, check_expiry=False)
-    except IdentityRejected as exc:
-        logger.warning("Ignoring an unverifiable embedded task context. event=task_context_rejected reason=%s", exc)
+    effective_team = team_id or str(getattr(agent, "team_id", "") or "")
+    if not effective_team:
+        audience = signed.get("audience") if isinstance(signed, dict) else getattr(signed, "audience", None)
+        effective_team = str(
+            (audience.get("team") if isinstance(audience, dict) else getattr(audience, "team", "")) or ""
+        )
+    if not effective_team:
         return False
-    return context.issuer == ISSUER_GATEWAY and context.person_id == person_id
+    try:
+        verified = context_verifier(agent).verify_root_task(
+            signed,
+            team_id=effective_team,
+            require_issuer="gateway",
+            check_expiry=False,
+            require_active_person=False,
+        )
+    except (IdentityRejected, ValueError) as exc:
+        logger.warning("Ignoring an unverifiable embedded authority token. event=task_context_rejected reason=%s", exc)
+        return False
+    return verified.is_gateway_issued and verified.person_id == person_id
 
 
 def run_owner(agent: Any, meta: Any) -> PersonNow | None:
