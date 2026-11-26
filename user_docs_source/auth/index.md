@@ -147,9 +147,13 @@ Sealbox credential store through `credential.capture_file`:
   team's, and `credential.capture_file` refuses to overwrite a credential you
   entered yourself, an external-source credential, or a team credential.
   Agent-callable `credential.collect` also refuses secret values from agents
-  (only your secure forms, account-link forms, `credential.capture_file`, and
-  store-native secret generation on an existing layout can store a secret), and
-  every agent write records agent provenance rather than your approval.
+  and requires any update to an existing key to keep the exact same field
+  names, secret/non-secret status, and stored record references (allowing only
+  store-native rotation of existing secret fields and updates to existing
+  non-secret metadata; only your secure forms, account-link forms,
+  `credential.capture_file`, and store-native secret generation can store a
+  secret), and every agent write records agent provenance rather than your
+  approval.
 - You receive one Inbox notice naming the agent type, credential display name,
   and deletion time (with no secret value). Operators can turn off capture
   notices with `security_layer.credential_catalog.notify_on_agent_capture: false`.

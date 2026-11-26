@@ -3852,10 +3852,14 @@ or clear one, and non-Sealbox write sources refuse an expiry
     `write_credential_to_source` before catalog commit routes through
     `_rollback_new_sealbox_writes` so a failed re-capture leaves the prior
     record's value and TTL untouched. Agent-callable `credential.collect`
-    likewise refuses secret values in `submitted_fields`
-    (`allow_submitted_secrets=False`; only store-native secret generation on
-    the existing layout and non-secret metadata are accepted), and every agent
-    write (`credential.capture_file`, `credential.collect`,
+    likewise refuses secret values (`allow_submitted_secrets=False`) and, when
+    updating an existing key, requires the exact existing layout — identical
+    field names, identical secret/non-secret status per field, and identical
+    stored record references (refusing any layout change before writing with
+    `credential_replacement_form_only`); within that layout only store-native
+    secret generation (`store_generated_secret`) and updates to existing
+    non-secret metadata fields are allowed. Every agent write
+    (`credential.capture_file`, `credential.collect`,
     `credential.register_existing_source`) records agent provenance (agent
     type, person) rather than person approval, never rewriting a captured row
     as person-approved.

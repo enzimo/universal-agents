@@ -31,8 +31,12 @@ from custom_messages.contracts.access_v2 import (
     AccessNoticeV1,
 )
 from secure_tool_broker.credential_catalog import (
+    CAPTURE_APPROVAL_SOURCE,
+    CAPTURE_APPROVAL_STATUS,
     CatalogCredential,
     collect_credential,
+    credential_has_non_sealbox_source,
+    is_agent_captured_for_person,
     load_catalog,
 )
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
@@ -57,7 +61,6 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CAPTURE_FIELD_NAME = "secret"
-CAPTURE_APPROVAL_SOURCE = "agent_file_capture"
 CAPTURE_DISPLAY_NAME_MAX_CHARS = 120
 CAPTURE_PURPOSE_MAX_CHARS = 400
 
@@ -474,27 +477,6 @@ def _read_secret_file(
     return secret_value, identity
 
 
-def is_agent_captured_for_person(credential: CatalogCredential, person_id: str) -> bool:
-    """Return True only when ``credential`` was created by ``credential.capture_file`` for ``person_id``."""
-
-    approval = credential.approval
-    if not isinstance(approval, Mapping):
-        return False
-    return (
-        str(approval.get("status") or "").strip().lower() == "captured"
-        and str(approval.get("source") or "").strip().lower() == CAPTURE_APPROVAL_SOURCE
-        and str(approval.get("captured_for_person_id") or "").strip() == person_id
-    )
-
-
-def _has_non_sealbox_source(credential: CatalogCredential) -> bool:
-    for field in credential.fields.values():
-        for ref in field.resolution_order:
-            if str(ref.source or "").strip().lower() != "sealbox":
-                return True
-    return False
-
-
 def _make_overwrite_guard(
     *,
     credential_key: str,
@@ -520,7 +502,7 @@ def _make_overwrite_guard(
                 )
         if existing is None:
             return None
-        if _has_non_sealbox_source(existing):
+        if credential_has_non_sealbox_source(existing):
             return _refuse(
                 CAPTURE_EXTERNAL_SOURCE_KEY_REFUSED,
                 f"Credential '{credential_key}' uses an external (non-Sealbox) source and cannot be "
@@ -707,7 +689,7 @@ def _store_captured_secret(
         ],
     }
     approval_record = {
-        "status": "captured",
+        "status": CAPTURE_APPROVAL_STATUS,
         "source": CAPTURE_APPROVAL_SOURCE,
         "captured_by_agent_type": agent_type,
         "captured_for_person_id": person_id,
@@ -734,10 +716,10 @@ def _store_captured_secret(
     content = dict(result.content or {})
     content["source_file_deleted"] = False
     error_text = str(result.error or "Failed to store captured credential.").strip()
-    if content.get("partial_store_write") and "stored value may have changed" not in error_text.lower():
+    if content.get("partial_store_write") and "could not be removed" not in error_text.lower():
         error_text = (
-            f"{error_text} Note: Sealbox was written before the conflict was detected, so the "
-            "stored value may have changed even though the catalog entry was not updated."
+            f"{error_text} Note: the earlier stored value is unchanged, but a copy of the new "
+            "value could not be removed from Sealbox and will expire with its TTL."
         )
     if _FILE_LEFT_IN_PLACE_NOTE not in error_text:
         error_text = f"{error_text} {_FILE_LEFT_IN_PLACE_NOTE}"

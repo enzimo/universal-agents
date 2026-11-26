@@ -321,11 +321,13 @@ When a workflow needs a new named credential:
 - Saving a new value without automatic deletion over a temporary credential
   through the secure form clears its expiry; direct agent `credential.collect`
   or `credential.register_existing_source` calls cannot set or clear an expiry.
-  Agent-callable `credential.collect` also refuses secret values in
-  `submitted_fields` (secrets come only from the person's secure form,
-  account-link forms, `credential.capture_file`, or store-native generation
-  with `value_source="store_generated_secret"` on the existing layout) and
-  records agent provenance rather than person approval.
+  Agent-callable `credential.collect` also refuses secret values and, when
+  updating an existing key, requires the exact existing layout — same field
+  names, same secret/non-secret status per field, and same stored record
+  references (allowing only store-native rotation with
+  `value_source="store_generated_secret"` and updates to existing non-secret
+  metadata; any layout change requires the person's secure form) — and records
+  agent provenance rather than person approval.
 - **Capturing a secret you already hold (`credential.capture_file`)**: when you
   already hold a temporary secret in a file (for example an auth file a sign-in
   wrote in the sandbox), store it in the verified person's Sealbox credential
@@ -658,17 +660,21 @@ raw credential in any field.
     `generic_signup_username_password`, `generic_api_token`,
     `generic_oauth_client_secret`, `generic_service_account_file`,
     `ssh_private_key`, and `ssh_host_bootstrap`.
-    `credential.collect` is the post-form storage action; `signup.prepare` only
-    validates. A user-facing form requires the terminal
+    `credential.collect` is the broker-owned storage action for
+    store-generated secrets and non-secret metadata (refusing agent-submitted
+    secrets and requiring any update over an existing key to keep its exact
+    field names, secret/non-secret status, and stored record references);
+    `signup.prepare` only validates. A user-facing form requires the terminal
     `secure_credential_collection_request` structured action.
   - `credential.capture_file` stores a temporary person-scoped Sealbox
     credential directly from a task file (required `path`, `credential_key`,
     `display_name`, `purpose`, `expires_at` 5 minutes to 90 days ahead;
     optional `field_name`, default `secret`), deletes the source file after
-    commit (`source_file_deleted`), and reports `notice_status` (`sent`, `off`,
-    or `failed`). See Temporary Credentials above; report
-    `capture_access_gate_required` as a broker fault and retry
-    `capture_folder_check_unavailable` at most once.
+    commit (reporting `source_file_deleted`, `source_file_status`,
+    `source_file_changed_after_read`, and `source_file_already_gone`), and
+    reports `notice_status` (`sent`, `off`, or `failed`). See Temporary
+    Credentials above; report `capture_access_gate_required` as a broker fault
+    and retry `capture_folder_check_unavailable` at most once.
   - New instances default to `write_source="sealbox"`: username/password fields
     become Sealbox credential records, custom secret fields become Sealbox
     secrets, and the catalog retains only source refs.

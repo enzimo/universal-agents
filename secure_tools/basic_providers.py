@@ -252,7 +252,13 @@ class CredentialCatalogProvider(DeclaredProvider):
     actions = {
         "credential.collect": ActionSpec(
             "credential.collect",
-            "Broker-owned create/update in the current user's catalog after values arrive from a secure broker form or store generation; does not create a user-facing form. Owner selection comes from trusted context. Defaults to write_source=sealbox, stores username/password pairs with sealbox-cli credential set, stores custom secret fields with sealbox-cli secret set, and records only catalog metadata/source refs.",
+            "Broker-owned create/update in the current user's catalog for store-generated secrets and non-secret "
+            "metadata; does not create a user-facing form and refuses agent-submitted secret values. Updating an "
+            "existing key must keep its exact field names, secret/non-secret status, and stored record references "
+            "(only store-native secret rotation and metadata updates are allowed; layout changes require the person's "
+            "secure broker form). Owner selection comes from trusted context. Defaults to write_source=sealbox, "
+            "stores username/password pairs with sealbox-cli credential set, stores custom secret fields with "
+            "sealbox-cli secret set, and records only catalog metadata/source refs.",
         ),
         "credential.capture_file": ActionSpec(
             "credential.capture_file",
@@ -260,7 +266,8 @@ class CredentialCatalogProvider(DeclaredProvider):
             "credential catalog without passing the secret in parameters or returning it. Requires path, "
             "credential_key, display_name, purpose, and expires_at (UTC, 5 minutes to 90 days ahead); optional "
             "field_name (default secret). Never replaces a person-entered, external-source, or team credential, "
-            "respects folder access, deletes the source file after commit (source_file_deleted), and reports "
+            "respects folder access, deletes the source file after commit (reporting source_file_deleted, "
+            "source_file_status, source_file_changed_after_read, and source_file_already_gone), and reports "
             "notice_status ('sent', 'off', or 'failed') beside notice_sent. Error capture_access_gate_required "
             "is a broker fault to stop and report; capture_folder_check_unavailable is transient and worth one retry.",
         ),
