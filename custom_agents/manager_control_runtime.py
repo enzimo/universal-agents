@@ -19,9 +19,12 @@ from custom_agents.task_context_runtime import context_verifier
 from custom_agents.control_runtime import stop_task_execution
 from custom_agents.execution_lanes import runs_in_parallel_lane
 from custom_agents.task_human_interaction_blockers import (
+    answer_held,
     blocker_request_ids,
     get_human_interaction_blocker,
+    is_timed_wait_blocker,
 )
+from custom_agents.timed_waits import wait_status_summary
 from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents.objective_lifecycle import (
     LinkSwitchResult,
@@ -361,13 +364,19 @@ async def _runtime_work_root_summary(agent: Any, root: Any) -> RuntimeWorkSummar
         blocker = pending_query.message
     elif human_blocker is not None:
         request_ids = blocker_request_ids(human_blocker)
-        blocker = (
-            "Waiting for a person to decide access request(s) in the Inbox: "
-            + ", ".join(request_ids)
-            + "."
-            if request_ids
-            else "Waiting for required input."
-        )
+        if request_ids:
+            blocker = (
+                "Waiting for a person to decide access request(s) in the Inbox: "
+                + ", ".join(request_ids)
+                + "."
+            )
+        elif is_timed_wait_blocker(human_blocker):
+            blocker = wait_status_summary(
+                human_blocker,
+                held=answer_held(human_blocker, getattr(agent, "id", None)),
+            )
+        else:
+            blocker = "Waiting for required input."
     elif root.state == ProgressState.WAITING:
         blocker = "Waiting for delegated work or required input."
     graph = await task_manager.operations_runtime.run(

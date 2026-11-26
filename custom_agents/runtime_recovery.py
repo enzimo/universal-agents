@@ -592,9 +592,10 @@ async def recover_runtime_after_restart(agent: Any) -> None:
             )
 
     # No paused turn survives a restart: clear all held-answer marks once before
-    # recovering setup runs (and due timed waits once timed_wait_runtime is wired).
+    # recovering setup runs and due timed waits.
     await _clear_stale_wait_answer_marks(agent)
     await _resume_ended_setup_runs(agent)
+    await _resume_due_timed_waits(agent)
 
 
 async def _clear_stale_wait_answer_marks(agent: Any) -> None:
@@ -643,5 +644,24 @@ async def _resume_ended_setup_runs(agent: Any) -> None:
         agent._logger.exception(
             "Could not resume tasks whose setup run ended during the restart. "
             "event=setup_run_recovery_failed agent_id=%s",
+            agent.id,
+        )
+
+
+async def _resume_due_timed_waits(agent: Any) -> None:
+    """Resume tasks whose timed wait came due while the agent was down (``timed_wait_runtime``).
+
+    Not-yet-due timed waits stay ``WAITING`` until the scheduler pass sees
+    their resume time pass; due waits are queued from a durable note without
+    waking the drain (startup wakes the drain once ready).
+    """
+    from custom_agents.timed_wait_runtime import resume_due_timed_waits
+
+    try:
+        await resume_due_timed_waits(agent, at_start=True)
+    except Exception:
+        agent._logger.exception(
+            "Could not resume tasks whose timed wait ended during the restart. "
+            "event=timed_wait_recovery_failed agent_id=%s",
             agent.id,
         )
