@@ -34,16 +34,18 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from access_control.authority_verifier import (
+from custom_messages.contracts.access_v2 import is_person_ref
+from custom_messages.wire.authority_bindings import (
     GATEWAY_ISSUER_ROLE,
     ROOT_TASK_BINDING,
+    SCHEDULER_ISSUER_ROLE,
     SCHEDULE_OWNER_PERMIT_PREFIX,
     SCHEDULE_PERMIT_PREFIX,
     SCHEDULE_RUN_CONTEXT_PREFIX,
+    extract_token_issuer,
     is_schedule_permit_binding,
     schedule_permit_binding_id,
 )
-from custom_messages.contracts.access_v2 import is_person_ref
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import (
     AUTHORITY_ISSUER_ROLES,
@@ -280,11 +282,13 @@ def schedule_permit_token(
 __all__ = [
     "GATEWAY_ISSUER_ROLE",
     "ROOT_TASK_BINDING",
+    "SCHEDULER_ISSUER_ROLE",
     "SCHEDULE_OWNER_PERMIT_PREFIX",
     "SCHEDULE_PERMIT_PREFIX",
     "SCHEDULE_RUN_CONTEXT_PREFIX",
     "command_binding_id",
     "command_token",
+    "extract_token_issuer",
     "is_schedule_permit_binding",
     "require_person_ref",
     "root_task_token",

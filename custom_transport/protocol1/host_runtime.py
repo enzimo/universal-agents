@@ -54,6 +54,7 @@ import hashlib
 import inspect
 import json
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
@@ -61,6 +62,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 import rfc8785
 from pydantic import ValidationError
 
+from custom_messages.wire.authority_bindings import token_issuer_lookup_bytes
 from custom_messages.wire.encoding import b64url, format_timestamp
 from custom_messages.wire.kinds import CONTRACT_SHA256, INSTALLATION_SCOPE, PROTOCOL
 from custom_messages.wire.models import HostStateComponentsItem
@@ -336,6 +338,12 @@ class MessageHost:
                 wanted.append(("certificate", f"host.{installation}.{token_issuer['runtime']}.{int(token_issuer['membership_epoch'])}"))
             except (KeyError, TypeError, ValueError):
                 pass
+        check_revocations = getattr(self._trust.store, "revocations_current", None)
+        if callable(check_revocations):
+            with getattr(self._trust, "lock", nullcontext()):
+                revocations_current = bool(check_revocations(installation, now))
+            if not revocations_current:
+                wanted.append(("revocations", f"revocations.{installation}"))
         taken = False
         for record, key in wanted:
             try:
@@ -349,6 +357,21 @@ class MessageHost:
                                     "event=protocol1_trust_lookup_failed runtime=%s key=%s error=%s: %s",
                                     self.profile.runtime, key, type(error).__name__, error)
         return taken
+
+    async def fetch_token_issuer(self, token: Any) -> bool:
+        """Fetch the issuer certificate named by an authority token (and revocations if stale).
+
+        Used before or on retry of authority token verification when a token arrives outside
+        a protocol 1 frame (for example inside ``GatewayContext``) or after the issuer renewed
+        to a newer membership epoch.
+        """
+
+        if self.records is None or self._trust is None:
+            return False
+        payload = token_issuer_lookup_bytes(token, self._trust.store.installation)
+        if payload is None:
+            return False
+        return await self.fetch_trust(payload)
 
     async def refresh_trust(self) -> None:
         """Take the authority's newest revocations record; log, never stop, when it cannot be read."""
@@ -911,7 +934,8 @@ class MessageHost:
 
         assert self.live is not None
         self._last_forget = now
-        forgotten = self.live.trust.store.forget(now)
+        with getattr(self.live.trust, "lock", nullcontext()):
+            forgotten = self.live.trust.store.forget(now)
         if forgotten:
             self.logger.info("Forgot trust records nothing can still need. event=protocol1_trust_forgotten runtime=%s "
                              "records=%s", self.profile.runtime, forgotten)

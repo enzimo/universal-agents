@@ -16,16 +16,21 @@ Every enforcement point that checks whom a task or scheduled run works for route
 - Refuses bare schedule permit tokens (``schedule_permit:*`` / ``schedule_owner_permit:*``)
   anywhere a root-task token is expected; permits verify only through
   ``verify_schedule_permit`` inside ``ScheduleRunIdentityV1`` (C01).
+- Preserves distinct refusal codes on ``IdentityRejected.code`` (unknown issuer, stale
+  revocations, revoked issuer, expired, bad signature, wrong issuer, etc.) and supports
+  one on-demand async issuer/revocations fetch via ``LiveHost``, ``MessageHost``,
+  ``AgentProcessHost``, or ``TrustReader`` before retrying verification once (C08).
 
-Protocol 1 wire models (``custom_messages.wire.*``) are imported lazily on first
-verification call so command-line tools that import ``access_control`` do not pay the
-startup cost of loading the full generated contract models.
+Protocol 1 wire models (``custom_messages.wire.models`` / ``frame``) are imported lazily
+on first verification call so command-line tools that import ``access_control`` do not
+pay the startup cost of loading the full generated contract models.
 """
 
 from __future__ import annotations
 
+import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,42 +38,62 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 from access_control.people_directory import PeopleDirectory, PeopleStore, PersonNow
 from custom_messages.contracts.access_v2 import is_person_ref
+from custom_messages.wire.authority_bindings import (
+    GATEWAY_ISSUER_ROLE,
+    ROOT_TASK_BINDING,
+    SCHEDULER_ISSUER_ROLE,
+    SCHEDULE_OWNER_PERMIT_PREFIX,
+    SCHEDULE_PERMIT_PREFIX,
+    SCHEDULE_RUN_CONTEXT_PREFIX,
+    extract_token_issuer,
+    is_schedule_permit_binding,
+    schedule_permit_binding_id,
+)
 
 if TYPE_CHECKING:
     from custom_messages.wire.models import AuthorityToken
+    from custom_messages.wire.refusals import FrameRefused
     from custom_messages.wire.trust import TrustStore
 
-ROOT_TASK_BINDING = "root_task"
-GATEWAY_ISSUER_ROLE = "gateway"
-SCHEDULER_ISSUER_ROLE = "scheduler"
-# Binding id prefixes for scheduler-signed schedule permits (C01). Kept distinct from real
-# root-task ids so bare permits are always refused when presented as task tokens.
-SCHEDULE_PERMIT_PREFIX = "schedule_permit:"
-SCHEDULE_OWNER_PERMIT_PREFIX = "schedule_owner_permit:"
-# Request id prefix required on ScheduleRunIdentityV1 wrappers so permit runs can never
-# collide with or adopt gateway message_context_* or task_context_* request ids and grants.
-SCHEDULE_RUN_CONTEXT_PREFIX = "schedule_run_"
+logger = logging.getLogger(__name__)
+
+# Distinct refusal codes carried on ``IdentityRejected.code`` so callers and logs can
+# distinguish an unfetched issuer certificate or stale revocations record from permanent
+# refusals such as a revoked issuer, bad signature, or expired token (C08).
+REFUSAL_MISSING = "missing"
+REFUSAL_MALFORMED = "malformed"
+REFUSAL_PERMIT_NOT_ALLOWED = "permit_not_allowed"
+REFUSAL_INVALID_PERMIT = "invalid_permit"
+REFUSAL_NO_TRUST_STORE = "no_trust_store"
+REFUSAL_WRONG_INSTALLATION = "wrong_installation"
+REFUSAL_WRONG_TEAM = "wrong_team"
+REFUSAL_UNKNOWN_ISSUER = "unknown_issuer"
+REFUSAL_REVOCATIONS_NOT_CURRENT = "revocations_not_current"
+REFUSAL_REVOKED_ISSUER = "revoked_issuer"
+REFUSAL_ISSUER_CERT_NOT_VALID = "issuer_cert_not_valid"
+REFUSAL_KEY_MISMATCH = "key_mismatch"
+REFUSAL_BAD_SIGNATURE = "bad_signature"
+REFUSAL_EXPIRED = "expired"
+REFUSAL_WRONG_ISSUER = "wrong_issuer"
+REFUSAL_INVALID_PERSON_REF = "invalid_person_ref"
+REFUSAL_NO_PEOPLE_STORE = "no_people_store"
+REFUSAL_PERSON_UNKNOWN = "person_unknown"
+REFUSAL_PERSON_INACTIVE = "person_inactive"
+REFUSAL_BAD_AUTHORITY = "bad_authority"
+FETCHABLE_REFUSAL_CODES = frozenset({REFUSAL_UNKNOWN_ISSUER, REFUSAL_REVOCATIONS_NOT_CURRENT})
 
 IssuerRequirement = Literal["any", "gateway", "scheduler"]
 TrustProvider = Any
 PeopleProvider = PeopleStore | Callable[[], PeopleStore | None]
-
-
-def schedule_permit_binding_id(schedule_id: str, *, owner_permit: bool = False) -> str:
-    """The ``bound_to.id`` / ``bound_to.request_id`` carried by a schedule's permit token."""
-
-    prefix = SCHEDULE_OWNER_PERMIT_PREFIX if owner_permit else SCHEDULE_PERMIT_PREFIX
-    return f"{prefix}{schedule_id}"
-
-
-def is_schedule_permit_binding(bound_id: str) -> bool:
-    """Whether ``bound_id`` identifies a per-schedule permit rather than a single root task."""
-
-    return bound_id.startswith((SCHEDULE_PERMIT_PREFIX, SCHEDULE_OWNER_PERMIT_PREFIX))
+IssuerFetcher = Callable[[Any], Awaitable[bool]]
 
 
 class IdentityRejected(PermissionError):
     """An authority token is missing, malformed, forged, expired, revoked, or from the wrong issuer."""
+
+    def __init__(self, message: str, *, code: str = REFUSAL_BAD_AUTHORITY) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -116,14 +141,39 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _unwrap_trust_store(source: TrustProvider) -> Optional[TrustStore]:
+def _resolve_trust_source(
+    source: TrustProvider,
+    *,
+    explicit_lock: Optional[threading.RLock],
+    explicit_fetcher: Optional[IssuerFetcher],
+) -> tuple[Optional[TrustStore], Optional[threading.RLock], Optional[IssuerFetcher]]:
+    """Unwrap TrustStore, PersistentTrustStore, TrustReader, LiveHost, MessageHost, or AgentProcessHost."""
+
     resolved = source() if callable(source) else source
     if resolved is None:
-        return None
-    inner = getattr(resolved, "store", None)
-    if inner is not None and hasattr(inner, "host_certificate"):
-        return cast("TrustStore", inner)
-    return cast("TrustStore", resolved)
+        return None, explicit_lock, explicit_fetcher
+    fetcher = explicit_fetcher
+    if fetcher is None and callable(getattr(resolved, "fetch_token_issuer", None)):
+        fetcher = cast(IssuerFetcher, resolved.fetch_token_issuer)
+    candidate: Any = resolved
+    lock = explicit_lock
+    for _ in range(5):
+        if lock is None:
+            cand_lock = getattr(candidate, "lock", None)
+            if cand_lock is not None and hasattr(cand_lock, "__enter__"):
+                lock = cand_lock
+        if hasattr(candidate, "host_certificate"):
+            return cast("TrustStore", candidate), lock, fetcher
+        next_obj = None
+        for attr in ("store", "trust", "live", "host", "_trust"):
+            value = getattr(candidate, attr, None)
+            if value is not None and value is not candidate:
+                next_obj = value
+                break
+        if next_obj is None:
+            break
+        candidate = next_obj
+    return None, lock, fetcher
 
 
 def _unwrap_people_store(source: Optional[PeopleProvider]) -> Optional[PeopleStore]:
@@ -138,16 +188,69 @@ def _parse_token(raw_token: Any) -> tuple[AuthorityToken, Mapping[str, Any]]:
     from custom_messages.wire.models import AuthorityToken
 
     if raw_token is None:
-        raise IdentityRejected("The task has no authority token, so nobody vouches for who it works for.")
+        raise IdentityRejected(
+            "The task has no authority token, so nobody vouches for who it works for.",
+            code=REFUSAL_MISSING,
+        )
     if isinstance(raw_token, AuthorityToken):
         return raw_token, raw_token.model_dump(mode="json")
     if not isinstance(raw_token, Mapping):
-        raise IdentityRejected("The authority token is not a valid token object.")
+        raise IdentityRejected("The authority token is not a valid token object.", code=REFUSAL_MALFORMED)
     try:
         token = AuthorityToken.model_validate(raw_token)
     except (ValidationError, TypeError, ValueError) as exc:
-        raise IdentityRejected(f"The authority token is malformed: {exc}") from exc
+        raise IdentityRejected(f"The authority token is malformed: {exc}", code=REFUSAL_MALFORMED) from exc
     return token, raw_token
+
+
+def _classify_frame_refusal(
+    refused: FrameRefused,
+    *,
+    token: AuthorityToken,
+    store: TrustStore,
+    issued_at: datetime,
+    moment: datetime,
+) -> tuple[str, str]:
+    """Map a ``verify_authority_token`` refusal into a specific ``IdentityRejected.code`` and plain message."""
+
+    at = refused.at or ""
+    if at.endswith("/issuer"):
+        certificate = store.host_certificate(
+            token.issuer.installation,
+            token.issuer.runtime,
+            token.issuer.membership_epoch,
+        )
+        if certificate is None:
+            return (
+                REFUSAL_UNKNOWN_ISSUER,
+                f"No certificate is held yet for token issuer {token.issuer.runtime} "
+                f"(membership epoch {token.issuer.membership_epoch}).",
+            )
+        if certificate.key_id != token.issuer.key_id:
+            return (REFUSAL_KEY_MISMATCH, "The token issuer's certificate names another key.")
+        if store.revoked(certificate):
+            return (REFUSAL_REVOKED_ISSUER, "The token issuer's certificate has been revoked.")
+        if not store.revocations_current(certificate.installation, moment):
+            return (
+                REFUSAL_REVOCATIONS_NOT_CURRENT,
+                "No current revocations record is held for this installation.",
+            )
+        if not certificate.valid_at(issued_at):
+            return (
+                REFUSAL_ISSUER_CERT_NOT_VALID,
+                "The token issuer's certificate was not valid when the token was issued.",
+            )
+        return (
+            REFUSAL_WRONG_ISSUER,
+            refused.detail or "The token issuer's certificate is not allowed to sign this token.",
+        )
+    if at.endswith("/signature"):
+        return (REFUSAL_BAD_SIGNATURE, refused.detail or "The token's signature does not verify.")
+    if at.endswith("/expires_at"):
+        return (REFUSAL_EXPIRED, refused.detail or "The authority token was not valid at the checked time.")
+    if at.endswith("/schedule_id"):
+        return (REFUSAL_WRONG_ISSUER, refused.detail or "Only a scheduler may name a schedule in an authority token.")
+    return (refused.code or REFUSAL_BAD_AUTHORITY, refused.detail or f"The authority token was refused ({refused.code}).")
 
 
 class AuthorityTokenVerifier:
@@ -161,19 +264,36 @@ class AuthorityTokenVerifier:
         installation: Optional[str] = None,
         clock: Callable[[], datetime] = _utc_now,
         read_lock: Optional[threading.RLock] = None,
+        fetch_issuer: Optional[IssuerFetcher] = None,
     ) -> None:
         self._trust = trust
         self._people = people
         self._installation = installation
         self._clock = clock
         self._read_lock = read_lock
+        self._fetch_issuer = fetch_issuer
 
-    def _require_trust(self) -> tuple[TrustStore, str]:
-        store = _unwrap_trust_store(self._trust)
+    def _require_trust(self) -> tuple[TrustStore, str, Optional[threading.RLock]]:
+        store, lock, _ = _resolve_trust_source(
+            self._trust,
+            explicit_lock=self._read_lock,
+            explicit_fetcher=self._fetch_issuer,
+        )
         if store is None:
-            raise IdentityRejected("No protocol 1 trust store is available to verify authority tokens.")
+            raise IdentityRejected(
+                "No protocol 1 trust store is available to verify authority tokens.",
+                code=REFUSAL_NO_TRUST_STORE,
+            )
         expected_installation = self._installation or store.installation
-        return store, expected_installation
+        return store, expected_installation, lock
+
+    def _resolve_fetcher(self) -> Optional[IssuerFetcher]:
+        _, _, fetcher = _resolve_trust_source(
+            self._trust,
+            explicit_lock=self._read_lock,
+            explicit_fetcher=self._fetch_issuer,
+        )
+        return fetcher
 
     def _resolve_person(
         self,
@@ -186,15 +306,27 @@ class AuthorityTokenVerifier:
         if person_ref is None:
             return None, None, ()
         if not is_person_ref(person_ref):
-            raise IdentityRejected("The authority token does not name a person by opaque reference.")
+            raise IdentityRejected(
+                "The authority token does not name a person by opaque reference.",
+                code=REFUSAL_INVALID_PERSON_REF,
+            )
         people_store = people_override if people_override is not None else _unwrap_people_store(self._people)
         if people_store is None:
-            raise IdentityRejected("This process cannot resolve the person named by the authority token.")
+            raise IdentityRejected(
+                "This process cannot resolve the person named by the authority token.",
+                code=REFUSAL_NO_PEOPLE_STORE,
+            )
         person = PeopleDirectory(people_store, team_id).person_by_ref(person_ref)
         if person is None:
-            raise IdentityRejected("The person named by the authority token is not known in this team.")
+            raise IdentityRejected(
+                "The person named by the authority token is not known in this team.",
+                code=REFUSAL_PERSON_UNKNOWN,
+            )
         if require_active_person and not person.active:
-            raise IdentityRejected(f"The person the task works for is not active ({person.describe()}).")
+            raise IdentityRejected(
+                f"The person the task works for is not active ({person.describe()}).",
+                code=REFUSAL_PERSON_INACTIVE,
+            )
         roles = tuple(sorted(set(person.roles))) if person.active else ()
         return person, person.person_id, roles
 
@@ -222,7 +354,10 @@ class AuthorityTokenVerifier:
 
         token, fields = _parse_token(raw_token)
         if not isinstance(token.bound_to, AuthorityTokenBoundToRootTask):
-            raise IdentityRejected(f"Expected a root-task authority token, got bound_to.type={token.bound_to.type!r}.")
+            raise IdentityRejected(
+                f"Expected a root-task authority token, got bound_to.type={token.bound_to.type!r}.",
+                code=REFUSAL_MALFORMED,
+            )
 
         bound_id = token.bound_to.id
         request_id = token.bound_to.request_id
@@ -232,7 +367,8 @@ class AuthorityTokenVerifier:
         is_permit = is_schedule_permit_binding(bound_id) or is_schedule_permit_binding(request_id)
         if is_permit and not allow_permit:
             raise IdentityRejected(
-                "A schedule permit cannot be presented as a task token directly; it must travel inside a scheduled run identity."
+                "A schedule permit cannot be presented as a task token directly; it must travel inside a scheduled run identity.",
+                code=REFUSAL_PERMIT_NOT_ALLOWED,
             )
         if require_permit:
             self._check_permit_binding(bound_id, request_id, schedule_id, person_ref)
@@ -240,7 +376,7 @@ class AuthorityTokenVerifier:
         issued_at = parse_timestamp(token.issued_at)
         expires_at = parse_timestamp(token.expires_at)
         if expires_at <= issued_at:
-            raise IdentityRejected("The authority token ends at or before it was issued.")
+            raise IdentityRejected("The authority token ends at or before it was issued.", code=REFUSAL_MALFORMED)
 
         moment = now or self._clock()
         if check_expiry:
@@ -252,13 +388,16 @@ class AuthorityTokenVerifier:
             effective_valid_at = issued_at
             effective_reached_at = issued_at
 
-        lock_ctx = self._read_lock if self._read_lock is not None else nullcontext()
+        store, expected_installation, lock = self._require_trust()
+        lock_ctx = lock if lock is not None else nullcontext()
         with lock_ctx:
-            store, expected_installation = self._require_trust()
             if token.issuer.installation != expected_installation or token.audience.installation != expected_installation:
-                raise IdentityRejected("The authority token belongs to another installation.")
+                raise IdentityRejected(
+                    "The authority token belongs to another installation.",
+                    code=REFUSAL_WRONG_INSTALLATION,
+                )
             if token.audience.team != team_id:
-                raise IdentityRejected("The authority token belongs to another team.")
+                raise IdentityRejected("The authority token belongs to another team.", code=REFUSAL_WRONG_TEAM)
             try:
                 verified = verify_authority_token(
                     token,
@@ -269,15 +408,28 @@ class AuthorityTokenVerifier:
                     reached_at=effective_reached_at,
                 )
             except FrameRefused as refused:
-                raise IdentityRejected(refused.detail or f"The authority token was refused ({refused.code}).") from refused
+                code, message = _classify_frame_refusal(
+                    refused,
+                    token=token,
+                    store=store,
+                    issued_at=issued_at,
+                    moment=moment,
+                )
+                raise IdentityRejected(message, code=code) from refused
 
         issuer_roles = verified.certificate.roles
         if require_issuer == "gateway":
             if GATEWAY_ISSUER_ROLE not in issuer_roles or schedule_id is not None:
-                raise IdentityRejected("Only a gateway-signed authority token is accepted here.")
+                raise IdentityRejected(
+                    "Only a gateway-signed authority token is accepted here.",
+                    code=REFUSAL_WRONG_ISSUER,
+                )
         elif require_issuer == "scheduler":
             if SCHEDULER_ISSUER_ROLE not in issuer_roles:
-                raise IdentityRejected("Only a scheduler-signed authority token is accepted here.")
+                raise IdentityRejected(
+                    "Only a scheduler-signed authority token is accepted here.",
+                    code=REFUSAL_WRONG_ISSUER,
+                )
 
         person, person_id, person_roles = self._resolve_person(
             person_ref=person_ref,
@@ -311,13 +463,80 @@ class AuthorityTokenVerifier:
         person_ref: Optional[str],
     ) -> None:
         if schedule_id is None:
-            raise IdentityRejected("A schedule permit token must name its schedule.")
+            raise IdentityRejected("A schedule permit token must name its schedule.", code=REFUSAL_INVALID_PERMIT)
         regular_id = schedule_permit_binding_id(schedule_id, owner_permit=False)
         owner_id = schedule_permit_binding_id(schedule_id, owner_permit=True)
         if bound_id != request_id or bound_id not in {regular_id, owner_id}:
-            raise IdentityRejected("The token is not a valid schedule permit for its schedule.")
+            raise IdentityRejected(
+                "The token is not a valid schedule permit for its schedule.",
+                code=REFUSAL_INVALID_PERMIT,
+            )
         if bound_id == owner_id and person_ref is None:
-            raise IdentityRejected("An owner schedule permit must name its owner.")
+            raise IdentityRejected("An owner schedule permit must name its owner.", code=REFUSAL_INVALID_PERMIT)
+
+    async def ensure_issuer_known(self, raw_token: Any, *, now: Optional[datetime] = None) -> bool:
+        """Fetch the token's issuer certificate (or fresh revocations) if not already held locally.
+
+        Returns ``True`` when a new trust record was fetched, ``False`` on the warm path or when
+        no fetcher is configured.
+        """
+
+        extracted = extract_token_issuer(raw_token)
+        if extracted is None:
+            return False
+        installation, runtime, epoch = extracted
+        store, lock, fetcher = _resolve_trust_source(
+            self._trust,
+            explicit_lock=self._read_lock,
+            explicit_fetcher=self._fetch_issuer,
+        )
+        if store is None or fetcher is None:
+            return False
+        expected_installation = self._installation or store.installation
+        if installation != expected_installation:
+            return False
+        moment = now or self._clock()
+        lock_ctx = lock if lock is not None else nullcontext()
+        with lock_ctx:
+            has_cert = store.host_certificate(installation, runtime, epoch) is not None
+            revocations_ok = store.revocations_current(installation, moment)
+        if has_cert and revocations_ok:
+            return False
+        return await fetcher(raw_token)
+
+    async def _verify_with_fetch(
+        self,
+        raw_token: Any,
+        verify_fn: Callable[..., VerifiedTaskToken],
+        **kwargs: Any,
+    ) -> VerifiedTaskToken:
+        try:
+            return verify_fn(raw_token, **kwargs)
+        except IdentityRejected as refused:
+            if refused.code not in FETCHABLE_REFUSAL_CODES:
+                raise
+            fetcher = self._resolve_fetcher()
+            if fetcher is None:
+                logger.warning(
+                    "Authority token refused because a trust record is missing and no fetcher is available. "
+                    "event=authority_token_refused code=%s",
+                    refused.code,
+                )
+                raise
+            fetched = await fetcher(raw_token)
+            if not fetched:
+                logger.warning(
+                    "Authority token refused; fetching trust records produced nothing new. "
+                    "event=authority_token_refused code=%s",
+                    refused.code,
+                )
+                raise
+            logger.info(
+                "Fetched missing trust record for authority token issuer; retrying verification once. "
+                "event=authority_token_issuer_fetched code=%s",
+                refused.code,
+            )
+            return verify_fn(raw_token, **kwargs)
 
     def verify_root_task(
         self,
@@ -343,6 +562,34 @@ class AuthorityTokenVerifier:
             require_issuer=require_issuer,
             allow_permit=False,
             require_permit=False,
+            check_expiry=check_expiry,
+            require_active_person=require_active_person,
+            people=people,
+        )
+
+    async def verify_root_task_async(
+        self,
+        raw_token: Any,
+        *,
+        team_id: str,
+        now: Optional[datetime] = None,
+        valid_at: Optional[datetime] = None,
+        reached_at: Optional[datetime] = None,
+        require_issuer: IssuerRequirement = "any",
+        check_expiry: bool = True,
+        require_active_person: bool = True,
+        people: Optional[PeopleStore] = None,
+    ) -> VerifiedTaskToken:
+        """Verify a root-task token, fetching an unknown issuer cert or stale revocations once on demand."""
+
+        return await self._verify_with_fetch(
+            raw_token,
+            self.verify_root_task,
+            team_id=team_id,
+            now=now,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            require_issuer=require_issuer,
             check_expiry=check_expiry,
             require_active_person=require_active_person,
             people=people,
@@ -376,12 +623,60 @@ class AuthorityTokenVerifier:
             people=people,
         )
 
+    async def verify_schedule_permit_async(
+        self,
+        raw_token: Any,
+        *,
+        team_id: str,
+        now: Optional[datetime] = None,
+        valid_at: Optional[datetime] = None,
+        reached_at: Optional[datetime] = None,
+        check_expiry: bool = True,
+        require_active_person: bool = True,
+        people: Optional[PeopleStore] = None,
+    ) -> VerifiedTaskToken:
+        """Verify a schedule permit token, fetching an unknown issuer cert or stale revocations once on demand."""
+
+        return await self._verify_with_fetch(
+            raw_token,
+            self.verify_schedule_permit,
+            team_id=team_id,
+            now=now,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            check_expiry=check_expiry,
+            require_active_person=require_active_person,
+            people=people,
+        )
+
 
 __all__ = [
     "AuthorityTokenVerifier",
+    "FETCHABLE_REFUSAL_CODES",
     "GATEWAY_ISSUER_ROLE",
     "IdentityRejected",
+    "IssuerFetcher",
     "IssuerRequirement",
+    "REFUSAL_BAD_AUTHORITY",
+    "REFUSAL_BAD_SIGNATURE",
+    "REFUSAL_EXPIRED",
+    "REFUSAL_INVALID_PERMIT",
+    "REFUSAL_INVALID_PERSON_REF",
+    "REFUSAL_ISSUER_CERT_NOT_VALID",
+    "REFUSAL_KEY_MISMATCH",
+    "REFUSAL_MALFORMED",
+    "REFUSAL_MISSING",
+    "REFUSAL_NO_PEOPLE_STORE",
+    "REFUSAL_NO_TRUST_STORE",
+    "REFUSAL_PERMIT_NOT_ALLOWED",
+    "REFUSAL_PERSON_INACTIVE",
+    "REFUSAL_PERSON_UNKNOWN",
+    "REFUSAL_REVOCATIONS_NOT_CURRENT",
+    "REFUSAL_REVOKED_ISSUER",
+    "REFUSAL_UNKNOWN_ISSUER",
+    "REFUSAL_WRONG_INSTALLATION",
+    "REFUSAL_WRONG_ISSUER",
+    "REFUSAL_WRONG_TEAM",
     "ROOT_TASK_BINDING",
     "SCHEDULER_ISSUER_ROLE",
     "SCHEDULE_OWNER_PERMIT_PREFIX",

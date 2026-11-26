@@ -746,6 +746,14 @@ class AgentProcessHost:
             return await coroutine
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, self.loop))  # type: ignore[arg-type]
 
+    async def fetch_token_issuer(self, token: Any) -> bool:
+        """Fetch an authority token's issuer certificate on this process's host loop (safe from any worker thread)."""
+
+        if self.host is None or self.loop is None or self.loop.is_closed():
+            return False
+        result = await self._on_host_loop(self.host.fetch_token_issuer(token))
+        return bool(result)
+
     def cannot_ask(self, sender_agent: str) -> Optional[AskBlocked]:
         """Why this process cannot sign a request for ``sender_agent`` now, or None (``agent_requests.cannot_ask``).
 

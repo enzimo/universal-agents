@@ -21,15 +21,14 @@ any NATS record:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Iterator, Optional
 
-from custom_messages.wire.models import AuthorityToken
+from custom_messages.wire.authority_bindings import extract_token_issuer
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import TrustStore
 from custom_transport.protocol1.bootstrap import read_bundle
@@ -66,7 +65,6 @@ class TrustReader:
         self.reader_id = reader_id
         self.clock = clock
         self.logger = logger
-        self._lock = threading.RLock()
         self._last_refresh: Optional[datetime] = None
         self._last_forget: Optional[datetime] = None
 
@@ -113,39 +111,35 @@ class TrustReader:
 
     @property
     def lock(self) -> threading.RLock:
-        return self._lock
+        return self.trust.lock
 
     @contextmanager
     def read_lock(self) -> Iterator[TrustStore]:
-        """Acquire the reader lock while inspecting ``TrustStore`` from another thread."""
+        """Acquire the trust store lock while inspecting ``TrustStore`` from another thread."""
 
-        with self._lock:
+        with self.trust.lock:
             yield self.trust.store
 
-    def _take_verified_raw(self, key: str, raw: bytes) -> bool:
-        """Verify key binding and add one raw trust record under the reader lock."""
+    async def _take_watch_bytes(self, key: str, raw: bytes) -> bool:
+        """Verify key binding and add one watched trust record through ``StateRecords``."""
 
         try:
-            document = json.loads(raw)
-        except (ValueError, TypeError):
+            return await self.records.take_trust_bytes(key, raw, now=self.clock())
+        except FrameRefused as refused:
             self.logger.warning(
-                "A trust record could not be decoded and is skipped. event=trust_reader_record_malformed "
-                "reader=%s key=%s",
+                "A watched trust record did not verify and is skipped. event=trust_reader_record_refused "
+                "reader=%s key=%s code=%s",
                 self.reader_id,
                 key,
+                refused.code,
             )
             return False
-        if not isinstance(document, dict) or document.get("key") != key:
-            self.logger.warning(
-                "A trust record was stored under another key and is skipped. event=trust_reader_key_mismatch "
-                "reader=%s key=%s",
-                self.reader_id,
-                key,
-            )
-            return False
+
+    async def _take_key(self, record: str, key: str) -> bool:
+        """Read one key from ``UA1_CERTS`` through ``StateRecords.take_trust_record``; skip invalid records."""
+
         try:
-            with self._lock:
-                return self.trust.add(raw, now=self.clock())
+            return await self.records.take_trust_record(record, key, now=self.clock())
         except FrameRefused as refused:
             self.logger.warning(
                 "A trust record did not verify and is skipped. event=trust_reader_record_refused "
@@ -155,15 +149,6 @@ class TrustReader:
                 refused.code,
             )
             return False
-
-    async def _take_key(self, record: str, key: str) -> bool:
-        """Read one key from ``UA1_CERTS`` and add it under the reader lock; skip invalid records."""
-
-        fetched = await self.records.raw(record, key)
-        if fetched is None:
-            return False
-        _, raw = fetched
-        return self._take_verified_raw(key, raw)
 
     async def sync_once(self) -> None:
         """Load every host certificate of this installation and the current revocations record."""
@@ -191,25 +176,13 @@ class TrustReader:
         key = f"host.{installation}.{runtime}.{membership_epoch}"
         return await self._take_key("certificate", key)
 
-    async def fetch_token_issuer(self, token: AuthorityToken | Mapping[str, Any]) -> bool:
+    async def fetch_token_issuer(self, token: Any) -> bool:
         """Fetch the issuer certificate named by ``token`` (and revocations if not current)."""
 
-        if isinstance(token, AuthorityToken):
-            installation = token.issuer.installation
-            runtime = token.issuer.runtime
-            epoch = token.issuer.membership_epoch
-        elif isinstance(token, Mapping):
-            issuer = token.get("issuer")
-            if not isinstance(issuer, Mapping):
-                return False
-            try:
-                installation = str(issuer["installation"])
-                runtime = str(issuer["runtime"])
-                epoch = int(issuer["membership_epoch"])
-            except (KeyError, TypeError, ValueError):
-                return False
-        else:
+        extracted = extract_token_issuer(token)
+        if extracted is None:
             return False
+        installation, runtime, epoch = extracted
         if installation != self.installation:
             return False
         taken = False
@@ -225,7 +198,7 @@ class TrustReader:
                 type(error).__name__,
                 error,
             )
-        with self._lock:
+        with self.trust.lock:
             current = self.trust.store.revocations_current(installation, self.clock())
         if not current:
             try:
@@ -262,7 +235,7 @@ class TrustReader:
                     if stop.is_set():
                         return
                     if raw is not None:
-                        self._take_verified_raw(key, raw)
+                        await self._take_watch_bytes(key, raw)
             except asyncio.CancelledError:
                 raise
             except Exception as error:  # noqa: BLE001 - retry watch on transient NATS errors
@@ -289,9 +262,8 @@ class TrustReader:
                         self.reader_id,
                     )
             if self._last_forget is None or now - self._last_forget >= FORGET_INTERVAL:
-                with self._lock:
-                    self._last_forget = now
-                    self.trust.store.forget(now)
+                self._last_forget = now
+                self.trust.forget(now)
 
 
 async def _stopped_within(stop: asyncio.Event, interval: timedelta) -> bool:

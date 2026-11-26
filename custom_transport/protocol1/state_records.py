@@ -168,6 +168,28 @@ class StateRecords:
         require_record_key(verified, key)
         return StoredRecord(int(entry.revision), verified)
 
+    async def take_trust_bytes(self, key: str, raw: bytes, *, now: datetime) -> bool:
+        """Verify key binding and add one raw trust record into the trust store.
+
+        Shared by keyed bucket reads (``take_trust_record``) and raw bucket watches so one
+        function enforces key binding and unknown-key retry for every trust record.
+        """
+
+        # Check before mutating the trust store. A copied session is still authentic,
+        # but it cannot supply the session requested under a different bucket key.
+        try:
+            document = json.loads(raw)
+        except (ValueError, TypeError) as error:
+            raise FrameRefused("malformed", at="/key") from error
+        if not isinstance(document, dict) or document.get("key") != key:
+            raise FrameRefused("invalid_body", "a trust record is stored under another key", at="/key")
+        try:
+            return self._trust.add(raw, now=now)
+        except FrameRefused as refused:
+            if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(raw):
+                raise
+            return self._trust.add(raw, now=now)
+
     async def take_trust_record(self, record: str, key: str, *, now: datetime) -> bool:
         """Read one trust record (certificate, revocations, session, agreement) into the trust store.
 
@@ -179,20 +201,7 @@ class StateRecords:
         entry = await self._get(record, key)
         if entry is None:
             return False
-        # Check before mutating the trust store. A copied session is still authentic,
-        # but it cannot supply the session requested under a different bucket key.
-        try:
-            document = json.loads(entry.value)
-        except (ValueError, TypeError) as error:
-            raise FrameRefused("malformed", at="/key") from error
-        if not isinstance(document, dict) or document.get("key") != key:
-            raise FrameRefused("invalid_body", "a trust record is stored under another key", at="/key")
-        try:
-            return self._trust.add(entry.value, now=now)
-        except FrameRefused as refused:
-            if refused.code != "unknown_key" or self._fetch_trust is None or not await self._fetch_trust(entry.value):
-                raise
-            return self._trust.add(entry.value, now=now)
+        return await self.take_trust_bytes(key, entry.value, now=now)
 
     def writer(self) -> HostIdentity:
         """The identity this host signs records with now."""
