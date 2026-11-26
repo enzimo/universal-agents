@@ -65,6 +65,7 @@ from custom_agents.task_human_interaction_blockers import (
     answer_held,
     get_human_interaction_blocker,
     is_timed_wait_blocker,
+    record_blocker_with_history,
     record_human_interaction_blocker,
     remove_answer_mark,
 )
@@ -483,38 +484,52 @@ async def decide_timed_wait(
 
 
 async def write_timed_wait(agent: Any, decision: TimedWaitDecision) -> bool:
-    """Persist the charge and blocker record for a decided timed wait (before WAITING is saved).
+    """Persist the charge and blocker record for a decided timed wait in one write (before WAITING is saved).
 
-    Caller holds ``_lock(agent, decision.task_id)``. Returns True when a record was written.
+    Caller holds ``_lock(agent, decision.task_id)``. Returns True when the
+    record was written and this agent still holds the task.
     """
 
-    if decision.action not in {"record", "restore"} or decision.record is None:
+    record = decision.record
+    if decision.action not in {"record", "restore"} or record is None:
         return False
     manager = agent.task_manager
     run_ops = manager.operations_runtime.run
     if decision.action == "record":
         assert decision.history_details is not None
-        # Charge (history) first, then save the blocker record.
-        await append_wait_history(
-            agent,
-            decision.task_id,
-            decision.record["summary"],
-            decision.history_details,
+        # Persist the budget charge (history) and the blocker record in one atomic write.
+        written = await run_ops(
+            partial(
+                record_blocker_with_history,
+                manager,
+                decision.task_id,
+                record,
+                history_summary=record["summary"],
+                history_details=decision.history_details,
+            )
         )
-        await run_ops(partial(record_human_interaction_blocker, manager), decision.task_id, decision.record)
+        if not written:
+            return False
         logger.info(
             "A task paused on a timed wait. event=timed_wait_started task_id=%s interrupt_id=%s "
             "tool=%s minutes=%s resume_at=%s agent_id=%s",
             decision.task_id,
             decision.interrupt_id,
-            decision.record.get("tool"),
-            decision.record.get("minutes"),
-            decision.record.get("resume_at"),
+            record.get("tool"),
+            record.get("minutes"),
+            record.get("resume_at"),
             getattr(agent, "id", "-"),
         )
         return True
-    await run_ops(partial(record_human_interaction_blocker, manager), decision.task_id, decision.record)
-    return True
+
+    def _restore_blocker() -> bool:
+        task_info = manager.get_task_info(decision.task_id)
+        if task_info is None:
+            return False
+        record_human_interaction_blocker(manager, decision.task_id, record)
+        return bool(manager.get_task_info(decision.task_id) is task_info)
+
+    return bool(await run_ops(_restore_blocker))
 
 
 async def stage_timed_wait(
@@ -540,7 +555,8 @@ async def stage_timed_wait(
             deferred_by=deferred_by,
         )
         if decision.action in {"record", "restore"}:
-            await write_timed_wait(agent, decision)
+            if not await write_timed_wait(agent, decision):
+                return TimedWaitDecision(action="skip", task_id=task_id, interrupt_id=interrupt_id)
         return decision
 
 

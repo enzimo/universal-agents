@@ -49,6 +49,7 @@ from custom_messages.contracts.task_v1 import (
     ACCESS_REQUEST_INTERRUPT_KIND,
     access_interrupt_request_ids,
 )
+from custom_messages.enums import TaskHistoryImportance, TaskHistoryType
 
 # A task blocked on a wait records the same kind as its interrupt.
 ACCESS_REQUEST_BLOCKER = ACCESS_REQUEST_INTERRUPT_KIND
@@ -130,6 +131,57 @@ def record_human_interaction_blocker(
         raise KeyError(f"Task {task_id} is not tracked")
     host.task_state.human_interaction_blockers[task_id] = dict(blocker)
     host._persist_runtime_state()
+
+
+def record_blocker_with_history(
+    host: Any,
+    task_id: str,
+    blocker: dict[str, Any],
+    *,
+    history_summary: str,
+    history_details: dict[str, Any],
+    entry_type: TaskHistoryType = TaskHistoryType.QUERY_EVENT,
+    importance: TaskHistoryImportance = TaskHistoryImportance.HIGH,
+) -> bool:
+    """Persist a task history entry and blocker record together in one runtime-state write.
+
+    Rolls back both in-memory mutations if persistence raises (while this agent
+    still holds the same ``TaskInfo``), and returns ``False`` if custody of this
+    task was released during the write (``TaskCustodyTakenOver``).
+    """
+
+    from custom_agents.task_manager import build_task_history_entry
+
+    task_info = host.get_task_info(task_id)
+    if task_info is None:
+        raise KeyError(f"Task {task_id} is not tracked")
+    entry = build_task_history_entry(
+        host,
+        task_id,
+        history_summary,
+        entry_type=entry_type,
+        importance=importance,
+        details=history_details,
+    )
+    if entry is None:
+        raise KeyError(f"Task {task_id} is not tracked")
+
+    had_blocker = task_id in host.task_state.human_interaction_blockers
+    previous_blocker = host.task_state.human_interaction_blockers.get(task_id)
+    task_info.task.execution_history.append(entry)
+    host.task_state.human_interaction_blockers[task_id] = dict(blocker)
+    try:
+        host._persist_runtime_state()
+    except Exception:
+        if host.get_task_info(task_id) is task_info:
+            if entry in task_info.task.execution_history:
+                task_info.task.execution_history.remove(entry)
+            if had_blocker and previous_blocker is not None:
+                host.task_state.human_interaction_blockers[task_id] = previous_blocker
+            else:
+                host.task_state.human_interaction_blockers.pop(task_id, None)
+        raise
+    return bool(host.get_task_info(task_id) is task_info)
 
 
 def clear_human_interaction_blocker(

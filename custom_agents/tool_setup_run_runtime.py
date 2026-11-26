@@ -173,7 +173,7 @@ def run_repository(agent: Any) -> ToolSetupRunRepository:
 def _lock(agent: Any, run_id: str) -> asyncio.Lock:
     """One lock per run, so results arriving together update it one after another."""
 
-    locks = getattr(agent, "_tool_setup_run_locks", None)
+    locks: dict[str, asyncio.Lock] | None = getattr(agent, "_tool_setup_run_locks", None)
     if locks is None:
         locks = {}
         agent._tool_setup_run_locks = locks
@@ -202,8 +202,17 @@ def _names(agent: Any, run: ToolSetupRunV1) -> dict[str, str]:
 # -- begin ------------------------------------------------------------------------------
 
 
-async def begin_run(agent: Any, *, task_id: str, interrupt_id: str, reason: dict[str, Any], msg_meta: Any) -> None:
-    """The turn paused on a run: record the wait, then open what may start now."""
+async def stage_run(
+    agent: Any, *, task_id: str, interrupt_id: str, reason: dict[str, Any], msg_meta: Any
+) -> str:
+    """Persist the setup-run blocker and interrupt id before ``ProgressState.WAITING`` is saved.
+
+    Saving the record before ``WAITING`` (matching access requests and timed waits)
+    prevents a crash right after ``WAITING`` from leaving an unblocked task that
+    recovery immediately re-queues. Workflow announcement and opening pages stay
+    in ``start_run`` after ``WAITING`` so an immediately settled run cannot wake
+    the task before the state transition completes.
+    """
 
     run_id = str(reason.get("run_id") or "")
     await agent.task_manager.operations_runtime.run(
@@ -222,11 +231,21 @@ async def begin_run(agent: Any, *, task_id: str, interrupt_id: str, reason: dict
         run = await _load(agent, run_id)
         if run is None:
             logger.warning("A paused turn names no stored setup run. event=tool_setup_run_missing run_id=%s", run_id)
-            return
+            return run_id
         if run.interrupt_id != interrupt_id:
-            run = await _save(agent, run.model_copy(update={"interrupt_id": interrupt_id}))
+            await _save(agent, run.model_copy(update={"interrupt_id": interrupt_id}))
+    return run_id
+
+
+async def start_run(agent: Any, *, task_id: str, run_id: str) -> None:
+    """Post-``WAITING`` step for a staged setup run: announce its workflow, then open pieces."""
+
+    async with _lock(agent, run_id):
+        run = await _load(agent, run_id)
+        if run is None:
+            return
         # The link comes before any page, so the person knows what the pages are for.
-        await _announce_workflow(agent, run)
+        run = await _announce_workflow(agent, run)
     logger.info(
         "A task waits for its tools to be set up. event=tool_setup_run_waiting run_id=%s task_id=%s pieces=%s",
         run_id,
@@ -234,6 +253,15 @@ async def begin_run(agent: Any, *, task_id: str, interrupt_id: str, reason: dict
         len(run.pieces),
     )
     await advance(agent, run_id)
+
+
+async def begin_run(agent: Any, *, task_id: str, interrupt_id: str, reason: dict[str, Any], msg_meta: Any) -> None:
+    """The turn paused on a run: record the wait, then open what may start now."""
+
+    run_id = await stage_run(
+        agent, task_id=task_id, interrupt_id=interrupt_id, reason=reason, msg_meta=msg_meta
+    )
+    await start_run(agent, task_id=task_id, run_id=run_id)
 
 
 # -- telling the person --------------------------------------------------------------------
@@ -889,6 +917,18 @@ def _changed_recently(run: ToolSetupRunV1) -> bool:
     return (datetime.now(timezone.utc) - run.updated_at_utc).total_seconds() < RECENT_RUN_SECONDS
 
 
+async def _announce_workflow_if_needed(agent: Any, run: ToolSetupRunV1) -> ToolSetupRunV1:
+    """Announce a recovered waiting run's workflow once if a crash skipped ``start_run``."""
+
+    if run.status != RUN_WAITING or not run.workflow_id or run.workflow_announced:
+        return run
+    async with _lock(agent, run.run_id):
+        current = await _load(agent, run.run_id)
+        if current is None or current.status != RUN_WAITING or current.workflow_announced:
+            return current or run
+        return await _announce_workflow(agent, current)
+
+
 async def _recover_task(agent: Any, task_id: str, blocker: dict[str, Any], *, at_start: bool) -> int:
     """Recover one task's setup run; 1 when it resumed the task. A failure is logged, never raised."""
 
@@ -904,6 +944,7 @@ async def _recover_task(agent: Any, task_id: str, blocker: dict[str, Any], *, at
             return int(await _resume_missing_run(agent, task_id, run_id, wake=wake))
         if not at_start and _changed_recently(run):
             return 0
+        run = await _announce_workflow_if_needed(agent, run)
         step = _recovery_step(agent, blocker, run)
         if step is None:
             return 0
@@ -962,4 +1003,6 @@ __all__ = [
     "resume_without_paused_turn",
     "run_repository",
     "send_setup_request",
+    "stage_run",
+    "start_run",
 ]

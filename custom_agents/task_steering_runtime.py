@@ -1578,6 +1578,24 @@ async def send_interrupt_request_for_result(
                 "conversation_id": getattr(msg_meta, "conversation_id", None),
             },
         )
+    staged_setup_run_ids: list[str] = []
+    if setup_runs:
+        # Stage setup runs (blocker record and run.interrupt_id) BEFORE
+        # ProgressState.WAITING is persisted, matching access requests and
+        # timed waits so a crash around WAITING never leaves an unblocked task.
+        from custom_agents.tool_setup_run_runtime import stage_run
+
+        for setup_run in setup_runs:
+            assert isinstance(setup_run.reason, dict)
+            staged_setup_run_ids.append(
+                await stage_run(
+                    agent,
+                    task_id=task.task_id,
+                    interrupt_id=setup_run.interrupt_id,
+                    reason=setup_run.reason,
+                    msg_meta=msg_meta,
+                )
+            )
     timed_wait_decisions: list[Any] = []
     if timed_waits:
         # Stage timed waits (charge and blocker record) BEFORE ProgressState.WAITING
@@ -1626,14 +1644,11 @@ async def send_interrupt_request_for_result(
         ProgressState.WAITING,
         datetime.now(timezone.utc).isoformat(),
     )
-    for setup_run in setup_runs:
-        # set_up_tools paused the turn (now waiting); trusted code opens its pages and resumes it.
-        from custom_agents.tool_setup_run_runtime import begin_run
+    for run_id in staged_setup_run_ids:
+        # set_up_tools paused the turn (now waiting); trusted code announces the workflow and opens its pages.
+        from custom_agents.tool_setup_run_runtime import start_run
 
-        assert isinstance(setup_run.reason, dict)
-        await begin_run(
-            agent, task_id=task.task_id, interrupt_id=setup_run.interrupt_id, reason=setup_run.reason, msg_meta=msg_meta
-        )
+        await start_run(agent, task_id=task.task_id, run_id=run_id)
     if timed_wait_decisions:
         from custom_agents.timed_wait_runtime import finish_timed_wait
 

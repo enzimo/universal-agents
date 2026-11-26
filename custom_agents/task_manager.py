@@ -1801,12 +1801,9 @@ class TaskManager(
             )
             return None
 
-        plan_id = self._ensure_task_plan_link(task_info, create=False)
-        objective_id = self._get_task_objective_id_from_context(task_id)
-        if objective_id is None and plan_id:
-            objective = self._get_objective_for_plan_id(plan_id)
-            objective_id = objective.objective_id if objective else None
-        entry = self._build_history_entry(
+        entry = build_task_history_entry(
+            self,
+            task_id,
             summary,
             source=source,
             entry_type=entry_type,
@@ -1819,15 +1816,17 @@ class TaskManager(
             tracks_to_plan=tracks_to_plan,
             details=details,
         )
-        entry.objective_id = objective_id
-        entry.plan_id = plan_id
+        if entry is None:
+            return None
         task_info.task.execution_history.append(entry)
         try:
             if not self.runtime_snapshot_coordinator.persist_task_history(task_id):
-                task_info.task.execution_history.remove(entry)
+                if self.get_task_info(task_id) is task_info and entry in task_info.task.execution_history:
+                    task_info.task.execution_history.remove(entry)
                 return None
         except Exception:
-            task_info.task.execution_history.remove(entry)
+            if self.get_task_info(task_id) is task_info and entry in task_info.task.execution_history:
+                task_info.task.execution_history.remove(entry)
             raise
         return entry
 
@@ -2865,13 +2864,8 @@ class TaskManager(
         added again (another restart or retry before the turn). A shorter
         note contained in earlier text can be a correction, so it stays.
         """
-        text = str(directive or "").strip()
-        earlier = self.task_state.runtime_resume_directives.get(task_id, "").strip()
-        # Match the entire note between the separators, including all of its
-        # paragraphs, rather than dropping a prefix, suffix or substring.
-        if not text or f"\n\n{text}\n\n" in f"\n\n{earlier}\n\n":
+        if not add_runtime_resume_directive(self, task_id, directive):
             return
-        self.task_state.runtime_resume_directives[task_id] = f"{earlier}\n\n{text}" if earlier else text
         self._persist_runtime_state()
 
     def read_runtime_resume_directive(self, task_id: Optional[str]) -> Optional[str]:
@@ -4199,3 +4193,58 @@ class TaskManager(
                 md += "\n"
 
         return md
+
+
+def build_task_history_entry(
+    manager: TaskManager,
+    task_id: str,
+    summary: str,
+    *,
+    source: TaskHistorySource = TaskHistorySource.SYSTEM,
+    entry_type: TaskHistoryType = TaskHistoryType.TASK_EVENT,
+    importance: TaskHistoryImportance = TaskHistoryImportance.NORMAL,
+    timestamp: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    related_task_id: Optional[str] = None,
+    plan_step_id: Optional[str] = None,
+    tracks_to_plan: Optional[bool] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> Optional[TaskHistoryEntry]:
+    """Build a task-linked history entry without mutating or persisting state."""
+    task_info = manager.get_task_info(task_id)
+    if not task_info:
+        return None
+    plan_id = manager._ensure_task_plan_link(task_info, create=False)
+    objective_id = manager._get_task_objective_id_from_context(task_id)
+    if objective_id is None and plan_id:
+        objective = manager._get_objective_for_plan_id(plan_id)
+        objective_id = objective.objective_id if objective else None
+    entry = manager._build_history_entry(
+        summary,
+        source=source,
+        entry_type=entry_type,
+        importance=importance,
+        timestamp=timestamp,
+        agent_name=agent_name,
+        agent_id=agent_id,
+        related_task_id=related_task_id,
+        plan_step_id=plan_step_id,
+        tracks_to_plan=tracks_to_plan,
+        details=details,
+    )
+    entry.objective_id = objective_id
+    entry.plan_id = plan_id
+    return entry
+
+
+def add_runtime_resume_directive(manager: TaskManager, task_id: str, directive: str) -> bool:
+    """Append ``directive`` to ``task_id``'s in-memory resume note with whole-block deduplication."""
+    text = str(directive or "").strip()
+    earlier = manager.task_state.runtime_resume_directives.get(task_id, "").strip()
+    # Match the entire note between the separators, including all of its
+    # paragraphs, rather than dropping a prefix, suffix or substring.
+    if not text or f"\n\n{text}\n\n" in f"\n\n{earlier}\n\n":
+        return False
+    manager.task_state.runtime_resume_directives[task_id] = f"{earlier}\n\n{text}" if earlier else text
+    return True

@@ -897,3 +897,244 @@ async def test_a_pass_skips_a_finished_task_that_still_has_a_record(lead, woken,
 
     assert reads == [1]
     assert record_of(lead) is not None and not lead.task_manager.task_state.task_queue and not woken
+
+
+# -- #206 / B3 / C08: setup-run blocker saved before WAITING ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_b3_setup_run_blocker_saved_before_waiting_and_crash_recovers_to_waiting_and_opens_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#206 / B3 / C08: blocker is saved before WAITING; a crash right before WAITING recovers to WAITING,
+    announces the workflow, and opens pending pages instead of re-queueing at once."""
+
+    from custom_tools.runtime_context import task_work
+
+    db_path = tmp_path / "setup_crash.db"
+    manager = TaskManager(db_path=str(db_path))
+    manager.set_owner_identity(AGENT_ID, "TeamArchitect", "team", "TeamArchitect")
+    task = Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Set up GitHub")
+    header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway_chat")
+    meta = MessageMeta(conversation_id="conv-1", msg_correlation_id="corr-1")
+    assert manager.add_task(task, header, meta, owner_person_id="user-1")
+    assert manager.get_next_task_to_process() == TASK
+    manager.update_main_task_state(TASK, ProgressState.IN_PROGRESS, _now())
+
+    agent = SimpleNamespace(
+        id=AGENT_ID,
+        name="TeamArchitect",
+        team_id="team",
+        named_agent_type="TeamArchitect",
+        task_manager=manager,
+        _interrupted_turn_sessions={},
+        _pending_interrupt_responses={},
+        _logger=logging.getLogger("test.setup_run_b3"),
+        _agent_id_by_name={},
+        named_agent_type_queue_map={},
+        mid_turn_steering_config={},
+    )
+    run_repository(agent).create(
+        ToolSetupRunV1(
+            run_id="run-b3",
+            team_id="team",
+            person_id="user-1",
+            task_id=TASK,
+            agent_id=AGENT_ID,
+            agent_type="TeamArchitect",
+            tool_ids=("cli:github",),
+            workflow_id="wf-b3",
+            workflow_announced=False,
+            interrupt_id="old-int",
+            pieces=(RunPieceV1(piece_id="sign_in", tool_id="cli:github", kind="sign_in", status="pending", attempt=0),),
+        )
+    )
+
+    # Crash right when send_interrupt_request_for_result tries to persist ProgressState.WAITING.
+    orig_update = manager.update_main_task_state
+
+    def crash_on_waiting(task_id: str, new_state: ProgressState, *args, **kwargs):
+        if new_state == ProgressState.WAITING:
+            raise RuntimeError("simulated crash before WAITING")
+        return orig_update(task_id, new_state, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "update_main_task_state", crash_on_waiting)
+    fake_result = SimpleNamespace(
+        interrupts=[
+            SimpleNamespace(
+                id="int-b3",
+                name="tool_setup_run",
+                reason={"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-b3", "summary": "Set up GitHub"},
+            )
+        ]
+    )
+    fake_strands = SimpleNamespace(replace_before_next_turn=False)
+    with task_work(TASK) as work:
+        work.strands = fake_strands
+        with pytest.raises(RuntimeError, match="simulated crash before WAITING"):
+            await task_steering_runtime.send_interrupt_request_for_result(
+                agent,
+                result=fake_result,
+                task=task,
+                msg_header=header,
+                msg_meta=meta,
+                invoke_kwargs={},
+                callback_handler=lambda **_kw: None,
+                full_prompt="Set up GitHub",
+            )
+
+    # Reload from SQLite in a fresh process: state is still IN_PROGRESS, but setup-run blocker & interrupt_id are durable.
+    restarted_mgr = TaskManager(db_path=str(db_path))
+    restarted_mgr.set_owner_identity(AGENT_ID, "TeamArchitect", "team", "TeamArchitect")
+    restarted_agent = SimpleNamespace(
+        id=AGENT_ID,
+        name="TeamArchitect",
+        team_id="team",
+        named_agent_type="TeamArchitect",
+        same_role_runtime_takeover_enabled=False,
+        task_manager=restarted_mgr,
+        deferred_inbox=SimpleNamespace(
+            stored_team_id=AsyncMock(return_value=None),
+            restore_role=AsyncMock(return_value=False),
+            restore=AsyncMock(return_value=False),
+        ),
+        _interrupted_turn_sessions={},
+        _pending_interrupt_responses={},
+        _logger=logging.getLogger("test.setup_run_b3_restarted"),
+        _recovery_retry_deadline_seconds=lambda: 1.0,
+        _parse_iso_timestamp=lambda v: datetime.fromisoformat(v) if v else None,
+    )
+
+    announced: list[str] = []
+    opened: list[str] = []
+
+    async def fake_announce(_agent, run: ToolSetupRunV1) -> ToolSetupRunV1:
+        announced.append(run.run_id)
+        return await tool_setup_run_runtime._save(_agent, run.model_copy(update={"workflow_announced": True}))
+
+    async def fake_open(_agent, run: ToolSetupRunV1, piece: RunPieceV1, _task_info) -> ToolSetupRunV1:
+        opened.append(piece.piece_id)
+        return await tool_setup_run_runtime._save(
+            _agent, run.with_piece(piece.model_copy(update={"status": "waiting", "attempt": 1}))
+        )
+
+    monkeypatch.setattr(tool_setup_run_runtime, "_announce_workflow", fake_announce)
+    monkeypatch.setattr(tool_setup_run_runtime, "_open", fake_open)
+
+    await runtime_recovery.recover_runtime_after_restart(restarted_agent)
+
+    # Recovery kept the task WAITING (not re-queued), preserved the blocker, announced the workflow, and opened pages.
+    assert restarted_mgr.get_task_info(TASK).state == ProgressState.WAITING
+    assert list(restarted_mgr.task_state.task_queue) == []
+    saved_blocker = get_human_interaction_blocker(restarted_mgr, TASK)
+    assert saved_blocker is not None and saved_blocker["kind"] == TOOL_SETUP_RUN_KIND
+    assert saved_blocker["run_id"] == "run-b3" and saved_blocker["interrupt_id"] == "int-b3"
+    saved_run = run_repository(restarted_agent).get("run-b3")
+    assert saved_run is not None
+    assert saved_run.interrupt_id == "int-b3"
+    assert saved_run.workflow_announced is True
+    assert saved_run.pieces[0].status == "waiting"
+    assert announced == ["run-b3"]
+    assert opened == ["sign_in"]
+
+
+@pytest.mark.asyncio
+async def test_b3_decision_arriving_between_stage_run_and_waiting_save_resumes_once(
+    tmp_path: Path, woken: list, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C08: if the setup run finishes in the gap between stage_run and WAITING, WAITING is still saved and the turn resumes once."""
+
+    from custom_tools.runtime_context import task_work
+
+    manager = TaskManager(db_path=str(tmp_path / "interleave.db"))
+    manager.set_owner_identity(AGENT_ID, "TeamArchitect", "team", "TeamArchitect")
+    task = Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Set up GitHub")
+    header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway_chat")
+    meta = MessageMeta(conversation_id="conv-1", msg_correlation_id="corr-1")
+    assert manager.add_task(task, header, meta, owner_person_id="user-1")
+    assert manager.get_next_task_to_process() == TASK
+    manager.update_main_task_state(TASK, ProgressState.IN_PROGRESS, _now())
+
+    agent = SimpleNamespace(
+        id=AGENT_ID,
+        name="TeamArchitect",
+        team_id="team",
+        named_agent_type="TeamArchitect",
+        task_manager=manager,
+        _interrupted_turn_sessions={},
+        _pending_interrupt_responses={},
+        _set_active_execution_context=lambda tid: ToolStop(agent_id=AGENT_ID, task_id=tid),
+        _clear_active_execution_context=lambda: None,
+        _refresh_self_agent_state=AsyncMock(),
+        _logger=logging.getLogger("test.setup_run_interleave"),
+        _agent_id_by_name={},
+        named_agent_type_queue_map={},
+        mid_turn_steering_config={},
+    )
+    run_repository(agent).create(
+        ToolSetupRunV1(
+            run_id="run-race",
+            team_id="team",
+            person_id="user-1",
+            task_id=TASK,
+            agent_id=AGENT_ID,
+            agent_type="TeamArchitect",
+            tool_ids=("cli:github",),
+            interrupt_id="int-race",
+            pieces=(RunPieceV1(piece_id="access", tool_id="cli:github", kind="access", status=DONE, attempt=1),),
+        )
+    )
+
+    # Interleave: right as WAITING is about to be saved, advance() settles the run and holds its answer.
+    orig_update = manager.update_main_task_state
+    settled_before_waiting = asyncio.Event()
+
+    async def fake_start_run(a, *, task_id: str, run_id: str) -> None:
+        # Advance was already triggered by the interleaved decision; start_run's advance is a no-op.
+        await tool_setup_run_runtime.advance(a, run_id)
+
+    orig_run = manager.operations_runtime.run
+
+    async def intercepting_run(fn, *args, **kwargs):
+        if fn == orig_update and len(args) >= 2 and args[1] == ProgressState.WAITING and not settled_before_waiting.is_set():
+            settled_before_waiting.set()
+            assert await tool_setup_run_runtime.advance(agent, "run-race") is True
+        return await orig_run(fn, *args, **kwargs)
+
+    monkeypatch.setattr(manager.operations_runtime, "run", intercepting_run)
+    monkeypatch.setattr(tool_setup_run_runtime, "start_run", fake_start_run)
+
+    fake_result = SimpleNamespace(
+        interrupts=[
+            SimpleNamespace(
+                id="int-race",
+                name="tool_setup_run",
+                reason={"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-race", "summary": "Set up GitHub"},
+            )
+        ]
+    )
+    with task_work(TASK) as work:
+        work.strands = SimpleNamespace(replace_before_next_turn=False)
+        await task_steering_runtime.send_interrupt_request_for_result(
+            agent,
+            result=fake_result,
+            task=task,
+            msg_header=header,
+            msg_meta=meta,
+            invoke_kwargs={},
+            callback_handler=lambda **_kw: None,
+            full_prompt="Set up GitHub",
+        )
+
+    assert settled_before_waiting.is_set()
+    assert manager.get_task_info(TASK).state == ProgressState.WAITING
+    assert answer_held(get_human_interaction_blocker(manager, TASK), AGENT_ID)
+    assert TASK in agent._pending_interrupt_responses
+    assert len(woken) == 1
+
+    # Now the drain resumes the paused turn exactly once.
+    seen = stub_turn(monkeypatch, agent)
+    await resume_interrupted_task_turn(agent, TASK)
+    assert seen == [None]
+    assert get_human_interaction_blocker(manager, TASK) is None
+    assert TASK not in agent._pending_interrupt_responses
