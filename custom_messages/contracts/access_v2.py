@@ -498,6 +498,11 @@ class OperationResolutionV1(AccessContractModel):
     level: AccessLevel
     source: ClassificationSource
     detail: str = Field(default="", max_length=500)
+    # True only when a command-table line could not be parsed (operation
+    # ``command:unparsed``). The broker's access gate refuses exactly these
+    # before the access decision. The operation name alone cannot say it: a
+    # listed command, or a command group, may itself be called ``unparsed``.
+    command_line_rejected: bool = False
 
 
 # ---------------------------------------------------------------------------

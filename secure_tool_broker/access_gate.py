@@ -13,7 +13,7 @@ For each request it:
    authorization modes (plan section 11);
 3. resolves the operation and level from the current tool catalog;
 4. refuses requests to hosts no web API tool (``http:*``) covers and
-   unparsed CLI command lines (``command_line:unparsed``), in both modes;
+   unparsed CLI command lines (``command_line_rejected``), in both modes;
 5. when authorization is enabled, asks the access service for the agent side
    and the person side (``access_control.decisions``);
 6. for a tool that uses a linked credential, finds the account link: the
@@ -40,7 +40,6 @@ from typing import Any, Mapping
 
 from access_catalog.catalog import (
     UNLISTED_WEB_TOOL,
-    UNPARSED_COMMAND_OPERATION,
     CatalogSource,
     ToolCatalog,
     mcp_tool_id,
@@ -231,7 +230,7 @@ class BrokerAccessGate:
                 ),
                 resolution=resolution,
             )
-        if resolution.operation == UNPARSED_COMMAND_OPERATION:
+        if resolution.command_line_rejected:
             return self._refuse(
                 REASON_COMMAND_LINE_REJECTED,
                 resolution.detail or "The command line could not be parsed.",

@@ -959,7 +959,8 @@ def test_gh_api_rejects_repeated_or_empty_method_flags(catalog, argv) -> None:
 
     resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
     assert resolution.tool_id == "cli:github"
-    assert resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert resolution.operation == UNPARSED_COMMAND_OPERATION == "command:unparsed"
+    assert resolution.command_line_rejected
     assert resolution.level is FULL
     assert resolution.source is ClassificationSource.UNREVIEWED
     assert resolution.detail
@@ -1104,7 +1105,8 @@ def test_gh_api_rejects_unknown_or_malformed_flags(catalog, argv) -> None:
 
     resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
     assert resolution.tool_id == "cli:github"
-    assert resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert resolution.operation == UNPARSED_COMMAND_OPERATION == "command:unparsed"
+    assert resolution.command_line_rejected
     assert resolution.level is FULL
     assert resolution.source is ClassificationSource.UNREVIEWED
     assert resolution.detail

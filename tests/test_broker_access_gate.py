@@ -879,12 +879,45 @@ def test_installed_cli_command_named_unparsed_is_not_mistaken_for_a_parse_failur
 
     listed = gate.check_broker_action(MANAGER, "demo", "exec", {"argv": ["unparsed"]}, context)
     assert listed.resolution is not None
-    assert listed.resolution.operation == "command:unparsed"
+    assert listed.resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert not listed.resolution.command_line_rejected
     assert listed.resolution.source is ClassificationSource.TRUSTED
     assert listed.resolution.level is AccessLevel.READ
     assert listed.allowed, (listed.reason_code, listed.message)
 
-    # A line the parser refuses on the same CLI still gets the marker and the refusal.
+    # A line the parser refuses on the same CLI is flagged and refused.
     broken = gate.check_broker_action(MANAGER, "demo", "exec", {"argv": ["unparsed", "--"]}, context)
     assert broken.resolution is not None and broken.resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert broken.resolution.command_line_rejected
     assert not broken.allowed and broken.reason_code == REASON_COMMAND_LINE_REJECTED
+
+
+def test_bare_unparsed_command_group_is_decided_not_refused_as_a_parse_failure(tmp_path) -> None:
+    from access_catalog.catalog import UNPARSED_COMMAND_OPERATION
+    from access_catalog.instance_tools import write_instance_tool
+    from custom_messages.contracts.access_v2 import ClassificationSource, ProposedCliToolV1
+    from custom_messages.contracts.cli_tool_v1 import InstalledCliV1
+
+    write_instance_tool(
+        tmp_path,
+        ProposedCliToolV1(
+            tool_id="cli:demo",
+            display_name="Demo CLI",
+            installed_cli=InstalledCliV1(
+                binary_path="team/tools/demo/demo", sha256="a" * 64, commands={"unparsed.list": "read"}
+            ),
+        ),
+    )
+    gate = open_gate(instance_root=tmp_path)
+    context = agent_context(roles=("owner",))
+
+    # "unparsed" is only a group here: the bare word parses, is not listed and
+    # needs full, but it is not a parse failure, so the gate does not refuse it.
+    group = gate.check_broker_action(MANAGER, "demo", "exec", {"argv": ["unparsed"]}, context)
+    assert group.resolution is not None
+    assert group.resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert not group.resolution.command_line_rejected
+    assert group.resolution.source is ClassificationSource.UNREVIEWED
+    assert group.resolution.level is AccessLevel.FULL
+    assert group.reason_code != REASON_COMMAND_LINE_REJECTED
+    assert group.allowed, (group.reason_code, group.message)

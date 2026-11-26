@@ -249,8 +249,9 @@ def _is_gh_api_graphql_endpoint(endpoint: str) -> bool:
     ``urlsplit`` raises ``ValueError`` for hosts it cannot read (unbalanced or
     non-numeric square brackets, characters that change under NFKC
     normalization). Such a line is refused as ``CommandLineRejected`` so both
-    the catalog (``command_line:unparsed``) and the broker (``cli_command_line_rejected``)
-    give the caller a plain reason instead of an uncaught error.
+    the catalog (``command:unparsed`` with ``command_line_rejected`` set) and
+    the broker (``cli_command_line_rejected``) give the caller a plain reason
+    instead of an uncaught error.
     """
 
     if "://" in endpoint:

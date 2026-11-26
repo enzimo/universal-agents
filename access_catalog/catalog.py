@@ -72,11 +72,11 @@ PROCEDURE_HANDLERS_FILE = (
 )
 INSTALLED_PROCEDURE_PREFIX = "installed_permission."
 UNREGISTERED_FUNCTION_TOOL = "fn:unregistered"
-# Operation name used when a CLI passthrough argument list fails parsing. It
-# sits outside the command:<path> names (command words cannot contain ':'), so
-# a listed command that happens to be called "unparsed" never matches it; the
-# broker's access gate refuses exactly this marker.
-UNPARSED_COMMAND_OPERATION = "command_line:unparsed"
+# Operation name used when a CLI passthrough argument list fails parsing. The
+# private Rust classifier uses the same name, so it stays as it is. A listed
+# command (or command group) may also be called "unparsed", so the resolution's
+# ``command_line_rejected`` flag, not this name, marks a parse failure.
+UNPARSED_COMMAND_OPERATION = "command:unparsed"
 # The one secure_cli action of an installed CLI: run a checked argument list.
 INSTALLED_CLI_ACTION = "exec"
 UNLISTED_WEB_TOOL = "http:unlisted"
@@ -741,6 +741,7 @@ class ToolCatalog:
                     level=AccessLevel.FULL,
                     source=ClassificationSource.UNREVIEWED,
                     detail=str(exc)[:500],
+                    command_line_rejected=True,
                 )
             return self.resolve_command_line(binding.tool_id, table, argv)
         assert binding.level is not None
@@ -760,6 +761,7 @@ class ToolCatalog:
                 level=AccessLevel.FULL,
                 source=ClassificationSource.UNREVIEWED,
                 detail=str(exc)[:500],
+                command_line_rejected=True,
             )
         known = policy.table.level_for(parsed.command_path) is not None or parsed.command_path == ("api",)
         return OperationResolutionV1(
