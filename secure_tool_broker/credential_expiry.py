@@ -46,6 +46,7 @@ EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
 
 CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE = "credential_expiry_unsupported_source"
 CREDENTIAL_EXPIRY_FORM_ONLY = "credential_expiry_form_only"
+CREDENTIAL_EXPIRY_SHARED_RECORD = "credential_expiry_shared_record"
 CREDENTIAL_EXPIRY_TOO_SOON = "credential_expiry_too_soon"
 CREDENTIAL_EXPIRY_INVALID = "credential_expiry_invalid"
 
@@ -333,6 +334,7 @@ __all__ = [
     "CREDENTIAL_EXPIRED",
     "CREDENTIAL_EXPIRY_FORM_ONLY",
     "CREDENTIAL_EXPIRY_INVALID",
+    "CREDENTIAL_EXPIRY_SHARED_RECORD",
     "CREDENTIAL_EXPIRY_TOO_SOON",
     "CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE",
     "CUSTOM_EXPIRY_OPTION",

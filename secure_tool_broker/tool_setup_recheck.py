@@ -6,9 +6,10 @@ anyone using the tool. This trusted job, not a model task, re-checks every
 ``ready`` state whose last use and last check are both older than
 ``security_layer.tool_setup_recheck_days`` (default 30; 0 turns it off):
 
-- it runs in the broker's own long-running loop (``run_secure_tool_broker``),
-  because only the broker can read sign-ins and linked accounts; this needs no
-  new route and no signed task for work that has no task;
+- it runs inside the broker's single periodic janitor loop
+  (``secure_tool_broker.janitor.run_broker_janitor``), because only the broker
+  can read sign-ins and linked accounts; this needs no new route and no signed
+  task for work that has no task;
 - it uses the same cheap, read-only checks as ``set_up_tools``
   (``tool_setup_status``): ``gh auth status`` for GitHub and Google's token
   check for Google really ask the service; an X sign-in and account links are
@@ -25,12 +26,11 @@ anyone using the tool. This trusted job, not a model task, re-checks every
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Final
+from typing import Any
 
 from access_control.tool_setup_states import (
     SOURCE_PERIODIC_CHECK,
@@ -54,8 +54,6 @@ from secure_tools.chat_commands import link_command
 
 LOGGER = logging.getLogger(__name__)
 
-# How often the loop looks for states that are due.
-RECHECK_LOOP_SECONDS: Final = 3600
 _NOTICE_ID_PREFIX = "tool_setup_"
 
 
@@ -163,7 +161,7 @@ def send_setup_notice(gate: Any, state: ToolSetupStateV1, *, now: datetime) -> b
             state.tool_id,
             state.missing_step,
         )
-    return sent
+    return bool(sent)
 
 
 def _recheck_one(gate: Any, state: ToolSetupStateV1, now: datetime) -> tuple[bool, bool]:
@@ -215,26 +213,10 @@ def recheck_due(gate: Any, *, every_days: int, now: datetime | None = None) -> R
     return report
 
 
-async def run_rechecks(gate: Any, *, every_days: int, interval_seconds: float = RECHECK_LOOP_SECONDS) -> None:
-    """The broker's loop: look for due states every ``interval_seconds``, forever."""
-
-    if every_days <= 0:
-        LOGGER.info(
-            "Periodic tool setup checks are off (security_layer.tool_setup_recheck_days is 0). "
-            "event=tool_setup_recheck_disabled"
-        )
-    while True:
-        await asyncio.sleep(interval_seconds)
-        if every_days > 0:
-            await asyncio.to_thread(recheck_due, gate, every_days=every_days)
-
-
 __all__ = [
-    "RECHECK_LOOP_SECONDS",
     "RecheckReport",
     "due_states",
     "notice_text",
     "recheck_due",
-    "run_rechecks",
     "send_setup_notice",
 ]

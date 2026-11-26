@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -259,7 +260,7 @@ class BrokerAccessGate:
         return TeamAccountSharing(self.links, self.team_id)
 
     def resolve_account_link(
-        self, tool_id: str, person_id: str | None
+        self, tool_id: str, person_id: str | None, *, now: datetime | None = None
     ) -> tuple[AccountLinkV1 | None, AccountLinkV1 | None]:
         """Return ``(usable_link, expired_link)`` for ``tool_id`` and ``person_id``.
 
@@ -286,7 +287,7 @@ class BrokerAccessGate:
                 self.team_id, tool_id, LinkOwnerKind.PERSON, person_id, purpose=LinkPurpose.ACCOUNT
             )
             if own is not None:
-                if not linked_credential_expired(own):
+                if not linked_credential_expired(own, now=now):
                     return own, None
                 expired_own = own
         if LinkOwnerKind.TEAM not in owners:
@@ -295,7 +296,7 @@ class BrokerAccessGate:
             self.team_id, tool_id, LinkOwnerKind.TEAM, self.team_id, purpose=LinkPurpose.ACCOUNT
         )
         if team_link is not None:
-            if not linked_credential_expired(team_link):
+            if not linked_credential_expired(team_link, now=now):
                 return team_link, expired_own
             return None, expired_own or team_link
         return None, expired_own

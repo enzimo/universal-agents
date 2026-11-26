@@ -396,7 +396,7 @@ async def test_c14_failed_store_after_claim_ends_page_without_form(
         assert resp.status == 400
         page = await resp.text()
         assert 'class="status status-error" role="alert"' in page
-        assert "Nothing was saved." in page
+        assert "The credential was not stored." in page
         assert "Ask the agent for a new form" in page
         # The session is terminal after the claim, so no form or resubmit button may appear.
         assert "<form" not in page

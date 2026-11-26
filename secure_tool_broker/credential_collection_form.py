@@ -379,7 +379,7 @@ def render_credential_collection_failed_page(details: str) -> str:
         '<section class="content-panel">'
         '<p class="eyebrow">Secure Credential Collection</p>'
         "<h1>Credential submission failed.</h1>"
-        f'<div class="status status-error" role="alert"><strong>Nothing was saved.</strong> {html.escape(details)}</div>'
+        f'<div class="status status-error" role="alert"><strong>The credential was not stored.</strong> {html.escape(details)}</div>'
         '<p class="lede">This form can no longer be submitted. Ask the agent for a new form to try again.</p>'
         "</section>"
     )

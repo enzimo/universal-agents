@@ -156,7 +156,7 @@ from access_control.people import is_administrator
 from runtime_settings.security import reject_removed_tool_credential_env_vars
 from mcp_control.hosting import HOSTED_MCP_START_FAILED_STATUS, HostedMCPStartError
 from secure_tool_broker.mcp_config import BrokerMCPConfig
-from secure_tool_broker.tool_setup_recheck import run_rechecks
+from secure_tool_broker.janitor import run_broker_janitor
 from secure_tool_broker.tool_setup_status import TOOL_SETUP_PROVIDER, tool_setup_status
 from secure_tool_broker.tool_setup_tracking import note_broker_result
 from secure_tool_broker.redaction import redact_json, redact_text
@@ -3005,8 +3005,9 @@ async def run_secure_tool_broker(
         __file__,
     )
     try:
-        # Runs forever: the periodic re-check of ready tool setups
-        # (security_layer.tool_setup_recheck_days; 0 only sleeps).
-        await run_rechecks(access_gate, every_days=tool_setup_recheck_days)
+        # Runs forever: the broker's single periodic janitor (expired credentials,
+        # link revocation and notices, per-tenant Sealbox cleanup, and ready tool
+        # setup re-checks when security_layer.tool_setup_recheck_days > 0).
+        await run_broker_janitor(access_gate, tool_setup_recheck_days=tool_setup_recheck_days)
     finally:
         await hosted_site.cleanup()

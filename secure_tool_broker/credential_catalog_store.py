@@ -71,6 +71,17 @@ class SealboxTenantMapping:
     created_at: str
 
 
+@dataclass(frozen=True)
+class CatalogEntryRow:
+    """One stored catalog row across any owner scope, with its persisted update timestamp."""
+
+    scope: CredentialOwnerScope
+    credential_key: str
+    credential: dict[str, Any]
+    created_at: str
+    updated_at: str
+
+
 def resolve_catalog_db_path() -> Path:
     """The catalog database: the launcher passes security_layer.credential_catalog.database_path."""
 
@@ -173,6 +184,54 @@ class CredentialCatalogStore:
                 ),
             )
 
+    def load_credential(
+        self,
+        scope: CredentialOwnerScope,
+        credential_key: str,
+    ) -> CatalogEntryRow | None:
+        """Read one catalog entry by primary key, including its persisted updated_at timestamp."""
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT scope_kind, owner_id, credential_key, credential_json, created_at, updated_at
+                FROM credential_catalog_entries
+                WHERE scope_kind = ? AND owner_id = ? AND credential_key = ?
+                """,
+                (scope.scope_kind, scope.owner_id, str(credential_key)),
+            ).fetchone()
+        if row is None:
+            return None
+        return CatalogEntryRow(
+            scope=CredentialOwnerScope(str(row["scope_kind"]), str(row["owner_id"])),
+            credential_key=str(row["credential_key"]),
+            credential=dict(json.loads(str(row["credential_json"]))),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    def list_all_credentials(self) -> list[CatalogEntryRow]:
+        """List every catalog entry across all owner scopes."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT scope_kind, owner_id, credential_key, credential_json, created_at, updated_at
+                FROM credential_catalog_entries
+                ORDER BY scope_kind, owner_id, credential_key
+                """
+            ).fetchall()
+        return [
+            CatalogEntryRow(
+                scope=CredentialOwnerScope(str(row["scope_kind"]), str(row["owner_id"])),
+                credential_key=str(row["credential_key"]),
+                credential=dict(json.loads(str(row["credential_json"]))),
+                created_at=str(row["created_at"]),
+                updated_at=str(row["updated_at"]),
+            )
+            for row in rows
+        ]
+
     def delete_credential(self, scope: CredentialOwnerScope, credential_key: str) -> bool:
         """Atomically delete one credential without touching sibling keys."""
         with self._connect() as conn:
@@ -183,6 +242,46 @@ class CredentialCatalogStore:
                 WHERE scope_kind = ? AND owner_id = ? AND credential_key = ?
                 """,
                 (scope.scope_kind, scope.owner_id, str(credential_key)),
+            )
+        return bool(cursor.rowcount)
+
+    def delete_credential_if_unchanged(
+        self,
+        scope: CredentialOwnerScope,
+        credential_key: str,
+        *,
+        expected_updated_at: str,
+        expected_expires_at: str | None,
+    ) -> bool:
+        """Compare-and-delete one catalog entry only if its updated_at and expires_at still match.
+
+        Prevents the background janitor from removing a temporary credential
+        that was renewed or replaced concurrently.
+        """
+
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT credential_json, updated_at
+                FROM credential_catalog_entries
+                WHERE scope_kind = ? AND owner_id = ? AND credential_key = ?
+                """,
+                (scope.scope_kind, scope.owner_id, str(credential_key)),
+            ).fetchone()
+            if row is None:
+                return False
+            if str(row["updated_at"]) != expected_updated_at:
+                return False
+            payload = dict(json.loads(str(row["credential_json"])))
+            if payload.get("expires_at") != expected_expires_at:
+                return False
+            cursor = conn.execute(
+                """
+                DELETE FROM credential_catalog_entries
+                WHERE scope_kind = ? AND owner_id = ? AND credential_key = ? AND updated_at = ?
+                """,
+                (scope.scope_kind, scope.owner_id, str(credential_key), expected_updated_at),
             )
         return bool(cursor.rowcount)
 
@@ -267,6 +366,28 @@ class CredentialCatalogStore:
             created_at=str(row["created_at"]),
         )
 
+    def list_sealbox_tenant_mappings(self) -> list[SealboxTenantMapping]:
+        """List every Sealbox tenant mapping recorded in the catalog store."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT scope_kind, owner_id, tenant_id, material_id, created_at
+                FROM sealbox_tenant_mappings
+                ORDER BY scope_kind, owner_id
+                """
+            ).fetchall()
+        return [
+            SealboxTenantMapping(
+                scope_kind=str(row["scope_kind"]),
+                owner_id=str(row["owner_id"]),
+                tenant_id=str(row["tenant_id"]),
+                material_id=str(row["material_id"]),
+                created_at=str(row["created_at"]),
+            )
+            for row in rows
+        ]
+
     def put_sealbox_tenant_mapping(
         self,
         scope: CredentialOwnerScope,
@@ -293,23 +414,19 @@ class CredentialCatalogStore:
         return mapping
 
 
-def load_scope_readonly(
+def _open_readonly_connection(
     path: str | os.PathLike[str],
-    scope: CredentialOwnerScope,
-) -> dict[str, dict[str, Any]]:
-    """Read one owner's catalog rows read-only without creating files, folders, or tables.
+) -> tuple[sqlite3.Connection, Path] | None:
+    """Open the catalog database read-only without creating files, folders, or tables.
 
-    Returns ``{}`` only when the catalog file does not exist or has not yet
-    created the ``credential_catalog_entries`` table. Any permission error,
-    corrupt/locked database, non-file path, or unreadable JSON logs a warning
-    with the path and raises ``CredentialCatalogReadError``.
+    Returns ``None`` only when the catalog file does not exist yet.
     """
 
     resolved = Path(path).expanduser().resolve()
     try:
         file_stat = os.stat(resolved)
     except FileNotFoundError:
-        return {}
+        return None
     except OSError as exc:
         logger.warning(
             "Credential catalog could not be accessed read-only. "
@@ -336,10 +453,29 @@ def load_scope_readonly(
             exc,
         )
         raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    conn.execute(f"PRAGMA busy_timeout={_LOCK_WAIT_MS}")
+    return conn, resolved
+
+
+def load_scope_readonly(
+    path: str | os.PathLike[str],
+    scope: CredentialOwnerScope,
+) -> dict[str, dict[str, Any]]:
+    """Read one owner's catalog rows read-only without creating files, folders, or tables.
+
+    Returns ``{}`` only when the catalog file does not exist or has not yet
+    created the ``credential_catalog_entries`` table. Any permission error,
+    corrupt/locked database, non-file path, or unreadable JSON logs a warning
+    with the path and raises ``CredentialCatalogReadError``.
+    """
+
+    opened = _open_readonly_connection(path)
+    if opened is None:
+        return {}
+    conn, resolved = opened
     try:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only = ON")
-        conn.execute(f"PRAGMA busy_timeout={_LOCK_WAIT_MS}")
         try:
             rows = conn.execute(
                 """
@@ -378,11 +514,61 @@ def load_scope_readonly(
         conn.close()
 
 
+def load_credential_readonly(
+    path: str | os.PathLike[str],
+    scope: CredentialOwnerScope,
+    credential_key: str,
+) -> dict[str, Any] | None:
+    """Read one catalog entry by key read-only without loading the owner's other rows."""
+
+    opened = _open_readonly_connection(path)
+    if opened is None:
+        return None
+    conn, resolved = opened
+    try:
+        try:
+            row = conn.execute(
+                """
+                SELECT credential_json
+                FROM credential_catalog_entries
+                WHERE scope_kind = ? AND owner_id = ? AND credential_key = ?
+                """,
+                (scope.scope_kind, scope.owner_id, str(credential_key)),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return None
+            logger.warning(
+                "Credential catalog query failed in read-only mode. "
+                "event=credential_catalog_readonly_failed path=%s error=%s",
+                resolved,
+                exc,
+            )
+            raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
+        if row is None:
+            return None
+        return dict(json.loads(str(row["credential_json"])))
+    except CredentialCatalogReadError:
+        raise
+    except (sqlite3.Error, json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Credential catalog could not be decoded in read-only mode. "
+            "event=credential_catalog_readonly_failed path=%s error=%s",
+            resolved,
+            exc,
+        )
+        raise CredentialCatalogReadError("The credential catalog could not be read.") from exc
+    finally:
+        conn.close()
+
+
 __all__ = [
+    "CatalogEntryRow",
     "CredentialCatalogReadError",
     "CredentialCatalogStore",
     "CredentialOwnerScope",
     "SealboxTenantMapping",
+    "load_credential_readonly",
     "load_scope_readonly",
     "resolve_catalog_db_path",
 ]

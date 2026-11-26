@@ -1,0 +1,740 @@
+"""Tests for the broker janitor, compare-and-delete, link revocation, notices, and Sealbox tenant cleanup (A4, Feature 5)."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from access_catalog.catalog import CatalogSource
+from access_control.account_sharing import TeamAccountSharing
+from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+from access_control.identity import ContextVerifier
+from access_control.people import PERSON_ROLE_ADMIN
+from access_control.tool_setup_states import (
+    HOW_OWN_LINK,
+    HOW_TEAM_LINK,
+    SOURCE_TOOL_CALL,
+    STEP_ACCOUNT_LINK,
+    ToolSetupStates,
+)
+from custom_messages.contracts.access_v2 import (
+    AccessNoticeKind,
+    AccountLinkStatus,
+    AccountLinkV1,
+    AccountMode,
+    AccountSharing,
+    CredentialInjectionV1,
+    InjectionPlacement,
+    LinkOwnerKind,
+    LinkPurpose,
+    SubjectKind,
+    SubjectRefV1,
+    ToolDefinitionV1,
+    ToolKind,
+    ToolSetupState,
+)
+from secure_tool_broker import credential_catalog, janitor
+from secure_tool_broker.access_gate import BrokerAccessGate
+from secure_tool_broker.credential_catalog import (
+    CatalogCredential,
+    CatalogCredentialField,
+    CatalogSourceRef,
+    delete_credential,
+    load_catalog,
+)
+from secure_tool_broker.credential_catalog_store import (
+    CredentialCatalogStore,
+    CredentialOwnerScope,
+    resolve_catalog_db_path,
+)
+from secure_tool_broker.sealbox_runtime import ensure_sealbox_key_pair_files
+from secure_tool_broker.tool_setup_recheck import RecheckReport
+from storage.access_repository import AccessRepository
+from storage.config import resolve_storage_settings
+from tests.broker_access_support import context_verify_keys
+
+TEAM_ID = "team-janitor"
+PERSON_ID = "person-alice"
+OTHER_PERSON_ID = "person-bob"
+USER_SCOPE = CredentialOwnerScope.user(PERSON_ID)
+TEAM_SCOPE = CredentialOwnerScope.team(TEAM_ID)
+NOW = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
+PAST_EXPIRY = (NOW - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+FUTURE_EXPIRY = (NOW + timedelta(hours=4)).isoformat().replace("+00:00", "Z")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_INSTANCE_ROOT", str(tmp_path))
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "credential_catalog.db"))
+    monkeypatch.setenv("SECURE_TOOL_BROKER_SEALBOX_TENANT_MATERIAL_DIR", str(tmp_path / "sealbox_tenants"))
+    monkeypatch.setenv("SEALBOX_URL", "http://127.0.0.1:18200")
+    credential_catalog._SECRET_CACHE.clear()
+    yield
+    credential_catalog._SECRET_CACHE.clear()
+
+
+def _save_catalog_entry(
+    key: str,
+    *,
+    scope: CredentialOwnerScope,
+    expires_at: str | None,
+    field_name: str = "api_token",
+    updated_at: str | None = None,
+) -> CatalogCredential:
+    ts = updated_at or "2026-11-26T00:00:00Z"
+    cred = CatalogCredential(
+        display_name=key,
+        purpose="Test credential",
+        created_at="2026-11-26T00:00:00Z",
+        updated_at=ts,
+        expires_at=expires_at,
+        fields={
+            field_name: CatalogCredentialField(
+                kind="token",
+                visibility="secret",
+                value_source="user_input",
+                resolution_order=[
+                    CatalogSourceRef(
+                        source="sealbox",
+                        item_id=f"item-{key}:{field_name}",
+                        item_name=f"item-{key}:{field_name}",
+                        field_ref="value",
+                    )
+                ],
+            )
+        },
+    )
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope, key, cred.model_dump(mode="json", exclude_none=True)
+    )
+    return cred
+
+
+def _make_gate(
+    tmp_path: Path,
+    *,
+    store: AccessRepository | None = None,
+    extra_tools: tuple[ToolDefinitionV1, ...] = (),
+) -> tuple[BrokerAccessGate, AccessRepository]:
+    if store is None:
+        settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+        store = AccessRepository(settings)
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:demo_api",
+        kind=ToolKind.HTTP,
+        display_name="Demo API",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("api.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization",
+                field="api_token",
+                template="Bearer {value}",
+            ),
+        ),
+    )
+    gated_tool = ToolDefinitionV1(
+        tool_id="http:gated_api",
+        kind=ToolKind.HTTP,
+        display_name="Gated API",
+        account=AccountMode.NONE,
+        hosts=("gate.demo.example",),
+        gate_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="X-Gate-Key",
+                field="api_token",
+            ),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    merged_tools = dict(base_catalog.tools)
+    for tool in (demo_tool, gated_tool, *extra_tools):
+        merged_tools[tool.tool_id] = tool
+    custom_catalog = replace(base_catalog, tools=merged_tools)
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEAM_ID,
+        access=None,
+        links=store,
+    )
+    return gate, store
+
+
+def _make_link(
+    *,
+    link_id: str,
+    tool_id: str,
+    credential_key: str,
+    owner_kind: LinkOwnerKind = LinkOwnerKind.PERSON,
+    owner_id: str = PERSON_ID,
+    purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+) -> AccountLinkV1:
+    return AccountLinkV1(
+        link_id=link_id,
+        team_id=TEAM_ID,
+        tool_id=tool_id,
+        owner_kind=owner_kind,
+        owner_id=owner_id,
+        purpose=purpose,
+        credential_key=credential_key,
+        injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization" if purpose is LinkPurpose.ACCOUNT else "X-Gate-Key",
+                field="api_token",
+                template="Bearer {value}" if purpose is LinkPurpose.ACCOUNT else "{value}",
+            ),
+        ),
+        created_by=SubjectRefV1(kind=SubjectKind.USER, id=PERSON_ID),
+        created_at_utc=NOW - timedelta(hours=2),
+    )
+
+
+def _provision_tenant_material(
+    scope: CredentialOwnerScope,
+    *,
+    tenant_id: str,
+    material_id: str,
+    token_value: str | None = "tenant-secret-token",
+    create_keys: bool = True,
+) -> Path:
+    store = CredentialCatalogStore(resolve_catalog_db_path())
+    store.put_sealbox_tenant_mapping(scope, tenant_id=tenant_id, material_id=material_id)
+    directory = Path(os.environ["SECURE_TOOL_BROKER_SEALBOX_TENANT_MATERIAL_DIR"]) / material_id
+    directory.mkdir(parents=True, exist_ok=True)
+    if create_keys:
+        ensure_sealbox_key_pair_files(
+            public_key_file=directory / "public.pem",
+            private_key_file=directory / "private.pem",
+        )
+    if token_value is not None:
+        (directory / "token").write_text(token_value, encoding="utf-8")
+    return directory
+
+
+# --- 1. Timing constants and single background loop --------------------------
+
+
+@pytest.mark.asyncio
+async def test_janitor_constants_and_background_loop_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert janitor.INITIAL_DELAY_SECONDS == 600.0
+    assert janitor.JANITOR_INTERVAL_SECONDS == 6 * 3600.0
+
+    gate, _store = _make_gate(tmp_path)
+    sleeps: list[float] = []
+    runs: list[int] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= 3:
+            raise asyncio.CancelledError()
+
+    def fake_run_once(_gate: Any, *, tool_setup_recheck_days: int) -> janitor.JanitorReport:
+        runs.append(tool_setup_recheck_days)
+        return janitor.JanitorReport()
+
+    monkeypatch.setattr(janitor.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(janitor, "run_janitor_once", fake_run_once)
+
+    with pytest.raises(asyncio.CancelledError):
+        await janitor.run_broker_janitor(
+            gate,
+            tool_setup_recheck_days=14,
+            initial_delay_seconds=600.0,
+            interval_seconds=21600.0,
+        )
+
+    assert sleeps == [600.0, 21600.0, 21600.0]
+    assert runs == [14, 14]
+
+
+# --- 2. Store helpers and compare-and-delete concurrency ---------------------
+
+
+def test_store_compare_and_delete_protects_concurrently_renewed_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CredentialCatalogStore(resolve_catalog_db_path())
+    _save_catalog_entry("renewed_key", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    row = store.load_credential(USER_SCOPE, "renewed_key")
+    assert row is not None
+    assert row.credential["expires_at"] == PAST_EXPIRY
+
+    # Simulate a concurrent renewal saving a new future expiry (or clearing expiry).
+    _save_catalog_entry("renewed_key", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
+
+    # Low-level store compare-and-delete refuses because updated_at & expires_at changed.
+    assert (
+        store.delete_credential_if_unchanged(
+            USER_SCOPE,
+            "renewed_key",
+            expected_updated_at=row.updated_at,
+            expected_expires_at=PAST_EXPIRY,
+        )
+        is False
+    )
+    assert store.load_credential(USER_SCOPE, "renewed_key") is not None
+
+    # High-level delete_credential in compare-and-delete mode refuses BEFORE touching Sealbox.
+    sealbox_delete_called = False
+
+    def fail_if_sealbox_deleted(**_k: Any) -> Any:
+        nonlocal sealbox_delete_called
+        sealbox_delete_called = True
+        raise AssertionError("Sealbox delete must not run for a renewed credential")
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fail_if_sealbox_deleted)
+    result = delete_credential(
+        {"credential_key": "renewed_key"},
+        scope=USER_SCOPE,
+        expected_updated_at=row.updated_at,
+        expected_expires_at=PAST_EXPIRY,
+    )
+    assert result.status == "success"
+    assert result.content["deleted"] is False
+    assert result.content["status"] == "credential_changed"
+    assert sealbox_delete_called is False
+    assert load_catalog(scope=USER_SCOPE).credentials["renewed_key"].expires_at == FUTURE_EXPIRY
+
+
+def test_janitor_skips_link_revocation_and_notice_when_credential_renewed_mid_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate, access_store = _make_gate(tmp_path)
+    _save_catalog_entry("race_key", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    link = _make_link(link_id="link-race", tool_id="http:demo_api", credential_key="race_key")
+    access_store.create_link(link)
+
+    real_delete = janitor.delete_credential
+
+    def renew_then_delete(params: Any, **kwargs: Any) -> Any:
+        # Simulate the person renewing the credential right before the janitor acquires the lock.
+        _save_catalog_entry("race_key", scope=USER_SCOPE, expires_at=None)
+        return real_delete(params, **kwargs)
+
+    monkeypatch.setattr(janitor, "delete_credential", renew_then_delete)
+    report = janitor.clean_expired_credentials(gate, now=NOW)
+    assert report.expired == 1
+    assert report.deleted == 0
+    assert report.skipped_changed == 1
+    assert report.links_revoked == 0
+    assert report.notices_sent == 0
+    # Credential and active link both survived untouched.
+    assert load_catalog(scope=USER_SCOPE).credentials["race_key"].expires_at is None
+    assert access_store.get_link("link-race").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+    assert access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=()) == []
+
+
+# --- 3. Multi-owner deletion, link revocation, system actor, notices ---------
+
+
+def test_janitor_deletes_expired_credentials_revokes_links_and_sends_exact_notices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate, access_store = _make_gate(tmp_path)
+    # 1. Expired personal credential linked to private tool (no team fallback).
+    _save_catalog_entry("alice_private_temp", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    TeamAccountSharing(access_store, TEAM_ID).choose_tool(
+        gate.catalog.tools["http:demo_api"], AccountSharing.PRIVATE, by="admin-1"
+    )
+    access_store.create_link(
+        _make_link(
+            link_id="link-alice-private",
+            tool_id="http:demo_api",
+            credential_key="alice_private_temp",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=PERSON_ID,
+        )
+    )
+    ToolSetupStates(access_store, clock=lambda: NOW - timedelta(hours=1)).note_ready(
+        TEAM_ID, PERSON_ID, "http:demo_api", how=HOW_OWN_LINK, source=SOURCE_TOOL_CALL
+    )
+
+    # 2. Expired personal credential with NO account link (must produce zero notices).
+    _save_catalog_entry("alice_unlinked_temp", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+
+    # 3. Active temporary credential and lasting credential (must survive).
+    _save_catalog_entry("alice_active_temp", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
+    _save_catalog_entry("alice_lasting", scope=USER_SCOPE, expires_at=None)
+
+    # 4. Expired team gate credential (must notify admins with /link http:gated_api gate).
+    _save_catalog_entry("team_gate_temp", scope=TEAM_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(
+            link_id="link-team-gate",
+            tool_id="http:gated_api",
+            credential_key="team_gate_temp",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM_ID,
+            purpose=LinkPurpose.GATE,
+        )
+    )
+
+    # Mock Sealbox delete (include already_absent=True for one item to verify it counts as absent).
+    deleted_items: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+
+    def fake_delete_sealbox_item(*, item_key: str, item_kind: str, env: Any = None) -> dict[str, Any]:
+        deleted_items.append((item_key, item_kind))
+        return {
+            "source": "sealbox",
+            "item_key": item_key,
+            "item_kind": item_kind,
+            "already_absent": item_key.startswith("item-alice_unlinked_temp"),
+        }
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete_sealbox_item)
+
+    report = janitor.clean_expired_credentials(gate, now=NOW)
+    assert report.scanned == 5
+    assert report.expired == 3
+    assert report.deleted == 3
+    assert report.failed == 0
+    assert report.links_revoked == 2
+    assert report.notices_sent == 2
+    assert report.link_failures == 0
+
+    # Expired catalog entries gone; active and lasting entries kept.
+    user_catalog = load_catalog(scope=USER_SCOPE).credentials
+    assert set(user_catalog) == {"alice_active_temp", "alice_lasting"}
+    assert load_catalog(scope=TEAM_SCOPE).credentials == {}
+    assert {item for item, _kind in deleted_items} == {
+        "item-alice_private_temp:api_token",
+        "item-alice_unlinked_temp:api_token",
+        "item-team_gate_temp:api_token",
+    }
+
+    # Verify revocation actor is the system role, NEVER a fake person.
+    expected_actor = SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEAM_ID, AGENT_ROLE_SYSTEM))
+    revoked_private = access_store.get_link("link-alice-private")
+    assert revoked_private is not None
+    assert revoked_private.status is AccountLinkStatus.REVOKED
+    assert revoked_private.revoked_by == expected_actor
+    assert revoked_private.revoked_by.kind is SubjectKind.ROLE
+
+    revoked_gate = access_store.get_link("link-team-gate")
+    assert revoked_gate is not None
+    assert revoked_gate.status is AccountLinkStatus.REVOKED
+    assert revoked_gate.revoked_by == expected_actor
+
+    # Personal link notice: exactly one, to Alice, states no linked account remains and exact /link command.
+    alice_notices = [n for n, _read in access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=())]
+    assert len(alice_notices) == 1
+    assert alice_notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert alice_notices[0].recipient_person_id == PERSON_ID
+    assert alice_notices[0].recipient_roles == ()
+    assert "Demo API" in alice_notices[0].summary
+    assert "no linked account" in alice_notices[0].summary
+    assert "/link http:demo_api" in alice_notices[0].summary
+
+    # Tool setup state flipped to needs_setup (account_link).
+    setup_state = ToolSetupStates(access_store).get(TEAM_ID, PERSON_ID, "http:demo_api")
+    assert setup_state is not None
+    assert setup_state.state is ToolSetupState.NEEDS_SETUP
+    assert setup_state.missing_step == STEP_ACCOUNT_LINK
+
+    # Team gate link notice: sent to team administrators with /link http:gated_api gate.
+    admin_notices = [n for n, _read in access_store.notices_for(TEAM_ID, person_id=OTHER_PERSON_ID, roles=(PERSON_ROLE_ADMIN,))]
+    assert len(admin_notices) == 1
+    assert admin_notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert admin_notices[0].recipient_person_id is None
+    assert admin_notices[0].recipient_roles == (PERSON_ROLE_ADMIN,)
+    assert "Gated API" in admin_notices[0].summary
+    assert "/link http:gated_api gate" in admin_notices[0].summary
+
+    # Non-admin unrelated person sees zero notices.
+    assert access_store.notices_for(TEAM_ID, person_id=OTHER_PERSON_ID, roles=()) == []
+
+
+def test_janitor_personal_link_notice_reports_shared_team_fallback_when_applicable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate, access_store = _make_gate(tmp_path)
+    TeamAccountSharing(access_store, TEAM_ID).choose_tool(
+        gate.catalog.tools["http:demo_api"], AccountSharing.SHARED, by="admin-1"
+    )
+    # Active team credential + team link exist; Alice's personal temporary credential expired.
+    _save_catalog_entry("team_shared_lasting", scope=TEAM_SCOPE, expires_at=None)
+    access_store.create_link(
+        _make_link(
+            link_id="link-team-shared",
+            tool_id="http:demo_api",
+            credential_key="team_shared_lasting",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM_ID,
+        )
+    )
+    _save_catalog_entry("alice_override_temp", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(
+            link_id="link-alice-override",
+            tool_id="http:demo_api",
+            credential_key="alice_override_temp",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=PERSON_ID,
+        )
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: {
+            "source": "sealbox",
+            "item_key": item_key,
+            "item_kind": item_kind,
+            "already_absent": False,
+        },
+    )
+
+    report = janitor.clean_expired_credentials(gate, now=NOW)
+    assert report.deleted == 1
+    assert report.links_revoked == 1
+    assert report.notices_sent == 1
+
+    # Notice explicitly tells Alice that work now uses the team's shared account and gives /link http:demo_api.
+    alice_notices = [n for n, _read in access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=())]
+    assert len(alice_notices) == 1
+    assert "team's shared account" in alice_notices[0].summary
+    assert "/link http:demo_api" in alice_notices[0].summary
+
+    # Tool setup state records team_link fallback as ready.
+    setup_state = ToolSetupStates(access_store).get(TEAM_ID, PERSON_ID, "http:demo_api")
+    assert setup_state is not None
+    assert setup_state.state is ToolSetupState.READY
+    assert setup_state.how == HOW_TEAM_LINK
+
+
+# --- 4. Per-tenant Sealbox cleanup & Lead Intervention 0011 env isolation ----
+
+
+def test_sealbox_cleanup_isolates_tenant_env_and_never_uses_inherited_tokens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    root_token_file = tmp_path / "root-token"
+    root_token_file.write_text("root-super-secret", encoding="utf-8")
+    fake_home = tmp_path / "broker-home"
+    fake_home.mkdir()
+    (fake_home / ".config").mkdir()
+
+    # Poison process environment with every dangerous variable named in Lead Intervention 0011.
+    monkeypatch.setenv("SEALBOX_TOKEN", "inherited-raw-token")
+    monkeypatch.setenv("SEALBOX_TOKEN_FILE", str(root_token_file))
+    monkeypatch.setenv("SEALBOX_ROOT_TOKEN_FILE", str(root_token_file))
+    monkeypatch.setenv("SEALBOX_CONFIG", str(fake_home / "sealbox.toml"))
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(fake_home / ".config"))
+
+    dir_user = _provision_tenant_material(USER_SCOPE, tenant_id="tenant-user-1", material_id="owner-user-1")
+    dir_team = _provision_tenant_material(TEAM_SCOPE, tenant_id="tenant-team-1", material_id="owner-team-1")
+    # Third tenant missing its token file -> must be refused & logged without running sealbox-cli.
+    _provision_tenant_material(
+        CredentialOwnerScope.user(OTHER_PERSON_ID),
+        tenant_id="tenant-broken-3",
+        material_id="owner-broken-3",
+        token_value=None,
+    )
+
+    seen_calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run_sealbox(args: list[str], *, env: Any = None, timeout_seconds: int = 30) -> subprocess.CompletedProcess[str]:
+        seen_calls.append((list(args), dict(env or {})))
+        return subprocess.CompletedProcess(
+            args=["sealbox-cli", *args],
+            returncode=0,
+            stdout='{"deleted_count": 2}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(janitor, "run_sealbox", fake_run_sealbox)
+
+    with caplog.at_level("INFO", logger="secure_tool_broker.janitor"):
+        report = janitor.cleanup_expired_sealbox_tenants()
+
+    assert report.tenants_scanned == 3
+    assert report.tenants_cleaned == 2
+    assert report.tenants_skipped == 1
+    assert report.tenants_failed == 0
+    assert report.secrets_deleted == 4
+    assert report.unsupported_cli is False
+    assert len(seen_calls) == 2
+
+    expected_token_files = {str(dir_user / "token"), str(dir_team / "token")}
+    seen_token_files: set[str] = set()
+    for args, env in seen_calls:
+        assert args == ["secret", "cleanup-expired", "--output", "json"]
+        assert "SEALBOX_TOKEN" not in env
+        assert "SEALBOX_ROOT_TOKEN_FILE" not in env
+        assert "SEALBOX_CONFIG" not in env
+        assert env["HOME"] != str(fake_home)
+        assert env["XDG_CONFIG_HOME"] != str(fake_home / ".config")
+        assert env["SEALBOX_TOKEN_FILE"] != str(root_token_file)
+        seen_token_files.add(env["SEALBOX_TOKEN_FILE"])
+    assert seen_token_files == expected_token_files
+
+    # Logs include tenant mapping ids for both cleaned and skipped tenants.
+    log_text = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "tenant-user-1" in log_text
+    assert "tenant-team-1" in log_text
+    assert "tenant-broken-3" in log_text
+
+
+def test_sealbox_cleanup_warns_once_on_older_cli_without_subcommand(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _provision_tenant_material(USER_SCOPE, tenant_id="tenant-a", material_id="owner-a")
+    _provision_tenant_material(TEAM_SCOPE, tenant_id="tenant-b", material_id="owner-b")
+
+    calls = 0
+
+    def fake_run_sealbox(args: list[str], *, env: Any = None, timeout_seconds: int = 30) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            args=["sealbox-cli", *args],
+            returncode=2,
+            stdout="",
+            stderr="error: unrecognized subcommand 'cleanup-expired'",
+        )
+
+    monkeypatch.setattr(janitor, "run_sealbox", fake_run_sealbox)
+
+    with caplog.at_level("WARNING", logger="secure_tool_broker.janitor"):
+        report = janitor.cleanup_expired_sealbox_tenants()
+
+    assert calls == 1
+    assert report.unsupported_cli is True
+    assert report.tenants_cleaned == 0
+    warnings = [rec.getMessage() for rec in caplog.records if rec.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "sealbox-cli secret cleanup-expired" in warnings[0]
+
+
+# --- 5. Job isolation & tool_setup_recheck integration -----------------------
+
+
+def test_run_janitor_once_isolates_failing_jobs_and_respects_recheck_days_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate, _store = _make_gate(tmp_path)
+    called_jobs: list[str] = []
+
+    def boom_credentials(_gate: Any, *, now: Any = None) -> Any:
+        called_jobs.append("credentials")
+        raise RuntimeError("catalog db busy")
+
+    def ok_sealbox() -> janitor.SealboxCleanupReport:
+        called_jobs.append("sealbox")
+        return janitor.SealboxCleanupReport(tenants_scanned=1, tenants_cleaned=1, secrets_deleted=3)
+
+    def ok_recheck(_gate: Any, *, every_days: int, now: Any = None) -> RecheckReport:
+        called_jobs.append(f"recheck:{every_days}")
+        return RecheckReport(checked=0 if every_days == 0 else 2, still_ready=0 if every_days == 0 else 2)
+
+    monkeypatch.setattr(janitor, "clean_expired_credentials", boom_credentials)
+    monkeypatch.setattr(janitor, "cleanup_expired_sealbox_tenants", ok_sealbox)
+    monkeypatch.setattr(janitor, "recheck_due", ok_recheck)
+
+    report_off = janitor.run_janitor_once(gate, tool_setup_recheck_days=0, now=NOW)
+    assert called_jobs == ["credentials", "sealbox", "recheck:0"]
+    assert report_off.job_errors == ("expired_credentials",)
+    assert report_off.sealbox_cleanup.tenants_cleaned == 1
+    assert report_off.tool_setup_recheck.checked == 0
+
+    called_jobs.clear()
+    report_on = janitor.run_janitor_once(gate, tool_setup_recheck_days=30, now=NOW)
+    assert called_jobs == ["credentials", "sealbox", "recheck:30"]
+    assert report_on.tool_setup_recheck.checked == 2
+
+
+# --- 6. Real PostgreSQL backend verification for link revocation & notices ---
+
+
+@pytest.mark.live
+@pytest.mark.postgres
+@pytest.mark.integration
+def test_janitor_link_revocation_and_notices_on_postgres(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_access_store_postgres import postgres_storage
+
+    with postgres_storage() as pg_settings:
+        pg_store = AccessRepository(pg_settings)
+        gate, _ = _make_gate(tmp_path, store=pg_store)
+        _save_catalog_entry("pg_temp_cred", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+        _save_catalog_entry("pg_team_cred", scope=TEAM_SCOPE, expires_at=PAST_EXPIRY)
+        pg_store.create_link(
+            _make_link(
+                link_id="pg-link-user",
+                tool_id="http:demo_api",
+                credential_key="pg_temp_cred",
+                owner_kind=LinkOwnerKind.PERSON,
+                owner_id=PERSON_ID,
+            )
+        )
+        pg_store.create_link(
+            _make_link(
+                link_id="pg-link-team",
+                tool_id="http:gated_api",
+                credential_key="pg_team_cred",
+                owner_kind=LinkOwnerKind.TEAM,
+                owner_id=TEAM_ID,
+                purpose=LinkPurpose.GATE,
+            )
+        )
+        monkeypatch.setattr(
+            credential_catalog,
+            "sealbox_tenant_environment",
+            lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+        )
+        monkeypatch.setattr(
+            credential_catalog,
+            "delete_sealbox_item",
+            lambda *, item_key, item_kind, env=None: {
+                "source": "sealbox",
+                "item_key": item_key,
+                "item_kind": item_kind,
+                "already_absent": False,
+            },
+        )
+
+        report = janitor.clean_expired_credentials(gate, now=NOW)
+        assert report.deleted == 2
+        assert report.links_revoked == 2
+        assert report.notices_sent == 2
+
+        expected_actor = SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEAM_ID, AGENT_ROLE_SYSTEM))
+        assert pg_store.get_link("pg-link-user").status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
+        assert pg_store.get_link("pg-link-user").revoked_by == expected_actor  # type: ignore[union-attr]
+        assert pg_store.get_link("pg-link-team").status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
+        assert pg_store.get_link("pg-link-team").revoked_by == expected_actor  # type: ignore[union-attr]
+
+        user_notices = [n for n, _read in pg_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=())]
+        admin_notices = [n for n, _read in pg_store.notices_for(TEAM_ID, person_id=OTHER_PERSON_ID, roles=(PERSON_ROLE_ADMIN,))]
+        assert len(user_notices) == 1
+        assert user_notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+        assert "/link http:demo_api" in user_notices[0].summary
+        assert len(admin_notices) == 1
+        assert admin_notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+        assert "/link http:gated_api gate" in admin_notices[0].summary

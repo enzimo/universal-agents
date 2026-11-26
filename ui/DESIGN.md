@@ -317,7 +317,9 @@ onboarding's server, titled **Choose what to import**, with these differences:
   line naming the agents that may use the tool, where the credential goes and
   how it is sent. It then offers two parts, each a small form with its own
   confirmation checkbox: **Use a stored credential** (only when one has every
-  field the tool needs) and **Add a new credential** (one masked field with
+  field the tool needs; expired temporary credentials are hidden, and active
+  temporary credentials are labeled with their deletion time in UTC as
+  `(deletes YYYY-MM-DD HH:MM UTC)`) and **Add a new credential** (one masked field with
   the standard inline reveal button per required field, and **Save and link
   account**). When nothing is stored, only the second part is shown.
 - Broker authentication failures lead with an explanation and recovery step,

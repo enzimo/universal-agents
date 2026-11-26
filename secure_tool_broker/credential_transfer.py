@@ -245,6 +245,10 @@ def _export_stored_values(owner: CredentialOwnerV1) -> list[StoredValueV1]:
     return values
 
 
+class _ExpiredDuringExport(Exception):
+    """Internal signal when a temporary credential expires mid-export read."""
+
+
 def _export_catalog(owner: CredentialOwnerV1) -> list[CatalogEntryV1]:
     from secure_tool_broker.credential_catalog import load_catalog
     from secure_tool_broker.credential_expiry import is_expired
@@ -256,9 +260,12 @@ def _export_catalog(owner: CredentialOwnerV1) -> list[CatalogEntryV1]:
         if is_expired(credential.expires_at):
             continue
         secret_values: dict[str, str] = {}
-        for field_name, spec in credential.fields.items():
-            if spec.is_secret() and _internal(spec):
-                secret_values[field_name] = _stored_secret_value(owner, key, field_name, catalog=catalog, scope=scope)
+        try:
+            for field_name, spec in credential.fields.items():
+                if spec.is_secret() and _internal(spec):
+                    secret_values[field_name] = _stored_secret_value(owner, key, field_name, catalog=catalog, scope=scope)
+        except _ExpiredDuringExport:
+            continue
         entries.append(
             CatalogEntryV1(
                 owner=owner, credential_key=key, credential=credential.model_dump(mode="json"), secret_values=secret_values
@@ -280,10 +287,15 @@ def _stored_secret_value(owner: CredentialOwnerV1, key: str, field_name: str, *,
     """
 
     from secure_tool_broker.credential_catalog import ResolvedCredentialField, resolve_secret_field
+    from secure_tool_broker.credential_diagnostics import CREDENTIAL_EXPIRED
 
     resolved = resolve_secret_field(key, field_name, catalog=catalog, scope=scope)
     if isinstance(resolved, ResolvedCredentialField) and resolved.source in _INTERNAL_SOURCES:
         return resolved.value
+    if not isinstance(resolved, ResolvedCredentialField):
+        content = getattr(resolved, "content", None) or {}
+        if isinstance(content, dict) and content.get("error_code") == CREDENTIAL_EXPIRED:
+            raise _ExpiredDuringExport()
     reason = (
         f"its value came from {resolved.source}, not this instance's store"
         if isinstance(resolved, ResolvedCredentialField)

@@ -229,10 +229,11 @@ def test_metadata_and_secret_resolution_refuse_expired_without_touching_store(
     assert not isinstance(second_secret, credential_catalog.ToolResult)
     assert second_secret.value == "older-or-live-sealbox-secret"
     assert source_calls == 1
-    # Verify the cache entry's deadline was capped to the ~10s remaining, not the 300s default TTL.
+    # Verify the cache entry's deadline was capped to the ~10s remaining and records the hard UTC expiry.
     assert len(credential_catalog._SECRET_CACHE) == 1
-    _val, deadline = next(iter(credential_catalog._SECRET_CACHE.values()))
+    _val, deadline, hard_expiry = next(iter(credential_catalog._SECRET_CACHE.values()))
     assert deadline - credential_catalog.time.monotonic() <= 15.0
+    assert hard_expiry == expiry
 
     # At exact expiry (inclusive): every read path treats the credential as absent with credential_expired.
     # Even if Sealbox still had an older non-expired version behind this key, the source is NEVER called.
@@ -300,9 +301,12 @@ def _gate_with_tools(tmp_path: Path, *tools: ToolDefinitionV1) -> tuple[BrokerAc
     catalog_source = CatalogSource(None)
     base_catalog = catalog_source.current()
     merged_tools = dict(base_catalog.tools)
+    merged_hosts = dict(base_catalog.http_hosts)
     for tool in tools:
         merged_tools[tool.tool_id] = tool
-    custom_catalog = replace(base_catalog, tools=merged_tools)
+        for host in tool.hosts:
+            merged_hosts[host.lower()] = tool.tool_id
+    custom_catalog = replace(base_catalog, tools=merged_tools, http_hosts=merged_hosts)
     gate = BrokerAccessGate(
         catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
         verifier=ContextVerifier.from_value(context_verify_keys()),
@@ -459,7 +463,6 @@ def test_web_api_and_openshell_refuse_expired_linked_credentials(
     _save_temp_credential("expired_web", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
     _save_temp_credential("expired_env", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
 
-    http_called = False
     monkeypatch.setattr(
         credential_catalog,
         "_send_api_request",
@@ -470,7 +473,6 @@ def test_web_api_and_openshell_refuse_expired_linked_credentials(
     web_res = api_request({"method": "GET", "url": "https://api.demo.example/items"}, context=web_ctx)
     assert web_res.status == "error"
     assert web_res.content["error_code"] == REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
-    assert http_called is False
 
     monkeypatch.setattr(
         credential_catalog,
@@ -689,3 +691,282 @@ def test_team_transfer_export_skips_expired_credentials_and_keeps_active_ones(
     assert exported_keys == ["active_export", "lasting_export"]
     active_rec = next(rec for rec in catalog_records if rec["credential_key"] == "active_export")
     assert active_rec["credential"]["expires_at"] == FUTURE_EXPIRY
+
+
+# --- 5. C18-C21 hardening: aliases, cache hard-expiry, slow reads, export race, gate tracking ---
+
+
+def test_c18_sealbox_alias_refused_in_both_orders(monkeypatch: pytest.MonkeyPatch) -> None:
+    from secure_tool_broker.credential_catalog import collect_credential, register_existing_source
+    from secure_tool_broker.credential_expiry import CREDENTIAL_EXPIRY_SHARED_RECORD
+
+    source_calls = 0
+
+    class FakeSealboxSource:
+        def get_secret(self, _request: Any) -> str:
+            nonlocal source_calls
+            source_calls += 1
+            return "secret-value"
+
+    monkeypatch.setattr(credential_catalog, "get_credential_source", lambda _name: FakeSealboxSource())
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "run_sealbox",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, stdout='{"key":"k"}', stderr=""),
+    )
+
+    # Order 1: temporary credential exists first -> register_existing_source naming its Sealbox record is refused.
+    _save_temp_credential("temp_primary", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
+    alias_exact = register_existing_source(
+        {
+            "credential_key": "alias_exact",
+            "field_name": "api_token",
+            "source": "sealbox",
+            "item_id": "team-nats-agents:default:temp_primary:api_token",
+            "field_ref": "value",
+        },
+        scope=USER_SCOPE,
+    )
+    assert alias_exact.status == "error"
+    assert alias_exact.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert alias_exact.content["conflicting_credential_key"] == "temp_primary"
+    assert source_calls == 0
+
+    # Shorthand field_ref form ("team-nats-agents:default:temp_primary" + field_ref="api_token") resolves to the same record and is refused.
+    alias_shorthand = register_existing_source(
+        {
+            "credential_key": "alias_shorthand",
+            "field_name": "api_token",
+            "source": "sealbox",
+            "item_id": "team-nats-agents:default:temp_primary",
+            "field_ref": "api_token",
+        },
+        scope=USER_SCOPE,
+    )
+    assert alias_shorthand.status == "error"
+    assert alias_shorthand.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert source_calls == 0
+
+    # Order 2: lasting alias exists first -> collect_credential with expires_at targeting the same record is refused
+    # before writing anything to Sealbox.
+    _save_temp_credential("lasting_holder", scope=USER_SCOPE, expires_at=None)
+    write_called = False
+
+    def fail_if_written(*_a: Any, **_k: Any) -> Any:
+        nonlocal write_called
+        write_called = True
+        raise AssertionError("Sealbox write should not happen when record is shared")
+
+    monkeypatch.setattr(credential_catalog, "write_credential_to_source", fail_if_written)
+    temp_over_shared = collect_credential(
+        {
+            "credential_key": "temp_conflict",
+            "write_source": "sealbox",
+            "item_id": "team-nats-agents:default:lasting_holder",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "required": True}],
+        },
+        {"api_token": "temp-val"},
+        scope=USER_SCOPE,
+        expires_at=FUTURE_EXPIRY,
+        allow_expiry_change=True,
+    )
+    assert temp_over_shared.status == "error"
+    assert temp_over_shared.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert temp_over_shared.content["conflicting_credential_key"] == "lasting_holder"
+    assert write_called is False
+
+
+def test_c18_secret_cache_never_serves_or_extends_past_hard_expiry_even_without_caller_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SECURE_TOOL_BROKER_SECRET_CACHE_TTL_SECONDS", "300")
+    expiry = BASE_NOW + timedelta(seconds=30)
+    calls = 0
+
+    class FakeSource:
+        def get_secret(self, _request: Any) -> str:
+            nonlocal calls
+            calls += 1
+            return f"secret-v{calls}"
+
+    monkeypatch.setattr(credential_catalog, "get_credential_source", lambda _name: FakeSource())
+    ref = CatalogSourceRef(source="sealbox", item_id="shared-item", item_name="shared-item", field_ref="value")
+
+    # Populate cache via a temporary credential read before expiry.
+    first = credential_catalog._resolve_source_ref(
+        ref, scope=USER_SCOPE, expires_at=expiry.isoformat().replace("+00:00", "Z"), now=BASE_NOW
+    )
+    assert first == "secret-v1"
+    assert calls == 1
+
+    # Another read BEFORE expiry with expires_at=None gets the cached value but CANNOT extend past hard_expiry.
+    second = credential_catalog._resolve_source_ref(
+        ref, scope=USER_SCOPE, expires_at=None, now=BASE_NOW + timedelta(seconds=20)
+    )
+    assert second == "secret-v1"
+    assert calls == 1
+    _val, deadline, hard_expiry = next(iter(credential_catalog._SECRET_CACHE.values()))
+    assert hard_expiry == expiry
+    assert deadline - credential_catalog.time.monotonic() <= 15.0
+
+    # Once expiry passes, even a caller with expires_at=None MUST NOT get the cached temporary value.
+    third = credential_catalog._resolve_source_ref(ref, scope=USER_SCOPE, expires_at=None, now=expiry)
+    assert calls == 2
+    assert third == "secret-v2"
+
+
+def test_c18_use_credential_for_action_refuses_expired_sealbox_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from secure_tool_broker.credential_automations import use_credential_for_action
+
+    _save_temp_credential("gh_temp", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    source_called = False
+
+    class FakeSealboxSource:
+        def get_secret(self, _request: Any) -> str:
+            nonlocal source_called
+            source_called = True
+            return "older-version-token"
+
+    monkeypatch.setattr("secure_tool_broker.credential_automations.get_credential_source", lambda _n: FakeSealboxSource())
+    login_called = False
+
+    def fake_login(_token: str, *, hostname: str | None = None) -> Any:
+        nonlocal login_called
+        login_called = True
+        return credential_catalog.ToolResult(status="success", content={"hostname": hostname})
+
+    ctx = ToolContext(agent_id="worker-1", canonical_user_id=PERSON_ID)
+    result = use_credential_for_action(
+        credential_provider="sealbox",
+        target_provider="github",
+        target_action="auth.login",
+        item_id="team-nats-agents:default:gh_temp:api_token",
+        item_name=None,
+        field_ref="value",
+        context=ctx,
+        github_token_login=fake_login,
+    )
+    assert result.status == "error"
+    assert result.content["error_code"] == CREDENTIAL_EXPIRED
+    assert source_called is False
+    assert login_called is False
+
+
+def test_c19_slow_source_read_finishing_after_expiry_returns_credential_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time as time_mod
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_SECRET_CACHE_TTL_SECONDS", "300")
+    # Real wall-clock expiry 1 second from now; fake source sleeps past it before returning an older value.
+    near_expiry = (datetime.now(timezone.utc) + timedelta(seconds=1)).replace(microsecond=0)
+    # Ensure at least ~0.2s remain before the read starts.
+    if (near_expiry - datetime.now(timezone.utc)).total_seconds() < 0.2:
+        near_expiry = near_expiry + timedelta(seconds=1)
+    expiry_iso = near_expiry.isoformat().replace("+00:00", "Z")
+    _save_temp_credential("slow_temp", scope=USER_SCOPE, expires_at=expiry_iso)
+
+    class SlowSource:
+        def get_secret(self, _request: Any) -> str:
+            remaining = (near_expiry - datetime.now(timezone.utc)).total_seconds()
+            if remaining > 0:
+                time_mod.sleep(remaining + 0.05)
+            return "earlier-lasting-version"
+
+    monkeypatch.setattr(credential_catalog, "get_credential_source", lambda _name: SlowSource())
+    result = resolve_secret_field("slow_temp", "api_token", scope=USER_SCOPE)
+    assert isinstance(result, credential_catalog.ToolResult)
+    assert result.status == "error"
+    assert result.content["error_code"] == CREDENTIAL_EXPIRED
+    assert credential_catalog._SECRET_CACHE == {}
+
+
+def test_c20_export_skips_credential_that_expires_during_secret_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _save_temp_credential("raced_temp", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
+    _save_temp_credential("lasting_keep", scope=USER_SCOPE, expires_at=None)
+
+    def fake_resolve(key: str, field_name: str, **_k: Any) -> Any:
+        if key == "raced_temp":
+            return credential_catalog.ToolResult(
+                status="error",
+                error="Temporary credential has expired.",
+                content={"error_code": CREDENTIAL_EXPIRED, "credential_key": key},
+            )
+        return credential_catalog.ResolvedCredentialField(
+            field_name=field_name,
+            value="lasting-secret",
+            source="sealbox",
+            source_ref={"source": "sealbox", "item_id": "team-nats-agents:default:lasting_keep:api_token", "field_ref": "value"},
+            secret=True,
+        )
+
+    monkeypatch.setattr(credential_catalog, "resolve_secret_field", fake_resolve)
+    monkeypatch.setattr("secure_tool_broker.credential_state_store.read_credential_state", lambda _k: None)
+
+    exported = export_credentials(TEAM_ID, [PERSON_ID])
+    catalog_keys = [rec["credential_key"] for rec in exported if rec.get("kind") == "catalog_entry"]
+    assert catalog_keys == ["lasting_keep"]
+
+
+def test_c21_note_broker_result_maps_gate_only_failures_to_gate_link_and_single_row_readonly(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    from secure_tool_broker.credential_catalog import linked_credential_expired
+    from secure_tool_broker.tool_setup_tracking import note_broker_result
+    from secure_tools.providers import ValidatedAction
+
+    gated_tool = ToolDefinitionV1(
+        tool_id="http:gate_only_api",
+        kind=ToolKind.HTTP,
+        display_name="Gate Only API",
+        account=AccountMode.NONE,
+        hosts=("gate.demo.example",),
+        gate_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="X-Gate-Key",
+                field="api_token",
+            ),
+        ),
+    )
+    gate, store = _gate_with_tools(tmp_path, gated_tool)
+    validated = ValidatedAction(
+        provider="secure_requests",
+        action="get",
+        params={"url": "https://gate.demo.example/ping"},
+    )
+    ctx = ToolContext(agent_id="worker-1", canonical_user_id=PERSON_ID)
+    for code in (REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED, "account_link_outdated", "auth_required"):
+        note_broker_result(
+            gate,
+            validated,
+            ctx,
+            credential_catalog.ToolResult(status="error", error="setup", content={"error_code": code}),
+        )
+        state = ToolSetupStates(store).get(TEAM_ID, PERSON_ID, gated_tool.tool_id)
+        assert state is not None
+        assert state.state is ToolSetupState.NEEDS_SETUP
+        assert state.missing_step == STEP_GATE_LINK
+
+    # C21(4): linked_credential_expired reads only its single catalog row (corrupt sibling row is never decoded).
+    _save_temp_credential("good_expired", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    db_path = credential_catalog.resolve_catalog_db_path()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO credential_catalog_entries (scope_kind, owner_id, credential_key, credential_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("user", PERSON_ID, "corrupt_sibling", "{not-valid-json", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+        )
+    link = _make_link(tool_id="http:demo_api", credential_key="good_expired")
+    assert linked_credential_expired(link) is True
