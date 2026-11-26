@@ -73,21 +73,19 @@ class TurnStartNotes:
         return cls(task_id, resume_directive, partial_tool_call_limit)
 
     @classmethod
-    def with_trailing_directive(
+    def with_live_wait_directive(
         cls,
         existing: Optional["TurnStartNotes"],
         task_id: str,
         directive: str,
     ) -> Optional["TurnStartNotes"]:
-        """Attach a block saved for this live turn (e.g. a live-resumed timed wait) to release on decision."""
+        """Record the single latest live-resumed wait note for this turn (replacing any earlier one)."""
         text = str(directive or "").strip()
         if not text:
             return existing
         if existing is None:
             return cls(task_id=task_id, trailing_resume_directives=(text,))
-        if text in existing.trailing_resume_directives:
-            return existing
-        return replace(existing, trailing_resume_directives=(*existing.trailing_resume_directives, text))
+        return replace(existing, trailing_resume_directives=(text,))
 
 
 def snapshot_runtime_resume_directive(
@@ -139,6 +137,20 @@ def _remove_whole_directive_block(current: str, block: str) -> tuple[bool, Optio
     if middle in current:
         return True, current.replace(middle, "\n\n", 1)
     return False, current
+
+
+def drop_resume_directive_blocks(
+    state: TaskRuntimeState,
+    task_id: str,
+    blocks: tuple[str, ...],
+) -> bool:
+    """Remove exact whole directive blocks from ``task_id``'s stored resume note without persisting."""
+    if not blocks:
+        return False
+    current = state.runtime_resume_directives.get(task_id)
+    if current is None:
+        return False
+    return _release_trailing_directives(state, task_id, current, blocks)
 
 
 def _release_trailing_directives(

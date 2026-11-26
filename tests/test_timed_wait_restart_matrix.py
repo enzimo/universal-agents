@@ -2,10 +2,11 @@
 
 Covers every crash/restart point from ``wait`` through resumed task completion
 using real ``recover_runtime_after_restart``, real ``take_over_orphaned_work``,
-real ``ScheduleStore`` / ``_coalesce_scheduled_fire_if_active``, real
-``scheduled_runtime._scheduler_pass``, and real ``TurnExecutor`` prompt/outbox
-handling with a controllable clock (``timed_waits.utc_now`` plus past-dated
-saved timestamps where recovery/schedule storage uses wall-clock UTC).
+real ``ScheduleStore`` + ``scheduled_runtime._scheduler_pass`` (with schedule
+claiming, signing, admission, coalescing, and advancement enabled in scenario
+(b)), and real ``TurnExecutor`` prompt/outbox handling with a controllable
+clock (``timed_waits.utc_now`` plus past-dated saved timestamps where
+recovery/schedule storage uses wall-clock UTC).
 """
 
 from __future__ import annotations
@@ -31,7 +32,6 @@ from custom_agents import (
     timed_waits as timed_waits_rules,
 )
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
-from custom_agents.schedule_store import ScheduleStore
 from custom_agents.strands_team import worker_holds_work
 from custom_agents.task_human_interaction_blockers import (
     TIMED_WAIT_BLOCKER,
@@ -284,115 +284,205 @@ async def test_matrix_a_restart_before_resume_at_waits_and_resumes_once_at_due_t
 # -- (b) restart hours late + recurring schedule overlap ------------------------------------
 
 
+async def _run_scheduler_pass_with_claiming(
+    agent: Any, monkeypatch: pytest.MonkeyPatch, claim_retry_deadlines: dict[str, datetime]
+) -> float | None:
+    """Run real ``scheduled_runtime._scheduler_pass`` with timed-wait resume AND schedule claiming/firing active."""
+
+    monkeypatch.setattr(scheduled_runtime, "observe_liveness", lambda _a: None)
+    monkeypatch.setattr(scheduled_runtime, "check_queue_pressure", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "resume_decided_access_waits", AsyncMock(return_value=0))
+    monkeypatch.setattr(scheduled_runtime, "resume_ended_setup_runs", AsyncMock(return_value=0))
+    monkeypatch.setattr(scheduled_runtime, "process_pending_handbacks", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "take_over_orphaned_work", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "prune_departed_agent_rows_when_due", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "report_stuck_schedules", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "report_failing_scheduled_runs", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "report_stuck_tasks", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "report_dead_letters", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "keep_storage_usage_measured", lambda _a: None)
+    monkeypatch.setattr(scheduled_runtime, "release_orphaned_slot_when_idle", AsyncMock())
+    monkeypatch.setattr(scheduled_runtime, "maybe_renew_schedule_permits", AsyncMock())
+    monkeypatch.setattr("custom_agents.delegation_wake.send_progress_notes", AsyncMock())
+    monkeypatch.setattr(
+        "custom_agents.agent_instantiation_service.renew_runtime_launch",
+        lambda _a: None,
+    )
+    monkeypatch.setattr(scheduled_runtime, "_notify_user_of_coalesced_scheduled_fire", AsyncMock())
+    return await scheduled_runtime._scheduler_pass(agent, claim_retry_deadlines, AsyncMock())
+
+
+@pytest.mark.parametrize(
+    "resumed_task_finished_first",
+    [False, True],
+    ids=["active_resumed_task_coalesces", "finished_resumed_task_runs_one_catchup"],
+)
 @pytest.mark.asyncio
-async def test_matrix_b_restart_hours_late_resumes_promptly_and_coalesces_recurring_schedule(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_matrix_b_restart_hours_late_resumes_promptly_and_handles_recurring_schedule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resumed_task_finished_first: bool,
 ) -> None:
-    """Matrix (b): restart 3 hours late resumes once with real waited time, coalesces the overlapping
-    recurring schedule fire, and advances next_fire_at past now without burst-replaying missed runs."""
-    db_path = tmp_path / "matrix_b.db"
-    # Anchor to real wall-clock UTC minus 3 hours so ScheduleStore.claim_due_schedules (which reads real UTC)
-    # and timed_waits.utc_now both agree that 3 hours elapsed across the outage (C06).
+    """Matrix (b) & C16: restart 3 hours late resumes once with real waited time, then runs the real
+    scheduler pass with claiming, signing, and admission enabled:
+    - if the resumed task is still active, the missed recurring fire coalesces into it (no duplicate run)
+      and next_fire_at advances past now;
+    - if the resumed task already finished, exactly one catch-up run is queued and the 5 missed
+      half-hour slots are not burst-replayed."""
+    from custom_messages.contracts.access_v2 import PersonStanding
+    from tests import scheduled_run_support as srs
+    from tests.broker_access_support import context_signer, forget_task_context_keys
+
+    # Anchor to real wall-clock UTC minus 3 hours so ScheduleStore (real UTC) and timed_waits.utc_now agree (C06).
     restart_now = datetime.now(timezone.utc).replace(microsecond=0)
     started_at = restart_now - timedelta(hours=3)
     now_box = [restart_now]
     monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
     monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda _a: None)
 
-    schedule_id = "sched-recurring-b"
-    original_next_fire = started_at + timedelta(minutes=30)
-    store = ScheduleStore(db_path=str(db_path))
-    store.add(
-        ScheduledMessage(
-            schedule_id=schedule_id,
-            management_class=ScheduleManagementClass.USER,
-            payload=Task(task_id="template", task_type=MessageMetaType.REQUEST, problem_statement="Check health"),
-            interval_ms=30 * 60 * 1000,
-            repeat_count=None,
-            next_fire_at=original_next_fire.isoformat(),
-            enabled=True,
+    world = srs.build_world(tmp_path, monkeypatch)
+    try:
+        srs.record_ann(world, PersonStanding.ACTIVE)
+        schedule_id = "sched-recurring-b"
+        original_next_fire = started_at + timedelta(minutes=30)
+        signed = context_signer().issue(team_id=srs.TEAM, person_id=srs.ANN, person_roles=("admin",))
+        world.store.add(
+            ScheduledMessage(
+                schedule_id=schedule_id,
+                schedule_name="Health check",
+                management_class=ScheduleManagementClass.USER,
+                payload=Task(
+                    task_id=f"task_{schedule_id}",
+                    task_type=MessageMetaType.REQUEST,
+                    problem_statement="Check health",
+                ),
+                payload_header=MessageHeader(from_agent_id="gateway", to_routing_path=srs.MANAGER_ID),
+                payload_meta=MessageMeta(
+                    gateway_context=GatewayContext(
+                        canonical_user_id=srs.ANN,
+                        session_key="sess-ann",
+                        task_context=signed,
+                        scheduled_job_id=schedule_id,
+                    )
+                ),
+                interval_ms=30 * 60 * 1000,
+                repeat_count=None,
+                next_fire_at=original_next_fire.isoformat(),
+                enabled=True,
+            ),
+            claim_team_id=srs.TEAM,
+            claim_named_agent_type=srs.WORKER_TYPE,
         )
-    )
 
-    meta = MessageMeta(
-        gateway_context=GatewayContext(
-            canonical_user_id="alice",
-            session_key="sess-alice",
-            scheduled_job_id=schedule_id,
+        db_path = Path(world.db_path)
+        saved_blocker = _seed_waiting_timed_wait(
+            db_path,
+            agent_id=srs.WORKER_ID,
+            team_id=srs.TEAM,
+            agent_type=srs.WORKER_TYPE,
+            minutes=10,
+            reason="check stack",
+            started_at=started_at,
+            meta=MessageMeta(
+                gateway_context=GatewayContext(
+                    canonical_user_id=srs.ANN,
+                    session_key="sess-ann",
+                    task_context=signed,
+                    scheduled_job_id=schedule_id,
+                )
+            ),
+            owner_person_id=srs.ANN,
         )
-    )
-    saved_blocker = _seed_waiting_timed_wait(
-        db_path,
-        minutes=10,
-        reason="check stack",
-        started_at=started_at,
-        meta=meta,
-        owner_person_id="alice",
-    )
 
-    # Restart 3 hours later: recover_runtime_after_restart resumes the overdue timed wait immediately.
-    restarted = _restarted_agent(db_path)
-    restarted._schedule_store = store
-    await runtime_recovery.recover_runtime_after_restart(restarted)
-
-    mgr = restarted.task_manager
-    assert mgr.get_task_info(TASK_ID).state == ProgressState.ACCEPTED
-    assert list(mgr.task_state.task_queue) == [TASK_ID]
-    assert get_human_interaction_blocker(mgr, TASK_ID) is None
-    note = mgr.read_runtime_resume_directive(TASK_ID) or ""
-    assert note == timed_waits_rules.resume_note(saved_blocker, now=restart_now)
-    assert "after 180 minutes" in note
-    assert timed_waits_rules.format_utc_display(restart_now) in note
-    assert "current time" not in note.lower()
-
-    # The overdue recurring schedule claims its fire while the resumed task is still active:
-    # _coalesce_scheduled_fire_if_active coalesces it (no duplicate run), and update_after_fire
-    # advances next_fire_at past now so the 5 missed 30-minute slots are NOT burst-replayed.
-    monkeypatch.setattr(scheduled_runtime, "_notify_user_of_coalesced_scheduled_fire", AsyncMock())
-    claimed = store.claim_next_due(
-        claimer_agent_id=AGENT_ID,
-        claimer_named_agent_type="Worker",
-        claimer_team_id=TEST_TEAM,
-        allow_unscoped=True,
-    )
-    assert claimed is not None and claimed["schedule_id"] == schedule_id
-    coalesced = await scheduled_runtime._coalesce_scheduled_fire_if_active(
-        restarted,
-        schedule_id,
-        schedule_id=schedule_id,
-        schedule_name="Health check",
-    )
-    assert coalesced is True
-    store.update_after_fire(
-        schedule_id,
-        claim_token=claimed["claim_token"],
-        claimer_agent_id=AGENT_ID,
-        due_at=original_next_fire.isoformat(),
-    )
-    updated_schedule = store.get_scheduled_message(schedule_id)
-    assert updated_schedule is not None and updated_schedule.next_fire_at is not None
-    next_due = timed_waits_rules.parse_utc(updated_schedule.next_fire_at)
-    assert next_due is not None and next_due > restart_now
-    assert (
-        store.claim_next_due(
-            claimer_agent_id=AGENT_ID,
-            claimer_named_agent_type="Worker",
-            claimer_team_id=TEST_TEAM,
-            allow_unscoped=True,
+        # Restart 3 hours later: fresh TaskManager + worker wired on the real BusAdapter for signing.
+        restarted_mgr = _new_manager(
+            db_path, agent_id=srs.WORKER_ID, team_id=srs.TEAM, agent_type=srs.WORKER_TYPE
         )
-        is None
-    )
+        restarted_worker = srs.worker_agent(restarted_mgr, world.store, world.bus, srs.WORKER_ID)
+        restarted_worker.is_executing = False
+        restarted_worker.main_lane_busy = False
+        restarted_worker.same_role_runtime_takeover_enabled = False
+        restarted_worker.deferred_inbox = SimpleNamespace(
+            stored_team_id=AsyncMock(return_value=None),
+            restore_role=AsyncMock(return_value=False),
+            restore=AsyncMock(return_value=False),
+        )
+        restarted_worker._recovery_retry_deadline_seconds = lambda: 900.0
+        restarted_worker._parse_iso_timestamp = lambda v: datetime.fromisoformat(v) if v else None
+        restarted_worker._refresh_self_agent_state = AsyncMock()
+        restarted_worker._recover_stalled_subtasks = AsyncMock()
+        restarted_worker._finalize_conversation_turn = AsyncMock()
+        restarted_worker._send_task_error_response = AsyncMock()
+        restarted_worker._agent_state_store = None
+        restarted_worker.subtask_watchdog_interval_seconds = 60.0
+        restarted_worker._worker_launch = None
+        restarted_worker.is_heartbeat_enabled = False
+        world.worker = restarted_worker
+        await srs.subscribe(world)
 
-    # Only the original resumed task exists and runs to completion once; budget stays 10 minutes.
-    assert list(mgr.task_state.task_queue) == [TASK_ID]
-    assert WaitLedger.from_history(mgr.get_task_info(TASK_ID)).total_minutes == 10
-    response, prompts = await _run_queued_task_to_completion(
-        mgr, answer="late restart recovered cleanly", now_iso=restart_now.isoformat()
-    )
-    assert response.answer == "late restart recovered cleanly"
-    assert len(prompts) == 1 and note in prompts[0]
-    archived = mgr.get_task_from_db(TASK_ID)
-    assert archived is not None and archived["status"] == ProgressState.COMPLETED.value
+        # 1. Real restart recovery resumes the overdue timed wait once promptly with real waited time.
+        await runtime_recovery.recover_runtime_after_restart(restarted_worker)
+        assert restarted_mgr.get_task_info(TASK_ID).state == ProgressState.ACCEPTED
+        assert list(restarted_mgr.task_state.task_queue) == [TASK_ID]
+        assert get_human_interaction_blocker(restarted_mgr, TASK_ID) is None
+        note = restarted_mgr.read_runtime_resume_directive(TASK_ID) or ""
+        assert note == timed_waits_rules.resume_note(saved_blocker, now=restart_now)
+        assert "after 180 minutes" in note
+        assert timed_waits_rules.format_utc_display(restart_now) in note
+        assert "current time" not in note.lower()
+        assert WaitLedger.from_history(restarted_mgr.get_task_info(TASK_ID)).total_minutes == 10
+
+        if resumed_task_finished_first:
+            # Resumed task runs and finishes BEFORE the overdue recurring schedule fires.
+            response, prompts = await _run_queued_task_to_completion(
+                restarted_mgr, answer="late restart finished first", now_iso=restart_now.isoformat()
+            )
+            assert response.answer == "late restart finished first"
+            assert len(prompts) == 1 and note in prompts[0]
+
+        # 2. Real scheduler pass (claiming, signing, admission, coalescing/queueing, advancing all active).
+        deadlines: dict[str, datetime] = {}
+        first_result = await _run_scheduler_pass_with_claiming(restarted_worker, monkeypatch, deadlines)
+        assert first_result is None, "claiming and firing a due schedule returns None to start the next pass"
+        assert deadlines == {}, "schedule must be admitted and advanced, not rejected with retry backoff"
+
+        updated_schedule = world.store.get_scheduled_message(schedule_id)
+        assert updated_schedule is not None and updated_schedule.next_fire_at is not None
+        next_due = timed_waits_rules.parse_utc(updated_schedule.next_fire_at)
+        assert next_due is not None and next_due > restart_now
+
+        # Second real scheduler pass finds nothing left to claim (missed half-hour slots are not burst-replayed).
+        second_result = await _run_scheduler_pass_with_claiming(restarted_worker, monkeypatch, deadlines)
+        assert second_result is not None and second_result > 0
+
+        if not resumed_task_finished_first:
+            # Active resumed task absorbed the overlapping fire (coalesced, no duplicate task).
+            assert list(restarted_mgr.task_state.task_queue) == [TASK_ID]
+            assert [info.task.task_id for info in restarted_mgr.list_task_infos()] == [TASK_ID]
+            history_events = [
+                (entry.details or {}).get("event")
+                for entry in restarted_mgr.get_task_history_entries(TASK_ID, limit=None)
+            ]
+            assert "scheduled_fire_coalesced" in history_events
+            response, prompts = await _run_queued_task_to_completion(
+                restarted_mgr, answer="late restart recovered cleanly", now_iso=restart_now.isoformat()
+            )
+            assert response.answer == "late restart recovered cleanly"
+            assert len(prompts) == 1 and note in prompts[0]
+        else:
+            # Resumed task already finished, so exactly one catch-up run started and completes cleanly.
+            queued_ids = list(restarted_mgr.task_state.task_queue)
+            assert len(queued_ids) == 1 and queued_ids[0] != TASK_ID
+            catchup_id = queued_ids[0]
+            catchup_response, _ = await _run_queued_task_to_completion(
+                restarted_mgr, task_id=catchup_id, answer="single catch-up run done", now_iso=restart_now.isoformat()
+            )
+            assert catchup_response.answer == "single catch-up run done"
+            assert list(restarted_mgr.task_state.task_queue) == []
+    finally:
+        for delivery_task in world.bus.deliveries:
+            delivery_task.cancel()
+        forget_task_context_keys()
 
 
 # -- (c) crash during resume hand-over (3 windows) ------------------------------------------

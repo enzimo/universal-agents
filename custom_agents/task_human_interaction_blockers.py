@@ -29,11 +29,12 @@ turn survives a restart. The stuck-task check excuses a marked task, so a mark
 without its answer would hide a stranded task.
 
 A record is removed only by what ends its wait: the answer a resumed turn
-takes (``clear_answered_blocker``, before the turn runs, so a new pause in it
-keeps its own record), a resume from a note (``clear_wait_record``), or the
-task ending. Recovery, the task queue, runtime-work summaries and the
-stuck-task check (``custom_agents.task_wait_reasons``) read the record to tell
-a waiting task from a stuck one; it never grants anything.
+takes (``clear_answered_blocker`` / ``clear_answered_blocker_with_resume_note``,
+before the turn runs, so a new pause in it keeps its own record), a resume from
+a note (``task_state_transitions.resume_wait_from_note``), or the task ending.
+Recovery, the task queue, runtime-work summaries and the stuck-task check
+(``custom_agents.task_wait_reasons``) read the record to tell a waiting task
+from a stuck one; it never grants anything.
 """
 
 from __future__ import annotations
@@ -175,7 +176,9 @@ def mark_answer_held(
     return True
 
 
-def _unmarked(blocker: Mapping[str, Any]) -> dict[str, Any]:
+def unmark_wait_record(blocker: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``blocker`` without held-answer mark keys."""
+
     return {key: value for key, value in blocker.items() if key not in (ANSWER_HELD_AT_KEY, ANSWER_HELD_BY_KEY)}
 
 
@@ -195,7 +198,7 @@ def remove_answer_mark(
     blocker = host.task_state.human_interaction_blockers.get(task_id)
     if blocker is None or not is_wait_blocker(blocker, kind, wait_id):
         return None
-    unmarked = _unmarked(blocker)
+    unmarked = unmark_wait_record(blocker)
     if unmarked != blocker:
         host.task_state.human_interaction_blockers[task_id] = unmarked
         host._persist_runtime_state()
@@ -208,23 +211,10 @@ def clear_answer_marks(host: TaskHumanInteractionBlockerHost) -> list[str]:
     blockers = host.task_state.human_interaction_blockers
     marked = [task_id for task_id, blocker in blockers.items() if answer_held(blocker)]
     for task_id in marked:
-        blockers[task_id] = _unmarked(blockers[task_id])
+        blockers[task_id] = unmark_wait_record(blockers[task_id])
     if marked:
         host._persist_runtime_state()
     return marked
-
-
-def clear_wait_record(
-    host: TaskHumanInteractionBlockerHost,
-    task_id: str,
-    kind: str,
-    wait_id: str,
-) -> bool:
-    """Remove the task's record only while it is this wait's (True when this call removed it)."""
-
-    if not is_wait_blocker(host.task_state.human_interaction_blockers.get(task_id), kind, wait_id):
-        return False
-    return clear_human_interaction_blocker(host, task_id)
 
 
 def _answers(blocker: Mapping[str, Any], response: Mapping[str, Any]) -> bool:

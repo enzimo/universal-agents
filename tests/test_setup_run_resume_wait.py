@@ -596,7 +596,7 @@ async def test_one_task_that_fails_does_not_stop_recovery_for_the_others(lead, w
 async def test_a_failed_atomic_note_resume_rolls_back_and_next_pass_resumes_once(
     lead, woken, results, monkeypatch, caplog
 ) -> None:
-    """Review C05 / C02: a persistence failure during atomic note-resume rolls back completely; next pass resumes once."""
+    """Review C05 / F2 / C02: a single-write failure keeps the record intact on disk and the next pass resumes once."""
     pause_on_setup(lead)
     ended(lead)
     lead._interrupted_turn_sessions.clear()
@@ -606,6 +606,7 @@ async def test_a_failed_atomic_note_resume_rolls_back_and_next_pass_resumes_once
     with caplog.at_level(logging.WARNING):
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
     assert record_of(lead) == {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"}
+    assert manager.get_task_info(TASK).state == ProgressState.WAITING
     assert manager.read_runtime_resume_directive(TASK) is None
     assert list(manager.task_state.task_queue) == []
     assert "event=tool_setup_run_recovery_failed" in caplog.text
@@ -749,32 +750,6 @@ async def test_a_failed_save_of_the_mark_leaves_the_record_unmarked_for_recovery
     assert answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
     assert woken == [lead]
     assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 0
-
-
-@pytest.mark.asyncio
-async def test_a_failure_during_atomic_note_resume_keeps_the_record_and_the_next_pass_resumes_once(
-    lead, woken, results, monkeypatch, caplog
-) -> None:
-    """Review F2 / C02: a single-write failure keeps the record intact on disk so recovery tries again cleanly."""
-    pause_on_setup(lead)
-    ended(lead)
-    lead._interrupted_turn_sessions.clear()
-    manager = lead.task_manager
-    persist_fails_once(monkeypatch, manager)
-
-    with caplog.at_level(logging.WARNING):
-        assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
-
-    assert record_of(lead) == {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"}
-    assert not manager.task_state.task_queue
-    assert manager.get_task_info(TASK).state == ProgressState.WAITING
-    assert "event=tool_setup_run_recovery_failed" in caplog.text
-
-    assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 1
-
-    assert record_of(lead) is None and list(manager.task_state.task_queue) == [TASK]
-    assert manager.get_task_info(TASK).state == ProgressState.ACCEPTED
-    assert manager.read_runtime_resume_directive(TASK).count(tool_setup_run_runtime.RUN_ENDED_NOTE) == 1
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,7 @@ from custom_agents.task_human_interaction_blockers import (
     answer_held,
     clear_answer_marks,
     clear_answered_blocker,
-    clear_wait_record,
+    clear_human_interaction_blocker,
     get_human_interaction_blocker,
     is_setup_run_blocker,
     is_timed_wait_blocker,
@@ -101,10 +101,7 @@ def test_wait_blocker_predicates_and_mark_lifecycle_for_timed_wait(manager: Task
     assert unmarked == record
     assert not answer_held(get_human_interaction_blocker(manager, TASK))
 
-    # Clearing only matches the same kind and wait id.
-    assert not clear_wait_record(manager, TASK, TIMED_WAIT_BLOCKER, "i-other")
-    assert not clear_wait_record(manager, TASK, SETUP_RUN_BLOCKER, "i-wait")
-    assert clear_wait_record(manager, TASK, TIMED_WAIT_BLOCKER, "i-wait")
+    assert clear_human_interaction_blocker(manager, TASK)
     assert get_human_interaction_blocker(manager, TASK) is None
 
 
@@ -449,7 +446,7 @@ def test_c02_atomic_resume_wait_from_note_matches_multi_step_sequence(
 
     old_mgr = _setup("old")
     old_mgr.append_runtime_resume_directive(TASK, note)
-    assert clear_wait_record(old_mgr, TASK, kind, wait_id)
+    assert clear_human_interaction_blocker(old_mgr, TASK)
     old_mgr.append_history_entry(
         TASK,
         history,
@@ -630,7 +627,7 @@ def test_c01_clear_answered_blocker_with_resume_note_and_turn_start_notes_releas
     assert "Earlier restart note." in stored and "Mid-pause correction." in stored and note in stored
 
     # Releasing start notes removes what the turn read + the live-resumed timed-wait note, keeping the mid-pause note.
-    start_notes = TurnStartNotes.with_trailing_directive(
+    start_notes = TurnStartNotes.with_live_wait_directive(
         TurnStartNotes.read(TASK, "Earlier restart note.", None),
         TASK,
         note,
@@ -638,3 +635,143 @@ def test_c01_clear_answered_blocker_with_resume_note_and_turn_start_notes_releas
     assert start_notes is not None
     manager.release_turn_start_notes(start_notes)
     assert manager.read_runtime_resume_directive(TASK) == "Mid-pause correction."
+
+
+def test_c17_repeated_live_waits_keep_only_the_latest_live_wait_note(
+    manager: TaskManager,
+) -> None:
+    """C17: consecutive live waits inside one turn replace the earlier live-wait note instead of accumulating."""
+    from custom_agents.task_runtime_state import TurnStartNotes
+    from custom_agents.task_state_transitions import clear_answered_blocker_with_resume_note
+
+    manager.append_runtime_resume_directive(TASK, "Earlier restart note.")
+    start_notes = TurnStartNotes.read(TASK, "Earlier restart note.", None)
+
+    record_human_interaction_blocker(manager, TASK, _timed_record("i-wait-1", held_by=AGENT_ID))
+    cleared_1, note_1 = clear_answered_blocker_with_resume_note(
+        manager,
+        TASK,
+        answers=[("i-wait-1", {"kind": TIMED_WAIT_RESPONSE_KIND})],
+        resumed_interrupt_ids=["i-wait-1"],
+        answered_interrupt_ids=["i-wait-1"],
+        replace_directives=start_notes.trailing_resume_directives if start_notes is not None else (),
+        now=datetime(2026, 11, 26, 6, 10, 0, tzinfo=timezone.utc),
+    )
+    assert cleared_1 is True and note_1 is not None
+    start_notes = TurnStartNotes.with_live_wait_directive(start_notes, TASK, note_1)
+    assert start_notes is not None and start_notes.trailing_resume_directives == (note_1,)
+
+    # Second live wait in the same paused turn replaces note_1 with note_2 in the same write.
+    record_human_interaction_blocker(
+        manager,
+        TASK,
+        {
+            "kind": TIMED_WAIT_BLOCKER,
+            "interrupt_id": "i-wait-2",
+            "minutes": 5,
+            "requested_at": "2026-11-26T06:10:00+00:00",
+            "resume_at": "2026-11-26T06:15:00+00:00",
+            "reason": "second poll",
+            ANSWER_HELD_AT_KEY: _now(),
+            ANSWER_HELD_BY_KEY: AGENT_ID,
+        },
+    )
+    cleared_2, note_2 = clear_answered_blocker_with_resume_note(
+        manager,
+        TASK,
+        answers=[("i-wait-2", {"kind": TIMED_WAIT_RESPONSE_KIND})],
+        resumed_interrupt_ids=["i-wait-2"],
+        answered_interrupt_ids=["i-wait-2"],
+        replace_directives=start_notes.trailing_resume_directives,
+        now=datetime(2026, 11, 26, 6, 15, 0, tzinfo=timezone.utc),
+    )
+    assert cleared_2 is True and note_2 is not None
+    start_notes = TurnStartNotes.with_live_wait_directive(start_notes, TASK, note_2)
+    stored = manager.read_runtime_resume_directive(TASK) or ""
+    assert "Earlier restart note." in stored
+    assert note_1 not in stored
+    assert note_2 in stored
+    assert stored.count("the task was resumed at") == 1
+
+
+@pytest.mark.asyncio
+async def test_c15_failed_live_clear_unmarks_record_so_next_pass_resumes_once(
+    manager: TaskManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C15: a failed save while clearing a live timer answer leaves the record unmarked so the next pass hands a fresh answer."""
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+
+    from custom_agents import task_steering_runtime, timed_wait_runtime, timed_waits as timed_waits_rules
+    from custom_tools.tool_stop import ToolStop
+
+    base = datetime(2026, 11, 26, 6, 0, 0, tzinfo=timezone.utc)
+    now_box = [base + timedelta(minutes=10)]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda _a: None)
+
+    record_human_interaction_blocker(
+        manager,
+        TASK,
+        {
+            "kind": TIMED_WAIT_BLOCKER,
+            "interrupt_id": "i-c15",
+            "call_id": "call-c15",
+            "tool": "wait",
+            "tool_use_id": "tu-c15",
+            "minutes": 10,
+            "reason": "c15 retry",
+            "requested_at": base.isoformat(),
+            "resume_at": (base + timedelta(minutes=10)).isoformat(),
+        },
+    )
+    agent = _fake_agent(manager, interrupt_id="i-c15")
+    agent._interrupted_turn_sessions[TASK].start_notes = None
+    agent._set_active_execution_context = lambda tid: ToolStop(agent_id=AGENT_ID, task_id=tid)
+    agent._clear_active_execution_context = lambda: None
+    agent._refresh_self_agent_state = AsyncMock()
+    agent._logger = logging.getLogger("test.c15")
+
+    # 1. First pass marks the record and hands the answer to the live paused turn.
+    assert await timed_wait_runtime.resume_due_timed_waits(agent) == 1
+    assert answer_held(get_human_interaction_blocker(manager, TASK), AGENT_ID)
+    assert TASK in agent._pending_interrupt_responses
+
+    # 2. The live resume pops the answer, then fails while persisting the clear+note write.
+    orig_persist = manager._persist_runtime_state
+    fail_once = [True]
+
+    def fail_clear(*args, **kwargs):
+        if fail_once[0]:
+            fail_once[0] = False
+            raise RuntimeError("database is locked")
+        return orig_persist(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_persist_runtime_state", fail_clear)
+    with pytest.raises(RuntimeError, match="database is locked"):
+        await task_steering_runtime.resume_interrupted_task_turn(agent, TASK)
+
+    # Record is back UNMARKED (not hidden from recovery or stuck-task check), no note saved, no pending answer.
+    blocker_after_fail = get_human_interaction_blocker(manager, TASK)
+    assert blocker_after_fail is not None and not answer_held(blocker_after_fail)
+    assert TASK not in agent._pending_interrupt_responses
+    assert manager.read_runtime_resume_directive(TASK) is None
+
+    # 3. Next pass finds the unmarked due record and hands a fresh answer; live turn then resumes once with one note.
+    now_box[0] = base + timedelta(minutes=11)
+    assert await timed_wait_runtime.resume_due_timed_waits(agent) == 1
+    assert answer_held(get_human_interaction_blocker(manager, TASK), AGENT_ID)
+    assert TASK in agent._pending_interrupt_responses
+
+    ran: list[str] = []
+
+    async def fake_run(_agent, session, _steering, _task_info, _blocks, _stop):
+        ran.append(session.task_id)
+        return "ok"
+
+    monkeypatch.setattr(task_steering_runtime, "_run_resumed_turn", fake_run)
+    assert await task_steering_runtime.resume_interrupted_task_turn(agent, TASK) == "ok"
+    assert ran == [TASK]
+    assert get_human_interaction_blocker(manager, TASK) is None
+    stored_note = manager.read_runtime_resume_directive(TASK) or ""
+    assert stored_note.count("c15 retry") == 1

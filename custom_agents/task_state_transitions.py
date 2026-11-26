@@ -21,10 +21,12 @@ from custom_agents.task_human_interaction_blockers import (
     is_timed_wait_blocker,
     is_wait_blocker,
     should_clear_answered_blocker,
+    unmark_wait_record,
 )
 from custom_agents.task_queue_safety import is_ready
 from custom_agents.task_runtime_state import (
     add_runtime_resume_directive,
+    drop_resume_directive_blocks,
     restore_runtime_resume_directive,
     snapshot_runtime_resume_directive,
 )
@@ -284,7 +286,17 @@ def resume_wait_from_note(
         raise
     if manager.get_task_info(task_id) is not task_info:
         return False
-    manager._sync_plan_from_task(task_id, create=False)
+    try:
+        manager._sync_plan_from_task(task_id, create=False)
+    except Exception:
+        logger.warning(
+            "Task was resumed and queued, but plan sync failed. "
+            "event=wait_resume_plan_sync_failed task_id=%s kind=%s wait_id=%s",
+            task_id,
+            kind,
+            wait_id,
+            exc_info=True,
+        )
     return True
 
 
@@ -295,6 +307,7 @@ def clear_answered_blocker_with_resume_note(
     *,
     resumed_interrupt_ids: Iterable[str] = (),
     answered_interrupt_ids: Iterable[str] = (),
+    replace_directives: tuple[str, ...] = (),
     now: datetime | None = None,
 ) -> tuple[bool, Optional[str]]:
     """Consume an answered wait blocker; for a timed wait, save its resume note in the same write.
@@ -306,6 +319,14 @@ def clear_answered_blocker_with_resume_note(
     resumed turn records a decision, restart recovery delivers the note so the
     next turn knows the wait already finished; when the live turn records its
     decision normally, ``TurnStartNotes`` releases that note cleanly.
+
+    Any prior live-wait directives named in ``replace_directives`` are removed
+    in the same write so repeated waits inside one turn keep only the latest
+    wait note. If persistence raises, the directive slot is rolled back and the
+    blocker is restored *unmarked* (matching ``mark_answer_held`` /
+    ``remove_answer_mark``) because the caller already popped the pending
+    answer from memory: leaving a held-answer mark without an answer would hide
+    the task from both the next timed-wait pass and the stuck-task check.
 
     Returns ``(cleared, added_timed_wait_note)``.
     """
@@ -324,15 +345,17 @@ def clear_answered_blocker_with_resume_note(
 
     task_info = manager.get_task_info(task_id)
     note = timed_waits_rules.resume_note(blocker, now=now or timed_waits_rules.utc_now())
-    previous_blocker = dict(blocker)
+    unmarked_blocker = unmark_wait_record(blocker)
     previous_directive = snapshot_runtime_resume_directive(manager.task_state, task_id)
     manager.task_state.human_interaction_blockers.pop(task_id, None)
+    if replace_directives:
+        drop_resume_directive_blocks(manager.task_state, task_id, replace_directives)
     added = add_runtime_resume_directive(manager.task_state, task_id, note)
     try:
         manager._persist_runtime_state()
     except Exception:
         if task_info is None or manager.get_task_info(task_id) is task_info:
-            manager.task_state.human_interaction_blockers[task_id] = previous_blocker
+            manager.task_state.human_interaction_blockers[task_id] = unmarked_blocker
             restore_runtime_resume_directive(manager.task_state, task_id, previous_directive)
         raise
     if task_info is not None and manager.get_task_info(task_id) is not task_info:
