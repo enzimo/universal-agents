@@ -542,11 +542,7 @@ def test_failed_describe_for_another_change_keeps_the_first_approval(tmp_path: P
     call.response = {"kind": "access_request_decision", "status": decided.status.value}
 
     # Remove the second plan's stored file so describing it fails.
-    plan_dir = Path(service._plan_dir(service._load_canonical_config()))
-    second_files = list(plan_dir.rglob(f"{second_plan['change_id']}*"))
-    assert second_files
-    for path in second_files:
-        path.unlink()
+    Path(second_plan["plan_path"]).unlink()
 
     before_bytes = config_path.read_bytes()
     refused = run_apply_change(agent, second_plan["change_id"], call, reason="Second plan with reused toolUseId")
