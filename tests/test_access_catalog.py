@@ -12,6 +12,7 @@ import pytest
 from access_catalog.catalog import (
     DEFINITIONS_DIR,
     UNLISTED_WEB_TOOL,
+    UNPARSED_COMMAND_OPERATION,
     UNREGISTERED_FUNCTION_TOOL,
     load_catalog,
 )
@@ -949,16 +950,16 @@ tools:
     ],
 )
 def test_gh_api_rejects_repeated_or_empty_method_flags(catalog, argv) -> None:
-    from access_catalog.cli_tables import CommandLineRejected, gh_api_method, parse_command_line
+    from access_catalog.cli_tables import CommandLineRejected, parse_command_line, parse_gh_api
 
     policy = load_cli_policy("gh")
     parsed = parse_command_line(argv, policy.table)
     with pytest.raises(CommandLineRejected):
-        gh_api_method(parsed)
+        parse_gh_api(parsed)
 
     resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
     assert resolution.tool_id == "cli:github"
-    assert resolution.operation == "command:unparsed"
+    assert resolution.operation == UNPARSED_COMMAND_OPERATION
     assert resolution.level is FULL
     assert resolution.source is ClassificationSource.UNREVIEWED
     assert resolution.detail
@@ -978,11 +979,11 @@ def test_gh_api_rejects_repeated_or_empty_method_flags(catalog, argv) -> None:
 def test_gh_api_hidden_method_in_value_flags_and_implicit_post_classify_full(
     catalog, argv, expected_method
 ) -> None:
-    from access_catalog.cli_tables import gh_api_method, parse_command_line
+    from access_catalog.cli_tables import parse_command_line, parse_gh_api
 
     policy = load_cli_policy("gh")
     parsed = parse_command_line(argv, policy.table)
-    assert gh_api_method(parsed) == expected_method
+    assert parse_gh_api(parsed).method == expected_method
 
     resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
     assert resolution.tool_id == "cli:github"
@@ -1015,11 +1016,11 @@ def test_gh_api_hidden_method_in_value_flags_and_implicit_post_classify_full(
     ],
 )
 def test_gh_api_ordinary_reads_classify_read(catalog, argv, expected_method) -> None:
-    from access_catalog.cli_tables import gh_api_method, parse_command_line
+    from access_catalog.cli_tables import parse_command_line, parse_gh_api
 
     policy = load_cli_policy("gh")
     parsed = parse_command_line(argv, policy.table)
-    assert gh_api_method(parsed) == expected_method
+    assert parse_gh_api(parsed).method == expected_method
 
     resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
     assert resolution.tool_id == "cli:github"
@@ -1061,11 +1062,11 @@ def test_gh_api_ordinary_reads_classify_read(catalog, argv, expected_method) -> 
     ],
 )
 def test_gh_api_writes_read_bodies_and_graphql_classify_full(catalog, argv, expected_method) -> None:
-    from access_catalog.cli_tables import gh_api_method, parse_command_line
+    from access_catalog.cli_tables import parse_command_line, parse_gh_api
 
     policy = load_cli_policy("gh")
     parsed = parse_command_line(argv, policy.table)
-    assert gh_api_method(parsed) == expected_method
+    assert parse_gh_api(parsed).method == expected_method
 
     resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
     assert resolution.tool_id == "cli:github"
@@ -1094,16 +1095,16 @@ def test_gh_api_writes_read_bodies_and_graphql_classify_full(catalog, argv, expe
     ],
 )
 def test_gh_api_rejects_unknown_or_malformed_flags(catalog, argv) -> None:
-    from access_catalog.cli_tables import CommandLineRejected, gh_api_method, parse_command_line
+    from access_catalog.cli_tables import CommandLineRejected, parse_command_line, parse_gh_api
 
     policy = load_cli_policy("gh")
     parsed = parse_command_line(argv, policy.table)
     with pytest.raises(CommandLineRejected):
-        gh_api_method(parsed)
+        parse_gh_api(parsed)
 
     resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
     assert resolution.tool_id == "cli:github"
-    assert resolution.operation == "command:unparsed"
+    assert resolution.operation == UNPARSED_COMMAND_OPERATION
     assert resolution.level is FULL
     assert resolution.source is ClassificationSource.UNREVIEWED
     assert resolution.detail
@@ -1274,7 +1275,7 @@ def test_gh_api_refuses_audit_probes_that_real_gh_would_send(tmp_path, argv, exp
     if shutil.which("gh") is None:
         pytest.skip("gh binary not on PATH")
 
-    from access_catalog.cli_tables import CommandLineRejected, gh_api_method, parse_command_line
+    from access_catalog.cli_tables import CommandLineRejected, parse_command_line, parse_gh_api
 
     output = _run_offline_gh_api(argv, tmp_path)
     assert _extract_gh_debug_method(output) == expected_wire_method
@@ -1282,7 +1283,7 @@ def test_gh_api_refuses_audit_probes_that_real_gh_would_send(tmp_path, argv, exp
     policy = load_cli_policy("gh")
     parsed = parse_command_line(argv, policy.table)
     with pytest.raises(CommandLineRejected):
-        gh_api_method(parsed)
+        parse_gh_api(parsed)
 
 
 @pytest.mark.parametrize(
@@ -1301,7 +1302,7 @@ def test_gh_api_errors_send_no_request_in_real_gh(tmp_path, argv) -> None:
     if shutil.which("gh") is None:
         pytest.skip("gh binary not on PATH")
 
-    from access_catalog.cli_tables import CommandLineRejected, gh_api_method, parse_command_line
+    from access_catalog.cli_tables import CommandLineRejected, parse_command_line, parse_gh_api
 
     output = _run_offline_gh_api(argv, tmp_path)
     assert _extract_gh_debug_method(output) is None
@@ -1309,7 +1310,7 @@ def test_gh_api_errors_send_no_request_in_real_gh(tmp_path, argv) -> None:
     policy = load_cli_policy("gh")
     parsed = parse_command_line(argv, policy.table)
     with pytest.raises(CommandLineRejected):
-        gh_api_method(parsed)
+        parse_gh_api(parsed)
 
 
 def test_gh_api_flag_tables_cover_installed_gh_help() -> None:

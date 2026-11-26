@@ -249,7 +249,7 @@ def _is_gh_api_graphql_endpoint(endpoint: str) -> bool:
     ``urlsplit`` raises ``ValueError`` for hosts it cannot read (unbalanced or
     non-numeric square brackets, characters that change under NFKC
     normalization). Such a line is refused as ``CommandLineRejected`` so both
-    the catalog (``command:unparsed``) and the broker (``cli_command_line_rejected``)
+    the catalog (``command_line:unparsed``) and the broker (``cli_command_line_rejected``)
     give the caller a plain reason instead of an uncaught error.
     """
 
@@ -309,12 +309,6 @@ def parse_gh_api(parsed: ParsedCommandLine) -> GhApiCall:
     return GhApiCall(method=method, has_fields=has_fields, has_input=has_input, is_graphql=is_graphql)
 
 
-def gh_api_method(parsed: ParsedCommandLine) -> str:
-    """The HTTP method ``gh api`` will use: explicit, else POST when it sends fields or input."""
-
-    return parse_gh_api(parsed).method
-
-
 def gh_api_level(call: GhApiCall) -> AccessLevel:
     """The access level one parsed ``gh api`` call requires.
 
@@ -332,12 +326,23 @@ def gh_api_level(call: GhApiCall) -> AccessLevel:
     return AccessLevel.READ
 
 
+def classify_passthrough_call(policy: CliPolicy, parsed: ParsedCommandLine) -> tuple[AccessLevel, GhApiCall | None]:
+    """The level a checked passthrough command needs, and its parsed ``gh api`` call when it is one.
+
+    The one place that decides whether a line is a ``gh api`` call, so the
+    catalog's level and the broker's method limit always read the same parse.
+    """
+
+    if policy.cli == "gh" and parsed.command_path == ("api",):
+        call = parse_gh_api(parsed)
+        return gh_api_level(call), call
+    return classify_command_line(parsed, policy.table), None
+
+
 def classify_passthrough(policy: CliPolicy, parsed: ParsedCommandLine) -> AccessLevel:
     """The level a checked passthrough command needs."""
 
-    if policy.cli == "gh" and parsed.command_path == ("api",):
-        return gh_api_level(parse_gh_api(parsed))
-    return classify_command_line(parsed, policy.table)
+    return classify_passthrough_call(policy, parsed)[0]
 
 
 __all__ = [
@@ -345,11 +350,10 @@ __all__ = [
     "CliPolicy",
     "CommandFileRules",
     "CommandLineRejected",
-    "GH_API_READ_METHODS",
     "GhApiCall",
     "classify_passthrough",
+    "classify_passthrough_call",
     "gh_api_level",
-    "gh_api_method",
     "load_cli_policy",
     "parse_command_line",
     "parse_gh_api",

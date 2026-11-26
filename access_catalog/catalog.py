@@ -72,8 +72,11 @@ PROCEDURE_HANDLERS_FILE = (
 )
 INSTALLED_PROCEDURE_PREFIX = "installed_permission."
 UNREGISTERED_FUNCTION_TOOL = "fn:unregistered"
-# Operation name used when a CLI passthrough argument list fails parsing.
-UNPARSED_COMMAND_OPERATION = "command:unparsed"
+# Operation name used when a CLI passthrough argument list fails parsing. It
+# sits outside the command:<path> names (command words cannot contain ':'), so
+# a listed command that happens to be called "unparsed" never matches it; the
+# broker's access gate refuses exactly this marker.
+UNPARSED_COMMAND_OPERATION = "command_line:unparsed"
 # The one secure_cli action of an installed CLI: run a checked argument list.
 INSTALLED_CLI_ACTION = "exec"
 UNLISTED_WEB_TOOL = "http:unlisted"

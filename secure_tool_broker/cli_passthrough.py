@@ -36,12 +36,10 @@ from access_catalog.cli_tables import (
     CliPolicy,
     CommandFileRules,
     CommandLineRejected,
-    GhApiCall,
     classify_passthrough,
-    gh_api_level,
+    classify_passthrough_call,
     load_cli_policy,
     parse_command_line,
-    parse_gh_api,
     split_flag,
 )
 from custom_messages.contracts.access_v2 import AccessLevel
@@ -230,13 +228,8 @@ def check_command_line(
         )
     rules = policy.rules_for(dotted)
     _refuse_blocked_flags(policy, rules, parsed.argv)
-    api_call: GhApiCall | None = None
     try:
-        if cli == "gh" and parsed.command_path == ("api",):
-            api_call = parse_gh_api(parsed)
-            level = gh_api_level(api_call)
-        else:
-            level = classify_passthrough(policy, parsed)
+        level, api_call = classify_passthrough_call(policy, parsed)
     except CommandLineRejected as exc:
         raise CommandRefused(str(exc), reason_code=REASON_COMMAND_LINE_REJECTED) from exc
     checked_argv = list(parsed.argv)

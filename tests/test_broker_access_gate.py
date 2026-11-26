@@ -844,3 +844,47 @@ async def test_broker_http_refuses_unparsed_gh_api_without_running_subprocess(
             assert payload["reason_code"] == REASON_COMMAND_LINE_REJECTED, argv
             assert reason in payload["error"], argv
             assert "next_step" not in payload, argv
+
+
+def test_gate_refuses_unparsable_gog_lines_before_the_access_decision(enabled_gate) -> None:
+    gate, _service = enabled_gate
+    context = agent_context(roles=("owner",))
+    argv = ["gmail", "-abc"]  # a combined short flag the command-table parser refuses
+
+    for target_gate in (gate, open_gate()):
+        refused = target_gate.check_broker_action(MANAGER, "google", "gog.exec", {"argv": argv}, context)
+        assert not refused.allowed
+        assert refused.reason_code == REASON_COMMAND_LINE_REJECTED
+        assert "combined short flags" in refused.message and refused.next_step == ""
+
+
+def test_installed_cli_command_named_unparsed_is_not_mistaken_for_a_parse_failure(tmp_path) -> None:
+    from access_catalog.catalog import UNPARSED_COMMAND_OPERATION
+    from access_catalog.instance_tools import write_instance_tool
+    from custom_messages.contracts.access_v2 import ClassificationSource, ProposedCliToolV1
+    from custom_messages.contracts.cli_tool_v1 import InstalledCliV1
+
+    write_instance_tool(
+        tmp_path,
+        ProposedCliToolV1(
+            tool_id="cli:demo",
+            display_name="Demo CLI",
+            installed_cli=InstalledCliV1(
+                binary_path="team/tools/demo/demo", sha256="a" * 64, commands={"unparsed": "read"}
+            ),
+        ),
+    )
+    gate = open_gate(instance_root=tmp_path)
+    context = agent_context(roles=("owner",))
+
+    listed = gate.check_broker_action(MANAGER, "demo", "exec", {"argv": ["unparsed"]}, context)
+    assert listed.resolution is not None
+    assert listed.resolution.operation == "command:unparsed"
+    assert listed.resolution.source is ClassificationSource.TRUSTED
+    assert listed.resolution.level is AccessLevel.READ
+    assert listed.allowed, (listed.reason_code, listed.message)
+
+    # A line the parser refuses on the same CLI still gets the marker and the refusal.
+    broken = gate.check_broker_action(MANAGER, "demo", "exec", {"argv": ["unparsed", "--"]}, context)
+    assert broken.resolution is not None and broken.resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert not broken.allowed and broken.reason_code == REASON_COMMAND_LINE_REJECTED

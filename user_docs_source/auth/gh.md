@@ -108,6 +108,9 @@ access; GraphQL requests, requests with `--input`, `HEAD` requests with fields,
 and all other HTTP methods (including implicit `POST` from `-f`/`-F`/`--input`
 without `-X`) require full access. The broker allows only `GET` and `POST` for
 `gh api` for now.
+A line the broker cannot parse is refused with `cli_command_line_rejected`
+before the access check, even for full access holders; see
+[Tool access and account links](../permissions.md#tool-access-and-account-links).
 
 ## Logout
 
