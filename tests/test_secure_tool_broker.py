@@ -390,15 +390,17 @@ async def test_secure_tool_broker_executes_validated_action(
 ) -> None:
     captured = {}
 
-    def fake_execute(action, context):
+    def fake_execute(action, context, *, access_gate=None):
         captured["action"] = action
         captured["context"] = context
+        captured["access_gate"] = access_gate
         return ToolResult(status="success", content={"ok": True})
 
     monkeypatch.setattr(
         "secure_tool_broker.service.execute_validated_action", fake_execute
     )
-    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=open_gate())
+    gate = open_gate()
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
     async with TestClient(TestServer(service.build_app())) as client:
         response = await client.post(
             "/v1/tools/github",
@@ -422,6 +424,7 @@ async def test_secure_tool_broker_executes_validated_action(
     assert captured["context"].canonical_user_id == "user-1"
     assert captured["context"].team_id == "team-1"
     assert captured["context"].account_link is None, "cli:github uses no linked account"
+    assert captured["access_gate"] is gate
 
 
 @pytest.mark.asyncio
@@ -430,7 +433,7 @@ async def test_gateway_runs_only_actions_a_person_approved_directly(
 ) -> None:
     executed: list[tuple[str, str]] = []
 
-    def fake_execute(action, _context):
+    def fake_execute(action, _context, *, access_gate=None):
         executed.append((action.provider, action.action))
         return ToolResult(status="success", content={"ok": True})
 
