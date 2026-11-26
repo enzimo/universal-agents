@@ -20,6 +20,7 @@ from custom_messages.contracts.control_v1 import (
 )
 from custom_messages.contracts.credentials_v1 import (
     CREDENTIAL_DECLINED,
+    CREDENTIAL_DELETION_FLOWS,
     TOOL_SETUP_COMPLETED,
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
@@ -82,7 +83,7 @@ def _render_credential_result_fallback(
         return (
             f"I couldn't create the requested account{service_suffix}. Please try again."
         )
-    if flow in {"credential_deletion", "credential_delete", "delete_credential"}:
+    if flow in CREDENTIAL_DELETION_FLOWS:
         return (
             f"I couldn't delete your saved credentials{service_suffix}. "
             "Nothing was changed."

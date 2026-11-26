@@ -42,9 +42,10 @@ from typing import Any, ClassVar, Mapping
 
 from pydantic import BaseModel
 
-from secure_tool_broker.credential_transfer import renamed_credential_owners
+from secure_tool_broker.credential_transfer import renamed_credential_owners, upgrade_v2_to_v3
 from team_transfer.errors import TransferError
 from team_transfer.sections import (
+    SECTION_UPGRADES,
     TEAM_ID_RENAMES,
     ExportSource,
     ImportContext,
@@ -164,7 +165,7 @@ def call_broker(
 
 class BrokerCredentialsSection:
     name: ClassVar[str] = SECTION_NAME
-    schema_version: ClassVar[int] = 2
+    schema_version: ClassVar[int] = 3
     encrypted: ClassVar[bool] = True
     after_start: ClassVar[bool] = True
     record_model: ClassVar[type[BaseModel]] = _record_model()
@@ -422,6 +423,7 @@ def _notify(config: Any, manifest: Any, person_id: str) -> bool:
 # The broker renames the decrypted records (``credential_transfer_api.decrypt_records``); the
 # review renames the unencrypted index with the same function through this registry.
 TEAM_ID_RENAMES[SECTION_NAME] = renamed_credential_owners
+SECTION_UPGRADES[(SECTION_NAME, 2, BrokerCredentialsSection.schema_version)] = upgrade_v2_to_v3
 
 
 __all__ = [

@@ -176,7 +176,7 @@
     {
       "filename": "CatalogCredential.schema.json",
       "model": "CatalogCredential",
-      "sha256": "5273865388059a661ee4ea6e1d7403609992fb44e4a784d396975ae3170069a4"
+      "sha256": "5eaf0074d512205746c936400c7aadc4775f221a2158f969fe8d45f07e6728cc"
     },
     {
       "filename": "StoredModelKey.schema.json",
@@ -325,7 +325,7 @@
         "StoredModelKey"
       ],
       "record_model": "BrokerCredentialsDocumentV1",
-      "schema_version": 2
+      "schema_version": 3
     }
   ]
 }

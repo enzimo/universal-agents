@@ -72,7 +72,16 @@ from secure_tool_broker.account_links import (
     used_by_text,
 )
 from custom_messages.contracts.access_v2 import AccountLinkRequestV1, LinkPurpose, PersonCredentialDeletionV1
-from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED
+from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED, CREDENTIAL_DELETION_FLOWS
+from secure_tool_broker.credential_collection_form import (
+    ExpiryFormState,
+    credential_collection_owner_scope,
+    credential_key_exists,
+    normalize_proposed_expiry,
+    parse_credential_collection_submission,
+    render_credential_collection_form,
+)
+from secure_tool_broker.credential_expiry import CredentialExpiryError
 from secure_tool_broker.credential_transfer_api import add_transfer_routes
 from secure_tool_broker.team_export_page import add_team_export_routes
 from secure_tool_broker.defaults import (
@@ -268,12 +277,6 @@ COMPLETED_CREDENTIAL_COLLECTION_STATUSES = {
 FAILED_CREDENTIAL_COLLECTION_STATUSES = {
     "credential_unavailable",
     "signup_failed",
-}
-
-CREDENTIAL_DELETION_FLOWS = {
-    "credential_deletion",
-    "credential_delete",
-    "delete_credential",
 }
 # The account link result page ends with this; the waiting agent hears the
 # outcome from the gateway.
@@ -1520,6 +1523,10 @@ class SecureToolBrokerService:
         if not request_payload["credential_key"]:
             raise web.HTTPBadRequest(text="credential_key is required.")
         if SecureToolBrokerService._is_credential_deletion_request(request_payload):
+            if request_payload.get("expires_at") is not None and str(request_payload.get("expires_at")).strip():
+                raise web.HTTPBadRequest(
+                    text="expires_at cannot be set on a credential deletion request."
+                )
             request_payload["flow"] = "credential_deletion"
             request_payload.setdefault(
                 "service_name",
@@ -1536,6 +1543,15 @@ class SecureToolBrokerService:
             )
             request_payload["fields"] = []
             return request_payload
+        if request_payload.get("expires_at") is not None:
+            try:
+                normalized_expiry = normalize_proposed_expiry(request_payload.get("expires_at"))
+            except CredentialExpiryError as exc:
+                raise web.HTTPBadRequest(text=exc.message) from exc
+            if normalized_expiry is None:
+                request_payload.pop("expires_at", None)
+            else:
+                request_payload["expires_at"] = normalized_expiry
         request_payload.setdefault(
             "display_name",
             request_payload.get("service_name") or request_payload["credential_key"],
@@ -1818,7 +1834,13 @@ class SecureToolBrokerService:
         )
 
     @staticmethod
-    def _render_credential_collection_form(session: CredentialCollectionSession) -> str:
+    def _render_credential_collection_form(
+        session: CredentialCollectionSession,
+        *,
+        error_message: str | None = None,
+        preserved_fields: dict[str, str] | None = None,
+        expiry_state: ExpiryFormState | None = None,
+    ) -> str:
         if SecureToolBrokerService._is_credential_deletion_request(
             session.request_payload
         ):
@@ -1829,114 +1851,24 @@ class SecureToolBrokerService:
             or request_payload.get("display_name")
             or "service"
         )
-        credential_key = str(request_payload.get("credential_key") or "")
-        countdown_html = render_session_countdown(session.expires_at)
-        signup_html = _render_manual_signup_action(
+        scope = credential_collection_owner_scope(
             request_payload,
-            service_name=service_name,
+            team_id=session.tool_context.team_id,
+            canonical_user_id=session.tool_context.canonical_user_id,
         )
-        inputs: list[str] = []
-        for spec in SecureToolBrokerService._credential_field_specs(request_payload):
-            name = str(spec.get("name") or spec.get("field_ref") or "").strip()
-            if not name:
-                continue
-            kind = str(spec.get("kind") or "custom").strip()
-            label = str(spec.get("label") or name.replace("_", " ").title()).strip()
-            value = str(spec.get("value") or "")
-            value_source = str(spec.get("value_source") or "").strip().lower()
-            is_secret = SecureToolBrokerService._credential_form_field_is_secret(spec)
-            if is_secret and value_source == "store_generated_secret":
-                inputs.append(
-                    '<div class="note">'
-                    f"<strong>{html.escape(label)}</strong> will be generated inside the credential store. "
-                    "The generated value is never shown to the agent."
-                    "</div>"
-                )
-                continue
-            form_spec = spec.get("form") if isinstance(spec.get("form"), dict) else {}
-            input_control = (
-                str(
-                    form_spec.get("input_control")
-                    or ("password" if is_secret else "text")
-                )
-                .strip()
-                .lower()
-            )
-            if input_control not in {"text", "password", "textarea", "file"}:
-                input_control = "password" if is_secret else "text"
-            input_type = (
-                "password"
-                if input_control == "password" or is_secret and input_control == "text"
-                else "text"
-            )
-            autocomplete = str(
-                form_spec.get("autocomplete")
-                or ("new-password" if is_secret else "username")
-            ).strip()
-            required = " required" if bool(spec.get("required", True)) else ""
-            help_text = str(
-                form_spec.get("help_text") or spec.get("description") or ""
-            ).strip()
-            help_html = (
-                render_markdown_text(help_text, class_name="muted") if help_text else ""
-            )
-            if input_control == "textarea":
-                inputs.append(
-                    "<div>"
-                    f'<label for="field__{html.escape(name)}">{html.escape(label)}'
-                    f' <span class="muted">({html.escape(kind)})</span></label>'
-                    f'<textarea id="field__{html.escape(name)}" name="field__{html.escape(name)}" '
-                    f'autocomplete="{html.escape(autocomplete)}"{required}>{html.escape(value)}</textarea>'
-                    f"{help_html}</div>"
-                )
-                continue
-            if input_control == "file":
-                accept = ",".join(
-                    str(item)
-                    for item in form_spec.get("accept", [])
-                    if str(item).strip()
-                )
-                accept_attr = f' accept="{html.escape(accept)}"' if accept else ""
-                inputs.append(
-                    "<div>"
-                    f'<label for="field__{html.escape(name)}">{html.escape(label)}'
-                    f' <span class="muted">({html.escape(kind)})</span></label>'
-                    f'<input id="field__{html.escape(name)}" name="field__{html.escape(name)}" '
-                    f'type="file" autocomplete="off"{accept_attr}{required}>'
-                    f"{help_html}</div>"
-                )
-                continue
-            inputs.append(
-                "<div>"
-                f'<label for="field__{html.escape(name)}">{html.escape(label)}'
-                f' <span class="muted">({html.escape(kind)})</span></label>'
-                + render_credential_input(
-                    input_id=f"field__{name}",
-                    input_type=input_type,
-                    autocomplete=autocomplete,
-                    value=value,
-                    placeholder=str(spec.get("placeholder") or "").strip(),
-                    required=bool(required),
-                )
-                + f"{help_html}</div>"
-            )
-        body = f"""
-  <section class="content-panel">
-    <p class="eyebrow">Secure Credential Collection</p>
-    <h1>Submit credentials for {html.escape(service_name)}.</h1>
-    <p class="lede broker-note">This form sends sensitive fields directly to the secure broker. Agents receive only redacted completion metadata.</p>
-    {signup_html}
-  </section>
-  <section class="content-panel">
-    <p>Credential key: <code>{html.escape(credential_key)}</code></p>
-    {countdown_html}
-    <form method="post" enctype="multipart/form-data">
-      {"".join(inputs)}
-      <button type="submit">Store Credential</button>
-    </form>
-  </section>"""
-        return render_broker_auth_page(
-            "Secure Credential Collection", body, script=SECRET_INPUT_TOGGLE_SCRIPT, decline=True
+        return render_credential_collection_form(
+            request_payload=request_payload,
+            session_expires_at=session.expires_at,
+            field_specs=SecureToolBrokerService._credential_field_specs(request_payload),
+            is_secret_field=SecureToolBrokerService._credential_form_field_is_secret,
+            signup_html=_render_manual_signup_action(request_payload, service_name=service_name),
+            key_exists=credential_key_exists(
+                str(request_payload.get("credential_key") or ""),
+                scope=scope,
+            ),
+            error_message=error_message,
+            preserved_fields=preserved_fields,
+            expiry_state=expiry_state,
         )
 
     async def _handle_credential_collection_form(
@@ -2087,26 +2019,22 @@ class SecureToolBrokerService:
                 text=self._credential_collection_success_html(session),
                 content_type="text/html",
             )
-        submitted_fields: dict[str, str] = {}
-        for key, value in form.items():
-            if not str(key).startswith("field__"):
-                continue
-            field_name = str(key).removeprefix("field__")
-            if isinstance(value, web.FileField):
-                raw_bytes = value.file.read()
-                if len(raw_bytes) > self._credential_collection_max_file_bytes():
-                    raise web.HTTPRequestEntityTooLarge(
-                        max_size=self._credential_collection_max_file_bytes(),
-                        actual_size=len(raw_bytes),
-                    )
-                try:
-                    submitted_fields[field_name] = raw_bytes.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    raise web.HTTPBadRequest(
-                        text="Uploaded credential files must be UTF-8 text."
-                    ) from exc
-            else:
-                submitted_fields[field_name] = str(value)
+        parsed = parse_credential_collection_submission(
+            form,
+            request_payload=session.request_payload,
+            max_file_bytes=self._credential_collection_max_file_bytes(),
+        )
+        if parsed.expiry_error is not None:
+            return web.Response(
+                text=self._render_credential_collection_form(
+                    session,
+                    error_message=parsed.expiry_error,
+                    preserved_fields=parsed.submitted_fields,
+                    expiry_state=parsed.expiry_state,
+                ),
+                content_type="text/html",
+                status=400,
+            )
         claim_credential_collection_submission(
             session,
             prune_expired=self._prune_credential_collection_sessions,
@@ -2115,15 +2043,15 @@ class SecureToolBrokerService:
             session,
             collect_credential,
             session.request_payload,
-            submitted_fields,
+            parsed.submitted_fields,
             context=session.tool_context,
-            scope=(
-                CredentialOwnerScope.team(session.tool_context.team_id or "")
-                if session.request_payload.get("owner_scope_kind") == "team"
-                else CredentialOwnerScope.user(
-                    session.tool_context.canonical_user_id or ""
-                )
+            scope=credential_collection_owner_scope(
+                session.request_payload,
+                team_id=session.tool_context.team_id,
+                canonical_user_id=session.tool_context.canonical_user_id,
             ),
+            expires_at=parsed.resolved_expires_at,
+            allow_expiry_change=True,
             on_result=lambda done: record_credential_form_result(session, done, stored_status="credential_stored"),
             log_ref=f"credential_collection {session_id[:12]}",
         )
@@ -2136,15 +2064,13 @@ class SecureToolBrokerService:
         )
         if result.status != "success":
             details = redact_text(result.error or "Credential collection failed.")
-            body = (
-                '<section class="content-panel">'
-                '<p class="eyebrow">Secure Credential Collection</p>'
-                "<h1>Credential submission failed.</h1>"
-                f"{render_markdown_text(details, class_name='lede')}"
-                "</section>"
-            )
             return web.Response(
-                text=render_broker_auth_page("Credential Submission Failed", body),
+                text=self._render_credential_collection_form(
+                    session,
+                    error_message=details,
+                    preserved_fields=parsed.submitted_fields,
+                    expiry_state=parsed.expiry_state,
+                ),
                 content_type="text/html",
                 status=400,
             )

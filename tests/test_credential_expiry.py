@@ -13,12 +13,14 @@ from pydantic import ValidationError
 
 from assistant_gateway.application.credential_workflow import GatewayCredentialWorkflow
 from assistant_gateway.application.secure_results import SendOutcome
+from custom_messages.contracts.access_v2 import REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
 from custom_messages.contracts.credentials_v1 import (
+    CREDENTIAL_DELETION_FLOWS,
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
 )
 from custom_messages.wire import models as wire_models
-from secure_tool_broker import credential_catalog
+from secure_tool_broker import credential_catalog, credential_diagnostics
 from secure_tool_broker.credential_catalog import (
     CatalogCredential,
     CredentialOwnerScope,
@@ -28,6 +30,8 @@ from secure_tool_broker.credential_catalog import (
     register_existing_source,
 )
 from secure_tool_broker.credential_expiry import (
+    ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+    CREDENTIAL_EXPIRED,
     CREDENTIAL_EXPIRY_FORM_ONLY,
     CREDENTIAL_EXPIRY_INVALID,
     CREDENTIAL_EXPIRY_TOO_SOON,
@@ -388,6 +392,8 @@ def test_sealbox_write_applies_ttl_to_every_record_and_overwrite_clears_expiry(
 
     def fake_run_sealbox(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         commands.append(list(command))
+        if command[:2] == ["password", "generate"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"password": "generated-temp-pw"}', stderr="")
         return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
 
     monkeypatch.setattr(credential_catalog, "run_sealbox", fake_run_sealbox)
@@ -403,6 +409,7 @@ def test_sealbox_write_applies_ttl_to_every_record_and_overwrite_clears_expiry(
         },
         scope=OWNER_SCOPE,
         expires_at=expiry,
+        allow_expiry_change=True,
         now=BASE_NOW,
     )
     assert result.status == "success", result.error
@@ -418,7 +425,7 @@ def test_sealbox_write_applies_ttl_to_every_record_and_overwrite_clears_expiry(
     saved = load_catalog(scope=OWNER_SCOPE).credentials["temp_service"]
     assert saved.expires_at == "2026-03-07T12:01:30Z"
 
-    # Overwriting without expires_at clears expires_at and writes without --ttl (A1).
+    # Overwriting without expires_at via form/trusted storage clears expires_at and writes without --ttl (A1).
     commands.clear()
     overwrite = collect_credential(
         _sealbox_request(),
@@ -430,6 +437,7 @@ def test_sealbox_write_applies_ttl_to_every_record_and_overwrite_clears_expiry(
         },
         scope=OWNER_SCOPE,
         expires_at=None,
+        allow_expiry_change=True,
     )
     assert overwrite.status == "success", overwrite.error
     assert "expires_at" not in overwrite.content
@@ -449,6 +457,8 @@ def test_storage_accepts_ten_second_ttl_and_refuses_non_sealbox_source(
 
     def fake_run_sealbox(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         commands.append(list(command))
+        if command[:2] == ["password", "generate"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"password": "generated-temp-pw"}', stderr="")
         return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
 
     monkeypatch.setattr(credential_catalog, "run_sealbox", fake_run_sealbox)
@@ -465,6 +475,7 @@ def test_storage_accepts_ten_second_ttl_and_refuses_non_sealbox_source(
         {"token": "short-lived"},
         scope=OWNER_SCOPE,
         expires_at=BASE_NOW + timedelta(seconds=10),
+        allow_expiry_change=True,
         now=BASE_NOW,
     )
     assert short_result.status == "success", short_result.error
@@ -484,6 +495,7 @@ def test_storage_accepts_ten_second_ttl_and_refuses_non_sealbox_source(
         {"username": "alice", "password": "pw", "api_token": "tok", "auth_file": "file"},
         scope=OWNER_SCOPE,
         expires_at=BASE_NOW + timedelta(hours=1),
+        allow_expiry_change=True,
         now=BASE_NOW,
     )
     assert non_sealbox.status == "error"
@@ -498,6 +510,8 @@ def test_c01_agent_actions_cannot_set_expiry_and_request_payload_expiry_is_ignor
 
     def fake_run_sealbox(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         commands.append(list(command))
+        if command[:2] == ["password", "generate"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"password": "generated-temp-pw"}', stderr="")
         return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
 
     monkeypatch.setattr(credential_catalog, "run_sealbox", fake_run_sealbox)
@@ -575,3 +589,228 @@ def test_catalog_credential_validates_expires_at() -> None:
 
     with pytest.raises(ValidationError):
         CatalogCredential(display_name="Bad", purpose="Test", expires_at="not-a-date")
+
+
+# --- C10 / Lead Decision (1): agent actions never clear or replace an expiry --
+
+
+def test_c10_agent_collect_over_temporary_key_keeps_expiry_and_remaining_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run_sealbox(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(list(command))
+        if command[:2] == ["password", "generate"]:
+            return subprocess.CompletedProcess(command, 0, stdout='{"password": "generated-temp-pw"}', stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    monkeypatch.setattr(credential_catalog, "run_sealbox", fake_run_sealbox)
+
+    # Person stores a temporary credential via the form (allow_expiry_change=True).
+    now_start = datetime.now(timezone.utc).replace(microsecond=0)
+    expiry = now_start + timedelta(minutes=30)
+    saved = collect_credential(
+        _sealbox_request(),
+        {"username": "alice", "password": "p1", "api_token": "t1", "auth_file": "f1"},
+        scope=OWNER_SCOPE,
+        expires_at=expiry,
+        allow_expiry_change=True,
+        now=now_start,
+    )
+    assert saved.status == "success", saved.error
+    expected_iso = format_utc_timestamp(expiry)
+    assert saved.content["expires_at"] == expected_iso
+
+    # Agent runs credential.collect with store_generated_secret and no expires_at:
+    # must preserve the person's expires_at and pass remaining --ttl on every Sealbox write.
+    commands.clear()
+    agent_write = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "temp_service",
+                    "display_name": "Temporary Service",
+                    "purpose": "Agent rotated generated secret",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {
+                            "name": "password",
+                            "kind": "password",
+                            "visibility": "secret",
+                            "value_source": "store_generated_secret",
+                        }
+                    ],
+                }
+            },
+        ),
+        TOOL_CONTEXT,
+    )
+    assert agent_write.status == "success", agent_write.error
+    assert agent_write.content["expires_at"] == expected_iso
+    assert agent_write.content["metadata"]["expires_at"] == expected_iso
+    assert load_catalog(scope=OWNER_SCOPE).credentials["temp_service"].expires_at == expected_iso
+    write_commands = [cmd for cmd in commands if cmd[:2] in (["credential", "set"], ["secret", "set"])]
+    assert write_commands, "expected Sealbox write command"
+    for cmd in write_commands:
+        ttl_index = cmd.index("--ttl")
+        ttl_val = int(cmd[ttl_index + 1])
+        assert 1 <= ttl_val <= 1800
+
+    # Agent collect over a temporary key with a non-Sealbox target is refused and writes nothing.
+    commands.clear()
+    non_sealbox = collect_credential(
+        _sealbox_request(store_target="bitwarden"),
+        {"username": "alice", "password": "p2", "api_token": "t2", "auth_file": "f2"},
+        scope=OWNER_SCOPE,
+        allow_expiry_change=False,
+        now=now_start + timedelta(minutes=5),
+    )
+    assert non_sealbox.status == "error"
+    assert non_sealbox.content["error_code"] == CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE
+    assert commands == []
+    assert load_catalog(scope=OWNER_SCOPE).credentials["temp_service"].expires_at == expected_iso
+
+    # Agent collect after expires_at has passed is refused with CREDENTIAL_EXPIRED and writes nothing.
+    commands.clear()
+    expired_overwrite = collect_credential(
+        {
+            "credential_key": "temp_service",
+            "display_name": "Temporary Service",
+            "purpose": "Late overwrite",
+            "store_target": "sealbox",
+            "fields": [
+                {
+                    "name": "password",
+                    "kind": "password",
+                    "visibility": "secret",
+                    "value_source": "store_generated_secret",
+                }
+            ],
+        },
+        {},
+        scope=OWNER_SCOPE,
+        allow_expiry_change=False,
+        now=expiry + timedelta(seconds=1),
+    )
+    assert expired_overwrite.status == "error"
+    assert expired_overwrite.content["error_code"] == CREDENTIAL_EXPIRED
+    assert commands == []
+    assert load_catalog(scope=OWNER_SCOPE).credentials["temp_service"].expires_at == expected_iso
+
+
+def test_c10_register_existing_source_refuses_temporary_key_active_or_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_sealbox(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    monkeypatch.setattr(credential_catalog, "run_sealbox", fake_run_sealbox)
+    monkeypatch.setattr(credential_catalog, "_resolve_source_ref", lambda *_a, **_k: "secret-val")
+
+    # Active temporary key: refused with CREDENTIAL_EXPIRY_FORM_ONLY and catalog unchanged.
+    active_expiry = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
+    saved = collect_credential(
+        _sealbox_request(),
+        {"username": "alice", "password": "p1", "api_token": "t1", "auth_file": "f1"},
+        scope=OWNER_SCOPE,
+        expires_at=active_expiry,
+        allow_expiry_change=True,
+    )
+    assert saved.status == "success"
+    expected_iso = format_utc_timestamp(active_expiry)
+
+    refused_active = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "temp_service",
+                "field_name": "api_token",
+                "source": "sealbox",
+                "item_id": "team-nats-agents:default:temp_service:api_token",
+                "field_ref": "value",
+            },
+        ),
+        TOOL_CONTEXT,
+    )
+    assert refused_active.status == "error"
+    assert refused_active.content["error_code"] == CREDENTIAL_EXPIRY_FORM_ONLY
+    assert load_catalog(scope=OWNER_SCOPE).credentials["temp_service"].expires_at == expected_iso
+
+    # Already-expired temporary key (not yet removed by janitor): also refused.
+    past_expiry = BASE_NOW - timedelta(hours=1)
+    past_cred = CatalogCredential(
+        display_name="Past Temp",
+        purpose="Expired",
+        expires_at=format_utc_timestamp(past_expiry),
+    )
+    credential_catalog._save_catalog_credential("expired_temp", past_cred, scope=OWNER_SCOPE)
+    refused_expired = register_existing_source(
+        {
+            "credential_key": "expired_temp",
+            "field_name": "api_token",
+            "source": "sealbox",
+            "item_id": "team-nats-agents:default:expired_temp:api_token",
+            "field_ref": "value",
+        },
+        scope=OWNER_SCOPE,
+    )
+    assert refused_expired.status == "error"
+    assert refused_expired.content["error_code"] == CREDENTIAL_EXPIRY_FORM_ONLY
+    assert load_catalog(scope=OWNER_SCOPE).credentials["expired_temp"].expires_at == format_utc_timestamp(past_expiry)
+
+
+# --- C12 & C13: single-definition constants, OverflowError, whole seconds -----
+
+
+def test_c12_shared_codes_and_deletion_flows_have_single_definitions() -> None:
+    from secure_tool_broker import service as broker_service
+
+    assert ACCOUNT_LINK_CREDENTIAL_EXPIRED == REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
+    assert credential_diagnostics.ACCOUNT_LINK_CREDENTIAL_EXPIRED == REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
+    assert CREDENTIAL_EXPIRED == credential_diagnostics.CREDENTIAL_EXPIRED
+    assert broker_service.CREDENTIAL_DELETION_FLOWS is CREDENTIAL_DELETION_FLOWS
+    assert "delete" not in CREDENTIAL_DELETION_FLOWS
+
+
+def test_c13_overflow_dates_raise_expiry_error_and_stored_times_drop_microseconds() -> None:
+    with pytest.raises(CredentialExpiryError) as high_exc:
+        resolve_form_expiry(
+            enabled=True,
+            when=CUSTOM_EXPIRY_OPTION,
+            custom_local="9999-12-31T23:59",
+            tz_offset_minutes_behind_utc="720",
+            now=BASE_NOW,
+        )
+    assert high_exc.value.code == CREDENTIAL_EXPIRY_INVALID
+
+    with pytest.raises(CredentialExpiryError) as low_exc:
+        resolve_form_expiry(
+            enabled=True,
+            when=CUSTOM_EXPIRY_OPTION,
+            custom_local="0001-01-01T00:00",
+            tz_offset_minutes_behind_utc="-840",
+            now=BASE_NOW,
+        )
+    assert low_exc.value.code == CREDENTIAL_EXPIRY_INVALID
+
+    with pytest.raises(CredentialExpiryError) as zone_exc:
+        resolve_form_expiry(
+            enabled=True,
+            when=CUSTOM_EXPIRY_OPTION,
+            custom_local="9999-12-31T23:59",
+            timezone_name="America/New_York",
+            now=BASE_NOW,
+        )
+    assert zone_exc.value.code == CREDENTIAL_EXPIRY_INVALID
+
+    now_with_micros = datetime(2026, 11, 26, 6, 9, 21, 92643, tzinfo=timezone.utc)
+    preset = resolve_form_expiry(enabled=True, when="15m", now=now_with_micros)
+    assert preset is not None
+    assert preset.microsecond == 0
+    assert format_utc_timestamp(preset) == "2026-11-26T06:24:21Z"
+    assert remaining_ttl_seconds(preset, now=now_with_micros) == 900
+    assert format_utc_timestamp(now_with_micros) == "2026-11-26T06:09:21Z"

@@ -620,6 +620,16 @@ _IMPORTERS: dict[str, Callable[[Any], None]] = {
 }
 
 
+def upgrade_v2_to_v3(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert version 2 ``broker_credentials`` records to version 3.
+
+    Version 3 adds optional ``expires_at`` to ``CatalogCredential``; version 2
+    catalog entries have no expiry and remain valid unchanged.
+    """
+
+    return list(records)
+
+
 def owners_with_imports(outcomes: list[CredentialOutcomeV1]) -> list[str]:
     """People who had something stored for them (they get an Inbox notice)."""
 
@@ -641,4 +651,5 @@ __all__ = [
     "owners",
     "owners_with_imports",
     "renamed_credential_owners",
+    "upgrade_v2_to_v3",
 ]

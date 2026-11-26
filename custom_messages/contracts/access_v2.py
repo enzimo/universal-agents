@@ -850,6 +850,7 @@ class ScheduleRunIdentityV1(AccessContractModel):
 # and the MCP runtime all report these values.
 REASON_ACCOUNT_LINK_MISSING = "account_link_missing"
 REASON_ACCOUNT_LINK_OUTDATED = "account_link_outdated"
+REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED = "account_link_credential_expired"
 REASON_GATE_LINK_MISSING = "gate_link_missing"
 
 
@@ -1852,6 +1853,7 @@ __all__ = [
     "AccessReviewChoice",
     "REASON_ACCOUNT_LINK_MISSING",
     "REASON_ACCOUNT_LINK_OUTDATED",
+    "REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED",
     "REASON_GATE_LINK_MISSING",
     "AccountLinkRequestV1",
     "ChangeApprovalMode",

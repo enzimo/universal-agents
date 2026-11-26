@@ -76,6 +76,7 @@ from assistant_gateway.domain.request_state import CredentialCollectionRecord
 from assistant_gateway.ports.repositories import CredentialCollectionRepository, SessionRepository, ToolSetupRepository
 from custom_messages.contracts.credentials_v1 import (
     CREDENTIAL_DECLINED,
+    CREDENTIAL_DELETION_FLOWS,
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
     SecureCredentialResultStatus,
@@ -757,11 +758,7 @@ class GatewayCredentialWorkflow:
     def _is_deletion_request(
         request_content: SecureCredentialCollectionRequest,
     ) -> bool:
-        return str(request_content.flow or "").strip().lower() in {
-            "credential_deletion",
-            "credential_delete",
-            "delete_credential",
-        }
+        return str(request_content.flow or "").strip().lower() in CREDENTIAL_DELETION_FLOWS
 
     async def _collection_start_failure(
         self,

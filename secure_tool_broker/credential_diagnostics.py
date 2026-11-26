@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from custom_messages.contracts.access_v2 import REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
+
 CREDENTIAL_NOT_FOUND = "credential_not_found"
 CREDENTIAL_FIELD_MISSING = "credential_field_missing"
 CREDENTIAL_SOURCES_UNCONFIGURED = "credential_sources_unconfigured"
@@ -10,7 +12,7 @@ CREDENTIAL_VALUE_UNAVAILABLE = "credential_value_unavailable"
 CREDENTIAL_FIELD_NOT_SECRET = "credential_field_not_secret"
 CREDENTIAL_UNAVAILABLE = "credential_unavailable"
 CREDENTIAL_EXPIRED = "credential_expired"
-ACCOUNT_LINK_CREDENTIAL_EXPIRED = "account_link_credential_expired"
+ACCOUNT_LINK_CREDENTIAL_EXPIRED = REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
 
 # Codes describe observations, not guesses about upstream authentication.
 _REMEDIATION = {

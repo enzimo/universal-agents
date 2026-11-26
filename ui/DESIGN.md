@@ -277,6 +277,32 @@ onboarding's server, titled **Choose what to import**, with these differences:
   page (`?view=card`) drops the header, mesh and countdown and keeps that
   footer; the long-lived `/auth model` and `/upgrade` pages keep their own
   **Close** instead of Decline.
+- The broker's credential collection form includes a temporary-credential
+  expiry control above **Store Credential**, matching the frosted broker style
+  and the three-column **Keep for later tasks** + **How long** grid (checkbox,
+  wrapping label, inline select, with muted helper text aligned under the
+  label) on both the standalone page and Web Chat's inline card view
+  (`?view=card`):
+  - **Delete automatically** checkbox (unticked by default). When ticked, a
+    **When** select appears with seven choices: **In 15 minutes**, **In 1
+    hour**, **In 1 day**, **In 7 days**, **In 1 month** (30 days), **In 3
+    months** (90 days), and **Choose a date and time**.
+  - Choosing **Choose a date and time** reveals a local date-and-time input
+    (`datetime-local`) and sends the browser's IANA time zone and the selected
+    date-time's UTC offset so the broker converts it accurately across daylight
+    saving changes. Preset durations are computed by the broker at submission.
+  - When the collection request proposed `expires_at`, the box starts ticked
+    with **Choose a date and time** pre-filled in the browser's local time; the
+    person can change or untick it, and the submitted form controls are
+    authoritative.
+  - When the credential key already exists in the owner's catalog, the expiry
+    area states that setting a deletion time deletes the whole credential,
+    including earlier versions, at that time.
+  - The form posts to `#credential-form`; past times, times less than 5 minutes
+    away, invalid local times, and unsupported non-Sealbox write sources
+    re-render the form with a red `.status-error` (`role="alert"`) at the top
+    of the form (per **Errors and Results**), preserving non-secret inputs and
+    the expiry selection while clearing secret fields.
 - The broker's account link form states whose account it is, a **Used by**
   line naming the agents that may use the tool, where the credential goes and
   how it is sent. It then offers two parts, each a small form with its own

@@ -11,6 +11,11 @@ import math
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from secure_tool_broker.credential_diagnostics import (
+    ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+    CREDENTIAL_EXPIRED,
+)
+
 # The form requires a chosen deletion time to be at least 5 minutes in the
 # future. Storage paths (transfer import, automated capture, live tests) only
 # require a timestamp strictly in the future so short TTLs remain possible.
@@ -39,12 +44,10 @@ EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
     (CUSTOM_EXPIRY_OPTION, "Choose a date and time"),
 )
 
-CREDENTIAL_EXPIRED = "credential_expired"
 CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE = "credential_expiry_unsupported_source"
 CREDENTIAL_EXPIRY_FORM_ONLY = "credential_expiry_form_only"
 CREDENTIAL_EXPIRY_TOO_SOON = "credential_expiry_too_soon"
 CREDENTIAL_EXPIRY_INVALID = "credential_expiry_invalid"
-ACCOUNT_LINK_CREDENTIAL_EXPIRED = "account_link_credential_expired"
 
 # IANA offsets span UTC-12 to UTC+14; allow +-14h (840 minutes).
 _MAX_UTC_OFFSET_MINUTES = 14 * 60
@@ -76,7 +79,13 @@ def parse_utc_timestamp(value: datetime | str) -> datetime:
                 CREDENTIAL_EXPIRY_INVALID,
                 "Expiry timestamp must include a time zone.",
             )
-        return value.astimezone(timezone.utc)
+        try:
+            return value.astimezone(timezone.utc)
+        except OverflowError as exc:
+            raise CredentialExpiryError(
+                CREDENTIAL_EXPIRY_INVALID,
+                "Enter a valid deletion date and time.",
+            ) from exc
     if not isinstance(value, str):
         raise CredentialExpiryError(
             CREDENTIAL_EXPIRY_INVALID,
@@ -100,13 +109,24 @@ def parse_utc_timestamp(value: datetime | str) -> datetime:
             CREDENTIAL_EXPIRY_INVALID,
             "Expiry timestamp must include a time zone offset or 'Z'.",
         )
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except OverflowError as exc:
+        raise CredentialExpiryError(
+            CREDENTIAL_EXPIRY_INVALID,
+            "Enter a valid deletion date and time.",
+        ) from exc
 
 
 def format_utc_timestamp(value: datetime | str) -> str:
-    """Format a timezone-aware timestamp as a canonical UTC ISO-8601 string ending in Z."""
+    """Format a timezone-aware timestamp as whole-second UTC ISO-8601 ending in Z.
 
-    parsed = parse_utc_timestamp(value)
+    Cutting sub-second microseconds down to the whole second keeps stored
+    timestamps aligned with Sealbox's whole-second TTLs so the catalog expiry
+    never lies after the Sealbox expiry.
+    """
+
+    parsed = parse_utc_timestamp(value).replace(microsecond=0)
     return parsed.isoformat().replace("+00:00", "Z")
 
 
@@ -142,9 +162,9 @@ def validate_storage_expiry(
     *,
     now: datetime | None = None,
 ) -> datetime:
-    """Validate an expiry timestamp for broker storage (must be strictly in the future)."""
+    """Validate an expiry timestamp for broker storage (strictly in the future, whole seconds)."""
 
-    parsed = parse_utc_timestamp(expires_at)
+    parsed = parse_utc_timestamp(expires_at).replace(microsecond=0)
     current = _utc_now(now)
     if parsed <= current:
         raise CredentialExpiryError(
@@ -160,9 +180,9 @@ def validate_form_expiry(
     now: datetime | None = None,
     min_lead_seconds: int = MIN_EXPIRY_LEAD_SECONDS,
 ) -> datetime:
-    """Validate an expiry timestamp chosen on the secure form (>= 5 minutes from now)."""
+    """Validate an expiry timestamp chosen on the secure form (>= 5 minutes from now, whole seconds)."""
 
-    parsed = parse_utc_timestamp(expires_at)
+    parsed = parse_utc_timestamp(expires_at).replace(microsecond=0)
     current = _utc_now(now)
     remaining = (parsed - current).total_seconds()
     if remaining <= 0:
@@ -267,7 +287,13 @@ def resolve_form_expiry(
     if offset_minutes is not None:
         # JS getTimezoneOffset() is (UTC - local) in minutes: e.g. UTC-5 -> +300,
         # UTC+2 -> -120. Adding offset_minutes to wall-clock local time yields UTC.
-        utc_dt = (local_dt + timedelta(minutes=offset_minutes)).replace(tzinfo=timezone.utc)
+        try:
+            utc_dt = (local_dt + timedelta(minutes=offset_minutes)).replace(tzinfo=timezone.utc)
+        except OverflowError as exc:
+            raise CredentialExpiryError(
+                CREDENTIAL_EXPIRY_INVALID,
+                "Enter a valid deletion date and time.",
+            ) from exc
         return validate_form_expiry(utc_dt, now=current)
 
     zone_name = str(timezone_name or "").strip()
@@ -279,7 +305,13 @@ def resolve_form_expiry(
                 CREDENTIAL_EXPIRY_INVALID,
                 "Could not recognize your browser's time zone. Choose a preset duration or try again.",
             ) from exc
-        utc_dt = local_dt.replace(tzinfo=tz).astimezone(timezone.utc)
+        try:
+            utc_dt = local_dt.replace(tzinfo=tz).astimezone(timezone.utc)
+        except OverflowError as exc:
+            raise CredentialExpiryError(
+                CREDENTIAL_EXPIRY_INVALID,
+                "Enter a valid deletion date and time.",
+            ) from exc
         return validate_form_expiry(utc_dt, now=current)
 
     raise CredentialExpiryError(
@@ -294,3 +326,26 @@ def format_expiry_label(expires_at: datetime | str) -> str:
 
     parsed = parse_utc_timestamp(expires_at)
     return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
+__all__ = [
+    "ACCOUNT_LINK_CREDENTIAL_EXPIRED",
+    "CREDENTIAL_EXPIRED",
+    "CREDENTIAL_EXPIRY_FORM_ONLY",
+    "CREDENTIAL_EXPIRY_INVALID",
+    "CREDENTIAL_EXPIRY_TOO_SOON",
+    "CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE",
+    "CUSTOM_EXPIRY_OPTION",
+    "CredentialExpiryError",
+    "EXPIRY_PRESET_OPTIONS",
+    "EXPIRY_PRESET_SECONDS",
+    "MIN_EXPIRY_LEAD_SECONDS",
+    "format_expiry_label",
+    "format_utc_timestamp",
+    "is_expired",
+    "parse_utc_timestamp",
+    "remaining_ttl_seconds",
+    "resolve_form_expiry",
+    "validate_form_expiry",
+    "validate_storage_expiry",
+]

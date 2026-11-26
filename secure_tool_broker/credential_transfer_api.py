@@ -23,15 +23,18 @@ from secure_tool_broker.credential_transfer import (
     export_credentials,
     import_credentials,
     renamed_credential_owners,
+    upgrade_v2_to_v3,
 )
 from secure_tool_broker.defaults import CREDENTIAL_TRANSFER_EXPORT_ROUTE, CREDENTIAL_TRANSFER_IMPORT_ROUTE
+from team_transfer.sections import SECTION_UPGRADES
 
 BROKER_CREDENTIALS_SECTION = "broker_credentials"
 # When this changes, register the conversion from the previous release's
 # version (team_transfer.sections.SECTION_UPGRADES) in this module too: the
 # broker reads the records here (decrypt_records) and does not import
 # team_transfer.broker_credentials.
-BROKER_CREDENTIALS_SCHEMA_VERSION = 2
+BROKER_CREDENTIALS_SCHEMA_VERSION = 3
+SECTION_UPGRADES[(BROKER_CREDENTIALS_SECTION, 2, BROKER_CREDENTIALS_SCHEMA_VERSION)] = upgrade_v2_to_v3
 
 
 class _Model(BaseModel):

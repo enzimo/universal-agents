@@ -849,7 +849,7 @@ async def test_credential_submission_accepted_before_expiry_cannot_be_expired(
     loop = asyncio.get_running_loop()
     release_operation = Event()
 
-    def fake_collect(request_payload, submitted_fields, *, context, scope):
+    def fake_collect(request_payload, submitted_fields, *, context, scope, **_kwargs):
         assert request_payload["credential_key"] == "smith_bank_login"
         assert submitted_fields == {
             "username": "smith-user",
@@ -2698,7 +2698,7 @@ async def test_empty_collection_fields_fall_back_to_username_password_form(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_collect(request_payload, submitted_fields, *, context, scope):
+    def fake_collect(request_payload, submitted_fields, *, context, scope, **_kwargs):
         assert context.canonical_user_id == TEST_CANONICAL_USER_ID
         assert context.principal_type == "user"
         assert scope == CredentialOwnerScope.user(TEST_CANONICAL_USER_ID)
@@ -2777,7 +2777,7 @@ async def test_manual_fallback_form_stores_user_submitted_credentials(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_collect(request_payload, submitted_fields, *, context, scope):
+    def fake_collect(request_payload, submitted_fields, *, context, scope, **_kwargs):
         assert context.canonical_user_id == TEST_CANONICAL_USER_ID
         assert context.principal_type == "user"
         assert scope == CredentialOwnerScope.user(TEST_CANONICAL_USER_ID)

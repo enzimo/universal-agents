@@ -32,6 +32,7 @@ from custom_messages.contracts.access_v2 import (
 from env_secrets import get_env_with_file_fallback
 from secure_tool_broker.bitwarden_cli import ensure_bitwarden_server_configured_from_env
 from secure_tool_broker.credential_diagnostics import (
+    CREDENTIAL_EXPIRED,
     CREDENTIAL_FIELD_MISSING,
     CREDENTIAL_NOT_FOUND,
     CREDENTIAL_SOURCE_FAILED,
@@ -44,6 +45,7 @@ from secure_tool_broker.credential_expiry import (
     CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
     CredentialExpiryError,
     format_utc_timestamp,
+    is_expired,
     remaining_ttl_seconds,
     validate_storage_expiry,
 )
@@ -714,6 +716,22 @@ def _generate_password_with_bitwarden(*, length: int = DEFAULT_PASSWORD_LENGTH) 
     return password
 
 
+def resolve_credential_write_source(request_payload: Mapping[str, Any]) -> str:
+    """Resolve the effective write source name for a credential collection request."""
+
+    write_source = normalize_credential_source_name(
+        _string(request_payload.get("write_source"))
+        or _string(request_payload.get("store_target"))
+        or _string(os.getenv("SECURE_TOOL_BROKER_DEFAULT_CREDENTIAL_WRITE_SOURCE"))
+        or "sealbox"
+    )
+    if write_source == "default":
+        write_source = normalize_credential_source_name(
+            _string(os.getenv("SECURE_TOOL_BROKER_DEFAULT_CREDENTIAL_WRITE_SOURCE")) or "sealbox"
+        )
+    return write_source
+
+
 def collect_credential(
     request_payload: Mapping[str, Any],
     submitted_fields: Mapping[str, str],
@@ -721,33 +739,37 @@ def collect_credential(
     context: ToolContext | None = None,
     scope: CredentialOwnerScope | None = None,
     expires_at: datetime | str | None = None,
+    allow_expiry_change: bool = False,
     now: datetime | None = None,
 ) -> ToolResult:
     """Store a credential from trusted form submission or broker-side storage.
 
     ``expires_at`` is accepted only as an explicit keyword argument (never read
-    from ``request_payload``) so an agent's proposed expiry can only pre-fill
-    the secure form and never make a credential temporary without the person's
-    submission.
+    from ``request_payload``) and only when ``allow_expiry_change=True`` (set
+    by the secure form submission handler, team transfer import, and trusted
+    broker capture). When ``allow_expiry_change=False`` (the default, used by
+    agent-callable ``credential.collect``), overwriting a key that currently
+    has ``expires_at`` preserves that expiry and writes every Sealbox record
+    with the remaining TTL, or refuses if the expiry has already passed.
     """
 
     try:
         resolved_scope = _owner_scope(context=context, scope=scope)
         credential_key = _credential_key(request_payload.get("credential_key"))
-        write_source = normalize_credential_source_name(
-            _string(request_payload.get("write_source"))
-            or _string(request_payload.get("store_target"))
-            or _string(os.getenv("SECURE_TOOL_BROKER_DEFAULT_CREDENTIAL_WRITE_SOURCE"))
-            or "sealbox"
-        )
-        if write_source == "default":
-            write_source = normalize_credential_source_name(
-                _string(os.getenv("SECURE_TOOL_BROKER_DEFAULT_CREDENTIAL_WRITE_SOURCE")) or "sealbox"
-            )
+        write_source = resolve_credential_write_source(request_payload)
+        current_now = now if now is not None else datetime.now(timezone.utc)
         normalized_expires_at: str | None = None
         ttl_seconds: int | None = None
         if expires_at is not None:
-            current_now = now if now is not None else datetime.now(timezone.utc)
+            if not allow_expiry_change:
+                return ToolResult(
+                    status="error",
+                    error=(
+                        "Temporary credential expiry can only be changed through the secure "
+                        "broker form or trusted transfer import."
+                    ),
+                    content={"error_code": CREDENTIAL_EXPIRY_FORM_ONLY, "credential_key": credential_key},
+                )
             try:
                 validated_expiry = validate_storage_expiry(expires_at, now=current_now)
             except CredentialExpiryError as exc:
@@ -852,13 +874,45 @@ def collect_credential(
                 secret_fields[field_name] = value
             else:
                 public_fields[field_name] = value
-        for field_name, field_spec in pending_non_sealbox_generated:
-            generated = generate_password(write_source=write_source, field_spec=field_spec)
-            if isinstance(generated, ToolResult):
-                return generated
-            values[field_name] = generated
-            secret_fields[field_name] = generated
         with credential_key_lock(resolved_scope, credential_key):
+            if not allow_expiry_change:
+                existing_credential = load_catalog(scope=resolved_scope).credentials.get(credential_key)
+                if existing_credential is not None and existing_credential.expires_at is not None:
+                    lock_now = now if now is not None else datetime.now(timezone.utc)
+                    if is_expired(existing_credential.expires_at, now=lock_now):
+                        return ToolResult(
+                            status="error",
+                            error=(
+                                f"Temporary credential {credential_key} has already expired and cannot be "
+                                "overwritten without the person submitting the secure form."
+                            ),
+                            content={
+                                "error_code": CREDENTIAL_EXPIRED,
+                                "credential_key": credential_key,
+                                "expires_at": existing_credential.expires_at,
+                            },
+                        )
+                    if write_source != "sealbox":
+                        return ToolResult(
+                            status="error",
+                            error=(
+                                "Temporary credentials with an expiry are only supported for Sealbox storage, "
+                                f"not {write_source or '<empty>'}."
+                            ),
+                            content={
+                                "error_code": CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
+                                "write_source": write_source,
+                                "credential_key": credential_key,
+                            },
+                        )
+                    normalized_expires_at = existing_credential.expires_at
+                    ttl_seconds = remaining_ttl_seconds(existing_credential.expires_at, now=lock_now)
+            for field_name, field_spec in pending_non_sealbox_generated:
+                generated = generate_password(write_source=write_source, field_spec=field_spec)
+                if isinstance(generated, ToolResult):
+                    return generated
+                values[field_name] = generated
+                secret_fields[field_name] = generated
             write_result = write_credential_to_source(
                 write_source=write_source,
                 credential_key=credential_key,
@@ -919,6 +973,20 @@ def register_existing_source(
             )
         request_payload = _normalize_existing_source_request_payload(dict(raw_request or params))
         credential_key = _credential_key(request_payload.get("credential_key"))
+        precheck_existing = load_catalog(scope=resolved_scope).credentials.get(credential_key)
+        if precheck_existing is not None and precheck_existing.expires_at is not None:
+            return ToolResult(
+                status="error",
+                error=(
+                    f"Cannot register an existing source over temporary credential {credential_key}; "
+                    "temporary credentials can only be replaced or cleared through the secure broker form."
+                ),
+                content={
+                    "error_code": CREDENTIAL_EXPIRY_FORM_ONLY,
+                    "credential_key": credential_key,
+                    "expires_at": precheck_existing.expires_at,
+                },
+            )
         field_specs = _normalize_field_specs(request_payload.get("fields") or [])
         if not field_specs:
             return ToolResult(
@@ -990,6 +1058,19 @@ def register_existing_source(
         with credential_key_lock(resolved_scope, credential_key):
             catalog = load_catalog(scope=resolved_scope)
             existing_credential = catalog.credentials.get(credential_key)
+            if existing_credential is not None and existing_credential.expires_at is not None:
+                return ToolResult(
+                    status="error",
+                    error=(
+                        f"Cannot register an existing source over temporary credential {credential_key}; "
+                        "temporary credentials can only be replaced or cleared through the secure broker form."
+                    ),
+                    content={
+                        "error_code": CREDENTIAL_EXPIRY_FORM_ONLY,
+                        "credential_key": credential_key,
+                        "expires_at": existing_credential.expires_at,
+                    },
+                )
             now = utc_now_iso()
             credential = CatalogCredential(
                 display_name=_string(request_payload.get("display_name"))

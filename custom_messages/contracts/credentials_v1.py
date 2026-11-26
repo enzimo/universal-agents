@@ -14,8 +14,8 @@ from typing import Literal
 from typing import Optional
 
 
-_DELETION_FLOWS = frozenset(
-    {"credential_deletion", "credential_delete", "delete_credential", "delete"}
+CREDENTIAL_DELETION_FLOWS = frozenset(
+    {"credential_deletion", "credential_delete", "delete_credential"}
 )
 
 
@@ -206,7 +206,7 @@ class SecureCredentialCollectionRequest(BaseModel):
     def _reject_expires_at_on_delete(self) -> "SecureCredentialCollectionRequest":
         if (
             self.expires_at is not None
-            and str(self.flow or "").strip().lower() in _DELETION_FLOWS
+            and str(self.flow or "").strip().lower() in CREDENTIAL_DELETION_FLOWS
         ):
             raise ValueError("expires_at cannot be set on a credential deletion request.")
         return self
