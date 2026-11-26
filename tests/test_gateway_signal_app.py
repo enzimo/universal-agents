@@ -818,7 +818,7 @@ async def test_signal_app_refuses_base64_over_limit_before_decode(
 
 @pytest.mark.asyncio
 async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
-    tmp_path, caplog
+    tmp_path, caplog, monkeypatch
 ) -> None:
     chunk_size = 1024
     total_chunks = 512
@@ -908,9 +908,19 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
                 await client.serve_attachment("redirect-me", max_bytes=64)
             assert list_route_hits == 0
 
-            # A huge error body is read only up to the preview limit.
-            with pytest.raises(signal_module.SignalRestError) as err_exc:
-                await client.serve_attachment("huge-500", max_bytes=64)
+            # A huge error body is read only up to the preview limit. The
+            # full-body readers fail during this call, so the test fails if
+            # the client reads the whole body and cuts it afterwards.
+            def _full_body_read_forbidden(*_args, **_kwargs):
+                raise AssertionError("error body must not be read in full")
+
+            with monkeypatch.context() as no_full_read:
+                for name in ("read", "text", "json"):
+                    no_full_read.setattr(
+                        aiohttp.ClientResponse, name, _full_body_read_forbidden
+                    )
+                with pytest.raises(signal_module.SignalRestError) as err_exc:
+                    await client.serve_attachment("huge-500", max_bytes=64)
             assert (
                 len(str(err_exc.value))
                 < signal_module.ATTACHMENT_ERROR_BODY_PREVIEW_BYTES + 100
