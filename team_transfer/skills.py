@@ -91,22 +91,18 @@ def _validate_unique_skill_paths(key: str, files: tuple["SkillFileV1", ...]) -> 
     seen_files: set[str] = set()
     seen_dirs: set[str] = set()
     for entry in files:
-        folded = entry.path.casefold()
-        if folded in seen_files:
-            raise ValueError(
-                f"Skill {key} contains duplicate or case-colliding file path: {entry.path!r}."
-            )
-        if folded in seen_dirs:
-            raise ValueError(f"Skill {key} uses {entry.path!r} as both a file and a folder.")
-        parts = entry.path.split("/")
+        path = entry.path
+        if path in seen_files:
+            raise ValueError(f"Skill {key} contains duplicate file path: {path!r}.")
+        if path in seen_dirs:
+            raise ValueError(f"Skill {key} uses {path!r} as both a file and a folder.")
+        parts = path.split("/")
         for index in range(1, len(parts)):
-            parent = "/".join(parts[:index]).casefold()
+            parent = "/".join(parts[:index])
             if parent in seen_files:
-                raise ValueError(
-                    f"Skill {key} places {entry.path!r} beneath a file path."
-                )
+                raise ValueError(f"Skill {key} places {path!r} beneath a file path.")
             seen_dirs.add(parent)
-        seen_files.add(folded)
+        seen_files.add(path)
 
 
 class SkillKind(StrEnum):

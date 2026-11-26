@@ -426,6 +426,24 @@ def test_apply_with_missing_or_corrupt_member_leaves_existing_skills_unchanged(
         attestations_root=attestations_root,
     )
 
+    # 6. Installed skill whose members match their records but whose tree digest disagrees
+    # with its attestation fails before swapping, leaving the existing skill untouched.
+    bad_digest_record = dict(inst_record)
+    bad_digest_record["attestation"] = {
+        **inst_record["attestation"],
+        "tree_sha256": "0" * 64,
+    }
+    with pytest.raises(PermissionError, match="changed after their reviewed installation"):
+        section.apply([bad_digest_record], inst_plan, _context(target, inst_members))
+    assert _snapshot_tree(layout.installed_skills_dir) == original_inst_snapshot
+    assert (attestations_root / "approved-skill.json").read_bytes() == original_attestation_bytes
+    assert sorted(p.name for p in layout.installed_skills_dir.iterdir()) == ["approved-skill"]
+    verify_managed_skill_attestation_paths(
+        skill_path=existing_inst,
+        installed_root=layout.installed_skills_dir,
+        attestations_root=attestations_root,
+    )
+
 
 def test_skill_unit_and_file_validators() -> None:
     valid_file = SkillFileV1(path="SKILL.md", size=1, sha256="a" * 64)
@@ -460,12 +478,11 @@ def test_skill_unit_and_file_validators() -> None:
             ),
         )
 
-    # Duplicate, case-colliding, and parent/child colliding file paths are rejected.
+    # Exact duplicate and exact parent/child colliding file paths are rejected.
     for bad_paths in (
-        ("SKILL.md", "skill.md"),
+        ("SKILL.md", "SKILL.md"),
         ("SKILL.md", "docs", "docs/x.md"),
-        ("SKILL.md", "Docs/x.md", "docs"),
-        ("SKILL.md", "docs", "Docs/x.md"),
+        ("SKILL.md", "docs/x.md", "docs"),
     ):
         with pytest.raises(ValidationError):
             SkillUnitV1(
@@ -473,6 +490,25 @@ def test_skill_unit_and_file_validators() -> None:
                 kind=SkillKind.OPERATOR,
                 files=tuple(SkillFileV1(path=p, size=1, sha256="a" * 64) for p in bad_paths),
             )
+
+    # Case-only distinct paths remain allowed on the model (valid on case-sensitive filesystems;
+    # reviewed installs still refuse case collisions per record in _check_installed).
+    case_only = SkillUnitV1(
+        name="case-only",
+        kind=SkillKind.OPERATOR,
+        files=(
+            SkillFileV1(path="Makefile", size=1, sha256="a" * 64),
+            SkillFileV1(path="makefile", size=1, sha256="b" * 64),
+            SkillFileV1(path="Docs/x.md", size=1, sha256="c" * 64),
+            SkillFileV1(path="docs", size=1, sha256="d" * 64),
+        ),
+    )
+    assert [entry.path for entry in case_only.files] == [
+        "Makefile",
+        "makefile",
+        "Docs/x.md",
+        "docs",
+    ]
 
     # Operator loose dotfile and operator file with a tab remain accepted.
     loose = SkillUnitV1(
@@ -487,6 +523,110 @@ def test_skill_unit_and_file_validators() -> None:
         files=(SkillFileV1(path="notes\tdraft.md", size=1, sha256="a" * 64),),
     )
     assert tabbed.files[0].path == "notes\tdraft.md"
+
+
+def test_operator_skill_with_case_only_filenames_exports_and_imports(tmp_path: Path) -> None:
+    probe_dir = tmp_path / "case-probe"
+    probe_dir.mkdir()
+    (probe_dir / "Makefile").write_bytes(b"upper\n")
+    (probe_dir / "makefile").write_bytes(b"lower\n")
+    if (probe_dir / "Makefile").read_bytes() != b"upper\n":
+        pytest.skip("filesystem is case-insensitive")
+
+    config_path = _old_instance(tmp_path)
+    source = export_source(config_path)
+    operator_skill = source.layout.control_dir / "skills" / "travel-tips"
+    (operator_skill / "Makefile").write_bytes(b"upper\n")
+    (operator_skill / "makefile").write_bytes(b"lower\n")
+    (operator_skill / "Docs").mkdir()
+    (operator_skill / "Docs" / "x.md").write_bytes(b"doc\n")
+    (operator_skill / "docs").write_bytes(b"file\n")
+
+    out = tmp_path / "case-only.uatransfer"
+    export_team(
+        source,
+        out,
+        PASSPHRASE,
+        owner_person_id="usr_owner",
+        sections=SECTIONS,
+        key_derivation=new_key_derivation(**FAST_KEYS),
+    )
+    target = tmp_path / "imported"
+    with TransferReader.open(out, PASSPHRASE) as reader:
+        plan = import_team(reader, target, dry_run=False, sections=SECTIONS)
+
+    outcomes = {r.key: r.outcome for r in plan.records if r.section == "skills"}
+    assert outcomes["operator/travel-tips"] is RecordOutcome.IMPORT
+    imported_skill = InstanceLayout.at(target).control_dir / "skills" / "travel-tips"
+    assert (imported_skill / "Makefile").read_bytes() == b"upper\n"
+    assert (imported_skill / "makefile").read_bytes() == b"lower\n"
+    assert (imported_skill / "Docs" / "x.md").read_bytes() == b"doc\n"
+    assert (imported_skill / "docs").read_bytes() == b"file\n"
+
+
+@pytest.mark.parametrize(
+    ("existing_kind", "incoming_kind"),
+    [
+        ("dir", "loose"),
+        ("loose", "dir"),
+        ("symlink_to_outside_dir", "dir"),
+        ("symlink_to_outside_dir", "loose"),
+    ],
+)
+def test_apply_replaces_existing_file_dir_or_symlink_safely(
+    tmp_path: Path,
+    existing_kind: str,
+    incoming_kind: str,
+) -> None:
+    target = tmp_path / "instance"
+    layout = InstanceLayout.at(target)
+    operator_root = layout.control_dir / "skills"
+    operator_root.mkdir(parents=True)
+    destination = operator_root / "travel-tips"
+    outside_dir = tmp_path / "outside-folder"
+    outside_sentinel = outside_dir / "keep.txt"
+
+    if existing_kind == "dir":
+        destination.mkdir()
+        (destination / "old.txt").write_text("old-dir\n", encoding="utf-8")
+    elif existing_kind == "loose":
+        destination.write_text("old-loose\n", encoding="utf-8")
+    else:
+        outside_dir.mkdir()
+        outside_sentinel.write_text("keep-me\n", encoding="utf-8")
+        os.symlink(outside_dir, destination)
+
+    if incoming_kind == "loose":
+        new_bytes = b"new-loose\n"
+        record = {
+            "name": "travel-tips",
+            "kind": SkillKind.OPERATOR.value,
+            "files": [_file_record(".", new_bytes)],
+        }
+        members = {"files/skills/skills/travel-tips": new_bytes}
+    else:
+        new_bytes = b"---\nname: travel-tips\ndescription: new\n---\n"
+        record = {
+            "name": "travel-tips",
+            "kind": SkillKind.OPERATOR.value,
+            "files": [_file_record("SKILL.md", new_bytes)],
+        }
+        members = {"files/skills/skills/travel-tips/SKILL.md": new_bytes}
+
+    plan = [PlannedRecord("skills", "operator/travel-tips", RecordOutcome.IMPORT)]
+    SkillsSection().apply([record], plan, _context(target, members))
+
+    assert sorted(p.name for p in operator_root.iterdir()) == ["travel-tips"]
+    assert not destination.is_symlink()
+    if incoming_kind == "loose":
+        assert destination.is_file()
+        assert destination.read_bytes() == new_bytes
+    else:
+        assert destination.is_dir()
+        assert (destination / "SKILL.md").read_bytes() == new_bytes
+    if existing_kind == "symlink_to_outside_dir":
+        assert outside_dir.is_dir()
+        assert outside_sentinel.read_text(encoding="utf-8") == "keep-me\n"
 
 
 def test_export_skips_installed_dotfiles_and_stray_files_and_import_refuses_legacy_ones_per_record(
@@ -545,6 +685,8 @@ def test_export_skips_installed_dotfiles_and_stray_files_and_import_refuses_lega
     }
     legacy_incoming_bytes = b"partial\n"
     legacy_ds_bytes = b"junk"
+    legacy_stray_bytes = b"stray"
+    case_collision_skill_md = b"---\nname: case-collide\ndescription: x\n---\n"
     legacy_archive = _write_skills_archive(
         tmp_path / "legacy.uatransfer",
         [
@@ -560,6 +702,27 @@ def test_export_skips_installed_dotfiles_and_stray_files_and_import_refuses_lega
                 "files": [_file_record(".", legacy_ds_bytes)],
                 "attestation": None,
             },
+            {
+                "name": "stray-file.txt",
+                "kind": SkillKind.INSTALLED.value,
+                "files": [_file_record(".", legacy_stray_bytes)],
+                "attestation": None,
+            },
+            {
+                "name": "case-collide",
+                "kind": SkillKind.INSTALLED.value,
+                "files": [
+                    _file_record("SKILL.md", case_collision_skill_md),
+                    _file_record("Makefile", b"upper\n"),
+                    _file_record("makefile", b"lower\n"),
+                ],
+                "attestation": {
+                    "schema_version": 2,
+                    "skill_name": "case-collide",
+                    "installed_path": "/old/installed/case-collide",
+                    "tree_sha256": "0" * 64,
+                },
+            },
             valid_inst_record,
             valid_op_record,
         ],
@@ -568,6 +731,10 @@ def test_export_skips_installed_dotfiles_and_stray_files_and_import_refuses_lega
             "files/skills/skills/travel-tips/SKILL.md": op_skill_bytes,
             "files/skills/installed/.incoming-chg1-abc/SKILL.md": legacy_incoming_bytes,
             "files/skills/installed/.DS_Store": legacy_ds_bytes,
+            "files/skills/installed/stray-file.txt": legacy_stray_bytes,
+            "files/skills/installed/case-collide/SKILL.md": case_collision_skill_md,
+            "files/skills/installed/case-collide/Makefile": b"upper\n",
+            "files/skills/installed/case-collide/makefile": b"lower\n",
         },
     )
 
@@ -576,13 +743,17 @@ def test_export_skips_installed_dotfiles_and_stray_files_and_import_refuses_lega
         dry_plan = import_team(
             reader, legacy_target, dry_run=True, sections=(SkillsSection(),)
         )
-        dry_outcomes = {r.key: r.outcome for r in dry_plan.records}
-        assert dry_outcomes == {
+        dry_by_key = {r.key: r for r in dry_plan.records}
+        assert {k: r.outcome for k, r in dry_by_key.items()} == {
             "installed/.incoming-chg1-abc": RecordOutcome.REFUSED,
             "installed/.DS_Store": RecordOutcome.REFUSED,
+            "installed/stray-file.txt": RecordOutcome.REFUSED,
+            "installed/case-collide": RecordOutcome.REFUSED,
             "installed/approved-skill": RecordOutcome.IMPORT,
             "operator/travel-tips": RecordOutcome.IMPORT,
         }
+        assert "must be a folder, not a loose file" in dry_by_key["installed/stray-file.txt"].reason
+        assert "case-colliding paths" in dry_by_key["installed/case-collide"].reason
         assert not legacy_target.exists()
 
         live_plan = import_team(
@@ -593,11 +764,15 @@ def test_export_skips_installed_dotfiles_and_stray_files_and_import_refuses_lega
     assert live_outcomes["operator/travel-tips"] is RecordOutcome.IMPORT
     assert live_outcomes["installed/.incoming-chg1-abc"] is RecordOutcome.REFUSED
     assert live_outcomes["installed/.DS_Store"] is RecordOutcome.REFUSED
+    assert live_outcomes["installed/stray-file.txt"] is RecordOutcome.REFUSED
+    assert live_outcomes["installed/case-collide"] is RecordOutcome.REFUSED
     layout = InstanceLayout.at(legacy_target)
     assert (layout.installed_skills_dir / "approved-skill" / "SKILL.md").is_file()
     assert (layout.control_dir / "skills" / "travel-tips" / "SKILL.md").is_file()
     assert not (layout.installed_skills_dir / ".incoming-chg1-abc").exists()
     assert not (layout.installed_skills_dir / ".DS_Store").exists()
+    assert not (layout.installed_skills_dir / "stray-file.txt").exists()
+    assert not (layout.installed_skills_dir / "case-collide").exists()
 
 
 def test_plan_performs_no_filesystem_writes_or_tempdirs(
