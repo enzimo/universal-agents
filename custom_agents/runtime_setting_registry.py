@@ -995,6 +995,10 @@ OPERATOR_ONLY_RUNTIME_SETTINGS: dict[str, str] = {
         "TeamArchitect sets each worker type's pool size inside the ceilings with "
         "set_worker_pool_limit, which stores it in the database, not here."
     ),
+    "agent.max_wait_minutes_*": (
+        "They limit how long a task may pause itself, with and without a person's approval; "
+        "raising them would let tasks wait longer without anyone approving it, so only the operator changes them."
+    ),
     "transport.*": "NATS routing and credentials are operator-owned.",
     "gateway.storage.*": "Gateway storage controls persisted sessions and must be changed by an operator.",
     "state.storage.*": "Manager storage controls shared persistence and must be changed by an operator.",

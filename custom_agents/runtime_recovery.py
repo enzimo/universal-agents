@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any, Dict, List, Optional
 
 from custom_agents.agent_liveness import LivenessPurpose, gone_owner_ids
 from custom_agents.orphaned_subtasks import stop_left_out_delegations
 from custom_agents.task_human_interaction_blockers import (
+    clear_answer_marks,
     has_pending_human_interaction,
 )
 from custom_agents.task_manager import TaskInfo
@@ -449,6 +451,25 @@ async def recover_runtime_after_restart(agent: Any) -> None:
         if await agent.task_manager.operations_runtime.run(
             agent.task_manager.is_executing_state, task_info.state
         ):
+            if has_pending_human_interaction(agent.task_manager, task_id):
+                # A crash right after saving a wait blocker and before saving
+                # ProgressState.WAITING: the pause is already durable, so move
+                # the task into WAITING instead of failing or re-queueing it.
+                await agent.task_manager.operations_runtime.run(
+                    agent.task_manager.append_history_entry,
+                    task_id,
+                    "Recovery found a saved wait record for this task; returned it to WAITING.",
+                    entry_type=TaskHistoryType.STATE_CHANGE,
+                    importance=TaskHistoryImportance.NORMAL,
+                    timestamp=now_ts,
+                )
+                await agent.task_manager.operations_runtime.run(
+                    agent.task_manager.update_main_task_state,
+                    task_id,
+                    ProgressState.WAITING,
+                    now_ts,
+                )
+                continue
             await agent.task_manager.operations_runtime.run(
                 agent.task_manager.append_history_entry,
                 task_id,
@@ -562,8 +583,37 @@ async def recover_runtime_after_restart(agent: Any) -> None:
                 agent.task_manager.enqueue_task, task_id
             )
 
-    # Tasks kept waiting above for a set_up_tools run that has ended.
+    # No paused turn survives a restart: clear all held-answer marks once before
+    # recovering setup runs and due timed waits.
+    await _clear_stale_wait_answer_marks(agent)
     await _resume_ended_setup_runs(agent)
+    await _resume_due_timed_waits(agent)
+
+
+async def _clear_stale_wait_answer_marks(agent: Any) -> None:
+    """Clear held-answer marks left on setup-run or timed-wait blockers from before a restart.
+
+    No paused turn survives a restart, so every held-answer mark is stale,
+    including for an agent whose configured id stays the same across restarts.
+    Clearing all marks once here logs a single neutral event rather than
+    reporting timed-wait marks under a setup-run event name.
+    """
+    try:
+        cleared = await agent.task_manager.operations_runtime.run(
+            partial(clear_answer_marks, agent.task_manager)
+        )
+        if cleared:
+            agent._logger.info(
+                "Removed held-answer marks left from before the restart. "
+                "event=wait_answer_marks_cleared task_ids=%s",
+                ",".join(cleared),
+            )
+    except Exception:
+        agent._logger.exception(
+            "Could not clear stale held-answer marks during startup recovery. "
+            "event=wait_answer_marks_clear_failed agent_id=%s",
+            agent.id,
+        )
 
 
 async def _resume_ended_setup_runs(agent: Any) -> None:
@@ -583,5 +633,24 @@ async def _resume_ended_setup_runs(agent: Any) -> None:
         agent._logger.exception(
             "Could not resume tasks whose setup run ended during the restart. "
             "event=setup_run_recovery_failed agent_id=%s",
+            agent.id,
+        )
+
+
+async def _resume_due_timed_waits(agent: Any) -> None:
+    """Resume tasks whose timed wait came due while the agent was down (``timed_wait_runtime``).
+
+    Not-yet-due timed waits stay ``WAITING`` until the scheduler pass sees
+    their resume time pass; due waits are queued from a durable note without
+    waking the drain (startup wakes the drain once ready).
+    """
+    from custom_agents.timed_wait_runtime import resume_due_timed_waits
+
+    try:
+        await resume_due_timed_waits(agent, at_start=True)
+    except Exception:
+        agent._logger.exception(
+            "Could not resume tasks whose timed wait ended during the restart. "
+            "event=timed_wait_recovery_failed agent_id=%s",
             agent.id,
         )

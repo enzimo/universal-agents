@@ -1468,10 +1468,23 @@ class ScheduleStore:
             "schedules": schedules if include_schedules else None,
         }
 
+    def read_scheduled_message(self, schedule_id: str) -> Optional["ScheduledMessage"]:
+        """Read one schedule from storage, letting storage or parse errors raise (None when absent)."""
+
+        row = self._row(schedule_id)
+        return _row_message(row, self._logger) if row is not None else None
+
+    def read_next_fire_schedule(self, schedule_id: str) -> tuple[Optional["ScheduledMessage"], bool]:
+        """Read one schedule and whether its final run is already finishing (raises on storage errors)."""
+
+        row = self._row(schedule_id)
+        if row is None:
+            return None, False
+        return _row_message(row, self._logger), is_finishing(row)
+
     def get_scheduled_message(self, schedule_id: str) -> Optional["ScheduledMessage"]:
         try:
-            row = self._row(schedule_id)
-            return _row_message(row, self._logger) if row is not None else None
+            return self.read_scheduled_message(schedule_id)
         except Exception as e:
             self._logger.error(f"Failed to load scheduled message {schedule_id}: {e}")
             return None

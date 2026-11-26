@@ -718,6 +718,18 @@ class AgentDefaultValues:
         "Maximum estimated tokens allowed in one tool result before offloading it to task-aware artifacts.",
         onboarding_overridable=False,
     )
+    # A task's waits together (runtime_settings.timed_waits): wait needs no
+    # permission up to the first, long_wait needs a person's approval up to the second.
+    max_wait_minutes_without_approval: DefaultValue[int] = default_value(
+        20,
+        "Minutes a task may pause itself in total with wait, without anyone's approval.",
+        onboarding_overridable=False,
+    )
+    max_wait_minutes_with_approval: DefaultValue[int] = default_value(
+        1440,
+        "Minutes a task may pause itself in total, long_wait included, once a person approved long_wait; at most 1440.",
+        onboarding_overridable=False,
+    )
     runtime_budget_policy: DefaultValue[dict[str, Any]] = default_value(
         {
             "mode": "user_guided",

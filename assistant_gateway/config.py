@@ -613,6 +613,8 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
         "cannot change it."
     ),
     "agent.max_tool_calls_per_task": "Cumulative tool calls across one ordinary local task-processing invocation, not per model turn. Accepted Objective work profiles use their own session total. Set null or <=0 to disable.",
+    "agent.max_wait_minutes_without_approval": "Minutes one task may pause itself in total with the wait tool, without anyone's approval (all its waits together). Only the operator changes it.",
+    "agent.max_wait_minutes_with_approval": "Minutes one task may pause itself in total once a person approved the long_wait tool for it (or for its scheduled job); at least the value above, at most 1440 (24 hours). Only the operator changes it.",
     "agent.max_tool_result_tokens_per_call": "Per-tool-result token safety cap. Oversized results are offloaded to artifacts.",
     "agent.runtime_budget_policy": "Policy for recoverable runtime budget/overload pauses.",
     "agent.runtime_budget_policy.mode": '"hard_stop" fails visibly; "user_guided" pauses and asks the requester.',

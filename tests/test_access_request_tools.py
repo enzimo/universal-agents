@@ -307,6 +307,61 @@ def test_the_team_lead_cannot_revoke_what_it_handed_down_for_another_persons_req
 
 
 @pytest.mark.asyncio
+async def test_an_access_request_pause_is_flushed_to_disk_after_its_record_and_waiting_are_saved(
+    storage, tmp_path, monkeypatch
+) -> None:
+    """Lead decision: a person may decide hours later, so the saved pause is flushed once after it commits."""
+
+    from storage import runtime_state_repository
+    from storage.runtime_state_repository import SqliteRuntimeStateRepository
+
+    worker = make_agent(storage, tmp_path)
+    worker.mid_turn_steering = {}
+    worker._agent_id_by_name = {}
+    worker.named_agent_type_queue_map = {}
+    worker._logger = SimpleNamespace(warning=lambda *a, **k: None, info=lambda *a, **k: None)
+    worker.team_comms = SimpleNamespace(send_message=AsyncMock())
+    set_agent_ref(worker)
+    context = Context()
+    with pytest.raises(InterruptException) as raised:
+        tools.request_access(tool_id="fn:schedules", level="write", reason="Track", tool_context=context)
+    request_id = context.raised[0]["access_request_id"]
+    manager = worker.task_manager
+    task_id = worker.test_task_id
+    info = manager.get_task_info(task_id)
+    store = access_runtime.runtime_requests(worker).service.store
+    flushes: list[tuple[str, str, bool]] = []
+
+    def recording_flush(_path: str) -> str | None:
+        [row] = SqliteRuntimeStateRepository(str(tmp_path / "manager.db")).load_task_runtime_by_owner(
+            manager.identity.owner_agent_id
+        )
+        payload = json.loads(row.runtime_state_json)
+        saved_task = next(item for item in payload["tasks"] if item["task"]["task_id"] == task_id)
+        flushes.append((
+            saved_task["state"],
+            payload["human_interaction_blockers"][task_id]["kind"],
+            store.get_request(request_id) is not None,
+        ))
+        return None
+
+    monkeypatch.setattr(runtime_state_repository, "sync_sqlite_commits_to_disk", recording_flush)
+    bind_turn(info.task.task_id)
+    await send_interrupt_request_for_result(
+        worker,
+        result=SimpleNamespace(interrupts=[raised.value.interrupt]),
+        task=info.task,
+        msg_header=info.header,
+        msg_meta=info.meta,
+        invoke_kwargs={},
+        callback_handler=lambda **_: None,
+        full_prompt="",
+    )
+
+    assert flushes == [(ProgressState.WAITING.value, ACCESS_REQUEST_BLOCKER, True)]
+
+
+@pytest.mark.asyncio
 async def test_an_access_interrupt_waits_here_and_a_decision_resumes_the_task(storage, tmp_path) -> None:
     worker = make_agent(storage, tmp_path)
     worker.mid_turn_steering = {}

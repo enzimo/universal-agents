@@ -213,7 +213,7 @@ def _export(args: argparse.Namespace) -> None:
     report = export_team(
         source, args.out, passphrase, owner_person_id=args.owner, sections=sections
     )
-    lines = [f"Wrote {report.path} (mode 0600).", *manifest_summary(report.manifest)]
+    lines = [f"Wrote {report.path} (mode 0600).", *manifest_summary(report.manifest), *report.notes]
     lines.append(
         "Stop this instance now: chat bot tokens and model-provider sign-ins must not be used by two running "
         "instances. Keep the file and its passphrase private; it holds the team's configuration."

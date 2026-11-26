@@ -31,7 +31,6 @@ from team_transfer.review import ImportReviewV1  # noqa: E402
 
 def section_payload_models() -> dict[str, tuple[type[BaseModel], ...]]:
     """Track persisted contracts inside generic records and their section ownership."""
-    from assistant_gateway.config import GatewayInstanceConfig
     from custom_agents.agent_catalog import AgentCatalogDocument
     from custom_agents.generated_agent_runtime import GeneratedAgentProvisioningRecordV1
     from custom_agents.objective_work_config import ObjectiveWorkExecutionConfigLayer
@@ -60,9 +59,12 @@ def section_payload_models() -> dict[str, tuple[type[BaseModel], ...]]:
     from secure_tool_broker.credential_catalog import CatalogCredential
     from secure_tool_broker.model_keys import StoredModelKey
     from storage.worker_pool_repository import WorkerPoolLimitV1
+    from team_transfer.settings import settings_payload_contract
 
     return {
-        "settings": (GatewayInstanceConfig,),
+        # The instance configuration as the section carries it (without the
+        # settings this line leaves out of the transfer).
+        "settings": (settings_payload_contract(),),
         "control": (
             AgentCatalogDocument,
             TeamCompositionConfig,

@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from functools import lru_cache
 from typing import Any, Dict, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from runtime_settings.knowledge import KnowledgeSettings
 from runtime_settings.memory import MemoryConfig
 from runtime_settings.schedule_workers import ScheduleWorkersConfig
@@ -12,6 +12,7 @@ from runtime_settings.worker_pools import WorkerPoolsConfig
 from runtime_settings.review_cleanup import ReviewCleanupSettings
 from runtime_settings.stale_schedules import StaleScheduleSettings
 from runtime_settings.stuck_tasks import StuckTaskSettings
+from runtime_settings.timed_waits import TimedWaitLimits, refuse_per_type_wait_limits
 from default_values import AGENT_DEFAULTS
 from runtime_settings.common import (
     _default_conversation_compactor_config,
@@ -101,6 +102,16 @@ class AgentRuntimeDefaultsSettings(BaseModel):
     max_tool_result_tokens_per_call: Optional[int] = (
         AGENT_DEFAULTS.max_tool_result_tokens_per_call.value
     )
+    # How long a task may pause itself in total (runtime_settings.timed_waits).
+    # One limit for every agent: a per-type override is refused in both files
+    # (AgentRuntimeOverrideSettings and config_loader.resolve_agent_type_settings),
+    # and agents cannot stage it (OPERATOR_ONLY_RUNTIME_SETTINGS).
+    max_wait_minutes_without_approval: int = Field(
+        default=AGENT_DEFAULTS.max_wait_minutes_without_approval.value, ge=1
+    )
+    max_wait_minutes_with_approval: int = Field(
+        default=AGENT_DEFAULTS.max_wait_minutes_with_approval.value, ge=1
+    )
     runtime_budget_policy: Dict[str, Any] = Field(
         default_factory=lambda: copy.deepcopy(
             AGENT_DEFAULTS.runtime_budget_policy.value
@@ -151,6 +162,18 @@ class AgentRuntimeDefaultsSettings(BaseModel):
     @classmethod
     def _known_tool_names(cls, value: Optional[list[str]], info: Any) -> Optional[list[str]]:
         return check_tool_names(info.field_name, value)
+
+    @model_validator(mode="after")
+    def _valid_wait_limits(self) -> "AgentRuntimeDefaultsSettings":
+        self.timed_wait_limits()
+        return self
+
+    def timed_wait_limits(self) -> TimedWaitLimits:
+        """The two wait limits as one checked value (refuses a configuration that breaks their rules)."""
+        return TimedWaitLimits(
+            without_approval=self.max_wait_minutes_without_approval,
+            with_approval=self.max_wait_minutes_with_approval,
+        )
 
     @field_validator("external_mcp_servers", mode="before")
     @classmethod
@@ -250,6 +273,14 @@ class AgentRuntimeDefaultsSettings(BaseModel):
 
 class AgentRuntimeOverrideSettings(BaseModel):
     schedule_worker_rules: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_per_type_wait_limits(cls, value: Any) -> Any:
+        # Unknown keys are otherwise dropped without a word; these must not be.
+        if isinstance(value, dict):
+            refuse_per_type_wait_limits(value)
+        return value
 
     @field_validator("schedule_worker_rules")
     @classmethod

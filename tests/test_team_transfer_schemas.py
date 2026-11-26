@@ -32,9 +32,18 @@ def test_payload_contract_changes_require_a_new_section_version() -> None:
         (DEFAULT_OUTPUT_DIR.parent / "section-contracts.json").read_text()
     )
     for version, digest in section_contract_digests().items():
-        assert frozen.get(version) == digest, (
-            f"{version} changed: bump the section version, add a converter, and append the new fingerprint"
-        )
+        if version == "settings/9":
+            message = (
+                "settings/9 changed: main shares settings/9 with release/0.10 under the documented "
+                "main-line exception (README_ARCHITECTURE.md, 'Moving a team to a new version'); "
+                "do not bump settings/9 on main — add main-line-only settings to "
+                "team_transfer.settings.NOT_CARRIED_SETTINGS instead."
+            )
+        else:
+            message = (
+                f"{version} changed: bump the section version, add a converter, and append the new fingerprint"
+            )
+        assert frozen.get(version) == digest, message
 
 
 def test_every_schema_is_valid_draft_2020_12_and_listed_in_the_manifest() -> None:

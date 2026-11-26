@@ -52,6 +52,7 @@ from custom_agents.dead_letter_watch import report_dead_letters
 from custom_agents.storage_usage_runtime import keep_storage_usage_measured
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.access_request_runtime import resume_decided_access_waits
+from custom_agents.timed_wait_runtime import resume_due_timed_waits, seconds_until_next_resume
 from custom_agents.tool_setup_run_runtime import resume_ended_setup_runs
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
 from custom_agents.agent_liveness import prune_departed_agent_rows_when_due
@@ -73,7 +74,7 @@ from custom_agents.schedule_management import (
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.schedule_v1 import ScheduledMessage
+from custom_messages.contracts.schedule_v1 import ScheduledMessage, is_recurring_schedule
 from custom_messages.contracts.task_v1 import Task, TaskQuery
 from custom_messages.enums import (
     MessageMetaType,
@@ -1292,15 +1293,6 @@ async def _enqueue_runtime_schedule(
     return None
 
 
-def _is_recurring(scheduled_message: ScheduledMessage) -> bool:
-    return (
-        scheduled_message.repeat_count is None
-        or (scheduled_message.repeat_count or 0) > 1
-        or scheduled_message.interval_ms is not None
-        or scheduled_message.cron_expression is not None
-    )
-
-
 def _fired_task(
     scheduled_message: ScheduledMessage, schedule_admission: ScheduleOccurrenceV1 | None
 ) -> Task:
@@ -1311,7 +1303,7 @@ def _fired_task(
     task.problem_statement = _append_schedule_memory_context(
         task.problem_statement, scheduled_message
     )
-    if _is_recurring(scheduled_message) and task.parent_task_id is None:
+    if is_recurring_schedule(scheduled_message) and task.parent_task_id is None:
         task.task_id = new_id("task_id")
     if schedule_admission is not None:
         task.task_id = schedule_admission.task_id
@@ -1952,6 +1944,14 @@ async def _scheduler_pass(
             "event=setup_run_recovery_failed agent_id=%s",
             agent.id,
         )
+    # Resume any task whose timed wait (wait / long_wait) has reached its resume time.
+    try:
+        await resume_due_timed_waits(agent)
+    except Exception:
+        agent._logger.exception(
+            "Could not check for due timed waits. event=timed_wait_check_failed agent_id=%s",
+            agent.id,
+        )
     # The lead sends out again any task a worker returned that is not settled.
     await process_pending_handbacks(agent)
     # ...and starts a replacement for a dead agent still holding unfinished work.
@@ -2244,4 +2244,7 @@ async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool, *, par
         from custom_agents.agent_instantiation_service import current_worker_limits
 
         sleep_seconds = min(sleep_seconds, current_worker_limits(agent).reconcile_interval_seconds)
+    next_timed_wait = await seconds_until_next_resume(agent)
+    if next_timed_wait is not None:
+        sleep_seconds = min(sleep_seconds, next_timed_wait)
     return sleep_seconds

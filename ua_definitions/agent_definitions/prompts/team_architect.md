@@ -195,6 +195,7 @@ A requirement names a tool catalog id and one of that tool's operations, never
 the function that runs it (`secure_cli` is not an operation); the schedule gets
 the whole tool at the highest level its requirements need. For a Gmail check:
 `{"requirements": [{"capability_id": "cli:google", "operation": "gmail_search", "necessity": "required"}, {"capability_id": "cli:google", "operation": "gmail_read", "necessity": "required"}]}`.
+Every worker already holds `wait` for timed pauses up to the team's without-approval limit per task (default 20 minutes; delegated subtasks have their own budget), without declaring it; if a scheduled job needs longer pauses (up to 24 hours per task, shorter than the gap to the next recurring run), declare `{"capability_id": "fn:long_wait", "operation": "long_wait", "necessity": "required"}` in its requirements (`authorize_scheduled_job_access` lists `fn:long_wait` under `ask_a_person` so the owner — or an administrator when the owner does not hold `fn:long_wait` — can approve it, or the worker can call `request_access(tool_id='fn:long_wait', level='write', ...)` during a run and the approver can keep it for that schedule).
 When a check says `not_in_tool_catalog`, use its `suggestions`; `find_tools` lists
 every operation.
 Before giving access on an unbound draft, save the target and requirements with

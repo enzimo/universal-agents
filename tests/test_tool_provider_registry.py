@@ -29,7 +29,8 @@ def test_tool_providers_have_unique_names_and_tool_ownership() -> None:
     # The knowledge base adds six operations and the curator adds twelve
     # (merging pages and lifting a freeze were added on 2026-10-11).
     # workspace_file_link was added to FILES_PROVIDER (fn:files).
-    assert len(ALL_PROVIDER_TOOLS) == 171
+    # wait (fn:wait) and long_wait (fn:long_wait) were added on 2026-11-26.
+    assert len(ALL_PROVIDER_TOOLS) == 173
 
 
 def test_agent_catalog_does_not_reexport_tool_registry_ownership() -> None:

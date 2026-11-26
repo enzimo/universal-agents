@@ -467,6 +467,51 @@ async def test_a_written_export_stays_a_success_when_its_owner_cannot_be_changed
 
 
 @pytest.mark.asyncio
+async def test_a_changed_setting_the_transfer_does_not_carry_is_named_beside_the_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The /upgrade page and chat show the settings section's note with any other note (team_transfer.settings)."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    config_path = _instance(tmp_path, monkeypatch)
+    config = GatewayInstanceConfig.load(config_path)
+    config.agent.max_wait_minutes_without_approval = 5
+    config.save(config_path)
+    layout = InstanceLayout.at(config_path.parent)
+
+    def not_permitted(_paths, _root) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(requested_export, "_give_to_data_folder_owner", not_permitted)
+    server = await _serving_broker(monkeypatch)
+    try:
+        page = await _submitted_page(server, "usr_owner")
+        request = take_export_request(layout.team_export_requests_dir)
+        assert request is not None
+        result = await asyncio.to_thread(
+            requested_export.run_requested_export, config_path, export_id=request.export_id, owner_person_id="usr_owner"
+        )
+        status = await _page_status(server, page)
+    finally:
+        await server.close()
+
+    assert result.ok
+    assert result.note.startswith("agent.max_wait_minutes_without_approval is 5 here")
+    assert result.note.endswith(requested_export.OWNER_NOT_SET_NOTE)
+    assert status["result"]["note"] == result.note
+
+
+def test_a_long_note_is_cut_to_the_results_limit() -> None:
+    from team_transfer.export_requests import NOTE_MAX_CHARS
+
+    note = requested_export.result_note(["x" * NOTE_MAX_CHARS, "more"])
+
+    assert len(note) == NOTE_MAX_CHARS and note.endswith("\u2026")
+    assert requested_export.result_note(["a", "b"]) == "a b"
+
+
+@pytest.mark.asyncio
 async def test_an_exports_folder_that_is_a_link_is_refused_and_nothing_is_written_through_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

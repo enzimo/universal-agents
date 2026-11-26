@@ -58,6 +58,11 @@ class ScheduleWorkersConfig(BaseModel):
         default=_DEFAULTS["max_idle_ttl_seconds"], gt=0, le=86400
     )
     lease_seconds: float = Field(default=_DEFAULTS["lease_seconds"], ge=10, le=3600)
+    # During wind-down, timed waits due before this deadline are kept and resumed,
+    # while timed waits ending after it fail immediately with a message to the
+    # requester (custom_agents/lease_loss_wind_down.py). Keep the Field description
+    # text below frozen on main because settings/9's JSON-schema fingerprint is
+    # pinned unchanged from main (see commit 3582b2cc); update it on release/0.10.
     lease_loss_wait_timeout_seconds: float = Field(
         default=_DEFAULTS["lease_loss_wait_timeout_seconds"],
         ge=60,

@@ -391,6 +391,37 @@ def test_cli_exports_inspects_and_dry_runs_an_import(tmp_path: Path, monkeypatch
     assert not (tmp_path / "fresh").exists()
 
 
+def test_cli_export_prints_report_notes_for_non_carried_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import yaml
+
+    import team_transfer.registry as registry
+    from team_transfer import crypto
+    from team_transfer.settings import SettingsSection
+
+    monkeypatch.setattr(registry, "TRANSFER_SECTIONS", (SettingsSection(),))
+    monkeypatch.setattr(crypto, "DEFAULT_OPSLIMIT", 1)
+    monkeypatch.setattr(crypto, "DEFAULT_MEMLIMIT", 8192)
+    config_path, _config = _owner_instance(tmp_path)
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    raw.setdefault("agent", {})["max_wait_minutes_without_approval"] = 12
+    config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    secret = tmp_path / "passphrase.txt"
+    secret.write_text(PASSPHRASE + "\n")
+    out = tmp_path / "team.uatransfer"
+
+    _run_cli("export", "--config", str(config_path), "--owner", "usr_owner", "--out", str(out), "--passphrase-file", str(secret))
+    printed = capsys.readouterr().out
+    assert (
+        "agent.max_wait_minutes_without_approval is 12 here, "
+        "but this version's team transfer does not carry it: "
+        "set it again in the new instance's instance_config.yaml."
+    ) in printed
+    assert "Stop this instance now" in printed
+
+
 @pytest.mark.parametrize("owner", ["usr_member", "usr_unknown"])
 def test_cli_export_requires_an_active_owner(tmp_path: Path, owner: str, monkeypatch: pytest.MonkeyPatch) -> None:
     import team_transfer.registry as registry

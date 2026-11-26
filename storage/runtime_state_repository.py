@@ -41,7 +41,7 @@ from .runtime_custody import (
     CustodyStore, DeferredMessageClaim, RuntimeCustodyLost, RuntimeRecoveryConflict,
     check_deferred_message, deferred_message_id,
 )
-from .sqlite_connection import connect_sqlite, ensure_sqlite_column
+from .sqlite_connection import connect_sqlite, ensure_sqlite_column, sync_sqlite_commits_to_disk
 
 
 @dataclass
@@ -109,6 +109,10 @@ class RuntimeStateRepository(Protocol):
     ) -> None: ...
 
     def clear_task_runtime(self, owner_agent_id: str) -> None: ...
+
+    def make_commits_durable(self) -> None:
+        """Make every commit already made to this store survive a power cut (see each backend)."""
+        ...
 
     def get_task_custody(self, team_id: str, task_ids: Sequence[str]) -> dict[str, TaskCustodyRow]: ...
 
@@ -1100,6 +1104,11 @@ class SqliteRuntimeStateRepository(_RelationalRuntimeStateRepository):
         conn.execute("BEGIN IMMEDIATE")
 
 
+    def make_commits_durable(self) -> None:
+        # Commits use synchronous=NORMAL, so flush the WAL once (sqlite_connection.sync_sqlite_commits_to_disk).
+        sync_sqlite_commits_to_disk(self._db_path)
+
+
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
         ensure_sqlite_column(conn, table_name, column_name, column_type, logger=self._logger)
 
@@ -1130,6 +1139,12 @@ class PostgresRuntimeStateRepository(_RelationalRuntimeStateRepository):
 
     def _connect(self) -> PostgresConnection:
         return connect_postgres(self._dsn)
+
+
+    def make_commits_durable(self) -> None:
+        # PostgreSQL flushes its write-ahead log before a commit returns
+        # (synchronous_commit=on, the server default), so nothing is left to do.
+        return None
 
 
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:

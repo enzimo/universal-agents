@@ -334,3 +334,86 @@ def test_choosing_environment_secrets_writes_no_team_env(tmp_path: Path) -> None
     assert saved["launch"]["secrets_source"] == "environment"
     assert not saved["launch"].get("env_file_path")
     assert not (target / "team.env").exists()
+
+
+def test_the_wait_limits_stay_behind_with_a_warning_and_a_note_in_the_report(tmp_path: Path, caplog) -> None:
+    """This line does not carry agent.max_wait_minutes_* (settings stays at version 9, which release/0.10 shares).
+
+    A changed limit is left out of the export; the export logs it and its
+    report names it, so the operator sets it again after the move. The rest of
+    the team's choices still move.
+    """
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    def shorter_waits(config: Any) -> None:
+        config.agent.max_wait_minutes_without_approval = 10
+        config.agent.max_wait_minutes_with_approval = 120
+        config.heartbeat.enabled = False
+
+    path, _config = _old_instance(tmp_path, shorter_waits)
+    out = tmp_path / "team.uatransfer"
+    with caplog.at_level("WARNING", logger="team_transfer.settings"):
+        report = export_team(
+            export_source(path), out, PASSPHRASE, owner_person_id="usr_owner", sections=(SettingsSection(),),
+            key_derivation=new_key_derivation(**FAST_KEYS),
+        )
+
+    assert {record.dotted: record.value for record in _records(out)} == {"heartbeat.enabled": False}
+    assert sorted(note.split(" here,")[0] for note in report.notes) == [
+        "agent.max_wait_minutes_with_approval is 120",
+        "agent.max_wait_minutes_without_approval is 10",
+    ]
+    assert all("set it again in the new instance's instance_config.yaml" in note for note in report.notes)
+    assert caplog.text.count("event=team_transfer_setting_not_carried") == 2
+    target = tmp_path / "new"
+    _import(out, target, dry_run=False)
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported.heartbeat.enabled is False
+    assert (imported.agent.max_wait_minutes_without_approval, imported.agent.max_wait_minutes_with_approval) == (20, 1440)
+
+
+def test_default_wait_limits_add_no_note(tmp_path: Path) -> None:
+    path, _config = _old_instance(tmp_path)
+    report = export_team(
+        export_source(path), tmp_path / "team.uatransfer", PASSPHRASE, owner_person_id="usr_owner",
+        sections=(SettingsSection(),), key_derivation=new_key_derivation(**FAST_KEYS),
+    )
+
+    assert report.notes == ()
+
+
+def test_the_settings_contract_is_main_and_release_0_10s_settings_9() -> None:
+    """settings/9 means the same format on main and release/0.10, so this line's contract must not move.
+
+    The section's payload contract leaves out the settings it does not carry;
+    its fingerprint and the tracked schema's checksum are pinned to their values
+    on origin/main (and release/0.10).
+    """
+
+    import json
+
+    from scripts.export_team_transfer_schemas import DEFAULT_OUTPUT_DIR, section_contract_digests
+    from team_transfer.settings import NOT_CARRIED_SETTINGS, settings_payload_contract
+
+    contract = settings_payload_contract()
+    agent_properties = contract.model_json_schema()["$defs"]["AgentRuntimeDefaultsSettings"]["properties"]
+    assert {path[-1] for path in NOT_CARRIED_SETTINGS} == {
+        "max_wait_minutes_without_approval", "max_wait_minutes_with_approval",
+    }
+    assert not {path[-1] for path in NOT_CARRIED_SETTINGS} & set(agent_properties)
+    assert "max_tool_calls_per_task" in agent_properties
+    assert contract.__name__ == "GatewayInstanceConfig"
+    pin_hint = (
+        "main shares settings/9 with release/0.10 under the documented main-line exception "
+        "(README_ARCHITECTURE.md, 'Moving a team to a new version'); add a new main-line setting "
+        "to team_transfer.settings.NOT_CARRIED_SETTINGS instead of changing settings/9."
+    )
+    assert SettingsSection.schema_version == 9, pin_hint
+    assert section_contract_digests()["settings/9"] == (
+        "791cfc3cbb6e62404c85c0e5d53f2c9b9183d1c46f719a7e574ade7996344e74"
+    ), pin_hint
+    manifest = json.loads((DEFAULT_OUTPUT_DIR / "manifest.json").read_text())
+    assert [entry["sha256"] for entry in manifest["schemas"] if entry["model"] == "GatewayInstanceConfig"] == [
+        "54020b8d38e62320daf64b7d8ed359b3f1334bb3387cdbf778893f8601f5b751"
+    ], pin_hint

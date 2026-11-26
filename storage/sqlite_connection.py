@@ -283,6 +283,34 @@ def _execute_with_schema_retry(
     raise AssertionError("The schema-change retry loop exited unexpectedly.")
 
 
+def sync_sqlite_commits_to_disk(db_path: str) -> str | None:
+    """Flush every commit already made to ``db_path`` to disk; return the file synced.
+
+    Connections use ``synchronous=NORMAL`` in WAL mode: a commit is written to
+    the WAL file but not flushed, so a power cut (not a process crash) can roll
+    back the last commits. That is the right trade for most writes, but a few
+    commits must survive a power cut because the work after them happens much
+    later (a timed wait's pause: losing it re-runs or fails a task that was
+    only waiting). ``fsync`` on the WAL file flushes every frame already written
+    to it, from any connection or process, so committed transactions become
+    durable without changing how other writes commit. A file without a WAL
+    holds its commits in the database file itself (a checkpoint on close
+    removed the WAL), so that file is synced instead. In-memory databases have
+    nothing to flush and return ``None``. Errors (``OSError``) reach the caller.
+    """
+
+    if not _should_enable_wal(db_path):
+        return None
+    wal_path = f"{db_path}-wal"
+    target = wal_path if os.path.exists(wal_path) else str(db_path)
+    descriptor = os.open(target, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return target
+
+
 def held_open_databases() -> list[str]:
     """The database files this process keeps one idle connection open to, least recently used first."""
 

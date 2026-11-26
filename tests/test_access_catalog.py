@@ -100,6 +100,17 @@ def test_memory_actions_keep_the_levels_of_the_functions_they_replaced(catalog):
     assert catalog.resolve_function("topic_tags", {"action": "find"}).level is AccessLevel.READ
 
 
+def test_timed_wait_tools_have_expected_catalog_classification(catalog):
+    wait_tool = catalog.tools["fn:wait"]
+    long_wait_tool = catalog.tools["fn:long_wait"]
+    assert wait_tool.tool_sets == ("agent_runtime",)
+    assert catalog.resolve_function("wait", {}).tool_id == "fn:wait"
+    assert catalog.resolve_function("wait", {}).level is READ
+    assert long_wait_tool.tool_sets == ()
+    assert catalog.resolve_function("long_wait", {}).tool_id == "fn:long_wait"
+    assert catalog.resolve_function("long_wait", {}).level is WRITE
+
+
 def test_every_staged_change_kind_has_a_catalog_level(catalog):
     """A kind of change applied with apply_change (or decided in the gateway) needs its catalog entry."""
 

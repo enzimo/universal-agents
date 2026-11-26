@@ -61,6 +61,7 @@ class TurnStartNotes:
     task_id: str
     resume_directive: Optional[str] = None
     partial_tool_call_limit: Optional[int] = None
+    trailing_resume_directives: tuple[str, ...] = ()
 
     @classmethod
     def read(
@@ -71,6 +72,109 @@ class TurnStartNotes:
             return None
         return cls(task_id, resume_directive, partial_tool_call_limit)
 
+    @classmethod
+    def with_live_wait_directive(
+        cls,
+        existing: Optional["TurnStartNotes"],
+        task_id: str,
+        directive: str,
+    ) -> Optional["TurnStartNotes"]:
+        """Record the single latest live-resumed wait note for this turn (replacing any earlier one)."""
+        text = str(directive or "").strip()
+        if not text:
+            return existing
+        if existing is None:
+            return cls(task_id=task_id, trailing_resume_directives=(text,))
+        return replace(existing, trailing_resume_directives=(text,))
+
+
+def snapshot_runtime_resume_directive(
+    state: TaskRuntimeState, task_id: str
+) -> tuple[bool, Optional[str]]:
+    """Capture ``task_id``'s current resume-directive slot before an atomic mutation."""
+    return (task_id in state.runtime_resume_directives, state.runtime_resume_directives.get(task_id))
+
+
+def restore_runtime_resume_directive(
+    state: TaskRuntimeState, task_id: str, snapshot: tuple[bool, Optional[str]]
+) -> None:
+    """Restore ``task_id``'s resume-directive slot after a rolled-back mutation."""
+    had_value, previous = snapshot
+    if had_value and previous is not None:
+        state.runtime_resume_directives[task_id] = previous
+    else:
+        state.runtime_resume_directives.pop(task_id, None)
+
+
+def add_runtime_resume_directive(
+    state: TaskRuntimeState, task_id: str, directive: str
+) -> bool:
+    """Append ``directive`` to ``task_id``'s resume note with whole-block deduplication.
+
+    Returns True when the stored note changed. Lives beside
+    ``release_turn_start_notes`` so single-write persistence paths share one
+    in-memory rule with ``TaskManager.append_runtime_resume_directive``.
+    """
+    text = str(directive or "").strip()
+    earlier = state.runtime_resume_directives.get(task_id, "").strip()
+    # Match the entire note between the separators, including all of its
+    # paragraphs, rather than dropping a prefix, suffix or substring.
+    if not text or f"\n\n{text}\n\n" in f"\n\n{earlier}\n\n":
+        return False
+    state.runtime_resume_directives[task_id] = f"{earlier}\n\n{text}" if earlier else text
+    return True
+
+
+def _remove_whole_directive_block(current: str, block: str) -> tuple[bool, Optional[str]]:
+    """Remove one exact whole block from ``current``; returns ``(removed, remaining_or_none)``."""
+    if current == block:
+        return True, None
+    if current.endswith(f"\n\n{block}"):
+        return True, current[: -(len(block) + 2)]
+    if current.startswith(f"{block}\n\n"):
+        return True, current[len(block) + 2 :]
+    middle = f"\n\n{block}\n\n"
+    if middle in current:
+        return True, current.replace(middle, "\n\n", 1)
+    return False, current
+
+
+def drop_resume_directive_blocks(
+    state: TaskRuntimeState,
+    task_id: str,
+    blocks: tuple[str, ...],
+) -> bool:
+    """Remove exact whole directive blocks from ``task_id``'s stored resume note without persisting."""
+    if not blocks:
+        return False
+    current = state.runtime_resume_directives.get(task_id)
+    if current is None:
+        return False
+    return _release_trailing_directives(state, task_id, current, blocks)
+
+
+def _release_trailing_directives(
+    state: TaskRuntimeState,
+    task_id: str,
+    current: Optional[str],
+    blocks: tuple[str, ...],
+) -> bool:
+    """Remove any trailing live-turn directives still present in ``task_id``'s stored note."""
+    changed = False
+    for block in blocks:
+        if not block or current is None:
+            continue
+        removed, remaining = _remove_whole_directive_block(current, block)
+        if not removed:
+            continue
+        changed = True
+        current = remaining
+        if remaining is None:
+            state.runtime_resume_directives.pop(task_id, None)
+        else:
+            state.runtime_resume_directives[task_id] = remaining
+    return changed
+
 
 def release_turn_start_notes(
     state: TaskRuntimeState, notes: TurnStartNotes, logger: logging.Logger
@@ -79,8 +183,10 @@ def release_turn_start_notes(
 
     Notes are only ever added after the existing text
     (``TaskManager.append_runtime_resume_directive``), so the note a turn read
-    is the start of the stored note. A partial limit is removed only if no
-    newer one replaced it.
+    is the start of the stored note. Blocks in ``trailing_resume_directives``
+    were saved for a live resumed turn (such as a timed wait that finished on
+    that turn) and are removed as exact whole blocks. A partial limit is removed
+    only if no newer one replaced it.
     """
     changed = False
     applied = notes.resume_directive
@@ -88,9 +194,11 @@ def release_turn_start_notes(
     if applied and current is not None:
         if current == applied:
             del state.runtime_resume_directives[notes.task_id]
+            current = None
             changed = True
         elif current.startswith(f"{applied}\n\n"):
-            state.runtime_resume_directives[notes.task_id] = current[len(applied) + 2 :]
+            current = current[len(applied) + 2 :]
+            state.runtime_resume_directives[notes.task_id] = current
             changed = True
         else:
             logger.warning(
@@ -98,6 +206,10 @@ def release_turn_start_notes(
                 "it is kept for the next turn. event=resume_note_kept_after_turn task_id=%s",
                 notes.task_id,
             )
+    if notes.trailing_resume_directives and _release_trailing_directives(
+        state, notes.task_id, current, notes.trailing_resume_directives
+    ):
+        changed = True
     limit = notes.partial_tool_call_limit
     if limit is not None and state.partial_tool_call_limit_overrides.get(notes.task_id) == limit:
         del state.partial_tool_call_limit_overrides[notes.task_id]

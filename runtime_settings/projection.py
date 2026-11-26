@@ -294,6 +294,14 @@ def _project_agent(
             "max_tool_result_tokens_per_call",
             AGENT_DEFAULTS.max_tool_result_tokens_per_call.value,
         ),
+        "max_wait_minutes_without_approval": agent_cfg.get(
+            "max_wait_minutes_without_approval",
+            AGENT_DEFAULTS.max_wait_minutes_without_approval.value,
+        ),
+        "max_wait_minutes_with_approval": agent_cfg.get(
+            "max_wait_minutes_with_approval",
+            AGENT_DEFAULTS.max_wait_minutes_with_approval.value,
+        ),
         "runtime_budget_policy": dict(
             agent_cfg.get(
                 "runtime_budget_policy", AGENT_DEFAULTS.runtime_budget_policy.value
