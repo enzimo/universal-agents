@@ -11,12 +11,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import pytest
 from strands import Skill
 
 from custom_agents.tool_loading import declared_skill_tool_ids
 from scripts.summarize_tool_presentation_report import COUNTED, main, summarize
-from tests.test_live_tool_presentation import TASKS, TEST_SKILLS, Watch, call_counts
+from tests.test_live_tool_presentation import CEDAR_BINARY, TASKS, TEST_SKILLS, Watch, call_counts
 
 SUCCESS = {"status": "success", "content": [{"text": "{}"}]}
 
@@ -66,9 +68,32 @@ def test_the_summary_adds_the_new_counts_and_reads_older_rows_as_zero(tmp_path: 
 
 
 def test_the_skill_task_uses_a_test_skill_that_declares_a_group_the_index_hides() -> None:
-    [task] = [task for task in TASKS if task.task_id == "skill_heartbeat_audit"]
-    skill = Skill.from_file(TEST_SKILLS / "heartbeat-checklist-audit" / "SKILL.md")
+    [task] = [task for task in TASKS if task.task_id == "skill_quiet_hours_audit"]
+    skill = Skill.from_file(TEST_SKILLS / "quiet-hours-settings-audit" / "SKILL.md")
 
     assert task.skill_directories == (str(TEST_SKILLS),)
-    assert declared_skill_tool_ids(skill.metadata) == ["fn:heartbeat"]
-    assert {need.tool for need in task.required} == {"skills", "list_heartbeat_items"}
+    assert declared_skill_tool_ids(skill.metadata) == ["fn:runtime_settings"]
+    assert {need.tool for need in task.required} == {"skills", "list_runtime_settings_options"}
+
+
+@pytest.mark.skipif(not CEDAR_BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
+def test_the_skill_tasks_function_returns_real_data_in_the_harness_team_lead(tmp_path: Path, monkeypatch) -> None:
+    # The harness's own TeamArchitect (team_lead()), with a scripted model instead of the endpoint: the skill
+    # task's function must answer with data, not an error (the first choice, list_heartbeat_items, needs a
+    # gateway heartbeat source the harness lacks, so every run failed).
+    import tests.test_live_tool_presentation as live
+    from custom_agents import access_runtime
+    from custom_tools.tool_lookup import trusted_tools
+    from tests.test_call_tool import ScriptedStepsModel
+
+    monkeypatch.setattr(live, "_settings", lambda: ("http://127.0.0.1:9", {"LITELLM_API_KEY": "unused"}))
+    with patch("custom_agents.strands_model_factory.build_strands_model", return_value=ScriptedStepsModel([])):
+        agent, _watch = live.team_lead(tmp_path, monkeypatch, "openai/unused", "index", (str(TEST_SKILLS),))
+    try:
+        decision = access_runtime.decide_call(agent, "list_runtime_settings_options", {})
+        paths = [item["path"] for item in json.loads(trusted_tools()["list_runtime_settings_options"]())["agent_controllable"]]
+    finally:
+        access_runtime._runtime_access.cache_clear()
+
+    assert decision is not None and decision.allowed
+    assert "delivery.quiet_hours.enabled" in paths

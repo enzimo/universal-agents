@@ -686,6 +686,10 @@ def test_c02_call_tool_refuses_skills_mcp_and_turn_decision_without_renaming(
     [step] = _tool_results_by_step(inner)
     assert "already in your tool list; call it directly" in _result_text(step["cid-skills"])
     assert "MCP server tool" in _result_text(step["cid-mcp"])
+    # F5: the refusal does not send the model to use_tools, which loads no MCP server.
+    from custom_tools.providers.tool_loading import MCP_LOADS_ON_ITS_OWN
+
+    assert MCP_LOADS_ON_ITS_OWN in _result_text(step["cid-mcp"]) and "Load its server with use_tools" not in _result_text(step["cid-mcp"])
     assert "call it directly, not through call_tool" in _result_text(step["cid-turn"])
     # Every call stayed named call_tool and was already cancelled before AccessDecisionHook.
     assert access_seen == [(CALL_TOOL_NAME, True), (CALL_TOOL_NAME, True), (CALL_TOOL_NAME, True)]
@@ -1074,3 +1078,200 @@ def test_c03_objective_checkpoint_only_pass_allows_record_checkpoint_through_cal
     bad_response, bad_degraded = _run_finalize("knowledge_search")
     assert bad_response is not None and "cp-degraded" in str(bad_response.answer)
     assert len(bad_degraded) == 1, "non-checkpoint tool through call_tool must be blocked and degrade"
+
+
+# -- F1 (project review): call_tool itself is decided, and blocks and the operator blocklist stop it ----------
+
+
+def _block(storage: Any, target: TargetRefV1, agent_type: str = "TeamArchitect") -> None:
+    from custom_messages.contracts.access_v2 import GrantKind
+
+    service = AccessService(store=AccessRepository(storage), catalog=CATALOG, cedar=CedarAccessClient(binary=str(BINARY)), team_id=TEAM)
+    try:
+        service.store.create(GrantV1(
+            grant_id=f"blk-{target.id}", team_id=TEAM, kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/{agent_type}"),
+            target=target, granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            created_at_utc=service.clock(),
+        ))
+    finally:
+        service.cedar.close()
+
+
+def _calculator_through_call_tool(ua: Any, *, drop_call_tool: bool = False, registry_tools: list[Any] | None = None) -> tuple[dict[str, Any], list[str]]:
+    """One call_tool(calculator) step; the result and the (name, tool selected) pairs the access hook saw."""
+
+    seen: list[str] = []
+    original = AccessDecisionHook.before_tool_call
+
+    async def spy(self: Any, event: Any) -> None:
+        seen.append(f"{event.tool_use.get('name')}:{event.selected_tool is not None}")
+        await original(self, event)
+
+    with patch.object(AccessDecisionHook, "before_tool_call", spy):  # before building: the hook binds its method then
+        inner, _parts = _build_agent(ua, [[("cid", CALL_TOOL_NAME, {"name": "calculator", "inputs": {"expression": "6*7"}})]], registry_tools=registry_tools)
+        if drop_call_tool:
+            # What the tool-list sync and the operator's tool_blocklist do: call_tool is not in the list.
+            inner.tool_registry.registry.pop(CALL_TOOL_NAME, None)
+        asyncio.run(inner.invoke_async("go"))
+    [step] = _tool_results_by_step(inner)
+    return step["cid"], seen
+
+
+@pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
+def test_f1_an_operation_block_on_call_tool_refuses_it_before_the_target_runs(storage: Any) -> None:
+    _block(storage, TargetRefV1(kind=TargetKind.OPERATION, id="fn:tool_loading#call_tool"))
+    ua = _make_ua_agent(storage, agent_type="TeamArchitect", lead=True, mode=TOOL_PRESENTATION_INDEX)
+
+    result, seen = _calculator_through_call_tool(ua)
+
+    assert result["status"] == "error" and "42" not in _result_text(result)
+    assert "access_denied" in _result_text(result) or "blocked" in _result_text(result).lower()
+    assert seen == [f"{CALL_TOOL_NAME}:True"], "never rewritten to calculator"
+
+
+@pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
+@pytest.mark.parametrize("drop_call_tool", [False, True])
+def test_f1_a_block_on_all_of_tool_loading_stops_call_tool(storage: Any, drop_call_tool: bool) -> None:
+    _block(storage, TargetRefV1(kind=TargetKind.TOOL, id="fn:tool_loading"))
+    ua = _make_ua_agent(storage, agent_type="TeamArchitect", lead=True, mode=TOOL_PRESENTATION_INDEX)
+
+    result, seen = _calculator_through_call_tool(ua, drop_call_tool=drop_call_tool)
+
+    assert result["status"] == "error" and "42" not in _result_text(result)
+    if drop_call_tool:
+        assert _result_text(result) == f"Unknown tool: {CALL_TOOL_NAME}"
+        assert seen == [f"{CALL_TOOL_NAME}:False"]
+    else:
+        assert seen == [f"{CALL_TOOL_NAME}:True"], "refused by the decision on call_tool, never rewritten"
+
+
+def test_f1_the_operator_tool_blocklist_stops_call_tool(storage: Any) -> None:
+    ua = _make_ua_agent(storage, agent_type="TeamArchitect", lead=True, mode=TOOL_PRESENTATION_INDEX, tool_filter={"tool_blocklist": [CALL_TOOL_NAME]})
+
+    result, seen = _calculator_through_call_tool(ua, drop_call_tool=True)
+
+    assert result["status"] == "error" and _result_text(result) == f"Unknown tool: {CALL_TOOL_NAME}"
+    assert seen == [f"{CALL_TOOL_NAME}:False"]
+
+
+def test_f1_a_target_in_the_registry_that_is_not_offered_is_cancelled_not_looked_up_again(storage: Any) -> None:
+    # SEC-2: Strands looks a call with no selected tool up again by name, and the access hook does not
+    # decide a call with no tool; the blocklisted calculator in the registry must not run that way.
+    from custom_tools.tool_lookup import trusted_tools
+
+    ua = _make_ua_agent(storage, agent_type="TeamArchitect", lead=True, enabled=False, mode=TOOL_PRESENTATION_INDEX, tool_filter={"tool_blocklist": ["calculator"]})
+
+    result, _seen = _calculator_through_call_tool(ua, registry_tools=[trusted_tools()["calculator"]])
+
+    assert result["status"] == "error" and _result_text(result) == "Unknown tool: calculator"
+
+
+# -- F2 (project review): a record change through call_tool with unusable inputs stops the step ----------------
+
+
+def test_f2_a_record_change_with_unusable_inputs_stops_the_step_with_the_real_hook_and_executor(storage: Any) -> None:
+    # Also F8 / EA-2: the real CallToolHook (not a test rewriter) with a refused change between two reads.
+    from custom_tools.tool_lookup import trusted_tools
+
+    ua = _make_ua_agent(storage, agent_type="TeamArchitect", lead=True, enabled=False, mode=TOOL_PRESENTATION_INDEX)
+    inner, _parts = _build_agent(
+        ua,
+        [[
+            ("read-1", "calculator", {"expression": "1+1"}),
+            ("change", CALL_TOOL_NAME, {"name": "knowledge_write", "inputs": "title=x"}),
+            ("read-2", "calculator", {"expression": "2+2"}),
+        ]],
+        registry_tools=[trusted_tools()["calculator"]],
+    )
+
+    asyncio.run(inner.invoke_async("go"))
+
+    [step] = _tool_results_by_step(inner)
+    assert step["change"]["status"] == "error" and "must be an object" in _result_text(step["change"])
+    for read in ("read-1", "read-2"):
+        assert step[read]["status"] == "error" and "Not run:" in _result_text(step[read]), read
+
+
+# -- F3 (project review): the stored tool-call limit record names the function call_tool runs --------------------
+
+
+def _stream(handler: ToolCallLimitCallbackHandler, tool_use_id: str, name: str, chunks: list[str]) -> None:
+    text = ""
+    for chunk in chunks:
+        text += chunk
+        handler(current_tool_use={"toolUseId": tool_use_id, "name": name, "input": text})
+
+
+def test_f3_a_streamed_call_tool_over_the_limit_is_recorded_under_its_target() -> None:
+    handler = ToolCallLimitCallbackHandler(max_tool_calls=1, raise_on_exceeded=False)
+    _stream(handler, "t1", "calculator", ['{"expression"', ': "1+1"}'])
+    assert handler.limit_error is None, "a direct call is checked at its first piece and is within the limit"
+
+    _stream(handler, "t2", CALL_TOOL_NAME, ['{"na', 'me": "memory", ', '"inputs": {"action": "list"}}'])
+
+    error = handler.limit_error
+    assert error is not None and error.last_attempted_tool == "memory"
+    assert error.tool_sequence == ["calculator", "memory"]
+    assert "Last attempted tool: memory." in str(error)
+
+
+def test_f3_a_streamed_call_tool_whose_name_never_becomes_valid_counts_as_call_tool() -> None:
+    handler = ToolCallLimitCallbackHandler(max_tool_calls=0, raise_on_exceeded=False)
+
+    _stream(handler, "t1", CALL_TOOL_NAME, ['{"name": "bad\\\\nname', '", "inputs": {}}'])
+
+    assert handler.limit_error is not None and handler.limit_error.last_attempted_tool == CALL_TOOL_NAME
+
+
+# -- F6 (project review): a repeated identical call under a reused id is reported again --------------------------
+
+
+def test_f6_a_repeated_identical_call_under_a_reused_id_is_reported_again() -> None:
+    emitted: list[str] = []
+    handler = ActivityPhaseCallbackHandler(emit_activity=lambda **kw: emitted.append(kw["details"]["tool_name"]), task_id="t")
+
+    # Polling, as a model server that reuses call_0 sends it: another tool in between.
+    for chunk in (
+        {"toolUseId": "call_0", "name": "check_status", "input": "{}"},
+        {"toolUseId": "call_0", "name": "knowledge_search", "input": '{"query": "a"}'},
+        {"toolUseId": "call_0", "name": CALL_TOOL_NAME, "input": '{"name": "check_status", "inputs": {}}'},
+    ):
+        handler(current_tool_use=chunk)
+    # The same call twice in a row, in two steps: the finished message between them clears the record.
+    handler(current_tool_use={"toolUseId": "call_0", "name": "check_status", "input": "{}"})
+    handler(message={"role": "assistant", "content": []})
+    handler(current_tool_use={"toolUseId": "call_0", "name": "check_status", "input": "{}"})
+
+    assert emitted == ["check_status", "knowledge_search", "check_status", "check_status", "check_status"]
+
+
+# -- F8 (project review): test gaps EA-1 and EA-3 ----------------------------------------------------------------
+
+
+@needs_cedar
+def test_f8_a_function_from_a_group_that_loads_on_request_runs_without_loading_its_group(storage: Any) -> None:
+    # EA-1: fn:runtime_settings loads on request, so the "no load" check below can fail (calculator could not).
+    ua = _make_ua_agent(storage, agent_type="TeamArchitect", lead=True, mode=TOOL_PRESENTATION_INDEX)
+    assert "fn:runtime_settings" in CATALOG.on_request
+    inner, parts = _build_agent(ua, [[("cid-opts", CALL_TOOL_NAME, {"name": "list_runtime_settings_options", "inputs": {}})]])
+
+    asyncio.run(inner.invoke_async("go"))
+
+    [step] = _tool_results_by_step(inner)
+    assert step["cid-opts"]["status"] == "success", _result_text(step["cid-opts"])[:300]
+    assert parts.loaded.loaded() == frozenset(), "call_tool must not load the group into later model calls"
+    assert "list_runtime_settings_options" not in inner.tool_registry.registry
+
+
+def test_f8_a_function_already_in_the_tool_list_also_runs_through_call_tool(storage: Any) -> None:
+    # EA-3: a target already in the registry runs as its registered tool.
+    from custom_tools.tool_lookup import trusted_tools
+
+    ua = _make_ua_agent(storage, agent_type="TeamArchitect", lead=True, enabled=False, mode=TOOL_PRESENTATION_INDEX)
+    inner, _parts = _build_agent(ua, [[("cid", CALL_TOOL_NAME, {"name": "calculator", "inputs": {"expression": "6*7"}})]], registry_tools=[trusted_tools()["calculator"]])
+
+    asyncio.run(inner.invoke_async("go"))
+
+    [step] = _tool_results_by_step(inner)
+    assert step["cid"]["status"] == "success" and "42" in _result_text(step["cid"])

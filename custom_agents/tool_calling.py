@@ -42,8 +42,10 @@ counts are affected.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
 from strands.hooks import (
@@ -181,12 +183,26 @@ class CallToolHook(HookProvider):
         registry.add_callback(AfterToolCallEvent, self.after_tool_call)
         registry.add_callback(AfterInvocationEvent, self.after_invocation)
 
-    def before_tool_call(self, event: BeforeToolCallEvent) -> None:
+    async def before_tool_call(self, event: BeforeToolCallEvent) -> None:
         if not isinstance(event.tool_use, Mapping) or event.tool_use.get("name") != CALL_TOOL_NAME:
             return
         tool_use_id = str(event.tool_use.get("toolUseId") or "")
+        if event.selected_tool is None or tool_name(event.selected_tool) != CALL_TOOL_NAME:
+            # call_tool is not this agent's tool now (a block, the operator's tool_blocklist or the
+            # tool-list sync removed it): leave the call as it is, and Strands answers "Unknown tool".
+            logger.info(
+                "call_tool was called but is not in the agent's tool list. event=call_tool_not_offered agent_id=%s "
+                "tool_use_id=%s",
+                getattr(self.agent, "id", None),
+                tool_use_id or None,
+            )
+            return
         target_hint = checked_target_name(event.tool_use)
         try:
+            refusal = await self._call_tool_refusal(event)
+            if refusal is not None:
+                event.cancel_tool = refusal
+                return
             self._rewrite(event, tool_use_id)
         except Exception:  # noqa: BLE001 - one broken call must return an error result, never fail the turn
             logger.exception(
@@ -200,6 +216,35 @@ class CallToolHook(HookProvider):
                 f"call_tool failed while preparing {target_hint or 'the requested tool'}. "
                 "Try again or inspect the tool with describe_tools."
             )
+
+    async def _call_tool_refusal(self, event: BeforeToolCallEvent) -> str | None:
+        """The access hook's refusal of call_tool itself, or None when it may run.
+
+        The rewrite hides call_tool from AccessDecisionHook, so call_tool is
+        decided here first, through the same ``decide_call`` (a block on
+        ``fn:tool_loading#call_tool`` or on all of ``fn:tool_loading`` stops
+        it). Its one-time uses bind to the call's id with a ``#call_tool``
+        suffix, so they never meet the target's own decision.
+        """
+
+        from custom_agents.access_runtime import call_operation_id, decide_call, refusal_text
+
+        operation_id = call_operation_id(self.agent, event)
+        arguments = event.tool_use.get("input")
+        decision = await asyncio.to_thread(
+            partial(decide_call, operation_id=f"{operation_id}#{CALL_TOOL_NAME}" if operation_id else None),
+            self.agent,
+            CALL_TOOL_NAME,
+            arguments if isinstance(arguments, Mapping) else None,
+        )
+        if decision is None or decision.allowed:
+            return None
+        logger.info(
+            "The access decision refused call_tool itself. event=call_tool_refused agent_id=%s tool_use_id=%s",
+            getattr(self.agent, "id", None),
+            event.tool_use.get("toolUseId"),
+        )
+        return refusal_text(decision)
 
     def _rewrite(self, event: BeforeToolCallEvent, tool_use_id: str) -> None:
         from custom_agents.access_runtime import runtime_access
@@ -247,6 +292,8 @@ class CallToolHook(HookProvider):
             if _is_callable_target(catalog, target)
             else (None, False)
         )
+        if selected_tool is None and self._cancel_unresolved(event, catalog, registry, target, tool_use_id):
+            return
         # Fresh dict so agent.messages keeps the original call_tool block intact for history and interrupt resumes.
         event.tool_use = {
             "toolUseId": event.tool_use.get("toolUseId"),
@@ -256,6 +303,36 @@ class CallToolHook(HookProvider):
         event.selected_tool = selected_tool
         if selected_tool is not None and not was_in_registry and tool_use_id:
             self._unshown_calls[tool_use_id] = (target, selected_tool)
+
+    def _cancel_unresolved(self, event: BeforeToolCallEvent, catalog: Any, registry: Any, target: str, tool_use_id: str) -> bool:
+        """Cancel a target that resolved to no tool, unless no tool can run under its name.
+
+        After the hooks Strands looks a call with no selected tool up again by
+        name, and AccessDecisionHook does not decide a call with no tool. So a
+        renamed call is left without a tool only when its name is in neither
+        the registry nor the catalog: then Strands answers "Unknown tool", and
+        a turn action keeps the guardrails' explanation. A catalog function the
+        agent is not offered gets Strands' own answer to a direct call; a
+        near-miss name gets the closest real names.
+        """
+
+        from custom_agents.tool_loading import unknown_tool_refusal
+
+        if _is_callable_target(catalog, target) or _registry_lookup(registry, target) is not None:
+            refusal: str | None = f"Unknown tool: {target}"
+        else:
+            refusal = unknown_tool_refusal(self.agent, registry, target)
+        if refusal is None:
+            return False
+        logger.info(
+            "call_tool's target resolved to no tool; refusing it. event=call_tool_target_unresolved agent_id=%s "
+            "target=%s tool_use_id=%s",
+            getattr(self.agent, "id", None),
+            target,
+            tool_use_id or None,
+        )
+        event.cancel_tool = refusal
+        return True
 
     def _cancel_disallowed_target(
         self,
@@ -284,9 +361,11 @@ class CallToolHook(HookProvider):
                 target,
                 tool_use_id or None,
             )
+            from custom_tools.providers.tool_loading import MCP_LOADS_ON_ITS_OWN
+
             event.cancel_tool = (
-                f"{target} is an MCP server tool and cannot be called through call_tool. "
-                f"Load its server with use_tools if needed and call {target} directly."
+                f"{target} is an MCP server tool and cannot be called through call_tool; call {target} directly. "
+                f"{MCP_LOADS_ON_ITS_OWN}"
             )
             return True
 

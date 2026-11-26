@@ -81,11 +81,9 @@ class ChangesFirstToolExecutor(ConcurrentToolExecutor):
         others: list[ToolUse] = []
         for tool_use in tool_uses:
             resolved = resolve_tool_use(tool_use)
-            kind = (
-                None
-                if resolved.error or not resolved.name
-                else self._record_kind_of(resolved.name, resolved.inputs)
-            )
+            # A valid name decides, even when call_tool's inputs are unusable: such a record change is refused
+            # (CallToolHook cancels it) and must stop the step like a direct call with unreadable arguments.
+            kind = self._record_kind_of(resolved.name, resolved.inputs or {}) if resolved.name else None
             (others if kind is None else changes).append(tool_use)
         return changes, others
 

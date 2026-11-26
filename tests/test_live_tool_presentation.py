@@ -115,12 +115,15 @@ TASKS = (
         (Required("memory", lambda inputs: inputs.get("action") == "create" and inputs.get("bank") == "coremem"),),
     ),
     LiveTask(
-        "skill_heartbeat_audit",
-        "Use the heartbeat-checklist-audit skill to audit the team's heartbeat checklist, and tell me how many items it has.",
+        # list_runtime_settings_options (fn:runtime_settings, loads on request) returns real data in this
+        # harness; list_heartbeat_items, the first choice, needs gateway heartbeat context it does not have.
+        "skill_quiet_hours_audit",
+        "Use the quiet-hours-settings-audit skill to audit the team's quiet-hours delivery settings, and name them exactly.",
         (
-            Required("skills", lambda inputs: inputs.get("skill_name") == "heartbeat-checklist-audit"),
-            Required("list_heartbeat_items"),
+            Required("skills", lambda inputs: inputs.get("skill_name") == "quiet-hours-settings-audit"),
+            Required("list_runtime_settings_options"),
         ),
+        answer_has=("delivery.quiet_hours.enabled",),
         skill_directories=(str(TEST_SKILLS),),
     ),
 )

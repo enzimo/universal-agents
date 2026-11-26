@@ -6,7 +6,7 @@ import json
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional
 
-from custom_agents.tool_use_unwrap import unwrap_tool_use
+from custom_agents.tool_use_unwrap import CALL_TOOL_NAME, unwrap_tool_use
 
 
 def compact_debug_preview(value: Any, *, max_chars: int = 1200) -> str:
@@ -125,6 +125,7 @@ class ToolCallLimitCallbackHandler:
         self.tool_sequence: List[str] = []
         self.tool_observations: List[Dict[str, Any]] = []
         self._tool_index_by_key: Dict[str, int] = {}
+        self._limit_checked: set[str] = set()  # tool keys whose limit check ran (once per call)
         self.limit_error: Optional[ToolCallLimitExceeded] = None
 
     @staticmethod
@@ -173,19 +174,29 @@ class ToolCallLimitCallbackHandler:
                         sequence_number=len(self.tool_sequence),
                     )
                 )
-                observed_tool_calls = len(self.tool_sequence)
-                if observed_tool_calls > self.max_tool_calls:
-                    self.limit_error = ToolCallLimitExceeded(
-                        max_tool_calls=self.max_tool_calls,
-                        observed_tool_calls=observed_tool_calls,
-                        tool_sequence=self.tool_sequence,
-                        last_attempted_tool=tool_name,
-                        recent_tool_uses=self.tool_observations[-8:],
-                    )
-                    if self.cancel_callback is not None:
-                        self.cancel_callback()
-                    if self.raise_on_exceeded:
-                        raise self.limit_error
+            # A streamed call_tool names its function only once "name" is readable; the stored limit
+            # record must name that function, so its check waits for the name or the complete input.
+            target_pending = normalized_tool_use.get("name") == CALL_TOOL_NAME and not unwrapped.name and not unwrapped.complete
+            if tool_key not in self._limit_checked and not target_pending:
+                self._limit_checked.add(tool_key)
+                self._check_limit(self._tool_index_by_key[tool_key] + 1, tool_name)
 
         if self.delegate is not None:
             self.delegate(**kwargs)
+
+    def _check_limit(self, observed_tool_calls: int, tool_name: str) -> None:
+        """Record and raise the limit error when this call (its 1-based position) is over the cap."""
+
+        if observed_tool_calls <= self.max_tool_calls:
+            return
+        self.limit_error = ToolCallLimitExceeded(
+            max_tool_calls=self.max_tool_calls,
+            observed_tool_calls=observed_tool_calls,
+            tool_sequence=self.tool_sequence,
+            last_attempted_tool=tool_name,
+            recent_tool_uses=self.tool_observations[-8:],
+        )
+        if self.cancel_callback is not None:
+            self.cancel_callback()
+        if self.raise_on_exceeded:
+            raise self.limit_error

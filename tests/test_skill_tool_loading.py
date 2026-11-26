@@ -242,6 +242,17 @@ def test_a_group_the_agent_lacks_is_named_as_not_available_without_a_request_acc
     assert owner_service(storage).store.version(TEAM) == version
 
 
+def test_with_full_definitions_a_lacking_group_that_does_not_load_on_request_is_not_available(storage, tmp_path) -> None:
+    # F4 (project review): fn:agent_management does not load on request; the worker lacks it.
+    worker = worker_agent(storage, tmp_path)
+    model_view(worker)
+
+    result = activate(skill(ua_tools="fn:agent_management"))
+
+    assert "- Not available to you: fn:agent_management." in result
+    assert "ask for access" not in result and "request_access" not in result
+
+
 @pytest.mark.parametrize("presentation", [TOOL_PRESENTATION_INDEX, "full_definitions"])
 def test_a_worker_activating_any_standard_skill_is_not_told_to_request_access(storage, tmp_path, presentation) -> None:
     from custom_agents.strands_team import STANDARD_RUNTIME_SKILL_DIRS

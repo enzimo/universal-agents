@@ -47,10 +47,11 @@ TOOL_INDEX_HOOK_ORDER = -90.0
 # The longest first sentence an index line may carry (tests/test_tool_index.py checks every tool).
 MAX_INDEX_SENTENCE_CHARS = 160
 # Index lines carry a compact signature so the model can call through call_tool without
-# describe_tools: required inputs (short enums inlined as a|b|c, at most COMPACT_SIGNATURE_MAX_ENUM
-# values), then at most COMPACT_SIGNATURE_MAX_OPTIONAL optional names marked '?' and '+N?' for the rest.
+# describe_tools: the required inputs (short enums inlined as a|b|c, at most COMPACT_SIGNATURE_MAX_ENUM
+# values; lists marked [] and objects {}) and a count of the optional ones ("+N optional").
 # Full typed signatures on every line cost the team lead ~59% of full definitions (budget is 50%).
-COMPACT_SIGNATURE_MAX_OPTIONAL = 4
+# Optional names without their allowed values made models guess them in the live comparison
+# (calculator(mode='exact'), get_self_status(info_type='basic'), refused and retried every run).
 COMPACT_SIGNATURE_MAX_ENUM = 6
 # Catalog tools whose functions never run from a tool script: loading and finding
 # tools, the script tool itself, and model-context loading, which only a direct
@@ -118,8 +119,9 @@ INDEX_HEADER = (
     "Each line below is a tool function you hold whose full definition is not in your tool list. "
     f"Call it in one step with {CALL_TOOL_NAME}(name='<function>', inputs={{...}}) "
     f"(tools already in your tool list are called directly, not through {CALL_TOOL_NAME}). "
-    "Use describe_tools(names=['<function>']) or use_tools(tool_ids=['<group id>']) only when you need "
-    "the full description or extra optional inputs.",
+    "A line shows the required inputs; '+N optional' counts the optional ones. "
+    "describe_tools(names=['<function>']) gives the optional inputs and their allowed values, "
+    "and use_tools(tool_ids=['<group id>']) loads a group's full definitions.",
 )
 INDEX_SCRIPT_NOTE = (
     "Functions marked script also run from run_tool_script without loading: use it to chain several "
@@ -207,31 +209,26 @@ def _compact_arg(argument: str, prop: Mapping[str, Any]) -> str:
 
 
 def _compact_signature(name: str, tool: Any) -> str:
-    """Compact signature for index lines: required args first, then optional names with '?'."""
+    """Compact signature for index lines: the required args, then how many optional ones there are."""
 
     schema = _schema_of(tool)
     properties: Mapping[str, Any] = schema.get("properties") or {}
     required = set(schema.get("required") or ())
-    first: list[str] = []
-    rest: list[str] = []
-    for argument, raw_prop in properties.items():
-        prop = raw_prop if isinstance(raw_prop, Mapping) else {}
-        if argument in required:
-            first.append(_compact_arg(argument, prop))
-        else:
-            rest.append(f"{argument}?")
-    if len(rest) > COMPACT_SIGNATURE_MAX_OPTIONAL:
-        extra = len(rest) - COMPACT_SIGNATURE_MAX_OPTIONAL
-        rest = [*rest[:COMPACT_SIGNATURE_MAX_OPTIONAL], f"+{extra}?"]
-    return f"{name}({', '.join(first + rest)})"
+    shown = [
+        _compact_arg(argument, prop if isinstance(prop, Mapping) else {})
+        for argument, prop in properties.items()
+        if argument in required
+    ]
+    optional = len(properties) - len(shown)
+    return f"{name}({', '.join([*shown, *([f'+{optional} optional'] if optional else [])])})"
 
 
 def signature(name: str, tool: Any, *, compact: bool = False) -> str:
     """A Python-style signature from the tool's input schema: required inputs first, then optional ones.
 
     With ``compact=True``, omits types and defaults, inlines short required enums
-    (up to ``COMPACT_SIGNATURE_MAX_ENUM`` values), and lists up to
-    ``COMPACT_SIGNATURE_MAX_OPTIONAL`` optional names with ``?`` (plus ``+N?``).
+    (up to ``COMPACT_SIGNATURE_MAX_ENUM`` values), and counts the optional
+    inputs (``+N optional``) instead of naming them.
     """
 
     if compact:
@@ -330,7 +327,6 @@ def held_functions(agent: Any, parts: Any) -> set[str]:
 
 __all__ = [
     "COMPACT_SIGNATURE_MAX_ENUM",
-    "COMPACT_SIGNATURE_MAX_OPTIONAL",
     "MAX_INDEX_SENTENCE_CHARS",
     "SCRIPT_EXCLUDED_FUNCTIONS",
     "SCRIPT_EXCLUDED_TOOLS",

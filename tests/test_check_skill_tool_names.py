@@ -21,6 +21,7 @@ from custom_tools.provider_contract import tool_name
 from custom_tools.registry import ALL_PROVIDER_TOOLS
 from scripts.check_skill_tool_names import (
     KIND_INVALID,
+    KIND_NOT_CHECKED,
     KIND_TOO_MANY,
     KIND_UNKNOWN_FUNCTION,
     KIND_UNKNOWN_ID,
@@ -77,6 +78,16 @@ def test_invalid_and_oversized_declarations_are_reported(tmp_path: Path) -> None
     kinds = {(f.path.parent.name, f.kind) for f in check([tmp_path])}
 
     assert kinds == {("listed", KIND_INVALID), ("many", KIND_TOO_MANY), ("broken", KIND_INVALID)}
+
+
+def test_a_declared_mcp_server_is_reported_as_not_checked_without_failing(tmp_path: Path, capsys) -> None:
+    write_skill(tmp_path, "tickets", "metadata:\n  ua-tools: mcp:tickets fn:objectives\n", "Body.")
+
+    [finding] = check([tmp_path])
+
+    assert (finding.kind, finding.fails) == (KIND_NOT_CHECKED, False) and "mcp:tickets" in finding.message
+    assert main([str(tmp_path)]) == 0
+    assert "not-checked: mcp:tickets is an MCP server id" in capsys.readouterr().out
 
 
 def test_the_command_exits_1_with_findings_0_when_clean_and_2_on_bad_arguments(tmp_path: Path, capsys) -> None:

@@ -13,15 +13,17 @@ argument:
 
 - ``ua-tools`` is a space-separated string of catalog tool ids, at most
   ``MAX_DECLARED_GROUPS`` of them (a declaration names only the few groups the
-  skill's main procedure needs; lead ruling of the tool index round two).
+  skill's main procedure needs; lead ruling of the tool index round two). An
+  MCP server id (``mcp:<name>``) is installed per instance, so it is reported
+  as not checked, which does not fail the check.
 - Every backticked name written as a call, such as ```name(...)``` or
   ```name()```, in ``SKILL.md`` and ``references/*.md`` outside fenced code
   blocks, is a catalog function, a catalog dispatcher or another agent tool.
   Dotted names (``json.loads()``) are not checked.
 
 Usable on any skill folder, including the sibling ua-skills repository.
-Prints ``path:line: kind: message`` per finding; exits 0 when clean, 1 with
-findings, 2 on bad arguments. ``tests/test_check_skill_tool_names.py`` runs it
+Prints ``path:line: kind: message`` per finding; exits 0 when clean (or with
+only not-checked notes), 1 with findings, 2 on bad arguments. ``tests/test_check_skill_tool_names.py`` runs it
 over ``custom_agents/skill_templates``.
 
 Run: ``.venv/bin/python scripts/check_skill_tool_names.py SKILL_DIR [SKILL_DIR ...]``
@@ -43,7 +45,7 @@ import yaml
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from access_catalog.catalog import ToolCatalog, load_catalog
+from access_catalog.catalog import ToolCatalog, load_catalog, mcp_tool_id
 from custom_agents.tool_loading import SKILL_TOOLS_METADATA_KEY
 from custom_tools.provider_contract import tool_name
 
@@ -57,6 +59,9 @@ KIND_INVALID = "invalid-ua-tools"
 KIND_UNKNOWN_ID = "unknown-tool-id"
 KIND_TOO_MANY = "too-many-groups"
 KIND_UNKNOWN_FUNCTION = "unknown-function"
+# An MCP server id (mcp:<name>) is installed per instance, so this instance-free check cannot know it.
+KIND_NOT_CHECKED = "not-checked"
+MCP_ID_PREFIX = mcp_tool_id("")
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,8 @@ class Finding:
     line: int
     kind: str
     message: str
+    # False for notes that do not fail the check (an MCP server id it cannot verify).
+    fails: bool = True
 
     def __str__(self) -> str:
         return f"{self.path}:{self.line}: {self.kind}: {self.message}"
@@ -127,7 +134,9 @@ def check_declaration(path: Path, lines: list[str], catalog: ToolCatalog) -> lis
         return [Finding(path, line, KIND_INVALID, f"{SKILL_TOOLS_METADATA_KEY} must be one space-separated string of tool ids")]
     declared = list(dict.fromkeys(value.split()))
     findings = [
-        Finding(path, line, KIND_UNKNOWN_ID, f"{tool_id} is not a catalog tool id{_closest(tool_id, set(catalog.tools))}")
+        Finding(path, line, KIND_NOT_CHECKED, f"{tool_id} is an MCP server id; servers are installed per instance, so it is not checked", fails=False)
+        if tool_id.startswith(MCP_ID_PREFIX)
+        else Finding(path, line, KIND_UNKNOWN_ID, f"{tool_id} is not a catalog tool id{_closest(tool_id, set(catalog.tools))}")
         for tool_id in declared
         if tool_id not in catalog.tools
     ]
@@ -190,7 +199,7 @@ def main(argv: list[str]) -> int:
     findings = check(roots)
     for finding in findings:
         print(finding)
-    return 1 if findings else 0
+    return 1 if any(finding.fails for finding in findings) else 0
 
 
 if __name__ == "__main__":

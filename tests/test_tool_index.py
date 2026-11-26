@@ -171,7 +171,7 @@ def test_compact_signature_inlines_short_enums_and_caps_optional_args() -> None:
             }
         }
     )
-    assert signature("demo", fake, compact=True) == "demo(action=list|create|delete, big_enum, urls[], proposal{}, opt1?, opt2?, opt3?, opt4?, +2?)"
+    assert signature("demo", fake, compact=True) == "demo(action=list|create|delete, big_enum, urls[], proposal{}, +6 optional)"
     no_args = SimpleNamespace(tool_spec={"inputSchema": {"json": {"type": "object", "properties": {}}}})
     assert signature("ping", no_args, compact=True) == "ping()"
     assert signature("exa_get_contents", TOOLS["exa_get_contents"], compact=True).startswith("exa_get_contents(urls[],")
@@ -190,7 +190,9 @@ def test_the_index_groups_functions_by_the_group_use_tools_loads() -> None:
     assert "call_tool(name='<function>', inputs={...})" in lines[1]
     assert "already in your tool list are called directly" in lines[1]
     assert "fn:knowledge (Knowledge base)" in lines and "fn:memory (Team and personal memory)" in lines
-    assert any(line.startswith("- knowledge_search(query?,") and "Search the shared knowledge base" in line for line in lines)
+    assert any(line.startswith("- knowledge_search(+") and " optional): Search the shared knowledge base" in line for line in lines)
+    assert "optional inputs and their allowed values" in lines[1], "optional names are not listed; describe_tools gives them"
+    assert "?" not in text.split("\n", 2)[2].replace("? ", ""), "no optional names on index lines"
     assert any(line.startswith("- memory(action=list|create|replace|delete|undo, bank=coremem|usermem,") for line in lines)
     assert "script" not in text.split("\n", 2)[2], "no script marks without tool scripts"
     assert index_text(CATALOG, set(), TOOLS, scripts=False) == ""

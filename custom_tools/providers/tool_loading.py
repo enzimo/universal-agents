@@ -548,18 +548,29 @@ def _index_group(agent: Any, catalog: Any, tool_id: str) -> dict[str, Any]:
 def _skill_group_results(agent: Any, catalog: Any, tool_ids: list[str]) -> list[dict[str, Any]]:
     """One result per declared group, in declared order.
 
-    In full_definitions every group goes through use_tools' path. In the
-    index setups only MCP server groups do (the index cannot list their
-    tools); catalog function groups are reported by ``_index_group``.
+    In full_definitions a group the agent lacks is reported as not available
+    first (its access is checked before use_tools' path, whose answer for a
+    group that does not load on request would otherwise suggest asking for
+    access); the rest go through use_tools' path. In the index setups only
+    MCP server groups do (the index cannot list their tools); catalog
+    function groups are reported by ``_index_group``. MCP servers get their
+    own answer in use_tools' path (``_mcp_server_answer``).
     """
 
     from custom_agents.tool_presentation import index_enabled
 
-    if not index_enabled(agent):
-        return load_tool_groups(agent, catalog, tool_ids)
     servers = mcp_tool_ids(catalog, tool_ids)
-    by_id = {item["tool_id"]: item for item in load_tool_groups(agent, catalog, [t for t in tool_ids if t in servers])}
-    by_id.update({tool_id: _index_group(agent, catalog, tool_id) for tool_id in tool_ids if tool_id not in servers})
+    reported: dict[str, dict[str, Any]]
+    if index_enabled(agent):
+        reported = {tool_id: _index_group(agent, catalog, tool_id) for tool_id in tool_ids if tool_id not in servers}
+    else:
+        reported = {
+            tool_id: _no_access(tool_id, refusal)
+            for tool_id in tool_ids
+            if tool_id not in servers and (refusal := _may_load(agent, catalog, tool_id))
+        }
+    by_id = {item["tool_id"]: item for item in load_tool_groups(agent, catalog, [t for t in tool_ids if t not in reported])}
+    by_id.update(reported)
     return [by_id[tool_id] for tool_id in tool_ids]
 
 

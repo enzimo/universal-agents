@@ -609,38 +609,45 @@ class OnRequestToolHook(HookProvider):
         event.selected_tool = tool
 
     def _no_such_tool(self, event: BeforeToolCallEvent, name: str) -> None:
-        """A name that is no tool at all gets the closest real names instead of only "Unknown tool".
-
-        Names of real tools the agent does not have keep Strands' answer: the
-        access hook and find_tools explain those. With a tool index the model
-        sees names without definitions, so a near miss ("knowledge_lookup")
-        is worth correcting at once.
-        """
-
-        import difflib
-
-        from custom_agents.runtime_guardrails import TURN_ACTION_TYPES
-        from custom_tools.tool_lookup import trusted_tools
+        """A name that is no tool at all gets the closest real names instead of only "Unknown tool" (``unknown_tool_refusal``)."""
 
         registry = getattr(getattr(event, "agent", None), "tool_registry", None)
-        known = set(trusted_tools()) | (registry_names(registry) if registry is not None else set())
-        # A turn action called as a tool gets the guardrails' own explanation
-        # (custom_agents.runtime_guardrails), not a list of similar tool names.
-        if not name or name in known or name in TURN_ACTION_TYPES:
-            return
-        closest = difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.5)
-        hint = f" The closest tool names are: {', '.join(closest)}." if closest else ""
-        event.cancel_tool = (
-            f"No tool is named {name!r}.{hint} describe_tools(names=[...]) gives a function's exact inputs, "
-            "and find_tools searches for tools by purpose."
-        )
-        logger.info(
-            "The model called a tool name that does not exist. event=tool_name_unknown agent_id=%s tool=%s closest=%s",
-            getattr(self.agent, "id", None),
-            name,
-            ",".join(closest),
-        )
+        refusal = unknown_tool_refusal(self.agent, registry, name)
+        if refusal is not None:
+            event.cancel_tool = refusal
 
+
+def unknown_tool_refusal(agent: Any, registry: Any, name: str) -> str | None:
+    """The answer for a name that is no tool at all, with the closest real names; None when the name is a tool.
+
+    Names of real tools the agent does not have keep Strands' answer: the
+    access hook and find_tools explain those. With a tool index the model
+    sees names without definitions, so a near miss ("knowledge_lookup") is
+    worth correcting at once. A turn action called as a tool also returns
+    None: the guardrails explain it (custom_agents.runtime_guardrails).
+    ``call_tool`` uses this too (custom_agents.tool_calling).
+    """
+
+    import difflib
+
+    from custom_agents.runtime_guardrails import TURN_ACTION_TYPES
+    from custom_tools.tool_lookup import trusted_tools
+
+    known = set(trusted_tools()) | (registry_names(registry) if registry is not None else set())
+    if not name or name in known or name in TURN_ACTION_TYPES:
+        return None
+    closest = difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.5)
+    hint = f" The closest tool names are: {', '.join(closest)}." if closest else ""
+    logger.info(
+        "The model called a tool name that does not exist. event=tool_name_unknown agent_id=%s tool=%s closest=%s",
+        getattr(agent, "id", None),
+        name,
+        ",".join(closest),
+    )
+    return (
+        f"No tool is named {name!r}.{hint} describe_tools(names=[...]) gives a function's exact inputs, "
+        "and find_tools searches for tools by purpose."
+    )
 
 __all__ = [
     "LOADED_TOOL_IDLE_MODEL_CALLS",
@@ -666,6 +673,7 @@ __all__ = [
     "shown_count",
     "shown_names",
     "tool_limit",
+    "unknown_tool_refusal",
     "work_key",
     "work_preloaded",
 ]
