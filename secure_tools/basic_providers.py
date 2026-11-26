@@ -254,11 +254,13 @@ class CredentialCatalogProvider(DeclaredProvider):
             "credential.collect",
             "Broker-owned create/update in the current user's catalog for store-generated secrets and non-secret "
             "metadata; does not create a user-facing form and refuses agent-submitted secret values, agent-chosen "
-            "Sealbox record names (item_id/sealbox_key), and Sealbox records already referenced by another catalog "
-            "key. Updating an existing key must keep its exact field names, secret/non-secret status, and stored "
-            "record references: omit existing secret fields to leave them untouched while updating existing "
-            "non-secret metadata, or pass value_source='store_generated_secret' to rotate a secret field; adding, "
-            "removing, or reclassifying fields or replacing a secret requires the person's secure broker form. "
+            "record names (item_id/item_name/sealbox_key), records already referenced by another catalog key, and "
+            "keys stored by credential.capture_file (capture a new file instead). Updating an existing key must "
+            "keep its exact field names, secret/non-secret status, and stored record references: omit existing "
+            "secret fields to leave them untouched while updating existing non-secret metadata, or pass "
+            "value_source='store_generated_secret' to rotate a secret field the broker stored (never one registered "
+            "from an existing source; include the username field when rotating a username-and-password record); "
+            "adding, removing, or reclassifying fields or replacing a secret requires the person's secure broker form. "
             "Owner selection comes from trusted context. Defaults to write_source=sealbox, stores "
             "username/password pairs with sealbox-cli credential set, stores custom secret fields with "
             "sealbox-cli secret set, and records only catalog metadata/source refs.",
@@ -280,11 +282,12 @@ class CredentialCatalogProvider(DeclaredProvider):
         ),
         "credential.register_existing_source": ActionSpec(
             "credential.register_existing_source",
-            "Register a new credential key against an existing broker-local env, *_FILE, password-manager, or "
-            "uncataloged Sealbox source without returning the secret value; refuses Sealbox records already "
-            "referenced by another catalog key and refuses sealbox_key. Over an existing key, only existing "
-            "non-secret metadata may change (omit existing secret fields to keep them untouched, or pass their "
-            "exact existing source references); layout or source changes require the person's secure broker form.",
+            "Register a new credential key against an existing broker-local env, *_FILE, or password-manager source "
+            "without returning the secret value; refuses every Sealbox source (the broker writes Sealbox records "
+            "itself), sealbox_key, and password-manager items another catalog key uses. Over an existing key, only "
+            "existing non-secret metadata may change (omit existing secret fields to keep them untouched, or pass "
+            "their exact existing env or password-manager references); layout or source changes require the "
+            "person's secure broker form.",
         ),
         "credential.bind_for_openshell": ActionSpec(
             "credential.bind_for_openshell",

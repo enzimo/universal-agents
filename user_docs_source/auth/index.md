@@ -151,15 +151,20 @@ Sealbox credential store through `credential.capture_file`:
   removed, or changed between secret and metadata, only existing non-secret
   metadata values may change, and every existing secret field either stays
   untouched (agents may omit it from the request, or in
-  `credential.register_existing_source` repeat its exact existing source
-  reference) or, in `credential.collect` only, rotates to a store-generated
-  value on its existing stored record. Agent-callable saves refuse
-  agent-submitted secret values, refuse agent-chosen Sealbox record names
-  (`item_id` and `sealbox_key` on `credential.collect`, `sealbox_key` on
-  `credential.register_existing_source`), and refuse any Sealbox record already
-  referenced by another saved credential (only your secure forms, account-link
-  forms, `credential.capture_file`, and store-native secret generation can
-  store a secret). Every agent write records agent provenance rather than your
+  `credential.register_existing_source` repeat its exact existing environment
+  variable or password-manager reference) or, in `credential.collect` only,
+  rotates to a store-generated value on its existing stored record. Agents
+  cannot rotate a secret that was registered from an existing source, and
+  cannot change a credential an agent captured from a file except by capturing
+  a new file. Agent-callable saves refuse agent-submitted secret values and
+  never let an agent name where a secret is stored: no Sealbox record names
+  (`item_id`, `sealbox_key`), no Bitwarden item names on `credential.collect`,
+  no Sealbox records at all on `credential.register_existing_source`, and no
+  password-manager item or Sealbox record that another saved credential uses.
+  This keeps an agent from overwriting your stored sign-ins or another
+  credential's secret (only your secure forms, account-link forms,
+  `credential.capture_file`, and store-native secret generation can store a
+  secret). Every agent write records agent provenance rather than your
   approval.
 - You receive one Inbox notice naming the agent type, credential display name,
   and deletion time (with no secret value). Operators can turn off capture

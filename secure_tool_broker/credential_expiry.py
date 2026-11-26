@@ -54,7 +54,16 @@ EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
 CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE = "credential_expiry_unsupported_source"
 CREDENTIAL_EXPIRY_FORM_ONLY = "credential_expiry_form_only"
 CREDENTIAL_REPLACEMENT_FORM_ONLY = "credential_replacement_form_only"
-CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED = "credential_sealbox_key_not_allowed"
+# Agent saves never name a stored record themselves: no Sealbox record name
+# (item_id / sealbox_key), no Sealbox source in register_existing_source (the
+# broker writes every Sealbox record itself), no Bitwarden item_name in
+# credential.collect, and no password-manager item another key references.
+CREDENTIAL_RECORD_NAME_NOT_ALLOWED = "credential_record_name_not_allowed"
+# Agent credential.collect over an agent file capture: only credential.capture_file
+# (or the person's form) replaces a captured value, so the row stays a capture.
+CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY = "credential_captured_key_capture_only"
+# Rotating a username-and-password Sealbox record needs the username in the request.
+CREDENTIAL_ROTATION_USERNAME_REQUIRED = "credential_rotation_username_required"
 CREDENTIAL_EXPIRY_SHARED_RECORD = "credential_expiry_shared_record"
 CREDENTIAL_EXPIRY_REQUIRED = "credential_expiry_required"
 CREDENTIAL_DROPPED_CLEANUP_PENDING = "credential_dropped_cleanup_pending"
@@ -396,6 +405,7 @@ def format_expiry_label(expires_at: datetime | str) -> str:
 
 __all__ = [
     "ACCOUNT_LINK_CREDENTIAL_EXPIRED",
+    "CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY",
     "CREDENTIAL_DROPPED_CLEANUP_PENDING",
     "CREDENTIAL_EXPIRED",
     "CREDENTIAL_EXPIRY_FORM_ONLY",
@@ -405,8 +415,9 @@ __all__ = [
     "CREDENTIAL_EXPIRY_TOO_FAR",
     "CREDENTIAL_EXPIRY_TOO_SOON",
     "CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE",
+    "CREDENTIAL_RECORD_NAME_NOT_ALLOWED",
     "CREDENTIAL_REPLACEMENT_FORM_ONLY",
-    "CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED",
+    "CREDENTIAL_ROTATION_USERNAME_REQUIRED",
     "CUSTOM_EXPIRY_OPTION",
     "CredentialExpiryError",
     "EXPIRY_PRESET_OPTIONS",

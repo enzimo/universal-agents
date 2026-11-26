@@ -698,12 +698,18 @@ def test_retry_refuses_an_item_adopted_by_a_destination_credential(
     )
     assert saved.status == "success", saved.error
     if composed_reference:
-        registered = credential_catalog.register_existing_source(
-            {"credential_key": "destination_alias", "field_name": "api_key", "kind": "api_key",
-             "source": "sealbox", "item_id": item_id, "field_ref": field_ref},
-            scope=scope,
+        # A row that names the record as item id plus field ref (as agent registration of a
+        # Sealbox source could before agents were refused Sealbox sources) is written directly.
+        alias_row = credential_catalog.load_catalog(scope=scope).credentials["destination_alias"]
+        alias_row.fields["api_key"] = credential_catalog.CatalogCredentialField(
+            kind="api_key",
+            visibility="secret",
+            value_source="existing_source",
+            resolution_order=[
+                credential_catalog.CatalogSourceRef(source="sealbox", item_id=item_id, field_ref=field_ref)
+            ],
         )
-        assert registered.status == "success", registered.error
+        credential_catalog._save_catalog_credential("destination_alias", alias_row, scope=scope)
     before_retry = dict(destination.secrets)
     [retried] = import_credentials(records, team_id=TEST_TEAM)
     assert not retried.imported

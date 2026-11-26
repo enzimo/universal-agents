@@ -42,13 +42,15 @@ from secure_tool_broker.credential_diagnostics import (
     CREDENTIAL_VALUE_UNAVAILABLE,
 )
 from secure_tool_broker.credential_expiry import (
+    CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY,
     CREDENTIAL_DROPPED_CLEANUP_PENDING,
     CREDENTIAL_EXPIRY_FORM_ONLY,
     CREDENTIAL_EXPIRY_INVALID,
     CREDENTIAL_EXPIRY_SHARED_RECORD,
     CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
+    CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
     CREDENTIAL_REPLACEMENT_FORM_ONLY,
-    CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED,
+    CREDENTIAL_ROTATION_USERNAME_REQUIRED,
     CredentialExpiryError,
     format_utc_timestamp,
     is_expired,
@@ -1623,46 +1625,242 @@ def _primary_credential_source(credential: CatalogCredential) -> str | None:
     return None
 
 
-def _agent_sealbox_record_name_refusal(
+# Request keys that name a stored record. Agent credential.collect refuses all
+# of them (an existing key rotates on its stored reference, a new key gets a
+# broker-derived name); credential.register_existing_source still accepts
+# item_id/item_name for env and password-manager items it registers.
+AGENT_COLLECT_RECORD_NAME_KEYS = ("item_id", "item_name", "sealbox_key")
+AGENT_REGISTER_RECORD_NAME_KEYS = ("sealbox_key",)
+_PASSWORD_MANAGER_EXCLUDED_SOURCES = frozenset({"env", "sealbox"})
+
+
+def _agent_record_name_refusal(
     payload: Mapping[str, Any],
     *,
     action_name: str,
+    forbidden_keys: tuple[str, ...],
     field_specs: Mapping[str, Mapping[str, Any]] | None = None,
-    allow_item_id: bool = False,
 ) -> ToolResult | None:
-    """Refuse agent-chosen Sealbox record names (``item_id`` / ``sealbox_key``)."""
+    """Refuse agent-chosen stored record names (``forbidden_keys``) in a request or its field specs."""
 
-    forbidden_keys = ("sealbox_key",) if allow_item_id else ("item_id", "sealbox_key")
-    for key_name in forbidden_keys:
-        if _string(payload.get(key_name)):
+    locations: list[tuple[str | None, Mapping[str, Any]]] = [(None, payload)]
+    locations.extend((field_name, spec) for field_name, spec in (field_specs or {}).items())
+    for field_name, mapping in locations:
+        for key_name in forbidden_keys:
+            if not _string(mapping.get(key_name)):
+                continue
+            where = f" on field '{field_name}'" if field_name else ""
+            content: dict[str, Any] = {
+                "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+                "rejected_param": key_name,
+            }
+            if field_name:
+                content["field_ref"] = field_name
             return ToolResult(
                 status="error",
                 error=(
-                    f"Agent {action_name} cannot choose a Sealbox record name ({key_name}). "
-                    "The broker derives Sealbox record names automatically."
+                    f"Agent {action_name} cannot choose a stored record name ({key_name}){where}. "
+                    "The broker derives record names for new keys and uses the stored reference "
+                    "when rotating an existing key."
                 ),
-                content={
-                    "error_code": CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED,
-                    "rejected_param": key_name,
-                },
+                content=content,
             )
-    if field_specs:
-        for field_name, spec in field_specs.items():
-            for key_name in forbidden_keys:
-                if _string(spec.get(key_name)):
-                    return ToolResult(
-                        status="error",
-                        error=(
-                            f"Agent {action_name} cannot choose a Sealbox record name ({key_name}) "
-                            f"on field '{field_name}'. The broker derives Sealbox record names automatically."
-                        ),
-                        content={
-                            "error_code": CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED,
-                            "rejected_param": key_name,
-                            "field_ref": field_name,
-                        },
-                    )
     return None
+
+
+def _agent_sealbox_source_refusal(
+    credential_key: str,
+    source_refs_by_field: Mapping[str, CatalogSourceRef],
+) -> ToolResult | None:
+    """Refuse a Sealbox source in agent ``credential.register_existing_source``.
+
+    The broker writes every Sealbox record itself (form saves, captures,
+    generated secrets, sign-ins and model keys), so an agent never has a
+    Sealbox record of its own to register. Registering one would let a later
+    rotation reach a record that belongs to something else, such as the
+    person's stored sign-in. Existing Sealbox-backed fields stay untouched when
+    the agent omits them.
+    """
+
+    for field_name, ref in source_refs_by_field.items():
+        if normalize_credential_source_name(ref.source) != "sealbox":
+            continue
+        return ToolResult(
+            status="error",
+            error=(
+                f"Agent credential.register_existing_source cannot register a Sealbox record for "
+                f"{credential_key} (field '{field_name}'). The broker writes every Sealbox record "
+                "itself; register an environment variable or password-manager item, omit existing "
+                "Sealbox-backed fields to leave them untouched, or ask the person to use the secure "
+                "broker form (secure_credential_collection_request)."
+            ),
+            content={
+                "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+                "credential_key": credential_key,
+                "field_ref": field_name,
+                "rejected_source": "sealbox",
+                "form_creation_action": "secure_credential_collection_request",
+            },
+        )
+    return None
+
+
+def _password_manager_item_identity(ref: CatalogSourceRef) -> tuple[str, str, str] | None:
+    """Return ``(source, item_id, item_name)`` for a password-manager reference, else ``None``."""
+
+    raw_source = _string(ref.source).lower()
+    source = "env" if raw_source == "env" else normalize_credential_source_name(raw_source)
+    if not source or source in _PASSWORD_MANAGER_EXCLUDED_SOURCES:
+        return None
+    item_id = _string(ref.item_id)
+    item_name = _string(ref.item_name)
+    if not item_id and not item_name:
+        return None
+    return (source, item_id, item_name)
+
+
+def _find_shared_password_manager_item(
+    catalog: CredentialCatalog,
+    *,
+    exclude_key: str,
+    refs: Iterable[CatalogSourceRef],
+) -> tuple[str, str] | None:
+    """Return ``(other_key, item_label)`` when another catalog key references one of ``refs``' items.
+
+    Items match on the same source and the same non-empty ``item_id`` or
+    ``item_name``. The check covers the catalog of the save's own owner; an
+    item referenced only by id in one row and only by name in another is not
+    matched.
+    """
+
+    wanted = [identity for ref in refs if (identity := _password_manager_item_identity(ref))]
+    if not wanted:
+        return None
+    for other_key, other in catalog.credentials.items():
+        if other_key == exclude_key:
+            continue
+        for field in other.fields.values():
+            for other_ref in field.resolution_order:
+                other_identity = _password_manager_item_identity(other_ref)
+                if other_identity is None:
+                    continue
+                for source, item_id, item_name in wanted:
+                    if other_identity[0] != source:
+                        continue
+                    if (item_id and item_id == other_identity[1]) or (
+                        item_name and item_name == other_identity[2]
+                    ):
+                        return other_key, item_name or item_id
+    return None
+
+
+def _shared_password_manager_item_result(
+    credential_key: str, other_key: str, item_label: str
+) -> ToolResult:
+    return ToolResult(
+        status="error",
+        error=(
+            f"Agent saves cannot point {credential_key} at password-manager item {item_label!r}, "
+            f"which catalog entry {other_key} already uses. Ask the person to use the secure broker "
+            "form (secure_credential_collection_request) to change either credential."
+        ),
+        content={
+            "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+            "credential_key": credential_key,
+            "conflicting_credential_key": other_key,
+            "form_creation_action": "secure_credential_collection_request",
+        },
+    )
+
+
+def _existing_bitwarden_item_name(existing: CatalogCredential | None) -> str | None:
+    """Return the one Bitwarden item every secret field of ``existing`` references, if any."""
+
+    if existing is None:
+        return None
+    names: set[str] = set()
+    for field in existing.fields.values():
+        if not field.is_secret():
+            continue
+        for ref in field.resolution_order:
+            if normalize_credential_source_name(ref.source) != "bitwarden":
+                return None
+            names.add(_string(ref.item_name))
+    if len(names) != 1:
+        return None
+    name = next(iter(names))
+    return name or None
+
+
+def _agent_captured_key_refusal(
+    credential_key: str, existing: CatalogCredential | None
+) -> ToolResult | None:
+    """Refuse agent ``credential.collect`` over an agent file capture.
+
+    A captured value came from a file the agent held; a generated password
+    cannot stand in for it, and rewriting the row with collect provenance
+    would stop it counting as a capture, so a later ``credential.capture_file``
+    into the key would be refused until it expires.
+    """
+
+    if existing is None or not isinstance(existing.approval, Mapping):
+        return None
+    approval = existing.approval
+    if not (
+        _string(approval.get("status")).lower() == CAPTURE_APPROVAL_STATUS
+        and _string(approval.get("source")).lower() == CAPTURE_APPROVAL_SOURCE
+    ):
+        return None
+    return ToolResult(
+        status="error",
+        error=(
+            f"Credential {credential_key} was stored by credential.capture_file and cannot be "
+            "changed through agent credential.collect. To replace its value, call "
+            "credential.capture_file again with the new file for this key, or ask the person to "
+            "use the secure broker form."
+        ),
+        content={
+            "error_code": CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY,
+            "credential_key": credential_key,
+            "next_step": "credential.capture_file",
+            "form_creation_action": "secure_credential_collection_request",
+        },
+    )
+
+
+def _agent_rotation_username_refusal(
+    credential_key: str,
+    existing_sealbox_targets: Mapping[str, tuple[str, str]],
+    values: Mapping[str, str],
+    field_specs: Mapping[str, Mapping[str, Any]],
+) -> ToolResult | None:
+    """Refuse before any write when a rotated username-and-password record has no username.
+
+    Sealbox stores such a record as one username-and-password pair and refuses
+    an empty username, so without this check a multi-secret rotation could
+    write an earlier secret and then fail on this one.
+    """
+
+    credential_fields = sorted(
+        field_name for field_name, (_key, kind) in existing_sealbox_targets.items() if kind == "credential"
+    )
+    if not credential_fields:
+        return None
+    if _first_value_by_kind(values, field_specs, {"username", "email", "login"}):
+        return None
+    return ToolResult(
+        status="error",
+        error=(
+            f"Rotating {', '.join(credential_fields)} on {credential_key} rewrites a stored "
+            "username-and-password record, so the request must include the credential's username "
+            "field with kind 'username', 'email' or 'login' and its value. Nothing was written."
+        ),
+        content={
+            "error_code": CREDENTIAL_ROTATION_USERNAME_REQUIRED,
+            "credential_key": credential_key,
+            "rotated_fields": credential_fields,
+        },
+    )
 
 
 def _existing_sealbox_rotation_targets(
@@ -1739,7 +1937,8 @@ def _agent_existing_key_layout_refusal(
     - every existing secret field either stays untouched (an agent may omit it
       from the request, or in ``credential.register_existing_source`` repeat
       its exact stored source references) or, in ``credential.collect`` only,
-      rotates to a store-generated value on its exact stored record reference.
+      rotates to a store-generated value on its exact stored record reference
+      (never a field whose ``value_source`` is ``existing_source``).
     Any other change is refused before writing with
     ``CREDENTIAL_REPLACEMENT_FORM_ONLY`` and the secure-form next step.
     """
@@ -1759,7 +1958,10 @@ def _agent_existing_key_layout_refusal(
         if added:
             parts.append(f"added field(s): {', '.join(added)}")
         if removed_metadata:
-            parts.append(f"removed field(s): {', '.join(removed_metadata)}")
+            parts.append(
+                f"removed field(s): {', '.join(removed_metadata)}; send every existing "
+                "non-secret field with its value"
+            )
         reason = "; ".join(parts)
     elif dropped_requested:
         reason = (
@@ -1806,6 +2008,15 @@ def _agent_existing_key_layout_refusal(
                 reason = (
                     f"secret field '{field_name}' may only stay untouched (by omitting it) "
                     "or rotate with store_generated_secret"
+                )
+                break
+            if _string(existing_field.value_source) == "existing_source":
+                # A registered source belongs to something else (an env var,
+                # a password-manager item or another record), so the broker
+                # never overwrites it on an agent's request.
+                reason = (
+                    f"secret field '{field_name}' is registered from an existing source the broker "
+                    "does not own, so an agent cannot rotate it"
                 )
                 break
             existing_sources = {
@@ -1932,15 +2143,23 @@ def collect_credential(
     When ``allow_submitted_secrets=False`` (set by agent-callable
     ``credential.collect``), any secret or undeclared field value in
     ``submitted_fields`` is refused with ``secret_value_in_request_rejected``,
-    agent-chosen Sealbox record names (``item_id`` / ``sealbox_key``) are
-    refused with ``credential_sealbox_key_not_allowed``, any Sealbox record
+    agent-chosen record names (``item_id`` / ``item_name`` / ``sealbox_key``)
+    are refused with ``credential_record_name_not_allowed`` (an existing
+    Sealbox or Bitwarden key writes to the record its fields already
+    reference; a new key's Bitwarden item must not already exist, and a
+    Bitwarden item another catalog key uses is refused), any Sealbox record
     already referenced by another catalog key is refused with
-    ``credential_expiry_shared_record`` (``temporary_only=False``), and when
+    ``credential_expiry_shared_record`` (``temporary_only=False``), a row
+    stored by ``credential.capture_file`` is refused with
+    ``credential_captured_key_capture_only``, a rotated username-and-password
+    Sealbox record without a username in the request is refused before any
+    write with ``credential_rotation_username_required``, and when
     updating an existing key the request must keep that key's exact layout
     (same field names and secret/non-secret status per field; only existing
     non-secret metadata values may change, and every existing secret field
     either stays untouched by omitting it or rotates via
-    ``store_generated_secret`` onto its existing stored record; any other
+    ``store_generated_secret`` onto its existing stored record, never a field
+    registered from an existing source; any other
     change is refused before writing with ``credential_replacement_form_only``).
     Secrets come only from the person's secure form, account-link forms,
     ``credential.capture_file``, or store-native generation.
@@ -2006,11 +2225,11 @@ def collect_credential(
                 },
             )
         if not allow_submitted_secrets:
-            record_name_refusal = _agent_sealbox_record_name_refusal(
+            record_name_refusal = _agent_record_name_refusal(
                 request_payload,
                 action_name="credential.collect",
+                forbidden_keys=AGENT_COLLECT_RECORD_NAME_KEYS,
                 field_specs=field_specs,
-                allow_item_id=False,
             )
             if record_name_refusal is not None:
                 return record_name_refusal
@@ -2104,6 +2323,12 @@ def collect_credential(
                 initial_existing = initial_catalog.credentials.get(credential_key)
                 if initial_existing is not None:
                     existing_keys = _credential_sealbox_record_keys(initial_existing)
+            if not allow_submitted_secrets and write_source == "bitwarden":
+                # Agents cannot name a Bitwarden item; an existing key keeps
+                # writing to the item its fields already reference.
+                stored_item_name = _existing_bitwarden_item_name(initial_existing)
+                if stored_item_name:
+                    request_payload = {**request_payload, "item_name": stored_item_name}
             existing_sealbox_targets = (
                 _existing_sealbox_rotation_targets(initial_existing, active_field_specs)
                 if (not allow_submitted_secrets and write_source == "sealbox")
@@ -2160,6 +2385,23 @@ def collect_credential(
                             )
                         normalized_expires_at = existing_credential.expires_at
                         ttl_seconds = remaining_ttl_seconds(existing_credential.expires_at, now=lock_now)
+                    if not allow_submitted_secrets:
+                        captured_refusal = _agent_captured_key_refusal(credential_key, existing_credential)
+                        if captured_refusal is not None:
+                            return captured_refusal
+                        if write_source == "bitwarden":
+                            shared_item = _find_shared_password_manager_item(
+                                catalog_snapshot,
+                                exclude_key=credential_key,
+                                refs=[
+                                    CatalogSourceRef(
+                                        source="bitwarden",
+                                        item_name=_catalog_item_name(credential_key, request_payload),
+                                    )
+                                ],
+                            )
+                            if shared_item is not None:
+                                return _shared_password_manager_item_result(credential_key, *shared_item)
                     if not allow_submitted_secrets and existing_credential is not None:
                         preserved_secret_fields = _preserved_omitted_secret_fields(
                             existing_credential, set(field_specs)
@@ -2177,6 +2419,11 @@ def collect_credential(
                         )
                         if layout_refusal is not None:
                             return layout_refusal
+                        username_refusal = _agent_rotation_username_refusal(
+                            credential_key, existing_sealbox_targets, values, active_field_specs
+                        )
+                        if username_refusal is not None:
+                            return username_refusal
                     existing_keys = (
                         _credential_sealbox_record_keys(existing_credential)
                         if existing_credential is not None
@@ -2291,6 +2538,9 @@ def collect_credential(
                         scope=resolved_scope,
                         ttl_seconds=ttl_seconds,
                         existing_sealbox_targets=existing_sealbox_targets,
+                        require_new_bitwarden_item=(
+                            not allow_submitted_secrets and existing_credential is None
+                        ),
                     )
                     if isinstance(raw_write_result, ToolResult):
                         return raw_write_result
@@ -2334,6 +2584,8 @@ def collect_credential(
                             guard_refusal = overwrite_guard(latest_existing)
                             if guard_refusal is not None:
                                 post_write_conflict = guard_refusal
+                        if post_write_conflict is None and not allow_submitted_secrets:
+                            post_write_conflict = _agent_captured_key_refusal(credential_key, latest_existing)
                         if post_write_conflict is None and not allow_submitted_secrets and latest_existing is not None:
                             post_write_conflict = _agent_existing_key_layout_refusal(
                                 action_name="credential.collect",
@@ -2532,18 +2784,18 @@ def register_existing_source(
                 ),
                 content={"error_code": CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE},
             )
-        top_sealbox_refusal = _agent_sealbox_record_name_refusal(
+        top_sealbox_refusal = _agent_record_name_refusal(
             params,
             action_name="credential.register_existing_source",
-            allow_item_id=True,
+            forbidden_keys=AGENT_REGISTER_RECORD_NAME_KEYS,
         )
         if top_sealbox_refusal is not None:
             return top_sealbox_refusal
         request_payload = _normalize_existing_source_request_payload(dict(raw_request or params))
-        payload_sealbox_refusal = _agent_sealbox_record_name_refusal(
+        payload_sealbox_refusal = _agent_record_name_refusal(
             request_payload,
             action_name="credential.register_existing_source",
-            allow_item_id=True,
+            forbidden_keys=AGENT_REGISTER_RECORD_NAME_KEYS,
         )
         if payload_sealbox_refusal is not None:
             return payload_sealbox_refusal
@@ -2584,11 +2836,11 @@ def register_existing_source(
                     },
                 },
             )
-        field_sealbox_refusal = _agent_sealbox_record_name_refusal(
+        field_sealbox_refusal = _agent_record_name_refusal(
             request_payload,
             action_name="credential.register_existing_source",
+            forbidden_keys=AGENT_REGISTER_RECORD_NAME_KEYS,
             field_specs=field_specs,
-            allow_item_id=True,
         )
         if field_sealbox_refusal is not None:
             return field_sealbox_refusal
@@ -2603,11 +2855,9 @@ def register_existing_source(
                     content={"error_code": "secret_value_in_request_rejected", "field_ref": field_name},
                 )
         source_refs_by_field = _normalize_source_refs_by_field(request_payload)
-        requested_sealbox_keys = {
-            record_key
-            for ref in source_refs_by_field.values()
-            if (record_key := _sealbox_record_key(ref))
-        }
+        sealbox_source_refusal = _agent_sealbox_source_refusal(credential_key, source_refs_by_field)
+        if sealbox_source_refusal is not None:
+            return sealbox_source_refusal
         if precheck_existing is not None:
             layout_refusal = _agent_existing_key_layout_refusal(
                 action_name="credential.register_existing_source",
@@ -2621,39 +2871,13 @@ def register_existing_source(
             )
             if layout_refusal is not None:
                 return layout_refusal
-        if _pending_dropped_sealbox_conflict(resolved_scope, requested_sealbox_keys) is not None:
-            with sealbox_record_locks(resolved_scope, requested_sealbox_keys):
-                with _scope_catalog_lock(resolved_scope):
-                    precheck_catalog = load_catalog(scope=resolved_scope)
-                    pending_conflict = _resolve_pending_dropped_sealbox_conflict(
-                        resolved_scope,
-                        requested_sealbox_keys,
-                        catalog=precheck_catalog,
-                        credential_key=credential_key,
-                    )
-            if pending_conflict is not None:
-                return _pending_dropped_cleanup_conflict_result(credential_key, pending_conflict)
-        shared_existing = _find_shared_sealbox_record(
+        shared_item = _find_shared_password_manager_item(
             precheck_catalog,
             exclude_key=credential_key,
-            target_keys=requested_sealbox_keys,
-            temporary_only=False,
+            refs=source_refs_by_field.values(),
         )
-        if shared_existing is not None:
-            other_key, record_key = shared_existing
-            return ToolResult(
-                status="error",
-                error=(
-                    f"Cannot register {credential_key} against a Sealbox record already referenced "
-                    f"by catalog entry {other_key}."
-                ),
-                content={
-                    "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
-                    "credential_key": credential_key,
-                    "conflicting_credential_key": other_key,
-                    "sealbox_record_key": record_key,
-                },
-            )
+        if shared_item is not None:
+            return _shared_password_manager_item_result(credential_key, *shared_item)
         public_fields: dict[str, str] = {}
         catalog_fields: dict[str, CatalogCredentialField] = {}
         missing_fields: list[str] = []
@@ -2708,7 +2932,7 @@ def register_existing_source(
                 peek_existing = peek_catalog.credentials.get(credential_key)
                 if peek_existing is not None:
                     existing_sealbox_keys = _credential_sealbox_record_keys(peek_existing)
-            with sealbox_record_locks(resolved_scope, requested_sealbox_keys | existing_sealbox_keys):
+            with sealbox_record_locks(resolved_scope, existing_sealbox_keys):
                 with _scope_catalog_lock(resolved_scope):
                     catalog = load_catalog(scope=resolved_scope)
                     existing_credential = catalog.credentials.get(credential_key)
@@ -2739,35 +2963,13 @@ def register_existing_source(
                         )
                         if locked_layout_refusal is not None:
                             return locked_layout_refusal
-                    pending_conflict = _resolve_pending_dropped_sealbox_conflict(
-                        resolved_scope,
-                        requested_sealbox_keys,
-                        catalog=catalog,
-                        credential_key=credential_key,
-                    )
-                    if pending_conflict is not None:
-                        return _pending_dropped_cleanup_conflict_result(credential_key, pending_conflict)
-                    shared_existing = _find_shared_sealbox_record(
+                    locked_shared_item = _find_shared_password_manager_item(
                         catalog,
                         exclude_key=credential_key,
-                        target_keys=requested_sealbox_keys,
-                        temporary_only=False,
+                        refs=source_refs_by_field.values(),
                     )
-                    if shared_existing is not None:
-                        other_key, record_key = shared_existing
-                        return ToolResult(
-                            status="error",
-                            error=(
-                                f"Cannot register {credential_key} against a Sealbox record already referenced "
-                                f"by catalog entry {other_key}."
-                            ),
-                            content={
-                                "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
-                                "credential_key": credential_key,
-                                "conflicting_credential_key": other_key,
-                                "sealbox_record_key": record_key,
-                            },
-                        )
+                    if locked_shared_item is not None:
+                        return _shared_password_manager_item_result(credential_key, *locked_shared_item)
                     if existing_credential is not None:
                         preserved = _preserved_omitted_secret_fields(
                             existing_credential, set(field_specs)
@@ -2955,6 +3157,7 @@ def write_credential_to_source(
     scope: CredentialOwnerScope,
     ttl_seconds: int | None = None,
     existing_sealbox_targets: Mapping[str, tuple[str, str]] | None = None,
+    require_new_bitwarden_item: bool = False,
 ) -> CredentialWriteResult | ToolResult:
     source = normalize_credential_source_name(write_source)
     if ttl_seconds is not None:
@@ -2983,6 +3186,7 @@ def write_credential_to_source(
             request_payload=request_payload,
             values=values,
             field_specs=field_specs,
+            require_new_item=require_new_bitwarden_item,
         )
     if source == "sealbox":
         return _write_sealbox_credential(
@@ -3240,7 +3444,15 @@ def _write_bitwarden_login_item(
     request_payload: Mapping[str, Any],
     values: Mapping[str, str],
     field_specs: Mapping[str, Mapping[str, Any]],
+    require_new_item: bool = False,
 ) -> CredentialWriteResult | ToolResult:
+    """Create or edit the Bitwarden login item for ``credential_key``.
+
+    ``require_new_item`` (agent ``credential.collect`` of a new key) refuses an
+    item that already exists, because the broker's Bitwarden session is shared
+    and the derived item name of a new key can match another owner's item.
+    """
+
     executable = shutil.which("bw")
     if not executable:
         return ToolResult(status="error", error="Required CLI is not installed or not on PATH: bw")
@@ -3261,6 +3473,25 @@ def _write_bitwarden_login_item(
         if isinstance(parsed, Mapping):
             existing_item = parsed
             item_id = _string(parsed.get("id")) or None
+        if require_new_item:
+            _LOGGER.warning(
+                "Agent credential save refused an existing Bitwarden item. "
+                "event=credential_agent_bitwarden_item_exists credential_key=%s",
+                credential_key,
+            )
+            return ToolResult(
+                status="error",
+                error=(
+                    f"A Bitwarden item named {item_name!r} already exists, so an agent cannot create "
+                    f"{credential_key} there. Choose another credential key, or ask the person to use "
+                    "the secure broker form (secure_credential_collection_request)."
+                ),
+                content={
+                    "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+                    "credential_key": credential_key,
+                    "form_creation_action": "secure_credential_collection_request",
+                },
+            )
     payload = _bitwarden_login_payload(
         item_name=item_name,
         request_payload=request_payload,
@@ -4913,10 +5144,10 @@ def execute_credential_catalog_action(action: ValidatedAction, context: ToolCont
                     ),
                     content={"error_code": CREDENTIAL_EXPIRY_FORM_ONLY},
                 )
-            top_record_refusal = _agent_sealbox_record_name_refusal(
+            top_record_refusal = _agent_record_name_refusal(
                 params,
                 action_name="credential.collect",
-                allow_item_id=False,
+                forbidden_keys=AGENT_COLLECT_RECORD_NAME_KEYS,
             )
             if top_record_refusal is not None:
                 return top_record_refusal

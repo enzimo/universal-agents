@@ -698,7 +698,10 @@ def test_team_transfer_export_skips_expired_credentials_and_keeps_active_ones(
 
 def test_c18_sealbox_alias_refused_in_both_orders(monkeypatch: pytest.MonkeyPatch) -> None:
     from secure_tool_broker.credential_catalog import collect_credential, register_existing_source
-    from secure_tool_broker.credential_expiry import CREDENTIAL_EXPIRY_SHARED_RECORD
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_EXPIRY_SHARED_RECORD,
+        CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+    )
 
     source_calls = 0
 
@@ -720,7 +723,8 @@ def test_c18_sealbox_alias_refused_in_both_orders(monkeypatch: pytest.MonkeyPatc
         lambda *_a, **_k: SimpleNamespace(returncode=0, stdout='{"key":"k"}', stderr=""),
     )
 
-    # Order 1: temporary credential exists first -> register_existing_source naming its Sealbox record is refused.
+    # Order 1: temporary credential exists first -> register_existing_source naming its Sealbox record is refused
+    # (since C28 agent registration refuses every Sealbox source before resolving it).
     _save_temp_credential("temp_primary", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
     alias_exact = register_existing_source(
         {
@@ -733,8 +737,8 @@ def test_c18_sealbox_alias_refused_in_both_orders(monkeypatch: pytest.MonkeyPatc
         scope=USER_SCOPE,
     )
     assert alias_exact.status == "error"
-    assert alias_exact.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
-    assert alias_exact.content["conflicting_credential_key"] == "temp_primary"
+    assert alias_exact.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    assert alias_exact.content["rejected_source"] == "sealbox"
     assert source_calls == 0
 
     # Shorthand field_ref form ("team-nats-agents:default:temp_primary" + field_ref="api_token") resolves to the same record and is refused.
@@ -749,7 +753,7 @@ def test_c18_sealbox_alias_refused_in_both_orders(monkeypatch: pytest.MonkeyPatc
         scope=USER_SCOPE,
     )
     assert alias_shorthand.status == "error"
-    assert alias_shorthand.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert alias_shorthand.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
     assert source_calls == 0
 
     # Order 2: lasting alias exists first -> collect_credential with expires_at targeting the same record is refused
@@ -1332,10 +1336,14 @@ def test_f5_f6_missing_catalog_row_counts_as_missing_link_and_allows_team_fallba
 def test_c33_register_existing_source_refuses_dropping_sealbox_records_and_allows_same_layout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """C33: register_existing_source refuses any save over an existing key that would drop its Sealbox record(s); same layout still works."""
+    """C33: register_existing_source refuses any save over an existing key that would drop its Sealbox record(s);
+    a metadata-only save that omits the Sealbox-backed field still works (C28 refuses naming a Sealbox source)."""
 
     from secure_tool_broker.credential_catalog import register_existing_source
-    from secure_tool_broker.credential_expiry import CREDENTIAL_REPLACEMENT_FORM_ONLY
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+        CREDENTIAL_REPLACEMENT_FORM_ONLY,
+    )
 
     monkeypatch.setenv("C28_ENV_SECRET", "env-token-value")
     monkeypatch.setattr(
@@ -1388,14 +1396,14 @@ def test_c33_register_existing_source_refuses_dropping_sealbox_records_and_allow
         scope=USER_SCOPE,
     )
     assert refused_other_item.status == "error"
-    assert (refused_other_item.content or {}).get("error_code") == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert (refused_other_item.content or {}).get("error_code") == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
     assert deleted_items == []
 
-    # 3. Re-registering over the SAME layout and Sealbox record (no dropped records or fields) still succeeds.
-    same_layout = register_existing_source(
+    # 3. Repeating the same Sealbox record is refused too (C28); omitting the Sealbox-backed field
+    # updates metadata and keeps the field on its record.
+    repeated_same_record = register_existing_source(
         {
             "credential_key": "svc",
-            "display_name": "Service Renamed",
             "fields": [
                 {"name": "username", "kind": "username", "visibility": "metadata_visible", "value": "alice"},
                 {
@@ -1408,22 +1416,39 @@ def test_c33_register_existing_source_refuses_dropping_sealbox_records_and_allow
         },
         scope=USER_SCOPE,
     )
+    assert (repeated_same_record.content or {}).get("error_code") == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    same_layout = register_existing_source(
+        {
+            "credential_key": "svc",
+            "display_name": "Service Renamed",
+            "fields": [
+                {"name": "username", "kind": "username", "visibility": "metadata_visible", "value": "alice"},
+            ],
+        },
+        scope=USER_SCOPE,
+    )
     assert same_layout.status == "success", same_layout.error
-    assert credential_catalog.load_catalog(scope=USER_SCOPE).credentials["svc"].display_name == "Service Renamed"
+    renamed = credential_catalog.load_catalog(scope=USER_SCOPE).credentials["svc"]
+    assert renamed.display_name == "Service Renamed"
+    assert renamed.fields["api_token"].resolution_order[0].item_id == r1_key
     assert deleted_items == []
 
 
 def test_c34_c35_pending_dropped_record_inline_retry_and_collect_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """C34(2) + C35(a): collect_credential and register_existing_source retry queued dropped deletes inline before writing, refusing only if deletion still fails."""
+    """C34(2) + C35(a): collect_credential retries queued dropped deletes inline before writing, refusing only if
+    deletion still fails; agent register_existing_source cannot name the queued record at all (C28)."""
 
     from secure_tool_broker.credential_catalog import register_existing_source
     from secure_tool_broker.credential_catalog_store import (
         CredentialCatalogStore,
         resolve_catalog_db_path,
     )
-    from secure_tool_broker.credential_expiry import CREDENTIAL_DROPPED_CLEANUP_PENDING
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_DROPPED_CLEANUP_PENDING,
+        CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+    )
 
     monkeypatch.setattr(
         credential_catalog,
@@ -1491,7 +1516,7 @@ def test_c34_c35_pending_dropped_record_inline_retry_and_collect_refusal(
     assert "6 hours" in (refused_collect.error or "")
     assert writes == []
 
-    # 2. register_existing_source for a new key targeting orig_record also refuses while deletion still fails.
+    # 2. register_existing_source for a new key targeting orig_record is refused as a Sealbox source (C28).
     refused_reg = register_existing_source(
         {
             "credential_key": "k_alias",
@@ -1503,8 +1528,8 @@ def test_c34_c35_pending_dropped_record_inline_retry_and_collect_refusal(
         scope=USER_SCOPE,
     )
     assert refused_reg.status == "error"
-    assert (refused_reg.content or {}).get("error_code") == CREDENTIAL_DROPPED_CLEANUP_PENDING
-    assert "6 hours" in (refused_reg.error or "")
+    assert (refused_reg.content or {}).get("error_code") == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    assert "k_alias" not in credential_catalog.load_catalog(scope=USER_SCOPE).credentials
 
     # 3. Once Sealbox works again, collect_credential retries the queued deletion inline and succeeds immediately.
     fail_delete = False

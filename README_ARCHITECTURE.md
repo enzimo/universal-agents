@@ -3858,16 +3858,36 @@ or clear one, and non-Sealbox write sources refuse an expiry
     removed, or reclassified), only existing non-secret metadata values may
     change, and every existing secret field either stays untouched (by omitting
     it from the request or, in `credential.register_existing_source`, naming
-    its exact current stored source references) or, in `credential.collect`
-    only, rotates to a store-generated value (`store_generated_secret`) on its
-    existing stored record; any other change is refused before writing with
-    `credential_replacement_form_only`. `credential.collect` also refuses
-    secret values (`allow_submitted_secrets=False`) and agent-chosen Sealbox
-    record names (`item_id` and `sealbox_key`, refused with
-    `credential_sealbox_key_not_allowed`), `credential.register_existing_source`
-    refuses `sealbox_key` and secret-field inline values, and both actions
-    refuse any Sealbox record already referenced by another catalog key
-    (`temporary_only=False`), while first registration of a new key keeps
+    its exact current stored env or password-manager references) or, in
+    `credential.collect` only, rotates to a store-generated value
+    (`store_generated_secret`) on its existing stored record; any other change
+    is refused before writing with `credential_replacement_form_only`.
+    Rotation never touches a field registered from an existing source
+    (`value_source="existing_source"`): that value belongs to an environment
+    variable, a password-manager item or a record the broker did not write.
+    Agents never name a stored record (`credential_record_name_not_allowed`),
+    because a name an agent picks can point at a record that belongs to
+    something else, such as the person's stored sign-in or model key in the
+    same Sealbox tenant, or another key's Bitwarden item through the broker's
+    shared Bitwarden session: `credential.collect` refuses `item_id`,
+    `item_name` and `sealbox_key` (an existing key rotates on the record or
+    Bitwarden item its fields already reference, and a new key's derived
+    Bitwarden item must not already exist), and
+    `credential.register_existing_source` refuses `sealbox_key`, every Sealbox
+    source (the broker writes every Sealbox record itself, so an agent never
+    has one of its own to register; existing Sealbox-backed fields stay
+    untouched when omitted) and any password-manager item another catalog key
+    of the same owner references. `credential.collect` also refuses secret
+    values (`allow_submitted_secrets=False`), refuses saving over an agent
+    capture (`credential_captured_key_capture_only`, next step
+    `credential.capture_file`, so the row keeps its capture provenance and stays
+    open to the next capture), and checks before the first write that every
+    rotated username-and-password Sealbox record has a username in the request
+    (`credential_rotation_username_required`), so a multi-secret rotation cannot
+    write one secret and then fail on the next. `credential.register_existing_source`
+    refuses secret-field inline values, and both actions refuse any Sealbox
+    record already referenced by another catalog key (`temporary_only=False`),
+    while first registration of a new env or password-manager key keeps
     working. Every agent write (`credential.capture_file`,
     `credential.collect`, `credential.register_existing_source`) records agent
     provenance (agent type, person) rather than person approval, never

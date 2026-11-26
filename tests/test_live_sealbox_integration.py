@@ -560,6 +560,73 @@ def test_live_sealbox_credential_state_backend(
     assert bob_resolved == "ghp_bob_secret"
 
 
+def test_live_agent_saves_cannot_register_or_rotate_a_persons_sealbox_sign_in(
+    live_sealbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C28: an agent cannot reach the person's stored sign-in record through register_existing_source
+    and a later credential.collect rotation; both steps are refused and the sign-in is unchanged."""
+
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+        CREDENTIAL_REPLACEMENT_FORM_ONLY,
+    )
+    from secure_tools.providers import ValidatedAction
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_MODE", "credential_source")
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_SOURCE", "sealbox")
+    person = "live-c28-alice"
+    stored = write_credential_state("github.token", "gho_person_sign_in_token", owner_id=person)
+    assert stored.status == "success", stored
+    sign_in_record = stored.content["credential_state_item_key"]
+    context = ToolContext(
+        agent_id="agent-1",
+        named_agent_type="ResearchAgent",
+        canonical_user_id=person,
+        principal_type="user",
+        team_id="live-c28-team",
+        person_roles=("member",),
+        work_id="ctx-1",
+    )
+
+    def act(action: str, params: dict) -> object:
+        return credential_catalog.execute_credential_catalog_action(
+            ValidatedAction(provider="credential_catalog", action=action, params=params), context
+        )
+
+    rotate_request = {"request": {
+        "credential_key": "gh_alias", "display_name": "gh_alias", "purpose": "rotate", "store_target": "sealbox",
+        "fields": [{"name": "token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"}],
+    }}
+    registered = act(
+        "credential.register_existing_source",
+        {"credential_key": "gh_alias", "field_name": "token", "source": "sealbox",
+         "item_id": sign_in_record, "field_ref": "value"},
+    )
+    assert registered.status == "error"
+    assert registered.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    scope = CredentialOwnerScope.user(person)
+    assert "gh_alias" not in credential_catalog.load_catalog(scope=scope).credentials
+
+    # A row registered against the sign-in record before this rule cannot be rotated either.
+    credential_catalog._save_catalog_credential(
+        "gh_alias",
+        credential_catalog.CatalogCredential(
+            display_name="gh_alias",
+            purpose="registered before Sealbox registration was refused",
+            fields={"token": credential_catalog.CatalogCredentialField(
+                kind="token", visibility="secret", value_source="existing_source",
+                resolution_order=[credential_catalog.CatalogSourceRef(
+                    source="sealbox", item_id=sign_in_record, item_name=sign_in_record, field_ref="value")],
+            )},
+        ),
+        scope=scope,
+    )
+    rotated = act("credential.collect", rotate_request)
+    assert rotated.status == "error"
+    assert rotated.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert read_credential_state("github.token", owner_id=person) == "gho_person_sign_in_token"
+
+
 def _model_key_state(monkeypatch):
     monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_MODE", "credential_source")
     monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_SOURCE", "sealbox")

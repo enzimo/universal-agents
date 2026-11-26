@@ -214,6 +214,35 @@ def env_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return layout, sealbox, store, gate
 
 
+def _seed_registered_sealbox_row(
+    scope: CredentialOwnerScope, credential_key: str, field_name: str, record_key: str
+) -> CatalogCredential:
+    """Write a catalog row registered against a Sealbox record, as agent registration allowed before C28.
+
+    Agent ``credential.register_existing_source`` now refuses Sealbox sources,
+    so tests that need such a row (old rows, shared-record collisions) write it
+    directly.
+    """
+
+    row = CatalogCredential(
+        display_name=credential_key,
+        purpose="Registered before Sealbox registration was refused",
+        approval={"status": "registered_by_agent", "source": "existing_source_registration"},
+        fields={
+            field_name: CatalogCredentialField(
+                kind="token",
+                visibility="secret",
+                value_source="existing_source",
+                resolution_order=[
+                    CatalogSourceRef(source="sealbox", item_id=record_key, item_name=record_key, field_ref="value")
+                ],
+            )
+        },
+    )
+    credential_catalog._save_catalog_credential(credential_key, row, scope=scope)
+    return row
+
+
 def _person_context(
     *,
     person_id: str = PERSON_ID,
@@ -827,17 +856,7 @@ def test_overwrite_guards_refuse_person_form_external_team_field_mismatch_and_sh
     monkeypatch.setattr(credential_capture.secrets, "token_hex", lambda _n=8: "fixed00011112222")
     planned_item = "agent-capture:shared_target:fixed00011112222:secret"
     sealbox.secrets[planned_item] = "preexisting-record-secret"
-    reg = register_existing_source(
-        {
-            "credential_key": "other_alias",
-            "field_name": "secret",
-            "source": "sealbox",
-            "item_id": planned_item,
-            "field_ref": "value",
-        },
-        scope=alice_scope,
-    )
-    assert reg.status == "success", reg.error
+    _seed_registered_sealbox_row(alice_scope, "other_alias", "secret", planned_item)
     src_shared = write_src("shared.txt", "collide")
     refused_shared = capture_file_credential(
         _valid_params(path="scratch/shared.txt", credential_key="shared_target", now=BASE_NOW),
@@ -2229,10 +2248,11 @@ def test_f3_normalized_record_locks_serialize_alias_keys_and_capture_refuses_non
 
 def test_f4_agent_collect_refuses_submitted_secrets_stamps_agent_provenance_and_allows_rotation(
     env_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """F4: agent-callable credential.collect refuses secret values in submitted_fields/fields_values,
     stamps agent provenance (never person approval), keeps store-generated rotation working, and
-    never rewrites a captured row as person-approved."""
+    never rewrites a captured row (C30: collect over a capture is refused and points to capture_file)."""
 
     from secure_tool_broker.credential_catalog import execute_credential_catalog_action
     from secure_tools.providers import ValidatedAction
@@ -2385,12 +2405,17 @@ def test_f4_agent_collect_refuses_submitted_secrets_stamps_agent_provenance_and_
     assert gen_row.approval.get("for_person_id") == PERSON_ID
     assert gen_row.approval.get("approved_by") != "user"
 
-    # 5. Passing item_id on agent credential.collect is refused (C27), while store-generated
-    # rotation over a captured row WITHOUT item_id writes to its existing Sealbox record,
-    # preserves expiry, and stamps agent provenance (never rewrites as person-approved).
-    from secure_tool_broker.credential_expiry import CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+    # 5. Passing item_id on agent credential.collect is refused (C27), and store-generated
+    # rotation over a captured row WITHOUT item_id is refused too (C30): the row, its
+    # capture provenance and its Sealbox value stay as captured, and the refusal points
+    # the agent to credential.capture_file.
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY,
+        CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+    )
 
     cap_item_id = cap_rec.rsplit(":", 1)[0]
+    cap_row_before = load_catalog(scope=alice_scope).credentials["f4_captured_key"]
     refused_with_item_id = execute_credential_catalog_action(
         ValidatedAction(
             provider="credential_catalog",
@@ -2411,7 +2436,7 @@ def test_f4_agent_collect_refuses_submitted_secrets_stamps_agent_provenance_and_
         ctx,
     )
     assert refused_with_item_id.status == "error"
-    assert refused_with_item_id.content["error_code"] == CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+    assert refused_with_item_id.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
 
     rotated_cap = execute_credential_catalog_action(
         ValidatedAction(
@@ -2431,15 +2456,18 @@ def test_f4_agent_collect_refuses_submitted_secrets_stamps_agent_provenance_and_
         ),
         ctx,
     )
-    assert rotated_cap.status == "success", rotated_cap.error
-    rotated_cap_row = load_catalog(scope=alice_scope).credentials["f4_captured_key"]
-    assert rotated_cap_row.expires_at == cap_expiry
-    assert rotated_cap_row.fields["secret"].resolution_order[0].item_id == cap_rec
-    assert rotated_cap_row.approval.get("recorded_by") == "agent"
-    assert rotated_cap_row.approval.get("approved_by") != "user"
+    assert rotated_cap.status == "error"
+    assert rotated_cap.content["error_code"] == CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY
+    assert rotated_cap.content["next_step"] == "credential.capture_file"
+    assert "credential.capture_file" in (rotated_cap.error or "")
+    unchanged_cap_row = load_catalog(scope=alice_scope).credentials["f4_captured_key"]
+    assert unchanged_cap_row.model_dump() == cap_row_before.model_dump()
+    assert is_agent_captured_for_person(unchanged_cap_row, PERSON_ID)
+    assert sealbox.secrets[cap_rec] == "captured-secret-v1"
 
-    # 6. Agent register_existing_source also stamps agent provenance, not approved_by="user".
-    sealbox.secrets["existing-agent-rec:token"] = "existing-val"
+    # 6. Agent register_existing_source (first registration of an environment variable)
+    # also stamps agent provenance, not approved_by="user".
+    monkeypatch.setenv("F4_AGENT_REG_TOKEN", "existing-val")
     reg = execute_credential_catalog_action(
         ValidatedAction(
             provider="credential_catalog",
@@ -2447,9 +2475,7 @@ def test_f4_agent_collect_refuses_submitted_secrets_stamps_agent_provenance_and_
             params={
                 "credential_key": "f4_reg_key",
                 "field_name": "token",
-                "source": "sealbox",
-                "item_id": "existing-agent-rec:token",
-                "field_ref": "value",
+                "env_var": "F4_AGENT_REG_TOKEN",
             },
         ),
         ctx,
@@ -3675,7 +3701,7 @@ def test_c25_register_existing_source_enforces_exact_layout_and_allows_new_key_a
     fields during a metadata update keep working."""
 
     from secure_tool_broker.credential_catalog import execute_credential_catalog_action
-    from secure_tool_broker.credential_expiry import CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+    from secure_tool_broker.credential_expiry import CREDENTIAL_RECORD_NAME_NOT_ALLOWED
     from secure_tools.providers import ValidatedAction
 
     _layout, sealbox, _store, _gate = env_setup
@@ -3718,7 +3744,8 @@ def test_c25_register_existing_source_enforces_exact_layout_and_allows_new_key_a
     assert person_rec and service_a_rec and bank_rec
 
     # Critic Run 1a (wrapped request) & 1b (flat params): reclassify person's secret `token`
-    # as metadata_visible with ATTACKER-TOKEN + add `keep` pointing at person_rec.
+    # as metadata_visible with ATTACKER-TOKEN + add `keep` pointing at person_rec. Since C28
+    # the Sealbox source in `keep` is refused before the layout check.
     run1_fields = [
         {
             "name": "token",
@@ -3746,7 +3773,7 @@ def test_c25_register_existing_source_enforces_exact_layout_and_allows_new_key_a
             ctx,
         )
         assert res.status == "error"
-        assert res.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+        assert res.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
         assert res.content["form_creation_action"] == "secure_credential_collection_request"
         assert "ATTACKER-TOKEN" not in (res.error or "") + json.dumps(dict(res.content))
     row_person = load_catalog(scope=alice_scope).credentials["c25_person_key"]
@@ -3805,7 +3832,8 @@ def test_c25_register_existing_source_enforces_exact_layout_and_allows_new_key_a
     assert row_env.fields["token"].resolution_order[0].env_var == "C25_PERSON_ENV_TOKEN"
 
     # Critic Run 3: re-pointing service_a's token at bank's Sealbox record (both with and
-    # without a keep field) is refused; service_a and bank rows, approvals, and values stay intact.
+    # without a keep field) is refused (since C28 as a Sealbox source); service_a and bank rows,
+    # approvals, and values stay intact.
     for fields in (
         [
             {
@@ -3839,7 +3867,7 @@ def test_c25_register_existing_source_enforces_exact_layout_and_allows_new_key_a
             ctx,
         )
         assert run3.status == "error"
-        assert run3.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+        assert run3.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
     row_a = load_catalog(scope=alice_scope).credentials["c25_service_a"]
     assert row_a.approval.get("approved_by") == "user"
     assert row_a.fields["token"].resolution_order[0].item_id == service_a_rec
@@ -3883,9 +3911,9 @@ def test_c25_register_existing_source_enforces_exact_layout_and_allows_new_key_a
         ctx,
     )
     assert sb_key_refused.status == "error"
-    assert sb_key_refused.content["error_code"] == CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+    assert sb_key_refused.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
 
-    # First registration of a new key (env AND uncataloged Sealbox record) keeps working.
+    # First registration of a new env key keeps working (a new uncataloged Sealbox record no longer does, C28).
     new_env = execute_credential_catalog_action(
         ValidatedAction(
             provider="credential_catalog",
@@ -3916,10 +3944,12 @@ def test_c25_register_existing_source_enforces_exact_layout_and_allows_new_key_a
         ),
         ctx,
     )
-    assert new_sb.status == "success", new_sb.error
-    resolved_sb = resolve_secret_field("c25_first_sealbox", "token", scope=alice_scope)
-    assert not isinstance(resolved_sb, ToolResult)
-    assert resolved_sb.value == "UNCATALOGED-SECRET"
+    # C28: an uncataloged Sealbox record is no longer registrable by an agent.
+    assert new_sb.status == "error"
+    assert new_sb.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    assert new_sb.content["rejected_source"] == "sealbox"
+    assert "c25_first_sealbox" not in load_catalog(scope=alice_scope).credentials
+    assert sealbox.secrets["c25-uncataloged:token"] == "UNCATALOGED-SECRET"
 
     # Metadata update over an existing key via register_existing_source omitting the secret field
     # updates metadata and keeps the secret field untouched.
@@ -4239,7 +4269,7 @@ def test_c27_agent_saves_refuse_record_name_choice_and_shared_sealbox_records(
     from secure_tool_broker.credential_catalog import execute_credential_catalog_action
     from secure_tool_broker.credential_expiry import (
         CREDENTIAL_EXPIRY_SHARED_RECORD,
-        CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED,
+        CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
     )
     from secure_tools.providers import ValidatedAction
 
@@ -4339,7 +4369,7 @@ def test_c27_agent_saves_refuse_record_name_choice_and_shared_sealbox_records(
             ctx,
         )
         assert res.status == "error"
-        assert res.content["error_code"] == CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+        assert res.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
     assert writes_seen == []
     assert "c27_other_key" not in load_catalog(scope=alice_scope).credentials
     person_row_after = load_catalog(scope=alice_scope).credentials["c27_person_key"]
@@ -4401,7 +4431,7 @@ def test_c27_agent_saves_refuse_record_name_choice_and_shared_sealbox_records(
     assert sealbox.secrets[holder_rec] == "HOLDER-SECRET"
 
     # 3. register_existing_source for a new key referencing permanent c27_person_key's Sealbox
-    # record is also refused with CREDENTIAL_EXPIRY_SHARED_RECORD (temporary_only=False).
+    # record is also refused (since C28 every Sealbox source is refused for agents).
     aliasing_reg = execute_credential_catalog_action(
         ValidatedAction(
             provider="credential_catalog",
@@ -4417,10 +4447,274 @@ def test_c27_agent_saves_refuse_record_name_choice_and_shared_sealbox_records(
         ctx,
     )
     assert aliasing_reg.status == "error"
-    assert aliasing_reg.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
-    assert aliasing_reg.content["conflicting_credential_key"] == "c27_person_key"
+    assert aliasing_reg.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
     assert "c27_alias_reg" not in load_catalog(scope=alice_scope).credentials
     assert sealbox.secrets[person_rec] == "PERSON-PERMANENT-SECRET"
 
 
 
+
+
+class _FakeBitwarden:
+    """In-memory ``bw`` double: items by name, create/edit/get only."""
+
+    def __init__(self) -> None:
+        self.items: dict[str, dict[str, Any]] = {}
+        self.counter = 0
+
+    def run(self, command: list[str], *, input_text: str | None = None, **_kwargs: Any) -> Any:
+        if command[1:3] == ["get", "item"]:
+            item = self.items.get(command[3])
+            if item is None:
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="Not found.")
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(item), stderr="")
+        if command[1:3] in (["create", "item"], ["edit", "item"]):
+            payload = json.loads(input_text or "{}")
+            if command[1] == "create":
+                self.counter += 1
+                payload["id"] = f"bw-{self.counter}"
+            else:
+                payload["id"] = command[3]
+            self.items[payload["name"]] = payload
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+
+def test_c28_c29_c30_agent_saves_never_replace_records_they_do_not_own(
+    env_setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C28-C30 (lead rulings). Agent register_existing_source never registers a Sealbox source and
+    never names a password-manager item another key uses; agent credential.collect refuses
+    item_name, never rotates a registered existing source, never writes into a Bitwarden item that
+    another key uses or that already exists for a new key, checks the username of every rotated
+    username-and-password record before the first write, and refuses a captured row with a next
+    step pointing to credential.capture_file. First registration of an env var still works."""
+
+    from secure_tool_broker.credential_catalog import execute_credential_catalog_action
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY,
+        CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+        CREDENTIAL_ROTATION_USERNAME_REQUIRED,
+    )
+    from secure_tools.providers import ValidatedAction
+
+    layout, sealbox, _store, gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    ctx = _person_context(agent_type="ResearchAgent")
+
+    def act(action: str, params: dict[str, Any]) -> ToolResult:
+        return execute_credential_catalog_action(
+            ValidatedAction(provider="credential_catalog", action=action, params=params), ctx
+        )
+
+    def sealbox_sets() -> list[list[str]]:
+        return [c for c in sealbox.commands if c[:2] in (["secret", "set"], ["credential", "set"])]
+
+    generated_token = {"name": "token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"}
+
+    # --- C28 Sealbox: the critic's sign-in run. The person's GitHub sign-in lives in an
+    # uncataloged Sealbox record of their tenant.
+    sign_in_record = "team-cred-store:github:token"
+    sealbox.secrets[sign_in_record] = "gho_person_sign_in_token"
+    sealbox.commands.clear()
+    step1 = act(
+        "credential.register_existing_source",
+        {"credential_key": "gh_alias", "field_name": "token", "source": "sealbox",
+         "item_id": sign_in_record, "field_ref": "value"},
+    )
+    assert step1.status == "error"
+    assert step1.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    assert step1.content["rejected_source"] == "sealbox"
+    # The same refusal for the wrapped request, a source_refs mapping and the CLI alias.
+    for params in (
+        {"request": {"credential_key": "gh_alias", "fields": [
+            {"name": "token", "kind": "token", "visibility": "secret",
+             "source_ref": {"source": "sealbox-cli", "item_id": sign_in_record, "field_ref": "value"}}]}},
+        {"credential_key": "gh_alias",
+         "fields": [{"name": "token", "kind": "token", "visibility": "secret"}],
+         "source_refs": {"token": {"source": "sealbox", "item_id": sign_in_record, "field_ref": "value"}}},
+    ):
+        again = act("credential.register_existing_source", params)
+        assert again.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED, again.error
+    assert "gh_alias" not in load_catalog(scope=alice_scope).credentials
+    # Step 2 against a row registered before this rule: rotating a registered source is refused.
+    _seed_registered_sealbox_row(alice_scope, "gh_alias", "token", sign_in_record)
+    old_row = load_catalog(scope=alice_scope).credentials["gh_alias"]
+    step2 = act(
+        "credential.collect",
+        {"request": {"credential_key": "gh_alias", "display_name": "gh_alias", "purpose": "rotate",
+                     "store_target": "sealbox", "fields": [generated_token]}},
+    )
+    assert step2.status == "error"
+    assert step2.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert "existing source" in (step2.error or "")
+    assert sealbox.secrets[sign_in_record] == "gho_person_sign_in_token"
+    assert sealbox_sets() == []
+    assert load_catalog(scope=alice_scope).credentials["gh_alias"].model_dump() == old_row.model_dump()
+
+    # An env-backed key registered by an agent is first-registration only: it can never be rotated.
+    monkeypatch.setenv("C28_FIRST_ENV_TOKEN", "ENV-VALUE")
+    first_env = act(
+        "credential.register_existing_source",
+        {"credential_key": "c28_env", "field_name": "token", "env_var": "C28_FIRST_ENV_TOKEN"},
+    )
+    assert first_env.status == "success", first_env.error
+    env_rotate = act(
+        "credential.collect",
+        {"request": {"credential_key": "c28_env", "display_name": "c28_env", "purpose": "rotate",
+                     "store_target": "sealbox", "fields": [generated_token]}},
+    )
+    assert env_rotate.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert resolve_secret_field("c28_env", "token", scope=alice_scope).value == "ENV-VALUE"
+    assert sealbox_sets() == []
+
+    # --- C29: the critic's two-secret rotation with the kinds redeclared. Refused before any write.
+    login_save = collect_credential(
+        {"credential_key": "c29_login", "display_name": "login", "purpose": "form", "store_target": "sealbox",
+         "fields": [
+             {"name": "username", "kind": "username", "visibility": "metadata_visible", "value_source": "user_input"},
+             {"name": "password", "kind": "password", "visibility": "secret", "value_source": "user_input"},
+             {"name": "api_token", "kind": "token", "visibility": "secret", "value_source": "user_input"},
+         ]},
+        {"username": "alice", "password": "PW-ORIG", "api_token": "TOK-ORIG"},
+        scope=alice_scope, allow_expiry_change=True, allow_drop_stored_records=True, now=BASE_NOW,
+    )
+    assert login_save.status == "success", login_save.error
+    login_before = load_catalog(scope=alice_scope).credentials["c29_login"]
+    pw_rec = login_before.fields["password"].resolution_order[0].item_id
+    tok_rec = login_before.fields["api_token"].resolution_order[0].item_id
+    pw_value_before = sealbox.secrets[pw_rec]
+    sealbox.commands.clear()
+
+    def rotate_login(username_kind: str) -> ToolResult:
+        return act("credential.collect", {"request": {
+            "credential_key": "c29_login", "display_name": "login", "purpose": "p", "store_target": "sealbox",
+            "fields": [
+                {"name": "username", "kind": username_kind, "visibility": "metadata_visible",
+                 "value_source": "agent_supplied_metadata", "value": "alice"},
+                {"name": "api_token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"},
+                {"name": "password", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"},
+            ]}})
+
+    no_username = rotate_login("custom")
+    assert no_username.status == "error"
+    assert no_username.content["error_code"] == CREDENTIAL_ROTATION_USERNAME_REQUIRED
+    assert no_username.content["rotated_fields"] == ["password"]
+    assert sealbox_sets() == []
+    assert sealbox.secrets[tok_rec] == "TOK-ORIG"
+    assert sealbox.secrets[pw_rec] == pw_value_before
+    assert load_catalog(scope=alice_scope).credentials["c29_login"].model_dump() == login_before.model_dump()
+    with_username = rotate_login("username")
+    assert with_username.status == "success", with_username.error
+    assert sealbox.secrets[tok_rec] != "TOK-ORIG"
+
+    # --- C30: the critic's capture-then-rotate run. Collect over a capture is refused and the key
+    # stays open to a new capture.
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    expiry = format_utc_timestamp(now_utc + timedelta(hours=2))
+    src = layout.person_dir(PERSON_ID) / "scratch" / "c30.txt"
+    src.write_text("captured-v1", encoding="utf-8")
+    cap = capture_file_credential(
+        _valid_params(path="scratch/c30.txt", credential_key="c30_cap", expires_at=expiry, now=now_utc),
+        context=ctx, access_gate=gate, now=now_utc,
+    )
+    assert cap.status == "success", cap.error
+    cap_before = load_catalog(scope=alice_scope).credentials["c30_cap"]
+    over_capture = act("credential.collect", {"request": {
+        "credential_key": "c30_cap", "display_name": "c30", "purpose": "p", "store_target": "sealbox",
+        "fields": [{"name": "secret", "kind": "token", "visibility": "secret",
+                    "value_source": "store_generated_secret"}]}})
+    assert over_capture.status == "error"
+    assert over_capture.content["error_code"] == CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY
+    assert over_capture.content["next_step"] == "credential.capture_file"
+    assert load_catalog(scope=alice_scope).credentials["c30_cap"].model_dump() == cap_before.model_dump()
+    src.write_text("captured-v2", encoding="utf-8")
+    recapture = capture_file_credential(
+        _valid_params(path="scratch/c30.txt", credential_key="c30_cap", expires_at=expiry, now=now_utc),
+        context=ctx, access_gate=gate, now=now_utc,
+    )
+    assert recapture.status == "success", recapture.error
+    assert resolve_secret_field("c30_cap", "secret", scope=alice_scope).value == "captured-v2"
+
+    # --- C28 Bitwarden: the critic's item_name run, plus the stored-item and shared-item rules.
+    bw = _FakeBitwarden()
+    monkeypatch.setattr(credential_catalog.shutil, "which", lambda name: "/usr/bin/bw" if name == "bw" else None)
+    monkeypatch.setattr(credential_catalog, "ensure_bitwarden_server_configured_from_env", lambda: None)
+    monkeypatch.setattr(credential_catalog, "_run_command", bw.run)
+    monkeypatch.setattr(credential_catalog, "_bitwarden_encode_item", lambda _exe, payload: json.dumps(payload))
+    monkeypatch.setattr(credential_catalog, "generate_password", lambda **_kw: "GENERATED-BY-STORE")
+    sealbox_resolver = credential_catalog._resolve_source_ref
+    monkeypatch.setattr(
+        credential_catalog,
+        "_resolve_source_ref",
+        lambda ref, **kw: "bw-value" if ref.source == "bitwarden" else sealbox_resolver(ref, **kw),
+    )
+    login_fields = [
+        {"name": "username", "kind": "username", "visibility": "metadata_visible", "value_source": "user_input"},
+        {"name": "password", "kind": "password", "visibility": "secret", "value_source": "user_input"},
+    ]
+    bank_save = collect_credential(
+        {"credential_key": "bank", "display_name": "Bank", "purpose": "form", "write_source": "bitwarden",
+         "item_name": "Bank Login", "fields": login_fields},
+        {"username": "alice", "password": "BANK-PERSON-PW"},
+        scope=alice_scope, now=BASE_NOW,
+    )
+    assert bank_save.status == "success", bank_save.error
+    bank_before = load_catalog(scope=alice_scope).credentials["bank"]
+
+    def bw_collect(key: str, **extra: Any) -> ToolResult:
+        return act("credential.collect", {"request": {
+            "credential_key": key, "display_name": key, "purpose": "p", "write_source": "bitwarden",
+            "fields": [
+                {"name": "username", "kind": "username", "visibility": "metadata_visible",
+                 "value_source": "agent_supplied_metadata", "value": "alice"},
+                {"name": "password", "kind": "password", "visibility": "secret",
+                 "value_source": "store_generated_secret"},
+            ], **extra}})
+
+    named = bw_collect("other", item_name="Bank Login")
+    assert named.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    assert named.content["rejected_param"] == "item_name"
+    assert bw.items["Bank Login"]["login"]["password"] == "BANK-PERSON-PW"
+    # A new key whose derived item name already exists in the shared Bitwarden session is refused.
+    taken_name = "team-nats-agents :: default :: taken_key"
+    bw.items[taken_name] = {"id": "bw-other-owner", "name": taken_name, "login": {"password": "OTHER-OWNER-PW"}}
+    taken = bw_collect("taken_key")
+    assert taken.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    assert bw.items[taken_name]["login"]["password"] == "OTHER-OWNER-PW"
+    assert "taken_key" not in load_catalog(scope=alice_scope).credentials
+    # Register refuses an item another key uses; a fresh item still registers.
+    shared_reg = act(
+        "credential.register_existing_source",
+        {"credential_key": "bank_alias", "field_name": "password", "source": "bitwarden",
+         "item_name": "Bank Login", "field_ref": "password"},
+    )
+    assert shared_reg.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    assert shared_reg.content["conflicting_credential_key"] == "bank"
+    fresh_reg = act(
+        "credential.register_existing_source",
+        {"credential_key": "fresh_bw", "field_name": "password", "source": "bitwarden",
+         "item_name": "Some Other Item", "field_ref": "password"},
+    )
+    assert fresh_reg.status == "success", fresh_reg.error
+    # Rotating the existing key writes to its stored item, not a derived one.
+    rotated_bank = bw_collect("bank")
+    assert rotated_bank.status == "success", rotated_bank.error
+    assert bw.items["Bank Login"]["login"]["password"] == "GENERATED-BY-STORE"
+    assert "team-nats-agents :: default :: bank" not in bw.items
+    bank_after = load_catalog(scope=alice_scope).credentials["bank"]
+    assert bank_after.fields["password"].resolution_order[0].item_name == "Bank Login"
+    assert bank_after.approval.get("recorded_by") == "agent"
+    assert bank_before.approval.get("approved_by") == "user"
+    # Once another key uses the same item, rotation through either key is refused.
+    second = collect_credential(
+        {"credential_key": "bank_twin", "display_name": "Twin", "purpose": "form", "write_source": "bitwarden",
+         "item_name": "Bank Login", "fields": login_fields},
+        {"username": "alice", "password": "TWIN-PW"},
+        scope=alice_scope, now=BASE_NOW,
+    )
+    assert second.status == "success", second.error
+    shared_rotate = bw_collect("bank")
+    assert shared_rotate.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    assert shared_rotate.content["conflicting_credential_key"] == "bank_twin"
+    assert bw.items["Bank Login"]["login"]["password"] == "TWIN-PW"

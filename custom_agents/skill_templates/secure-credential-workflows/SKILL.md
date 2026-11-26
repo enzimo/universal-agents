@@ -328,13 +328,23 @@ When a workflow needs a new named credential:
   person's secure form), only values of existing non-secret metadata fields may
   change, and every existing secret field either stays untouched (omit it from
   the request, or in `credential.register_existing_source` pass its exact
-  current stored source reference) or, in `credential.collect` only, rotates to
-  a store-generated value (`value_source="store_generated_secret"`) on its
-  existing stored record. Agent `credential.collect` also refuses secret values
-  and agent-chosen Sealbox record names (`item_id`/`sealbox_key`),
-  `credential.register_existing_source` refuses `sealbox_key` and inline secret
-  values, both refuse Sealbox records already referenced by another catalog
-  key, and every agent write records agent provenance rather than person
+  current env or password-manager reference) or, in `credential.collect` only,
+  rotates to a store-generated value (`value_source="store_generated_secret"`)
+  on its existing stored record. You cannot rotate a field registered from an
+  existing source; when rotating a username-and-password record, send the
+  username field with kind `username`, `email` or `login` (otherwise
+  `credential_rotation_username_required`, nothing written). You never name
+  where a secret is stored (`credential_record_name_not_allowed`): agent
+  `credential.collect` refuses `item_id`, `item_name` and `sealbox_key` (an
+  existing key rotates on the record it already uses; a new key's Bitwarden
+  item must not already exist), and `credential.register_existing_source`
+  refuses `sealbox_key`, every Sealbox source and any password-manager item
+  another key uses. Agent `credential.collect` also refuses secret values and
+  refuses keys stored by `credential.capture_file`
+  (`credential_captured_key_capture_only`: capture a new file into the key
+  instead); `credential.register_existing_source` refuses inline secret
+  values; both refuse Sealbox records already referenced by another catalog
+  key; and every agent write records agent provenance rather than person
   approval.
 - **Capturing a secret you already hold (`credential.capture_file`)**: when you
   already hold a temporary secret in a file (for example an auth file a sign-in
@@ -416,9 +426,11 @@ When a workflow needs a new named credential:
   `credential.collect`. Any other layout or source change is refused before
   writing with `credential_replacement_form_only`; return a terminal
   `secure_credential_collection_request` action so the person decides through
-  the secure form. Agent `credential.collect` also refuses `item_id` and
-  `sealbox_key`, and both actions refuse Sealbox records already referenced by
-  another catalog key.
+  the secure form. Agent `credential.collect` also refuses `item_id`,
+  `item_name` and `sealbox_key` and keys stored by `credential.capture_file`,
+  `credential.register_existing_source` refuses Sealbox sources and
+  password-manager items another key uses, and both actions refuse Sealbox
+  records already referenced by another catalog key.
 - When the person saves over an existing key through the secure form using a
   different item or field layout (or moving it to another source), the broker
   permanently deletes every version of the replaced Sealbox records. Confirm
@@ -676,12 +688,14 @@ raw credential in any field.
     `ssh_private_key`, and `ssh_host_bootstrap`.
     `credential.collect` is the broker-owned storage action for
     store-generated secrets and non-secret metadata (refusing agent-submitted
-    secrets, agent-chosen `item_id`/`sealbox_key`, and Sealbox records shared
-    with another catalog key; over an existing key, omit existing secret fields
-    to leave them untouched while updating existing non-secret metadata, or
-    pass `value_source="store_generated_secret"` to rotate them on their
-    existing stored record; adding, removing, or reclassifying fields always
-    requires the person's secure form);
+    secrets, agent-chosen `item_id`/`item_name`/`sealbox_key`, records shared
+    with another catalog key, and keys stored by `credential.capture_file`;
+    over an existing key, omit existing secret fields to leave them untouched
+    while updating existing non-secret metadata, or pass
+    `value_source="store_generated_secret"` to rotate them on their existing
+    stored record, never a field registered from an existing source; adding,
+    removing, or reclassifying fields always requires the person's secure
+    form);
     `signup.prepare` only validates. A user-facing form requires the terminal
     `secure_credential_collection_request` structured action.
   - `credential.capture_file` stores a temporary person-scoped Sealbox
@@ -697,14 +711,15 @@ raw credential in any field.
     become Sealbox credential records, custom secret fields become Sealbox
     secrets, and the catalog retains only source refs.
   - `credential.register_existing_source` maps a new catalog key's `field_name`
-    to an existing env, password-manager (`item_id` or `item_name` and
-    `field_ref`), or uncataloged Sealbox source (refusing `sealbox_key` and any
-    Sealbox record already referenced by another catalog key). A spaced manager
+    to an existing env or password-manager (`item_id` or `item_name` and
+    `field_ref`) source (refusing `sealbox_key`, every Sealbox source, and any
+    password-manager item another catalog key uses). A spaced manager
     item name such as `team-nats-agents :: default :: home_assistant` is valid
     as `item_name`, but do not reuse it as the catalog key. `::` is valid
     inside a catalog key; ` :: ` with spaces is not. Over an existing key, only
     existing non-secret metadata may change (omit existing secret fields to
-    keep them untouched, or repeat their exact existing source references).
+    keep them untouched, or repeat their exact existing env or
+    password-manager references).
   - `credential.collect` and `credential.register_existing_source` refuse with
     `credential_replacement_form_only` if saving over an existing key would
     add, remove, or reclassify fields, change a secret's stored source
