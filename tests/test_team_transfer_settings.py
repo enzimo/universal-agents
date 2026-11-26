@@ -404,11 +404,15 @@ def test_the_settings_contract_is_main_and_release_0_10s_settings_9() -> None:
     assert not {path[-1] for path in NOT_CARRIED_SETTINGS} & set(agent_properties)
     assert "max_tool_calls_per_task" in agent_properties
     assert contract.__name__ == "GatewayInstanceConfig"
-    assert SettingsSection.schema_version == 9
+    pin_hint = (
+        "main shares settings/9 with release/0.10; add a new main-line setting to "
+        "team_transfer.settings.NOT_CARRIED_SETTINGS instead of changing settings/9."
+    )
+    assert SettingsSection.schema_version == 9, pin_hint
     assert section_contract_digests()["settings/9"] == (
         "791cfc3cbb6e62404c85c0e5d53f2c9b9183d1c46f719a7e574ade7996344e74"
-    )
+    ), pin_hint
     manifest = json.loads((DEFAULT_OUTPUT_DIR / "manifest.json").read_text())
     assert [entry["sha256"] for entry in manifest["schemas"] if entry["model"] == "GatewayInstanceConfig"] == [
         "54020b8d38e62320daf64b7d8ed359b3f1334bb3387cdbf778893f8601f5b751"
-    ]
+    ], pin_hint
