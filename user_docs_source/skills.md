@@ -41,6 +41,32 @@ container-installed native `anydoc` binary for local Office, OpenDocument, RTF,
 EPUB, CSV, and text-based PDF conversion without an npm or hosted-service
 fallback.
 
+A skill can name the tool groups its procedure uses in its `SKILL.md`
+frontmatter, under the Agent Skills `metadata` map, as space-separated catalog
+tool ids:
+
+```yaml
+metadata:
+  ua-tools: fn:access_workflows fn:access_proposals
+```
+
+When an agent activates the skill, the runtime makes those groups available for
+the task through the same path as `use_tools`: only groups the agent already
+holds, within its model's tool cap. A skill never gives access. The skill result
+says which groups were loaded, which are in the agent's tool index (called with
+`call_tool`, see [How agents' tools are shown](configuration.md#how-agents-tools-are-shown-experiment)),
+which did not fit, and which are not available to this agent. It does not ask
+the agent to request access to those, because a skill names everything it can
+use, not what one task needs. An MCP server named there loads on its own once
+the agent has access. Unknown ids are skipped and logged. Name only the few
+groups the skill's main procedure needs (at most six).
+
+`scripts/check_skill_tool_names.py SKILL_DIR...` reports `ua-tools` ids that
+are not catalog tools, declarations of more than six groups, and backticked
+calls such as `` `name(...)` `` to functions that no agent tool has. It works on
+any skill folder, for example a `ua-skills` checkout; a test runs it over the
+bundled templates.
+
 These packaged skills are fallbacks. If `control/skills`, an imported `ua-skills`
 catalog, or another configured external source provides the same
 case-insensitive skill name, UA loads only the external definition. Removing
