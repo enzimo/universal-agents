@@ -40,14 +40,13 @@ def verified_work(agent: Any) -> VerifiedWork:
     from custom_agents.access_runtime import verified_task_context
 
     context = verified_task_context(agent)
-    person_id = str(getattr(context, "person_id", "") or "") if context is not None else ""
-    work_id = str(getattr(context, "context_id", "") or "") if context is not None else ""
-    issuer_roles = getattr(context, "issuer_roles", ()) if context is not None else ()
+    person_id = str(context.person_id or "") if context is not None else ""
+    work_id = str(context.context_id or "") if context is not None else ""
     is_request = (
         context is not None
         and context.issuer == GATEWAY_ISSUER_ROLE
-        and (not issuer_roles or GATEWAY_ISSUER_ROLE in issuer_roles)
-        and getattr(context, "schedule_id", None) is None
+        and (not context.issuer_roles or GATEWAY_ISSUER_ROLE in context.issuer_roles)
+        and context.schedule_id is None
         and bool(person_id)
     )
     return VerifiedWork(

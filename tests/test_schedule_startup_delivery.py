@@ -47,6 +47,7 @@ def startup_probe(tmp_path):
     agent.authorization_config = {"enabled": False}
     agent.on_nats_operational_delivery = AsyncMock()
     agent._cleanup_nats_runtime_on_exit = AsyncMock()
+    agent._bind_task_manager_authority_verifier = lambda: None
     agent._nats_mapper = lambda: NatsSubjectMapper(team_id=agent.team_id)
     for method in (
         "_ensure_schedule_store",

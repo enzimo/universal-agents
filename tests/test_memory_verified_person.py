@@ -211,13 +211,12 @@ def test_a_scheduler_signed_run_loads_its_owners_memories(tmp_path, monkeypatch,
 def test_a_permit_backed_scheduled_run_loads_its_owners_memories(tmp_path, monkeypatch, caplog) -> None:
     """A worker without the scheduler key starts the run with its schedule's permit (``schedule_permits``)."""
 
-    from custom_agents.schedule_permits import renew_schedule_permits
     from tests import scheduled_run_support as runs
 
     world = runs.build_world(tmp_path, monkeypatch)
     runs.record_people(world, (runs.ANN, PersonStanding.ACTIVE, ("member",)))
     runs.save_schedule(world)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    runs.issue_permits(world)
 
     async def start_run() -> dict:
         await runs.subscribe(world)

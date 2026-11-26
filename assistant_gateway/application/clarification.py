@@ -29,8 +29,10 @@ from assistant_gateway.application.pending_questions import (
 )
 from assistant_gateway.application.ports import GatewayIdGenerator
 from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
     GatewayRequestContextService,
     GatewayRequestRoute,
+    SIGNER_UNAVAILABLE_USER_MESSAGE,
 )
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_coordinator import (
@@ -482,6 +484,22 @@ class GatewayClarificationApplication:
                     query_handler=None,
                     response_task_id=question.parent_task_id,
                 )
+        except GatewayAuthorityTokenUnavailable:
+            if not published:
+                self._questions.release_answer(question)
+            self._logger.warning(
+                "Could not sign a person's answer to a question yet; leaving the question open. "
+                "event=gateway_question_answer_signer_unavailable task_query_id=%s session_key=%s",
+                task_query_id,
+                session_key,
+            )
+            return not_sent(
+                self._local_responses.create(
+                    text=SIGNER_UNAVAILABLE_USER_MESSAGE,
+                    correlation_id=correlation_id,
+                    conversation_id=question.conversation_id,
+                )
+            )
         except BaseException:
             # Channel acquisition and cancellation can both fail before the
             # transport sends anything. Neither consumes the person's answer.

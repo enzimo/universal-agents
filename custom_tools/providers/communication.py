@@ -17,7 +17,6 @@ from custom_agents.schedule_management import (
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import (
     GATEWAY_MANAGER_CONTROL_TYPES,
-    SCHEDULED_RUN_CONTEXT_TYPES,
     CommsMessage,
     MessageEnvelope,
 )
@@ -124,17 +123,6 @@ async def send_message(message_json: str) -> str:
             return (
                 "Error: Manager control messages are reserved for the authenticated "
                 "gateway and cannot be sent by an agent."
-            )
-        if isinstance(comms_obj.msg_content, SCHEDULED_RUN_CONTEXT_TYPES):
-            logger.warning(
-                "Agent-authored scheduled run context message rejected. "
-                "event=reserved_run_context_message_rejected agent_id=%s content_type=%s",
-                agent.id,
-                type(comms_obj.msg_content).__name__,
-            )
-            return (
-                "Error: Scheduled run context messages are reserved for the agent "
-                "runtimes and cannot be sent by an agent."
             )
         if isinstance(
             comms_obj.msg_content, ScheduledMessage

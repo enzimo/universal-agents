@@ -19,20 +19,22 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from access_control.identity import ISSUER_SCHEDULER, ContextVerifier
+from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from custom_messages.system_schedules import STALE_CONVERSATION_SCHEDULE_NAME_PREFIX, person_system_schedule_name
+from custom_messages.wire.authority_bindings import SCHEDULER_ISSUER_ROLE
 from storage.access_repository import AccessRepository
 from storage.change_ledger import ChangeRequestStore, ChangeWriterKind, RequestState, work_writer
 from storage.pinned_memory_changes import MemoryWriter
 from storage.pinned_memory_repository import create_pinned_memory_repository
-from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import broker_person_ref, forget_task_context_keys, signed_task_token
+from tests.scheduled_run_support import bind_test_scheduler
 
 TEAM, PERSON = "team_test", "alice"
 NOW = datetime.now(timezone.utc)
@@ -54,9 +56,11 @@ def _conversation_review(owner: str = PERSON, schedule_id: str = SCHEDULE_ID) ->
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    use_scheduler_key(monkeypatch)
     tasks = TaskManager(db_path=str(tmp_path / "manager.db"))
-    schedules = ScheduleStore(db_path=str(tmp_path / "schedules.db"))
+    schedules = ScheduleStore(db_path=str(tmp_path / "manager.db"), storage_settings=tasks.storage_settings)
+    sched = bind_test_scheduler(
+        monkeypatch, store=schedules, team_id=TEAM, storage_settings=tasks.storage_settings
+    )
     lead = SimpleNamespace(
         id="agent_lead",
         name="TeamArchitect",
@@ -70,21 +74,23 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         _verify_delegation_target=AsyncMock(return_value=True),
         _memory_review_task_ttl_seconds=lambda: 600.0,
     )
-    yield SimpleNamespace(tasks=tasks, schedules=schedules, lead=lead, tmp_path=tmp_path)
+    yield SimpleNamespace(
+        tasks=tasks, schedules=schedules, lead=lead, tmp_path=tmp_path, scheduler=sched.scheduler, verifier=sched.verifier
+    )
     forget_task_context_keys()
 
 
 def _record_person(world, standing: PersonStanding = PersonStanding.ACTIVE) -> None:
     roles = ("member",) if standing is PersonStanding.ACTIVE else ()
     AccessRepository(world.tasks.storage_settings).replace_people(
-        TEAM, [TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=PERSON, standing=standing, roles=roles, changed_at_utc=NOW)], at=NOW
+        TEAM, [TeamPersonV1(person_ref=broker_person_ref(PERSON), team_id=TEAM, person_id=PERSON, standing=standing, roles=roles, changed_at_utc=NOW)], at=NOW
     )
 
 
 def _turn_signed_context():
     """The gateway's signed context of the person's turn, which the review job keeps."""
 
-    return context_signer().issue(team_id=TEAM, person_id=PERSON, person_roles=("member",))
+    return signed_task_token(PERSON, team_id=TEAM, roles=("member",))
 
 
 async def _send_review(world, turn_context) -> list:
@@ -107,18 +113,26 @@ async def _send_review(world, turn_context) -> list:
 async def test_a_review_after_a_turn_works_for_the_persons_review_schedule_so_its_memory_changes_go_through(world, caplog):
     world.schedules.add(_conversation_review())
     _record_person(world)
+    world.scheduler.renew_permits()
     turn = _turn_signed_context()
     # The person's request was admitted and has ended: the turn is over.
     requests = ChangeRequestStore(world.tasks.storage_settings)
-    requests.open(team_id=TEAM, request_id=turn.context.context_id, person_id=PERSON, now=NOW)
-    requests.close(team_id=TEAM, request_id=turn.context.context_id, person_id=PERSON, state=RequestState.ENDED, now=NOW)
+    requests.open(team_id=TEAM, request_id=turn.bound_to.request_id, person_id=PERSON, now=NOW)
+    requests.close(team_id=TEAM, request_id=turn.bound_to.request_id, person_id=PERSON, state=RequestState.ENDED, now=NOW)
 
     with caplog.at_level(logging.INFO, logger="custom_agents.task_context_runtime"):
         [envelope] = await _send_review(world, turn)
 
-    context = ContextVerifier.from_env().verify(envelope.msg_meta.gateway_context.task_context, team_id=TEAM)
+    gw = envelope.msg_meta.gateway_context
+    context = resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=gw.task_context,
+        schedule_run=gw.schedule_run,
+        schedule_runs=ScheduleRunLookup.from_storage(world.tasks.storage_settings),
+    )
     assert (context.issuer, context.person_id, context.person_roles, context.schedule_id) == (
-        ISSUER_SCHEDULER, PERSON, ("member",), SCHEDULE_ID,
+        SCHEDULER_ISSUER_ROLE, PERSON, ("member",), SCHEDULE_ID,
     )
     # The chat route comes from the schedule, with the identity.
     assert envelope.msg_meta.gateway_context.chat_id == "chat_schedule"

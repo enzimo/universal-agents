@@ -179,14 +179,13 @@ async def test_manager_startup_preserves_conversation_ownership(tmp_path, identi
 def test_a_permit_backed_scheduled_run_records_its_owners_conversation(tmp_path, monkeypatch) -> None:
     """A worker without the scheduler key starts the run with its schedule's permit (``schedule_permits``)."""
 
-    from custom_agents.schedule_permits import renew_schedule_permits
     from tests import scheduled_run_support as runs
 
     world = runs.build_world(tmp_path, monkeypatch)
     world.worker._conversation_store = ConversationStore(world.db_path, artifacts_dir=tmp_path / "artifacts")
     runs.record_people(world, (runs.ANN, PersonStanding.ACTIVE, ("member",)))
     runs.save_schedule(world)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    runs.issue_permits(world)
 
     async def start_run() -> dict:
         await runs.subscribe(world)

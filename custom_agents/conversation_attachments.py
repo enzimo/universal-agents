@@ -146,7 +146,6 @@ from pydantic import ValidationError
 from access_control import safe_open
 from access_control.authority_verifier import IdentityRejected
 from access_control.ownership import (
-    CONTEXT_NAMES_NO_TASK,
     OwnershipDecision,
     answer_context_id,
     conversation_files_access,
@@ -234,18 +233,6 @@ _REFUSAL_TEXT = {
     TASK_NOT_FOUND_REASON: "the task it was sent to is not held here",
 }
 _NOT_VOUCHED_TEXT = "the gateway does not vouch that it sent it for this task"
-# What ``log_refused_files`` says for a new request whose signed context names
-# no task (``CONTEXT_NAMES_NO_TASK``): the gateway before the update that
-# started keeping each message's files signed a request's context without one,
-# so this is a request still queued for the lead across that update. Only a
-# request gets this text. Guidance and interrupt answers are signed again each
-# time the gateway sends them, and that gateway sent no files with answers to
-# questions, so on those messages the reason means a context taken from another
-# message, such as the gateway's status check, and gets ``_NOT_VOUCHED_TEXT``.
-_QUEUED_REQUEST_TEXT = (
-    "its signed context names no task, as a request's context the gateway signed before the update that started "
-    "keeping each message's files does; the person must send the file again"
-)
 # Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.
 _BUBBLED_ENTRY_KEY = "bubbled_entry_id"
 
@@ -1119,7 +1106,7 @@ def _vouched_request_files(
     if decision.allowed:
         return list(task.attachments)
     log_refused_files(
-        task.attachments, decision.reason, task_id=task.task_id, conversation_id=conversation_id, request=True
+        task.attachments, decision.reason, task_id=task.task_id, conversation_id=conversation_id
     )
     return []
 
@@ -1213,19 +1200,10 @@ def log_refused_files(
     *,
     task_id: str,
     conversation_id: Optional[str],
-    request: bool = False,
 ) -> None:
-    """One warning per file a message brought that is not kept, saying why (``_REFUSAL_TEXT``).
+    """One warning per file a message brought that is not kept, saying why (``_REFUSAL_TEXT``)."""
 
-    ``request`` is set for a new request's files (``admit_request_files``),
-    the only message whose context names no task because the gateway signed
-    it before the update (``_QUEUED_REQUEST_TEXT``).
-    """
-
-    if request and reason == CONTEXT_NAMES_NO_TASK:
-        explanation = _QUEUED_REQUEST_TEXT
-    else:
-        explanation = _REFUSAL_TEXT.get(reason, _NOT_VOUCHED_TEXT)
+    explanation = _REFUSAL_TEXT.get(reason, _NOT_VOUCHED_TEXT)
     for attachment in attachments:
         logger.warning(
             "A file on a message was not kept: %s. "

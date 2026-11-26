@@ -64,6 +64,8 @@ SCHEDULE_COLUMNS: tuple[str, ...] = (
     "run_permit_owner",
     "run_permit_recheck_at",
     "parallel_thread",
+    "owner_vouched",
+    "owner_permit_json",
 )
 
 
@@ -91,6 +93,8 @@ SCHEDULE_ROW_FIELDS: tuple[str, ...] = (
     "expires_at_utc",
     "owner_canonical_user_id",
     "run_permit_json",
+    "owner_vouched",
+    "owner_permit_json",
 )
 
 
@@ -166,6 +170,7 @@ class ScheduleRepository(Protocol):
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
         parallel_thread: bool = False,
+        owner_vouched: bool = False,
     ) -> bool: ...
 
     def get_schedule_row(self, schedule_id: str) -> Optional[tuple]: ...
@@ -213,6 +218,7 @@ class ScheduleRepository(Protocol):
         permit_json: Optional[str],
         checked_owner: Optional[str],
         recheck_at: str,
+        owner_permit_json: Optional[str] = None,
     ) -> bool: ...
 
 
@@ -227,10 +233,10 @@ _SCHEDULE_COLUMN_MIGRATIONS: dict[str, str] = {
     "claimed_at": "TEXT",
     "expires_at_utc": "TEXT",
     "owner_canonical_user_id": "TEXT",
-    # The schedule's run permit (custom_agents.schedule_permits): runtime
-    # bookkeeping like next_fire_at, never part of schedule_json or of the
-    # schedule's control state. run_permit_owner is the row owner the manager
-    # last checked for; run_permit_recheck_at is when it looks again.
+    # The schedule's run permit (team_services.scheduler): runtime bookkeeping
+    # like next_fire_at, never part of schedule_json or of the schedule's
+    # control state. run_permit_owner is the row owner the scheduler last
+    # checked for; run_permit_recheck_at is when it looks again.
     "run_permit_json": "TEXT",
     "run_permit_owner": "TEXT",
     "run_permit_recheck_at": "TEXT",
@@ -239,6 +245,14 @@ _SCHEDULE_COLUMN_MIGRATIONS: dict[str, str] = {
     # (custom_agents.schedule_store._definition_columns). The scheduler claims
     # such a schedule while the main lane is busy (scheduled_runtime).
     "parallel_thread": "INTEGER NOT NULL DEFAULT 0",
+    # Whether the schedule's stored owner was vouched for (installed by the
+    # person, imported as vouched by an administrator, or converted from a
+    # verified gateway context at upgrade).
+    "owner_vouched": "INTEGER NOT NULL DEFAULT 0",
+    # Standing scheduler-signed owner permit for system-work schedules that
+    # also name a vouched administrator owner (used by system escalations and
+    # worker pool reviews so the lead holds no signing key).
+    "owner_permit_json": "TEXT",
 }
 
 
@@ -286,7 +300,9 @@ class _RelationalScheduleRepository:
                         run_permit_json TEXT,
                         run_permit_owner TEXT,
                         run_permit_recheck_at TEXT,
-                        parallel_thread INTEGER NOT NULL DEFAULT 0
+                        parallel_thread INTEGER NOT NULL DEFAULT 0,
+                        owner_vouched INTEGER NOT NULL DEFAULT 0,
+                        owner_permit_json TEXT
                     )
                     """
                 )
@@ -698,8 +714,9 @@ class _RelationalScheduleRepository:
         permit_json: Optional[str],
         checked_owner: Optional[str],
         recheck_at: str,
+        owner_permit_json: Optional[str] = None,
     ) -> bool:
-        """Record the manager's check of a schedule's run permit (None when it issued none).
+        """Record the scheduler's check of a schedule's run permit (None when it issued none).
 
         Applies only while the row's owner is still ``checked_owner``; if the
         owner changed meanwhile, nothing is written and the next check sees it.
@@ -710,12 +727,13 @@ class _RelationalScheduleRepository:
                 f"""
                 UPDATE scheduled_messages
                    SET run_permit_json = {self._dialect.bind},
+                       owner_permit_json = {self._dialect.bind},
                        run_permit_owner = {self._dialect.bind},
                        run_permit_recheck_at = {self._dialect.bind}
                  WHERE schedule_id = {self._dialect.bind}
                    AND COALESCE(owner_canonical_user_id, '') = COALESCE({self._dialect.bind}, '')
                 """,
-                (permit_json, checked_owner, recheck_at, schedule_id, checked_owner),
+                (permit_json, owner_permit_json, checked_owner, recheck_at, schedule_id, checked_owner),
             )
             conn.commit()
             return cursor.rowcount > 0
@@ -766,6 +784,7 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
         parallel_thread: bool = False,
+        owner_vouched: bool = False,
     ) -> bool:
         """Atomically insert a schedule without mutating an existing row."""
 
@@ -776,8 +795,8 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
                    (schedule_id, payload_json, schedule_name, objective_id, interval_ms, cron_expression,
                     schedule_json, repeat_count, remaining_count, next_fire_at, paused_until, created_at, enabled,
                     expires_at_utc, claim_team_id, claim_named_agent_type, claim_agent_id, owner_canonical_user_id,
-                    parallel_thread, claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
-                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
+                    parallel_thread, owner_vouched, claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
+                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
                 """,
                 (
                     schedule_id,
@@ -799,6 +818,7 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
                     claim_agent_id,
                     owner_canonical_user_id,
                     1 if parallel_thread else 0,
+                    1 if owner_vouched else 0,
                 ),
             )
             conn.commit()
@@ -919,6 +939,7 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
         claim_agent_id: Optional[str] = None,
         owner_canonical_user_id: Optional[str] = None,
         parallel_thread: bool = False,
+        owner_vouched: bool = False,
     ) -> bool:
         """Atomically insert a schedule without mutating an existing row."""
 
@@ -929,8 +950,8 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
                    (schedule_id, payload_json, schedule_name, objective_id, interval_ms, cron_expression,
                     schedule_json, repeat_count, remaining_count, next_fire_at, paused_until, created_at, enabled,
                     expires_at_utc, claim_team_id, claim_named_agent_type, claim_agent_id, owner_canonical_user_id,
-                    parallel_thread, claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
-                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
+                    parallel_thread, owner_vouched, claimed_by_agent_id, claim_token, claim_expires_at, claimed_at)
+                   VALUES ({self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, {self._dialect.bind}, NULL, NULL, NULL, NULL)
                 ON CONFLICT(schedule_id) DO NOTHING
                 """,
                 (
@@ -953,6 +974,7 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
                     claim_agent_id,
                     owner_canonical_user_id,
                     1 if parallel_thread else 0,
+                    1 if owner_vouched else 0,
                 ),
             )
             conn.commit()

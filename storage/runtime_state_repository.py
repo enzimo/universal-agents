@@ -604,9 +604,9 @@ class _RelationalRuntimeStateRepository:
             digest = payload_digest(payload)
             if existing.get((section, record_id)) == digest:
                 continue
-            task, previous_state, previous_had_token = (
+            task, previous_state = (
                 self._checked_task_snapshot(conn, owner_agent_id, record_id, payload, saved=(section, record_id) in existing)
-                if section == "tasks" else (None, None, False)
+                if section == "tasks" else (None, None)
             )
             conn.execute(f"""INSERT INTO active_task_runtime_records
                 (owner_agent_id, section, record_id, payload_json, payload_digest)
@@ -621,12 +621,11 @@ class _RelationalRuntimeStateRepository:
                     team_id,
                     task,
                     previous_state=previous_state,
-                    previous_had_token=previous_had_token,
                 )
 
     def _checked_task_snapshot(
         self, conn: Any, owner_agent_id: str, task_id: str, payload: str, *, saved: bool,
-    ) -> tuple[TaskSnapshotRecord, Any, bool]:
+    ) -> tuple[TaskSnapshotRecord, Any]:
         """Validate only the changed task's immutable request identity; also return its saved state.
 
         The saved state is None for a task this owner never saved.
@@ -634,7 +633,7 @@ class _RelationalRuntimeStateRepository:
 
         task = TaskSnapshotRecord.model_validate_json(payload)
         if not saved:
-            return task, None, False
+            return task, None
         p = self._dialect.bind
         previous = conn.execute(
             f"SELECT payload_json FROM active_task_runtime_records "
@@ -643,13 +642,11 @@ class _RelationalRuntimeStateRepository:
         ).fetchone()
         saved_task = TaskSnapshotRecord.model_validate_json(previous[0])
         require_same_request_identity(saved_task, task)
-        saved_gw = saved_task.meta.gateway_context
-        saved_had_token = saved_gw is not None and saved_gw.task_context is not None
-        return task, saved_task.state, saved_had_token
+        return task, saved_task.state
 
     def _record_task_outcome(
         self, conn: Any, owner_agent_id: str, team_id: Optional[str], task: TaskSnapshotRecord,
-        *, previous_state: Any, previous_had_token: bool = False,
+        *, previous_state: Any,
     ) -> None:
         """Keep request lifecycle and schedule outcomes in the task's transaction."""
 
@@ -662,7 +659,6 @@ class _RelationalRuntimeStateRepository:
             task=task,
             now=datetime.now(timezone.utc),
             verifier=self._authority_verifier,
-            admitted=(previous_state is not None and previous_had_token),
         )
         if task.state != previous_state:
             # Only on entering a state: a later save of an old failure must
@@ -970,7 +966,6 @@ class _RelationalRuntimeStateRepository:
                 task=task.model_copy(update={"state": ProgressState.CANCELLED}),
                 now=datetime.now(timezone.utc),
                 verifier=self._authority_verifier,
-                admitted=True,
             )
 
     def get_task_cancellation(

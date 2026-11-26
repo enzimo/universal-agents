@@ -72,7 +72,6 @@ from storage.operation_outcomes import CommandOutcome, OutcomeAlreadyStored
 from storage.schedule_repository import UNFINISHED_RUNS, RowWrite, create_schedule_repository
 
 if TYPE_CHECKING:
-    from custom_messages.contracts.access_v2 import SignedSchedulePermitV1
     from custom_messages.contracts.schedule_v1 import ScheduledMessage, ScheduleTaskMemory
 
 logger = logging.getLogger(__name__)
@@ -793,6 +792,7 @@ class ScheduleStore:
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
         deferred_message: DeferredMessageClaim | None = None,
         create_only: bool = False,
+        owner_vouched: Optional[bool] = None,
     ) -> str:
         """Install a schedule: create it, or replace the stored definition of one with its id.
 
@@ -823,7 +823,10 @@ class ScheduleStore:
         def decide(row: Optional[dict[str, Any]]) -> RowWrite:
             if row is None:
                 remaining = msg.repeat_count if remaining_count_override is _UNSET_REMAINING_COUNT else remaining_count_override
-                return RowWrite(columns=_definition_columns(msg, remaining_count=remaining), insert=True, result=SCHEDULE_INSTALLED)
+                columns = _definition_columns(msg, remaining_count=remaining)
+                if owner_vouched is not None:
+                    columns["owner_vouched"] = 1 if owner_vouched else 0
+                return RowWrite(columns=columns, insert=True, result=SCHEDULE_INSTALLED)
             if create_only:
                 return RowWrite(result=SCHEDULE_KEPT)
             current = _row_message(row, self._logger)
@@ -842,7 +845,13 @@ class ScheduleStore:
                 remaining = _runs_after_edit(row.get("remaining_count"), msg, current)
             written = msg.model_copy(deep=True)
             written.timing_revision = current.timing_revision + int(_next_run_changed(msg, current))
-            return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=SCHEDULE_REPLACED)
+            columns = _definition_columns(written, remaining_count=remaining)
+            if owner_vouched is not None:
+                columns["owner_vouched"] = 1 if owner_vouched else 0
+            elif (row.get("owner_canonical_user_id") or None) != columns.get("owner_canonical_user_id"):
+                # Owner changed without an explicit vouching decision: never inherit the previous owner's vouch.
+                columns["owner_vouched"] = 0
+            return RowWrite(columns=columns, result=SCHEDULE_REPLACED)
 
         try:
             write = self._repository.write_locked(
@@ -968,6 +977,7 @@ class ScheduleStore:
         claim_named_agent_type: Optional[str] = None,
         claim_agent_id: Optional[str] = None,
         remaining_count_override: Any = _UNSET_REMAINING_COUNT,
+        owner_vouched: bool = False,
     ) -> Optional[bool]:
         """Atomically install a schedule once while preserving an existing row verbatim."""
 
@@ -1005,6 +1015,7 @@ class ScheduleStore:
                 claim_agent_id=getattr(msg, "claim_agent_id", None),
                 owner_canonical_user_id=owner_canonical_user_id_for_schedule(msg),
                 parallel_thread=schedule_runs_in_parallel_lane(msg.payload_meta),
+                owner_vouched=owner_vouched,
             )
             if created:
                 self._logger.info(
@@ -1815,37 +1826,53 @@ class ScheduleStore:
             self._logger.error(f"Failed to count enabled schedules: {e}")
             return 0
 
-    # -- run permits (custom_agents.schedule_permits) ---------------------------------
+    # -- run permits (team_services.scheduler / custom_agents.schedule_permits) --------
     # Runtime bookkeeping kept on the row beside next_fire_at: never part of
     # schedule_json or the schedule's control state, so setting it needs no
     # schedule permit. Storage errors propagate: callers decide what a
-    # missing answer means (the manager retries; a worker asks the manager).
+    # missing answer means (the scheduler retries; a worker asks svc.scheduler).
 
-    def run_permit(self, schedule_id: str) -> Optional["SignedSchedulePermitV1"]:
-        """The schedule's stored run permit as the manager signed it, or None.
-
-        Not verified here; whoever uses it verifies it. A stored value that is
-        not a permit is logged and treated as none.
-        """
-
-        from custom_messages.contracts.access_v2 import SignedSchedulePermitV1
+    def is_owner_vouched(self, schedule_id: str) -> bool:
+        """Whether the schedule row carries the explicit owner_vouched mark."""
 
         row = self._row(schedule_id)
-        raw = row.get("run_permit_json") if row else None
+        return bool(row.get("owner_vouched")) if row else False
+
+    def _parse_permit_column(self, schedule_id: str, column: str) -> Optional[Any]:
+        from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+
+        row = self._row(schedule_id)
+        raw = row.get(column) if row else None
         if not raw:
             return None
         try:
-            return SignedSchedulePermitV1.model_validate_json(raw)
+            return AuthorityTokenRecord.model_validate_json(raw)
         except ValueError:
             self._logger.warning(
-                "A schedule's stored run permit is not readable; treating it as none. "
-                "event=schedule_permit_unreadable schedule_id=%s",
+                "A schedule's stored %s is not a readable protocol 1 permit token; treating it as none. "
+                "event=schedule_permit_unreadable schedule_id=%s column=%s",
+                column,
                 schedule_id,
+                column,
             )
             return None
 
+    def run_permit(self, schedule_id: str) -> Optional[Any]:
+        """The schedule's stored protocol 1 run permit token as the scheduler signed it, or None.
+
+        Not verified here; whoever uses it verifies it. A stored value that is
+        not a valid ``AuthorityTokenRecord`` is logged and treated as none.
+        """
+
+        return self._parse_permit_column(schedule_id, "run_permit_json")
+
+    def owner_permit(self, schedule_id: str) -> Optional[Any]:
+        """The schedule's stored protocol 1 owner permit token (for system-work schedules with an admin owner)."""
+
+        return self._parse_permit_column(schedule_id, "owner_permit_json")
+
     def rows_needing_run_permit(self, *, now: datetime, limit: int) -> List[str]:
-        """Schedule ids whose run permit the manager should issue, renew or re-check (one query)."""
+        """Schedule ids whose run permit the scheduler should issue, renew or re-check (one query)."""
 
         return self._repository.rows_needing_run_permit(now_iso=now.astimezone(timezone.utc).isoformat(), limit=limit)
 
@@ -1853,18 +1880,29 @@ class ScheduleStore:
         self,
         schedule_id: str,
         *,
-        permit: Optional["SignedSchedulePermitV1"],
+        permit: Optional[Any],
         checked_owner: Optional[str],
         recheck_at: datetime,
+        owner_permit: Optional[Any] = None,
     ) -> bool:
-        """Record the manager's check: the permit it issued (or None) and when to look again.
+        """Record the scheduler's check: the permit it issued (or None) and when to look again.
 
         False when the row is gone or its owner is no longer ``checked_owner``.
         """
 
+        def _dump(token: Optional[Any]) -> Optional[str]:
+            if token is None:
+                return None
+            if hasattr(token, "model_dump_json"):
+                return token.model_dump_json()
+            import json
+
+            return json.dumps(token)
+
         return self._repository.set_run_permit(
             schedule_id,
-            permit_json=permit.model_dump_json() if permit is not None else None,
+            permit_json=_dump(permit),
+            owner_permit_json=_dump(owner_permit),
             checked_owner=checked_owner,
             recheck_at=recheck_at.astimezone(timezone.utc).isoformat(),
         )

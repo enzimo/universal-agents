@@ -908,6 +908,65 @@ def test_admitted_non_terminal_resave_succeeds_without_issuer_cert_or_verifier_c
         }
     assert rows == {"task_context_admitted_run": "open"}
 
+    # C20: restore under the same id and takeover by another owner via commit_task_runtime_recovery
+    # also succeed without the issuer cert or verifier because change_requests proves prior admission.
+    source_rows = repo2.load_task_runtime_by_owner("lead")
+    assert len(source_rows) == 1
+    same_owner_replacement = source_rows[0].__class__(
+        owner_agent_id="lead",
+        owner_agent_name="Lead",
+        team_id=tv.TEAM,
+        owner_named_agent_type="TeamArchitect",
+        runtime_state_json=_snap(ProgressState.IN_PROGRESS, "v3-restored", token),
+        updated_at=fixtures.NOW.isoformat(),
+    )
+    repo2.commit_task_runtime_recovery(sources=source_rows, replacement=same_owner_replacement)
+
+    restored_rows = repo2.load_task_runtime_by_owner("lead")
+    assert len(restored_rows) == 1
+    takeover_replacement = restored_rows[0].__class__(
+        owner_agent_id="lead_replacement",
+        owner_agent_name="Lead Replacement",
+        team_id=tv.TEAM,
+        owner_named_agent_type="TeamArchitect",
+        runtime_state_json=_snap(ProgressState.COMPLETED, "v4-taken-over", token),
+        updated_at=fixtures.NOW.isoformat(),
+    )
+    repo2.commit_task_runtime_recovery(sources=restored_rows, replacement=takeover_replacement)
+
+    with connect_sqlite(db_path) as conn:
+        rows_after = {
+            str(r[0]): str(r[1])
+            for r in conn.execute("SELECT request_id, state FROM change_requests").fetchall()
+        }
+    assert rows_after == {"task_context_admitted_run": "ended"}
+
+    # C20: a task with NO change_requests row is still fully verified and refused when trust is missing.
+    unadmitted_token = gw_host.sign_root_task_token(
+        person_ref=person_ref,
+        root_task_id="task_no_ledger_row",
+        request_id="task_context_no_ledger_row",
+    )
+    unadmitted_rec = TaskSnapshotRecord(
+        task_id="task_no_ledger_row",
+        state=ProgressState.ACCEPTED,
+        task=Task(task_id="task_no_ledger_row", task_type=MessageMetaType.REQUEST, problem_statement="unadmitted"),
+        header=MessageHeader(message_id="m_unadmitted", timestamp=fixtures.NOW.isoformat()),
+        meta=MessageMeta(gateway_context=GatewayContext(source="test", task_context=unadmitted_token)),
+        owner_person_id=person_id,
+    )
+    with pytest.raises(IdentityRejected):
+        repo2.save_task_runtime(
+            owner_agent_id="lead_unadmitted",
+            owner_agent_name="Lead",
+            team_id=tv.TEAM,
+            owner_named_agent_type="TeamArchitect",
+            runtime_state_json=RuntimeSnapshotV3(
+                schema_version=3, tasks=[unadmitted_rec], task_queue=["task_no_ledger_row"]
+            ).model_dump_json(),
+            expect_existing=False,
+        )
+
     # Security invariant: a task originally saved WITHOUT a token cannot sneak in a forged token on resave.
     unverified_rec = TaskSnapshotRecord(
         task_id="task_unsigned",
@@ -1226,3 +1285,220 @@ async def test_gateway_refuses_unsigned_person_request_and_maintenance_waits_for
         assert isinstance(tok, AuthorityTokenRecord)
         verified = verifier2.verify_root_task(tok, team_id=tv.TEAM, now=fixtures.NOW, require_issuer="gateway")
         assert verified.person_id == person_id2
+
+
+@pytest.mark.parametrize(
+    "entry_point",
+    [
+        "clarification_probe",
+        "clarification_reply",
+        "task_progress",
+        "manager_stop_command",
+        "person_standing_command",
+        "schedule_create_via_bridge",
+        "autonomous_task",
+        "automation",
+    ],
+)
+@pytest.mark.asyncio
+async def test_all_gateway_entry_points_handle_unavailable_signer_without_publishing_c21(
+    tmp_path: Path, entry_point: str
+) -> None:
+    """C21: every build_gateway_context entry point refuses unsigned publication with its defined outcome."""
+
+    from assistant_gateway.application.automated_submission import (
+        GatewayAutomationRequest,
+        GatewayAutonomousTaskRequest,
+    )
+    from assistant_gateway.application.operational_control import GatewayStopControlRequest
+    from assistant_gateway.application.request_context import (
+        GatewayAuthorityTokenUnavailable,
+        SIGNER_UNAVAILABLE_USER_MESSAGE,
+    )
+    from assistant_gateway.application.task_progress import GatewayTaskProgressRequest
+    from assistant_gateway.channel_bridge import ChannelBridge
+    from assistant_gateway.translation import ChannelInboundMessage
+    from custom_messages.contracts.access_v2 import PersonStanding
+    from custom_messages.contracts.task_v1 import TaskQuery
+
+    gateway, transport, _gw_host, _verifier, person_id, _person_ref = _build_real_gateway(tmp_path)
+
+    class _FailingSigner:
+        async def ready(self, timeout: float = 5.0) -> None:
+            raise TimeoutError("signer not ready")
+
+        def sign_root_task_token(self, **_kwargs: Any) -> AuthorityTokenRecord:
+            raise GatewayHostUnavailable("gateway host is not joined yet")
+
+    gateway._request_context_service._token_signer = _FailingSigner()
+    route = GatewayRequestRoute(
+        channel_name="telegram",
+        user_id="tg_alice",
+        chat_id="chat_alice",
+        canonical_user_id=person_id,
+    )
+    session = gateway._session_service.resolve_session(
+        requested_session_key="telegram:chat_alice",
+        default_session_key="telegram:chat_alice",
+        manager_agent_id="agent_lead_1",
+        owner_canonical_user_id=person_id,
+        default_owner_canonical_user_id=person_id,
+        enforce_owner_scope=False,
+    )
+
+    if entry_point == "clarification_probe":
+        gateway._manager_client._runtime._connected = True
+        probe_pending = SimpleNamespace(
+            task_query_id="q_probe_c21",
+            session_key=session.session_key,
+            conversation_id=session.conversation_id,
+            parent_task_id="task_parent_c21",
+        )
+        preserved = await gateway._clarification_core._parent_is_active(probe_pending)  # type: ignore[arg-type]
+        assert preserved is True
+    elif entry_point == "clarification_reply":
+        query = TaskQuery(
+            task_query_id="q_ans_c21",
+            query_type=MessageMetaType.REQUEST,
+            message="Which report?",
+            parent_task_id="task_parent_c21",
+        )
+        gateway._pending_questions.ask(
+            session_key=session.session_key,
+            correlation_id="corr_q_c21",
+            conversation_id=session.conversation_id,
+            query=query,
+            rendered_text="Which report?",
+        )
+        response = await gateway._clarification_application.reply(
+            session_key=session.session_key,
+            task_query_id="q_ans_c21",
+            response_text="Q4",
+        )
+        assert SIGNER_UNAVAILABLE_USER_MESSAGE in response.text
+        # Question stays open so the person can resend once the team finishes starting.
+        stored_q = gateway._pending_questions.get("q_ans_c21")
+        assert stored_q is not None and stored_q.is_open
+    elif entry_point == "task_progress":
+        gateway._manager_client._runtime._connected = True
+        response = await gateway._task_progress_service.request(
+            GatewayTaskProgressRequest(
+                session_key=session.session_key,
+                conversation_id=session.conversation_id,
+                route=route,
+            )
+        )
+        assert SIGNER_UNAVAILABLE_USER_MESSAGE in response.text
+    elif entry_point == "manager_stop_command":
+        response = await gateway._operational_controls.stop(
+            GatewayStopControlRequest(
+                session_key=session.session_key,
+                conversation_id=session.conversation_id,
+                action="inventory",
+                scope="user",
+                command_text="/stop",
+                route=route,
+            )
+        )
+        assert SIGNER_UNAVAILABLE_USER_MESSAGE in response.text
+    elif entry_point == "person_standing_command":
+        from assistant_gateway.application.person_lifecycle import (
+            GatewayPersonLifecycle,
+            GatewayPersonLifecycleSettings,
+            _Reply,
+        )
+
+        actor = gateway._identity_service.resolve_user_by_id(person_id)
+        assert actor is not None
+        lifecycle = GatewayPersonLifecycle(
+            settings=GatewayPersonLifecycleSettings(
+                team_id=tv.TEAM,
+                removed_data_retention_days=30,
+            ),
+            identity=gateway._identity_service,
+            records=SimpleNamespace(),  # type: ignore[arg-type]
+            work=gateway._manager_commands,
+            broker=None,
+            person_schedules=None,
+            clock=gateway._clock,
+        )
+        reply_acc = _Reply()
+        outcome = await lifecycle._tell_manager(
+            actor, person_id, PersonStanding.ACTIVE, reply_acc
+        )
+        assert outcome is None
+        assert SIGNER_UNAVAILABLE_USER_MESSAGE in reply_acc.problems
+    elif entry_point == "schedule_create_via_bridge":
+        cli_session = gateway._session_service.resolve_session(
+            requested_session_key=f"cli:{gateway.config.instance_name}",
+            default_session_key=f"cli:{gateway.config.instance_name}",
+            manager_agent_id="agent_lead_1",
+            owner_canonical_user_id=person_id,
+            default_owner_canonical_user_id=person_id,
+            enforce_owner_scope=False,
+        )
+        bridge = ChannelBridge(gateway.application)
+        inbound = ChannelInboundMessage(
+            channel_name="cli",
+            user_id=person_id,
+            chat_id=f"cli:{gateway.config.instance_name}",
+            message_id="msg_cron_c21",
+            session_key=cli_session.session_key,
+            text="/cron 60 daily_check Check status",
+        )
+        outbound = await bridge.handle_inbound(inbound)
+        assert len(outbound) == 1
+        assert SIGNER_UNAVAILABLE_USER_MESSAGE in outbound[0].text
+    elif entry_point == "autonomous_task":
+        recorded: list[Any] = []
+        orig_record = gateway.automated_submission._requests.record
+        gateway.automated_submission._requests.record = lambda *a, **kw: (recorded.append((a, kw)), orig_record(*a, **kw))[1]
+        try:
+            with pytest.raises(GatewayAuthorityTokenUnavailable):
+                await gateway.automated_submission.submit_autonomous_task(
+                    GatewayAutonomousTaskRequest(
+                        instruction="Run check",
+                        session_key=session.session_key,
+                        origin_kind="heartbeat",
+                        route=route,
+                    )
+                )
+        finally:
+            gateway.automated_submission._requests.record = orig_record
+        assert recorded == []
+    elif entry_point == "automation":
+        recorded_auto: list[Any] = []
+        orig_record_auto = gateway.automated_submission._requests.record
+        gateway.automated_submission._requests.record = lambda *a, **kw: (recorded_auto.append((a, kw)), orig_record_auto(*a, **kw))[1]
+        orig = MessageEnvelope(
+            msg_content=Task(task_id="t_orig_c21", task_type=MessageMetaType.REQUEST, problem_statement="hi"),
+            msg_header=MessageHeader(from_agent_id="gateway"),
+            msg_meta=MessageMeta(
+                gateway_context=GatewayContext(
+                    canonical_user_id=person_id,
+                    session_key=session.session_key,
+                )
+            ),
+        )
+        try:
+            with pytest.raises(GatewayAuthorityTokenUnavailable):
+                await gateway.automated_submission.submit_automation(
+                    GatewayAutomationRequest(
+                        automation_id="auto_c21",
+                        hook_name="test_hook",
+                        original_envelope=orig,
+                        rendered_original_user_text="hi",
+                        allowed_decisions=("deliver",),
+                        decision_instructions="decide",
+                        session_key=session.session_key,
+                        route=route,
+                    )
+                )
+        finally:
+            gateway.automated_submission._requests.record = orig_record_auto
+        assert recorded_auto == []
+    else:
+        raise AssertionError(f"Unhandled entry point: {entry_point}")
+
+    assert transport.durable == []
+    assert transport.operational == []

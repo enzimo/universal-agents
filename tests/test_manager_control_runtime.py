@@ -239,6 +239,7 @@ def test_legacy_ownerless_schedule_stays_unassigned_through_startup_and_firing(
         conn.execute("DROP INDEX idx_scheduled_messages_owner_user")
         conn.execute("ALTER TABLE scheduled_messages DROP COLUMN owner_canonical_user_id")
     world.store = ScheduleStore(storage_settings=world.tasks.storage_settings)
+    world.scheduler._store = world.store
     world.manager._schedule_store = world.store
     world.worker._schedule_store = world.store
     world.worker._conversation_store = ConversationStore(
@@ -271,7 +272,7 @@ def test_legacy_ownerless_schedule_stays_unassigned_through_startup_and_firing(
     assert asyncio.run(scenario()) == {}, "The ownerless occurrence commits without a scope mismatch."
     run = scheduled_runs.queued_run(world)
     assert run.owner_person_id is None
-    signed = scheduled_runs.run_context(run)
+    signed = scheduled_runs.run_context(run, world)
     assert signed.person_id is None and signed.person_roles == ()
     assert all(
         getattr(run.meta.gateway_context, name) is None

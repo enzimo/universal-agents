@@ -20,10 +20,9 @@ working for Ann (signed task context). Covers:
   agent process received (sent again with other files, under a new key or
   under the same key after a restart) gets none of its files onto the task,
   its turn or the model's text, at admission and on guidance and answers;
-- a request the gateway signed before the update (its context names no task)
-  is admitted without its files, logged with its own reason and advice; a
-  guidance or interrupt answer under the gateway's status-check context
-  (which names no task either) keeps none, without that advice;
+- a request or guidance whose authority token names another task (such as
+  the gateway's status-check token) is admitted without its files, logged
+  with reason=another_task;
 - a delegated task keeps no files from guidance, and the lead sends guidance
   on without files, saying how many came with it;
 - an answer refused as stale keeps none of its files, and a guidance or an
@@ -632,12 +631,11 @@ async def test_a_guidance_context_every_agent_process_received_vouches_for_no_ot
 
 @pytest.mark.parametrize("kind", [TaskSteeringType.PROACTIVE_GUIDANCE, TaskSteeringType.INTERRUPT_RESPONSE])
 @pytest.mark.asyncio
-async def test_a_status_check_context_on_guidance_keeps_no_files_and_is_not_blamed_on_the_update(
+async def test_a_status_check_context_on_guidance_keeps_no_files(
     lead, layout: InstanceLayout, statuses, caplog: pytest.LogCaptureFixture, kind: TaskSteeringType
 ) -> None:
-    """The gateway's status check carries Ann's context naming no task, on the subject every agent process
-    receives. A faulty one puts it on guidance with a file: refused for naming no task, and the warning
-    does not send the operator after a request queued across the update."""
+    """The gateway's status check carries Ann's token bound to its own probe id, on the subject every
+    agent process receives. A faulty one puts it on guidance with a file: refused as another_task."""
 
     before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
     scan = _upload(layout, "scan.png")
@@ -755,11 +753,11 @@ def test_a_copy_of_the_request_with_other_files_keeps_none(
 
 
 @pytest.mark.asyncio
-async def test_a_request_signed_before_the_update_is_admitted_without_its_files_and_says_why(
+async def test_a_request_with_another_tasks_token_is_admitted_without_its_files(
     tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A request still queued for the lead when the instance was updated: the gateway before the update
-    signed only the team, the person and their roles, so the context names no task."""
+    """A new request carrying an authority token bound to another task is admitted for its person
+    without keeping any of its files (refused with reason=another_task)."""
 
     agent = _lead(tmp_path, layout)
     photo = _upload(layout, "photo.png")

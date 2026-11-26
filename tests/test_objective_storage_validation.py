@@ -71,7 +71,8 @@ def test_objective_storage_canary_completes_and_restores_identity_trust(
         )
         for verifier in (runtime_access(agent).verifier, context_verifier()):
             assert verifier.verify_root_task(caller_context, team_id=tv.TEAM, now=fixtures.NOW).person_id == "usr_alice"
-            with pytest.raises(IdentityRejected):
+            with pytest.raises(IdentityRejected) as exc_info:
                 verifier.verify_root_task(canary_context, team_id="team_live_objective", now=datetime.now(timezone.utc))
+            assert exc_info.value.code == "wrong_installation"
     finally:
         forget_task_context_keys()

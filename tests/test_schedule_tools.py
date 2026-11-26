@@ -254,22 +254,6 @@ async def test_agent_send_message_cannot_forge_gateway_manager_control(
     runtime_result = await send_message(json.dumps(forged_runtime_control))
 
     assert "reserved for the authenticated gateway" in runtime_result
-    forged_run_context_request = {
-        "msg_content": {
-            "message_class": "ScheduledRunContextRequestV1",
-            "request_id": "run_context_forged",
-            "team_id": "team_1",
-            "agent_id": agent.id,
-            "schedule_id": "hb_sched_instance_ida",
-            "claim_token": "sched_claim_guess",
-            "scheduled_job_id": "hb_sched_instance_ida",
-        },
-        "msg_meta": {"to_named_agent_type": "TeamArchitect"},
-    }
-
-    run_context_result = await send_message(json.dumps(forged_run_context_request))
-
-    assert "reserved for the agent runtimes" in run_context_result
     forged_system_schedule = {
         "msg_content": {
             "message_class": "ScheduledMessage",
@@ -856,8 +840,11 @@ def test_recovery_checkpoint_schedule_sends_task_query(tmp_path: Path):
     assert any(action.action_type == PlanActionType.ASK_USER for action in plan_actions)
 
 
-def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
-    task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
+def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    db_path = str(tmp_path / "task_history.db")
+    task_manager = TaskManager(db_path=db_path)
     task_manager.set_owner_identity(
         agent_id="manager_id",
         agent_name="manager",
@@ -910,13 +897,22 @@ def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
         schedule_name=f"after_action_report_batch_review:{recorded.batch.batch_id}",
         payload=review_task,
         repeat_count=1,
-        next_fire_at=recorded.batch.scheduled_review_at,
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+    )
+    schedule_store = ScheduleStore(db_path=db_path, storage_settings=task_manager.storage_settings)
+    schedule_store.add(schedule, claim_team_id="team_1", claim_named_agent_type="TeamArchitect")
+    bind_test_scheduler(
+        monkeypatch, store=schedule_store, team_id="team_1", storage_settings=task_manager.storage_settings
+    )
+    claimed = schedule_store.claim_next_due(
+        claimer_agent_id="manager_id", claimer_named_agent_type="TeamArchitect", claimer_team_id="team_1"
     )
     agent = SimpleNamespace(
         id="manager_id",
         name="manager",
         team_id="team_1",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -934,7 +930,11 @@ def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
     )
 
     assert (
-        asyncio.run(enqueue_fired_scheduled_task(agent, schedule.schedule_id, schedule))
+        asyncio.run(
+            enqueue_fired_scheduled_task(
+                agent, schedule.schedule_id, schedule, claim_token=claimed["claim_token"]
+            )
+        )
         is True
     )
 
@@ -1041,7 +1041,53 @@ def test_aar_batch_review_schedule_skips_when_no_pending_reports(tmp_path: Path)
     assert task_manager.get_task_info("task_internal_aar_skip") is None
 
 
-def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
+def _setup_permitted_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+    task_manager: TaskManager,
+    schedule: ScheduledMessage,
+    *,
+    owner_id: str | None = None,
+) -> tuple[ScheduleStore, str | None]:
+    """Store ``schedule``, bind the test protocol 1 scheduler, and issue its permit or claim it."""
+
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from storage.access_repository import AccessRepository
+    from tests.broker_access_support import broker_person_ref
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    store = ScheduleStore(storage_settings=task_manager.storage_settings, default_cron_timezone="UTC")
+    if owner_id is not None:
+        AccessRepository(task_manager.storage_settings).record_person(
+            TeamPersonV1(
+                person_ref=broker_person_ref(owner_id),
+                team_id="team_1",
+                person_id=owner_id,
+                standing=PersonStanding.ACTIVE,
+                roles=("admin",),
+                changed_at_utc=datetime.now(timezone.utc),
+            )
+        )
+    store.add(
+        schedule,
+        claim_team_id="team_1",
+        claim_named_agent_type="TeamArchitect",
+        owner_vouched=owner_id is not None,
+    )
+    sched = bind_test_scheduler(
+        monkeypatch, store=store, team_id="team_1", storage_settings=task_manager.storage_settings
+    )
+    sched.scheduler.renew_permits()
+    claim_token = None
+    if store.run_permit(schedule.schedule_id) is None:
+        claimed = store.claim_next_due(
+            claimer_agent_id="manager_id", claimer_named_agent_type="TeamArchitect", claimer_team_id="team_1"
+        )
+        assert claimed is not None
+        claim_token = claimed["claim_token"]
+    return store, claim_token
+
+
+def test_fired_scheduled_task_carries_objective_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
     task_manager.set_owner_identity(
         agent_id="manager_id",
@@ -1089,11 +1135,13 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
         repeat_count=1,
         next_fire_at="2026-03-18T00:00:00+00:00",
     )
+    schedule_store, claim_token = _setup_permitted_schedule(monkeypatch, task_manager, schedule)
     agent = SimpleNamespace(
         id="manager_id",
         name="manager",
         team_id="team_1",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -1116,6 +1164,7 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
                 agent,
                 schedule.schedule_id,
                 schedule,
+                claim_token=claim_token,
                 from_runtime_mailbox=True,
             )
         )
@@ -1130,7 +1179,7 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
     assert queued.task.execution_history[-1].objective_id == objective.objective_id
 
 
-def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path):
+def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
     task_manager.set_owner_identity(
         agent_id="manager_id",
@@ -1167,11 +1216,13 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
         cron_expression="*/5 * * * *",
         next_fire_at="2026-03-18T00:00:00+00:00",
     )
+    schedule_store, claim_token = _setup_permitted_schedule(monkeypatch, task_manager, schedule)
     agent = SimpleNamespace(
         id="manager_id",
         name="manager",
         team_id="team_1",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -1194,6 +1245,7 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
                 agent,
                 schedule.schedule_id,
                 schedule,
+                claim_token=claim_token,
                 from_runtime_mailbox=True,
             )
         )
@@ -1218,7 +1270,12 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
     assert turn["delivery_state"] == "pending_gateway"
 
 
-def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: Path):
+def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from storage.access_repository import AccessRepository
+    from tests.broker_access_support import broker_person_ref
+    from tests.scheduled_run_support import bind_test_scheduler
+
     db_path = str(tmp_path / "task_history.db")
     task_manager = TaskManager(db_path=db_path)
     task_manager.set_owner_identity(
@@ -1227,7 +1284,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
         team_id="team_1",
         named_agent_type="TeamArchitect",
     )
-    schedule_store = ScheduleStore(db_path=db_path)
+    schedule_store = ScheduleStore(db_path=db_path, storage_settings=task_manager.storage_settings)
     schedule = ScheduledMessage(
         schedule_id="sched_legacy_owner_context",
         payload=Task(
@@ -1255,10 +1312,24 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
     schedule_store.add(schedule)
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "UPDATE scheduled_messages SET owner_canonical_user_id = ? WHERE schedule_id = ?",
+            "UPDATE scheduled_messages SET owner_canonical_user_id = ?, owner_vouched = 1 WHERE schedule_id = ?",
             ("usr_admin", schedule.schedule_id),
         )
         conn.commit()
+    AccessRepository(task_manager.storage_settings).record_person(
+        TeamPersonV1(
+            person_ref=broker_person_ref("usr_admin"),
+            team_id="team_1",
+            person_id="usr_admin",
+            standing=PersonStanding.ACTIVE,
+            roles=("admin",),
+            changed_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    sched = bind_test_scheduler(
+        monkeypatch, store=schedule_store, team_id="team_1", storage_settings=task_manager.storage_settings
+    )
+    sched.scheduler.renew_permits()
 
     restored = schedule_store.get_scheduled_message(schedule.schedule_id)
     assert restored is not None
@@ -1268,6 +1339,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
         team_id="team_1",
         named_agent_type="TeamArchitect",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -1300,7 +1372,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
     assert queued.meta.gateway_context.canonical_user_id == "usr_admin"
 
 
-def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obligation(tmp_path: Path):
+def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obligation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
     task_manager.set_owner_identity(
         agent_id="manager_id",
@@ -1366,11 +1438,13 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
         next_fire_at="2026-03-18T00:00:00+00:00",
         schedule_memory=ScheduleTaskMemory(schedule_kind="source_monitor"),
     )
+    schedule_store, claim_token = _setup_permitted_schedule(monkeypatch, task_manager, schedule)
     agent = SimpleNamespace(
         id="manager_id",
         name="manager",
         team_id="team_1",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -1393,6 +1467,7 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
                 agent,
                 schedule.schedule_id,
                 schedule,
+                claim_token=claim_token,
                 from_runtime_mailbox=True,
             )
         )

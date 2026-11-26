@@ -181,7 +181,6 @@ from custom_agents.runtime_recovery import (
     recover_runtime_after_restart,
     should_fail_stale_executing_recovery,
 )
-from custom_agents.scheduled_run_contexts import subscribe_run_context_routes
 from custom_agents.scheduled_runtime import (
     enqueue_fired_scheduled_task,
     enqueue_heartbeat_items,
@@ -503,9 +502,6 @@ async def _subscribe_manager_control_route(
         owner_agent_id=agent.id,
     )
     agent._logger.info("[%s] NATS control route ready for %s.", agent.id, agent.id)
-    # The team lead signs scheduled runs for worker processes without the
-    # scheduler key; such a worker listens for its answers.
-    await subscribe_run_context_routes(agent, adapter, mapper)
 
 
 async def _stop_local_team_members(agent: Any) -> None:
@@ -4890,9 +4886,7 @@ class UniversalAgent(BaseModel):
         await assign_partition_agent_id(self, adapter)
         # This process's protocol 1 host gives the agent a session; it never waits for it.
         attach_agent(self, adapter)
-        bind_verifier = getattr(self, "_bind_task_manager_authority_verifier", None)
-        if callable(bind_verifier):
-            bind_verifier()
+        self._bind_task_manager_authority_verifier()
         try:
             # A durable subscription can deliver before its setup await returns.
             # Prepare shared schedule state first; start the scheduler only after
@@ -5208,7 +5202,7 @@ class UniversalAgent(BaseModel):
                     msg_meta=msg_meta,
                     message_handled_at=datetime.now(timezone.utc).isoformat(),
                     source_queue_name=delivery.source_queue_name or delivery.logical_route,
-                    message_stored_at=getattr(delivery, "stored_at", None),
+                    message_stored_at=delivery.stored_at,
                 )
             await delivery.ack()
         except Exception as exc:

@@ -110,13 +110,6 @@ _CREATABLE = frozenset(
 _REQUEST_MESSAGE = "request"
 _STEERING_MESSAGE = "steering"
 _ANSWER_MESSAGE = "question_answer"
-# ``sent_files_access``'s reason for a gateway context that names no task.
-# Gateways before the update that started keeping each message's files signed
-# a request's context without one, so on a request this is how one still
-# queued for the team lead across that update arrives; on a guidance or an
-# answer it is a context taken from another message
-# (``custom_agents.conversation_attachments`` words each for the log).
-CONTEXT_NAMES_NO_TASK = "context_names_no_task"
 # ``escalation_result_files_access``'s reason for work for no person; the
 # worker's log explains it (``custom_agents.sent_files_runtime``).
 WORK_FOR_A_PERSON_REQUIRED = "work_for_a_person_required"
@@ -267,9 +260,7 @@ def sent_files_access(
         reason = "sender_not_gateway"
     elif _person(sender.person_id) != _person(person_id):
         reason = "another_person"
-    elif not sender.root_task_id:
-        reason = CONTEXT_NAMES_NO_TASK
-    elif not task_id or sender.root_task_id != task_id:
+    elif not task_id or not sender.root_task_id or sender.root_task_id != task_id:
         reason = "another_task"
     elif not conversation_id or not sender_conversation or sender_conversation != conversation_id:
         reason = "another_conversation"

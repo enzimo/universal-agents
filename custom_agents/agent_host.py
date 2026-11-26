@@ -816,6 +816,20 @@ class AgentProcessHost:
                                                                 team=self.team, agent=sender_agent, timeout=timeout))
         return dict(reply.raw["body"])
 
+    async def ask_scheduler(self, kind: str, body: Mapping[str, Any], *, sender_agent: str,
+                            timeout: Optional[float] = None) -> dict[str, Any]:
+        """A request to the team services' scheduler (``svc.scheduler``), signed as ``sender_agent``.
+
+        Raises ``AgentUnreachable`` when this process cannot send yet, and the live host's
+        ``ServiceUnavailable`` or ``RequestRefused``.
+        """
+
+        self._sender_session(sender_agent)
+        assert self.host is not None and self.host.live is not None
+        reply = await self._on_host_loop(self.host.live.request(kind, body, self._audience(),
+                                                                team=self.team, agent=sender_agent, timeout=timeout))
+        return dict(reply.raw["body"])
+
     async def announce(self, kind: str, body: Mapping[str, Any], *, sender_agent: str) -> None:
         """A team event, signed as ``sender_agent``."""
 

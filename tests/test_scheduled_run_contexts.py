@@ -1,28 +1,19 @@
-"""A worker process without the scheduler key gets its scheduled runs signed by the manager.
-
-This is the fallback for a schedule that has no run permit yet (the
-manager's issuing pass has not run in these tests); with a permit the worker
-asks nobody (``tests/test_schedule_permits.py``).
-
-Real SQLite (schedule rows, claims, the team's people, the task store), real
-Ed25519 signing and verification, the real fire path
-(``scheduled_runtime._fire_claimed_schedule``) and real Cedar for the tool
-decision. The two processes share one test process, so which of them holds
-the scheduler key is set explicitly: the environment is the worker's (it
-trusts the scheduler key but holds none), and the manager's answer is given
-the signer the manager process would read from its own environment. Messages
-cross an in-memory bus that serializes them like the wire; the last test
-sends them over a live NATS server instead.
+"""Scheduled runs get protocol 1 authority tokens from ``svc.scheduler`` when no standing permit exists.
 
 Covers:
-- the manager signs a claimed run for the schedule's owner with the owner's
-  current roles, and the run's tool call is then allowed;
-- the manager refuses a wrong claim token, a claim held by another agent, a
-  sender that is not the agent named in the request, and a disabled or
-  removed owner; the worker then does not start the run and releases the claim;
-- no answer in time: the run is not started and the claim is released;
-- an agent with the key in its own process signs locally and sends nothing;
-- a heartbeat schedule's items are signed one by one, for the item.
+- ``team_services.scheduler.SchedulerOperations`` signs a claimed run for the schedule's
+  vouched active owner, and tool calls are decided by real Cedar with the owner's live roles;
+- ``svc.scheduler`` refuses a wrong claim token, a claim held by another agent, a frame
+  issuer that does not match the claim holder (``claim_not_held``), a missing scheduler
+  certificate (``signer_missing``), a disabled/removed/unvouched owner (``owner_inactive``),
+  and a schedule job mismatch (``scheduled_job_mismatch``);
+- a refusal or timeout releases the claim and starts nothing;
+- a schedule paused or turned off after claiming does not run and releases the claim;
+- a retimed claim waits for the new due time;
+- neither the team lead nor any worker holds a signing key (both follow permit-first -> ``svc.scheduler``);
+- claimless ``scheduled_message`` mailbox replays use the schedule's standing permit (logged)
+  and refuse to start unsigned when no permit exists (C02);
+- heartbeat items without a standing permit are signed individually by ``svc.scheduler``.
 """
 
 from __future__ import annotations
@@ -34,21 +25,14 @@ from pathlib import Path
 
 import pytest
 
-from access_control.identity import ENV_VERIFY_KEYS, ISSUER_SCHEDULER
-from custom_agents import access_runtime, scheduled_run_contexts
+from custom_agents import access_runtime
 from custom_agents.heartbeat_store import HeartbeatStore
-from custom_agents.scheduled_run_contexts import (
-    answer_run_context_request,
-    asks_manager,
-    subscribe_run_context_routes,
-)
+from custom_agents.scheduled_run_contexts import ScheduledRun, sign_scheduled_run
 from custom_messages.contracts.access_v2 import PersonStanding
-from custom_messages.contracts.scheduled_run_context_v1 import (
-    ScheduledRunContextRefusal,
-    ScheduledRunContextRequestV1,
-)
-from custom_transport.subjects import NatsSubjectMapper
-from tests.broker_access_support import context_verify_keys, forget_task_context_keys, use_scheduler_key
+from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
+from custom_messages.wire.authority_bindings import SCHEDULER_ISSUER_ROLE
+from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, ServiceUnavailable
+from tests.broker_access_support import forget_task_context_keys
 from tests.scheduled_run_support import (
     ANN,
     CEDAR,
@@ -59,44 +43,52 @@ from tests.scheduled_run_support import (
     build_world,
     claim,
     claim_row,
+    fake_verified_frame,
     fire,
+    issue_permits,
     queued,
     queued_run,
     record_ann,
     run_context,
     save_schedule,
     subscribe,
-    transport,
     worker_agent,
 )
 
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A worker process's view: it trusts the scheduler key but holds none (``scheduled_run_support``)."""
-
     yield build_world(tmp_path, monkeypatch)
     forget_task_context_keys()
 
 
-# -- the claiming side decides who signs ----------------------------------------------
+def _sign_body(
+    claimed: dict,
+    *,
+    schedule_id: str = SCHEDULE_ID,
+    scheduled_job_id: str = SCHEDULE_ID,
+    claim_token: str | None = None,
+    conversation_id: str = "conv_1",
+    heartbeat_item_id: str | None = None,
+) -> dict:
+    body = {
+        "request_id": "run_context_1",
+        "schedule_id": schedule_id,
+        "claim_token": claim_token if claim_token is not None else claimed["claim_token"],
+        "scheduled_job_id": scheduled_job_id,
+        "conversation_id": conversation_id,
+    }
+    if heartbeat_item_id is not None:
+        body["heartbeat_item_id"] = heartbeat_item_id
+    return body
 
 
-def test_only_a_worker_without_the_key_that_trusts_the_scheduler_asks(world, monkeypatch) -> None:
-    assert asks_manager(world.worker)
-    assert not asks_manager(world.manager), "the team lead is the manager and signs itself"
-    # A process that trusts no scheduler key keeps the local path.
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
-    forget_task_context_keys()
-    assert not asks_manager(world.worker)
-
-
-# -- the manager signs a claimed run --------------------------------------------------
+# -- svc.scheduler signs a claimed run -------------------------------------------------
 
 
 @pytest.mark.skipif(not CEDAR.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
-def test_the_manager_signs_a_workers_claimed_run_and_its_tool_calls_are_allowed(world, caplog) -> None:
-    record_ann(world, PersonStanding.ACTIVE, ("member",))  # her current role, not the one she had
+def test_svc_scheduler_signs_a_workers_claimed_run_and_its_tool_calls_are_allowed(world, caplog) -> None:
+    record_ann(world, PersonStanding.ACTIVE, ("member",))
     save_schedule(world)
 
     async def scenario():
@@ -104,19 +96,18 @@ def test_the_manager_signs_a_workers_claimed_run_and_its_tool_calls_are_allowed(
         claimed = claim(world)
         return await fire(world, claimed)
 
-    with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
+    with caplog.at_level(logging.INFO):
         deadlines = asyncio.run(scenario())
 
     assert deadlines == {}, "the run was accepted"
-    requests = [content for _subject, content in world.bus.published if isinstance(content, ScheduledRunContextRequestV1)]
-    assert [(request.agent_id, request.schedule_id, request.scheduled_job_id) for request in requests] == [
-        (WORKER_ID, SCHEDULE_ID, SCHEDULE_ID)
-    ]
-    assert "event=scheduled_run_context_signed" in caplog.text
+    assert len(world.host.requests) == 1
+    sender, body = world.host.requests[0]
+    assert (sender, body["schedule_id"], body["scheduled_job_id"]) == (WORKER_ID, SCHEDULE_ID, SCHEDULE_ID)
+    assert "event=scheduler_run_context_signed" in caplog.text
     run = queued_run(world)
-    context = run_context(run)
+    context = run_context(run, world)
     assert (context.issuer, context.person_id, context.person_roles, context.schedule_id) == (
-        ISSUER_SCHEDULER,
+        SCHEDULER_ISSUER_ROLE,
         ANN,
         ("member",),
         SCHEDULE_ID,
@@ -125,13 +116,13 @@ def test_the_manager_signs_a_workers_claimed_run_and_its_tool_calls_are_allowed(
 
     agent = access_agent(world, run)
     assert access_runtime.decide_call(agent, "exa_search", {}).allowed
-    # The same run without the manager's signature is refused, as before the fix.
+    # The same run without the scheduler's token is refused.
     run.meta.gateway_context.task_context = None
     refused = access_runtime.decide_call(agent, "exa_search", {})
     assert not refused.allowed and "Nobody verifiably asked" in refused.reason
 
 
-# -- the manager refuses; the worker does not start the run and releases the claim ----
+# -- svc.scheduler refuses; the worker does not start the run and releases the claim ---
 
 
 def _assert_not_started_and_released(world, deadlines: dict, caplog, reason: str) -> None:
@@ -149,102 +140,89 @@ def test_a_wrong_claim_token_is_refused_and_the_run_does_not_start(world, caplog
     async def scenario():
         await subscribe(world)
         claimed = claim(world)
-        # The row keeps the real token; this worker shows another one.
         return await fire(world, {**claimed, "claim_token": "sched_claim_forged"})
 
-    with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
+    with caplog.at_level(logging.INFO):
         deadlines = asyncio.run(scenario())
 
-    assert "event=scheduled_run_context_refused" in caplog.text
+    assert "event=scheduler_run_context_refused" in caplog.text
     assert queued(world) == []
     assert SCHEDULE_ID in deadlines
-    assert "reason=claim_not_held" in caplog.text
-    # The forged token cannot release the real claim; it expires on its own.
+    assert "outcome=claim_not_held" in caplog.text
     assert claim_row(world)[0] == WORKER_ID
 
 
 def test_a_claim_held_by_another_agent_is_refused(world, caplog) -> None:
     record_ann(world, PersonStanding.ACTIVE)
     save_schedule(world)
-    other = worker_agent(world.tasks, world.store, world.bus, "worker_2")
+    other = worker_agent(world.tasks, world.store, "worker_2")
 
     async def scenario():
         await subscribe(world)
-        await subscribe_run_context_routes(other, *transport(other))
         claimed = claim(world)  # worker_1 holds it
         return await fire(world, claimed, agent=other)
 
-    with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
+    with caplog.at_level(logging.INFO):
         asyncio.run(scenario())
 
     assert queued(world) == []
-    assert "event=scheduled_run_context_refused" in caplog.text and "reason=claim_not_held" in caplog.text
+    assert "event=scheduler_run_context_refused" in caplog.text and "outcome=claim_not_held" in caplog.text
     assert claim_row(world)[0] == WORKER_ID, "only the holder can release its claim"
 
 
-def test_the_manager_refuses_a_sender_that_is_not_the_agent_in_the_request(world, caplog) -> None:
+def test_svc_scheduler_checks_frame_issuer_agent_and_signer_presence(world, caplog) -> None:
     record_ann(world, PersonStanding.ACTIVE)
     save_schedule(world)
     claimed = claim(world)
-    request = ScheduledRunContextRequestV1(
-        request_id="run_context_1",
-        team_id=TEAM,
-        agent_id=WORKER_ID,
-        schedule_id=SCHEDULE_ID,
-        claim_token=claimed["claim_token"],
-        scheduled_job_id=SCHEDULE_ID,
-    )
+    body = _sign_body(claimed)
 
-    with caplog.at_level(logging.WARNING, logger="custom_agents.scheduled_run_contexts"):
-        reply = asyncio.run(answer_run_context_request(world.manager, request, sender="worker_2", signer=world.signer))
-        honest = asyncio.run(answer_run_context_request(world.manager, request, sender=WORKER_ID, signer=world.signer))
-        keyless = asyncio.run(answer_run_context_request(world.manager, request, sender=WORKER_ID, signer=None))
+    with caplog.at_level(logging.WARNING):
+        wrong_agent = world.scheduler.answer(fake_verified_frame("run_context.sign", body, sender_agent="worker_2"))
+        honest = world.scheduler.answer(fake_verified_frame("run_context.sign", body, sender_agent=WORKER_ID))
+        world.scheduler_state["identity"] = None
+        keyless = world.scheduler.answer(fake_verified_frame("run_context.sign", body, sender_agent=WORKER_ID))
 
-    assert (reply.task_context, reply.refusal) == (None, ScheduledRunContextRefusal.SENDER_MISMATCH)
-    assert honest.task_context is not None and honest.refusal is None
-    assert keyless.refusal is ScheduledRunContextRefusal.SIGNER_MISSING, "a manager without the key says so"
-    assert "reason=sender_mismatch" in caplog.text and "sender=worker_2" in caplog.text
+    assert wrong_agent["outcome"] == "claim_not_held"
+    assert honest["outcome"] == "ok" and honest["system_work"] is False and "authority" in honest
+    assert keyless["outcome"] == "signer_missing"
 
 
 @pytest.mark.parametrize("standing", [PersonStanding.DISABLED, PersonStanding.REMOVED])
-def test_the_manager_refuses_a_run_for_a_disabled_or_removed_owner(world, caplog, standing) -> None:
+def test_svc_scheduler_refuses_a_run_for_a_disabled_or_removed_owner(world, caplog, standing) -> None:
     record_ann(world, PersonStanding.ACTIVE)
     save_schedule(world)
     claimed = claim(world)
-    # Ann leaves after the worker checked her standing and before the manager signs.
     record_ann(world, standing, ())
-    request = ScheduledRunContextRequestV1(
-        request_id="run_context_2",
-        team_id=TEAM,
-        agent_id=WORKER_ID,
-        schedule_id=SCHEDULE_ID,
-        claim_token=claimed["claim_token"],
-        scheduled_job_id=SCHEDULE_ID,
-    )
 
     with caplog.at_level(logging.INFO):
-        reply = asyncio.run(answer_run_context_request(world.manager, request, sender=WORKER_ID, signer=world.signer))
+        reply = world.scheduler.answer(fake_verified_frame("run_context.sign", _sign_body(claimed), sender_agent=WORKER_ID))
 
-    assert reply.refusal is ScheduledRunContextRefusal.OWNER_INACTIVE
+    assert reply["outcome"] == "owner_inactive"
     assert "event=scheduled_run_skipped_owner_inactive" in caplog.text
 
 
-def test_the_manager_refuses_a_context_that_names_another_schedule(world) -> None:
+def test_svc_scheduler_refuses_unvouched_owner(world) -> None:
+    record_ann(world, PersonStanding.ACTIVE, ("admin",))
+    save_schedule(world, vouched=False)
+    claimed = claim(world)
+
+    reply = world.scheduler.answer(fake_verified_frame("run_context.sign", _sign_body(claimed), sender_agent=WORKER_ID))
+    assert reply["outcome"] == "owner_inactive"
+
+
+def test_svc_scheduler_refuses_a_context_that_names_another_schedule(world) -> None:
     record_ann(world, PersonStanding.ACTIVE)
     save_schedule(world)
     claimed = claim(world)
-    request = ScheduledRunContextRequestV1(
-        request_id="run_context_3",
-        team_id=TEAM,
-        agent_id=WORKER_ID,
-        schedule_id=SCHEDULE_ID,
-        claim_token=claimed["claim_token"],
-        scheduled_job_id="sched_someone_elses",
+
+    reply = world.scheduler.answer(
+        fake_verified_frame(
+            "run_context.sign",
+            _sign_body(claimed, scheduled_job_id="sched_someone_elses"),
+            sender_agent=WORKER_ID,
+        )
     )
-
-    reply = asyncio.run(answer_run_context_request(world.manager, request, sender=WORKER_ID, signer=world.signer))
-
-    assert reply.refusal is ScheduledRunContextRefusal.SCHEDULED_JOB_MISMATCH
+    assert reply["outcome"] == "scheduled_job_mismatch"
 
 
 def test_a_refusal_releases_the_claim_so_the_schedule_is_retried(world, caplog) -> None:
@@ -254,8 +232,7 @@ def test_a_refusal_releases_the_claim_so_the_schedule_is_retried(world, caplog) 
     async def scenario():
         await subscribe(world)
         claimed = claim(world)
-        # The owner leaves between the worker's check and the manager's.
-        world.manager._schedule_store = _StandingChangesOnRead(world)
+        world.scheduler._store = _StandingChangesOnRead(world)
         return await fire(world, claimed)
 
     with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
@@ -266,7 +243,6 @@ def test_a_refusal_releases_the_claim_so_the_schedule_is_retried(world, caplog) 
 
 @pytest.mark.parametrize("control", ["pause", "turn_off"])
 def test_a_schedule_paused_or_turned_off_after_its_claim_does_not_run_and_frees_the_claim(world, caplog, control) -> None:
-    """Control changes keep the claim (2026-10-17), so the worker checks the schedule before its run starts."""
     record_ann(world, PersonStanding.ACTIVE)
     save_schedule(world)
 
@@ -286,7 +262,7 @@ def test_a_schedule_paused_or_turned_off_after_its_claim_does_not_run_and_frees_
     assert claim_row(world) == (None, None), "the claim was released"
     assert "event=scheduled_run_skipped_schedule_stopped" in caplog.text
     assert f"schedule_id={SCHEDULE_ID}" in caplog.text
-    assert not world.bus.published, "the manager was not asked to sign a run that does not start"
+    assert not world.host.requests, "svc.scheduler was not asked for a run that does not start"
 
 
 @pytest.mark.parametrize("one_time", [False, True])
@@ -303,7 +279,7 @@ def test_a_claim_retimed_before_admission_waits_and_counts_only_the_actual_run(w
     )
     original_claim = claim(world)
     base = world.store.get_scheduled_message(SCHEDULE_ID)
-    future = datetime.now(timezone.utc) + timedelta(days=1)
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
     world.store.update(base.model_copy(update={"next_fire_at": future.isoformat()}), base=base)
 
     async def scenario():
@@ -327,8 +303,9 @@ def test_a_claim_retimed_before_admission_waits_and_counts_only_the_actual_run(w
 
     monkeypatch.setattr(schedule_store, "datetime", AtFutureRun)
     monkeypatch.setattr(scheduled_runtime, "datetime", AtFutureRun)
-    monkeypatch.setattr(scheduled_run_contexts, "datetime", AtFutureRun)
     monkeypatch.setattr(schedule_worker_repository, "database_now", lambda _conn: AtFutureRun.now(timezone.utc))
+    world.scheduler._clock = lambda: AtFutureRun.now(timezone.utc)
+    world.verifier._clock = lambda: AtFutureRun.now(timezone.utc)
     asyncio.run(fire(world, claim(world)))
 
     assert len(queued(world)) == 1
@@ -341,17 +318,17 @@ def test_a_claim_retimed_before_admission_waits_and_counts_only_the_actual_run(w
         assert row["next_fire_at"] > future.isoformat()
 
 
-def test_the_manager_refuses_a_run_paused_after_the_workers_check(world, caplog) -> None:
+def test_svc_scheduler_refuses_a_run_paused_after_the_workers_check(world, caplog) -> None:
     record_ann(world, PersonStanding.ACTIVE)
     save_schedule(world)
 
     async def scenario():
         await subscribe(world)
         claimed = claim(world)
-        world.manager._schedule_store = _PausedOnRead(world)
+        world.scheduler._store = _PausedOnRead(world)
         return await fire(world, claimed)
 
-    with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
+    with caplog.at_level(logging.INFO):
         asyncio.run(scenario())
 
     assert queued(world) == [], "no run was started"
@@ -359,12 +336,10 @@ def test_the_manager_refuses_a_run_paused_after_the_workers_check(world, caplog)
     [skipped] = [r for r in caplog.records if "event=scheduled_run_skipped_schedule_stopped" in r.getMessage()]
     assert skipped.levelno == logging.INFO and "retried" not in skipped.getMessage()
     assert "event=scheduled_run_not_started_unsigned" not in caplog.text
-    assert "reason=schedule_stopped" in caplog.text  # the manager's refusal, logged where it decides
+    assert "outcome=schedule_stopped" in caplog.text
 
 
 class _PausedOnRead:
-    """The manager's schedule store, where the person pauses the schedule just before the manager reads it."""
-
     def __init__(self, world) -> None:
         self._world = world
 
@@ -377,8 +352,6 @@ class _PausedOnRead:
 
 
 class _StandingChangesOnRead:
-    """The manager's schedule store, where the owner is disabled just before the manager reads the row."""
-
     def __init__(self, world) -> None:
         self._world = world
 
@@ -393,44 +366,76 @@ class _StandingChangesOnRead:
 # -- no answer in time ----------------------------------------------------------------
 
 
-def test_no_answer_in_time_releases_the_claim_and_starts_nothing(world, caplog, monkeypatch) -> None:
+def test_no_answer_in_time_releases_the_claim_and_starts_nothing(world, caplog) -> None:
     record_ann(world, PersonStanding.ACTIVE)
     save_schedule(world)
-    monkeypatch.setattr(scheduled_run_contexts, "REPLY_TIMEOUT_SECONDS", 0.2)
+
+    async def _timeout(_kind, _body, _sender):
+        raise ServiceUnavailable("run_context.sign", "svc.scheduler", NO_ANSWER_IN_TIME)
+
+    world.host.custom_handler = _timeout
 
     async def scenario():
-        # Only the worker listens: the manager is down.
-        await subscribe_run_context_routes(world.worker, *transport(world.worker))
+        await subscribe(world)
         return await fire(world, claim(world))
 
     with caplog.at_level(logging.WARNING, logger="custom_agents.scheduled_run_contexts"):
         deadlines = asyncio.run(scenario())
 
     _assert_not_started_and_released(world, deadlines, caplog, "no_answer")
-    assert [type(content).__name__ for _subject, content in world.bus.published] == ["ScheduledRunContextRequestV1"]
+    assert len(world.host.requests) == 1
 
 
-# -- the key in this process: sign locally --------------------------------------------
+# -- claimless mailbox replay (C02) ---------------------------------------------------
 
 
-def test_an_agent_with_the_key_signs_locally_and_sends_nothing(world, monkeypatch) -> None:
-    use_scheduler_key(monkeypatch)  # this process holds the key, like the manager process
+def test_claimless_mailbox_replay_uses_standing_permit_or_skips_unsigned_c02(world, caplog) -> None:
     record_ann(world, PersonStanding.ACTIVE, ("member",))
-    save_schedule(world)
+    schedule = save_schedule(world)
+    owner = world.people.person(ANN)
 
-    async def scenario():
-        return await fire(world, claim(world))
+    # Without a standing permit and without a claim, mailbox replay skips instead of running unsigned.
+    meta_no_permit = MessageMeta(
+        conversation_id="conv_replay_1",
+        gateway_context=GatewayContext(canonical_user_id=ANN),
+    )
+    with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
+        ok_without = asyncio.run(
+            sign_scheduled_run(
+                world.manager,
+                meta_no_permit,
+                ScheduledRun(schedule, None, SCHEDULE_ID, owner, from_runtime_mailbox=True),
+            )
+        )
+    assert ok_without is False
+    assert "event=scheduled_run_mailbox_replay_unpermitted" in caplog.text
+    assert world.host.requests == []
 
-    assert asyncio.run(scenario()) == {}
-    assert world.bus.published == []
-    context = run_context(queued_run(world))
-    assert (context.issuer, context.person_id, context.person_roles) == (ISSUER_SCHEDULER, ANN, ("member",))
+    # With a standing permit, claimless mailbox replay attaches it and logs the named path.
+    issue_permits(world)
+    meta_with_permit = MessageMeta(
+        conversation_id="conv_replay_2",
+        gateway_context=GatewayContext(canonical_user_id=ANN),
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="custom_agents.scheduled_run_contexts"):
+        ok_with = asyncio.run(
+            sign_scheduled_run(
+                world.manager,
+                meta_with_permit,
+                ScheduledRun(schedule, None, SCHEDULE_ID, owner, from_runtime_mailbox=True),
+            )
+        )
+    assert ok_with is True
+    assert "event=scheduled_run_mailbox_replay_permit" in caplog.text
+    assert meta_with_permit.gateway_context.schedule_run is not None
+    assert world.host.requests == []
 
 
 # -- heartbeat items ------------------------------------------------------------------
 
 
-def test_each_heartbeat_item_is_signed_by_the_manager_for_that_item(world) -> None:
+def test_each_heartbeat_item_is_signed_by_svc_scheduler_for_that_item(world) -> None:
     record_ann(world, PersonStanding.ACTIVE, ("member",))
     heartbeats = HeartbeatStore(db_path=world.db_path, storage_settings=world.tasks.storage_settings)
     heartbeats.upsert_source(source_id="hb_ann", title="Ann's checks")
@@ -446,60 +451,7 @@ def test_each_heartbeat_item_is_signed_by_the_manager_for_that_item(world) -> No
 
     assert asyncio.run(scenario()) == {}
     signed = {
-        run_context(info).schedule_id: (run_context(info).person_id, run_context(info).conversation_id)
+        run_context(info, world).schedule_id: (run_context(info, world).person_id, info.meta.conversation_id)
         for info in queued(world)
     }
     assert signed == {item.heartbeat_item_id: (ANN, item.conversation_id) for item in items}
-
-
-# -- over a live NATS server ------------------------------------------------------------
-
-
-@pytest.mark.live
-@pytest.mark.nats
-@pytest.mark.parametrize("exact_agent_final", [False, True])
-def test_over_live_nats_the_manager_signs_and_the_worker_starts_the_run(world, exact_agent_final) -> None:
-    from live_nats_client import nats_transport_config_from_env
-
-    from custom_transport.nats_adapter import NatsTransportAdapter
-    from id_generation import new_id
-
-    record_ann(world, PersonStanding.ACTIVE, ("member",))
-    schedule = save_schedule(world)
-    if exact_agent_final:
-        world.store.remove(SCHEDULE_ID)
-        world.store.add(schedule.model_copy(update={
-            "claim_named_agent_type": None, "claim_agent_id": WORKER_ID,
-            "interval_ms": None, "repeat_count": 1,
-        }))
-    # A fresh subject prefix per run keeps this team's subjects apart from others on the server.
-    mapper = NatsSubjectMapper(team_id=TEAM, subject_prefix=new_id("runctx_live"))
-    config = nats_transport_config_from_env()
-    manager_adapter = NatsTransportAdapter(config=config, mapper=mapper)
-    worker_adapter = NatsTransportAdapter(config=config, mapper=mapper)
-    world.manager._ensure_nats_transport_adapter = lambda: manager_adapter
-    world.worker._ensure_nats_transport_adapter = lambda: worker_adapter
-
-    async def scenario():
-        await manager_adapter.connect(reconcile_topology=True)
-        await worker_adapter.connect()
-        try:
-            await subscribe_run_context_routes(world.manager, manager_adapter, mapper)
-            await subscribe_run_context_routes(world.worker, worker_adapter, mapper)
-            return await fire(world, claim(world))
-        finally:
-            await worker_adapter.close()
-            await manager_adapter.close()
-
-    assert asyncio.run(scenario()) == {}
-    context = run_context(queued_run(world))
-    assert (context.issuer, context.person_id, context.person_roles, context.schedule_id) == (
-        ISSUER_SCHEDULER,
-        ANN,
-        ("member",),
-        SCHEDULE_ID,
-    )
-    if exact_agent_final:
-        assert world.store.get_row(SCHEDULE_ID)["remaining_count"] == 0
-        assert world.store.prune_expired() == 0
-        assert world.store.worker_records.for_task(queued_run(world).task.task_id, TEAM).state == "admitted"

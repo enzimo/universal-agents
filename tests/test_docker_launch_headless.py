@@ -2321,7 +2321,7 @@ def test_the_authority_and_the_team_services_start_after_the_streams_each_ready_
     assert "SECURE_TOOL_BROKER_TOKEN" not in env
     # The team services and the gateway are hosts the authority approves without asking anyone.
     expected = read_expected_hosts(layout.trust_expected_hosts_path)
-    assert expected["team-services"].roles == {"team_services"}
+    assert expected["team-services"].roles == {"team_services", "scheduler"}
     assert expected["gateway"].roles == {"gateway"} and expected["gateway"].teams == {"team_test"}
     # The agent processes: the team lead's may run any type in the catalog, a startup agent's its one type.
     assert expected["lead"].roles == {"lead_host", "worker_host"} and expected["lead"].agent_types_from_catalog

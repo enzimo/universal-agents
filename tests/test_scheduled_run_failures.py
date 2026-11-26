@@ -21,10 +21,17 @@ from custom_agents.task_wait_limit import TaskWaitLimitReached
 from custom_agents.turn_failure_runtime import fail_task_after_turn_error
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+from custom_transport.protocol1.authority_tokens import root_task_token
 from storage.access_repository import AccessRepository
 from storage.scheduled_run_problems import ScheduledRunProblems
 from storage.stuck_work_repository import StuckWorkRepository
-from tests.broker_access_support import forget_task_context_keys
+from tests.broker_access_support import (
+    broker_person_ref,
+    broker_scheduler_identity,
+    forget_task_context_keys,
+    signed_scheduler_token,
+)
 from tests.scheduled_run_support import ANN, SCHEDULE_ID, TEAM, build_world
 from tests.test_schedule_final_runs import start_final_run
 
@@ -79,11 +86,20 @@ def problems(world):
 def test_a_failed_one_time_reminder_is_reported_once_and_then_closes_without_a_message(world, use_permit, caplog):
     run = start_final_run(world)
     if not use_permit:
-        # A run the manager signed itself; its context may have expired since.
+        # A run signed directly by svc.scheduler; its token may have expired since.
+        now = datetime.now(timezone.utc)
         run.meta.gateway_context.schedule_run = None
-        run.meta.gateway_context.task_context = world.signer.issue(
-            team_id=TEAM, person_id=ANN, schedule_id=SCHEDULE_ID,
-            now=datetime.now(timezone.utc) - timedelta(days=8),
+        run.meta.gateway_context.task_context = AuthorityTokenRecord.model_validate(
+            root_task_token(
+                broker_scheduler_identity(TEAM),
+                team=TEAM,
+                root_task_id=run.task.task_id,
+                request_id=f"schedule_run_{run.task.task_id}",
+                person_ref=broker_person_ref(ANN),
+                schedule_id=SCHEDULE_ID,
+                issued=now - timedelta(minutes=30),
+                expires_at=now - timedelta(minutes=5),
+            )
         )
     finish(world, run.task.task_id)
     world.tasks._save_completed_task(run.task.task_id, ProgressState.FAILED)
@@ -146,7 +162,7 @@ def test_a_job_turned_off_after_its_failure_was_told_closes_without_a_message(wo
 def test_team_and_system_work_is_reported_to_administrators_in_the_inbox_only(world):
     run = start_final_run(world, interval=DAILY, count=None)
     run.meta.gateway_context.schedule_run = None
-    run.meta.gateway_context.task_context = world.signer.issue(team_id=TEAM, person_id=None, schedule_id=SCHEDULE_ID)
+    run.meta.gateway_context.task_context = signed_scheduler_token(None, team_id=TEAM, schedule_id=SCHEDULE_ID)
     finish(world, run.task.task_id)
     assert report(world) == []
     [notice] = notices(world, "usr_admin", roles=("admin",))
@@ -180,7 +196,7 @@ def test_a_refused_workflow_answer_is_never_quoted_in_notices(world, work):
     run = start_final_run(world, interval=DAILY, count=None)
     if work == "team":
         run.meta.gateway_context.schedule_run = None
-        run.meta.gateway_context.task_context = world.signer.issue(team_id=TEAM, person_id=None, schedule_id=SCHEDULE_ID)
+        run.meta.gateway_context.task_context = signed_scheduler_token(None, team_id=TEAM, schedule_id=SCHEDULE_ID)
     finish(world, run.task.task_id, ProgressState.IN_PROGRESS)
     reply = "The second registrar's account ID is still needed."
     worker = SimpleNamespace(
@@ -227,8 +243,8 @@ def test_a_hundred_failed_chat_deliveries_do_not_starve_a_later_notice(world):
     for index in range(101):
         meta = run.meta.model_copy(deep=True)
         meta.gateway_context.schedule_run = None
-        meta.gateway_context.task_context = world.signer.issue(
-            team_id=TEAM, person_id=ANN, schedule_id=f"sched_{index:03d}",
+        meta.gateway_context.task_context = signed_scheduler_token(
+            ANN, team_id=TEAM, roles=("member",), schedule_id=f"sched_{index:03d}",
         )
         task_id = f"task_failure_{index:03d}"
         world.tasks.add_task(
@@ -286,8 +302,6 @@ def test_saving_an_old_failure_again_does_not_reopen_a_problem_a_newer_run_resol
 
 @pytest.mark.parametrize("case", ["successful", "unsigned", "not_a_timer", "forged", "gateway_signed"])
 def test_finished_or_unverified_runs_are_not_reported(world, case, caplog):
-    from tests.broker_access_support import context_signer
-
     run = start_final_run(world)
     if case == "unsigned":
         run.meta.gateway_context.schedule_run = None
@@ -296,13 +310,36 @@ def test_finished_or_unverified_runs_are_not_reported(world, case, caplog):
     elif case == "forged":
         signed = run.meta.gateway_context.schedule_run.permit
         run.meta.gateway_context.schedule_run = run.meta.gateway_context.schedule_run.model_copy(update={
-            "permit": signed.model_copy(update={"permit": signed.permit.model_copy(update={"person_id": "usr_bob"})}),
+            "permit": signed.model_copy(update={"person": broker_person_ref("usr_bob")}),
         })
     elif case == "gateway_signed":
-        run.meta.gateway_context.schedule_run = None
-        run.meta.gateway_context.task_context = context_signer().issue(
-            team_id=TEAM, person_id=ANN, schedule_id=SCHEDULE_ID,
+        from custom_messages.wire.encoding import format_timestamp
+        from custom_messages.wire.frame import sign_authority_token
+        from custom_transport.protocol1.ids import new_message_id
+        from tests.broker_access_support import broker_gateway_identity
+
+        gw_id = broker_gateway_identity(TEAM)
+        now = datetime.now(timezone.utc)
+        raw_gw_sched = sign_authority_token(
+            {
+                "token_id": new_message_id(),
+                "issuer": {
+                    "installation": gw_id.installation,
+                    "runtime": gw_id.runtime,
+                    "membership_epoch": gw_id.certificate.membership_epoch,
+                    "key_id": gw_id.keys.key_id,
+                },
+                "audience": {"installation": gw_id.installation, "team": TEAM},
+                "person": broker_person_ref(ANN),
+                "bound_to": {"type": "root_task", "id": run.task.task_id, "request_id": "task_context_forged_sched"},
+                "schedule_id": SCHEDULE_ID,
+                "issued_at": format_timestamp(now),
+                "expires_at": format_timestamp(now + timedelta(hours=1)),
+            },
+            gw_id.keys.application_key,
         )
+        run.meta.gateway_context.schedule_run = None
+        run.meta.gateway_context.task_context = AuthorityTokenRecord.model_validate(raw_gw_sched)
     finish(world, run.task.task_id, ProgressState.COMPLETED if case == "successful" else ProgressState.FAILED)
     assert report(world) == []
     assert not notices(world) and not notices(world, "usr_bob")

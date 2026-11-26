@@ -26,10 +26,11 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
-from access_control.identity import ISSUER_SCHEDULER, ContextVerifier
+from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
 from custom_agents import folder_access
 from custom_agents.access_runtime import decide_call, verified_person_id
 from custom_agents.code_access import CODE_SHELL_TOOL_ID, code_access
@@ -40,7 +41,7 @@ from custom_agents.internal_improvement_runtime import (
 )
 from custom_agents.memory_review_store import MemoryReviewStore
 from custom_agents.schedule_store import ScheduleStore
-from custom_agents.task_context_runtime import sign_system_context, sign_system_escalation
+from custom_agents.task_context_runtime import sign_system_escalation
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.routing_v1 import (
     GatewayContext,
@@ -51,6 +52,7 @@ from custom_messages.contracts.routing_v1 import (
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, RequesterType, ScheduleManagementClass
+from custom_messages.wire.authority_bindings import SCHEDULER_ISSUER_ROLE
 from custom_tools.non_interactive_file_tools import file_write
 from custom_tools.providers.memory import resolve_memory_review_job
 from custom_tools.providers.memory_review_inspection import get_memory_review_job, list_pending_memory_review_jobs
@@ -63,9 +65,15 @@ from custom_tools.providers.schedules import (
 from tests.task_work_support import acting_as, set_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.instance_layout import InstanceLayout
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from storage.access_repository import AccessRepository
-from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import (
+    broker_person_ref,
+    forget_task_context_keys,
+    signed_scheduler_token,
+    signed_task_token,
+)
+from tests.scheduled_run_support import bind_test_scheduler
 from tests.test_internal_improvement_runtime import _Manager, _Worker
 from tests.tool_result_support import tool_json
 
@@ -99,15 +107,18 @@ def decide_for(agent, function, arguments):
 pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
 
 
-def _dispatched_maintenance_run() -> tuple[ScheduledMessage, object]:
+def _dispatched_maintenance_run(schedules: ScheduleStore, scheduler: Any) -> tuple[ScheduledMessage, object]:
     """The manager's dispatch of one maintenance run, as the worker receives it."""
 
     manager = _Manager()
+    manager._schedule_store = schedules
     schedule = prepare_internal_improvement_schedule_for_manager(
         manager, build_internal_improvement_schedule(_Worker("worker_maintenance"))
     )
     assert schedule is not None
     schedule.next_fire_at = "2026-09-25T12:00:00+00:00"
+    schedules.add(schedule)
+    scheduler.renew_permits()
     assert asyncio.run(enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule))
     return schedule, manager.team_comms.sent[0][0]
 
@@ -126,7 +137,7 @@ def _person_schedule() -> ScheduledMessage:
 
 
 def _member_review_meta() -> MessageMeta:
-    signed = context_signer().issue(team_id=TEAM, person_id=MEMBER, person_roles=("member",))
+    signed = signed_task_token(MEMBER, team_id=TEAM, roles=("member",))
     return MessageMeta(
         conversation_id="conversation_member",
         requester_type=RequesterType.TIMER_REQUESTER,
@@ -140,17 +151,23 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     layout.ensure_directories()
     monkeypatch.setenv("AGENT_WORKSPACE_DIR", str(layout.workspaces_dir))
     monkeypatch.setenv("TEAM_INSTANCE_ROOT", str(layout.root))
-    use_scheduler_key(monkeypatch)
     folder_access.forget_kept_answers()
 
-    schedule, envelope = _dispatched_maintenance_run()
-    tasks = TaskManager(db_path=str(layout.root / "manager.db"))
+    db_path = str(layout.root / "manager.db")
+    tasks = TaskManager(db_path=db_path)
     tasks.set_owner_identity("agent-InternalImprovementAgent", "InternalImprovementAgent", TEAM, "InternalImprovementAgent")
+    schedules = ScheduleStore(db_path=db_path, storage_settings=tasks.storage_settings)
+    AccessRepository(tasks.storage_settings).replace_people(
+        TEAM,
+        [TeamPersonV1(person_ref=broker_person_ref(MEMBER), team_id=TEAM, person_id=MEMBER, standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW)],
+        at=NOW,
+    )
+    sched = bind_test_scheduler(monkeypatch, store=schedules, team_id=TEAM, storage_settings=tasks.storage_settings)
+
+    schedule, envelope = _dispatched_maintenance_run(schedules, sched.scheduler)
     envelope.msg_content.task_id = MAINTENANCE_TASK
     tasks.add_task(envelope.msg_content, envelope.msg_header, envelope.msg_meta, owner_person_id=None)
     tasks.add_task(Task(task_id=REVIEW_TASK, task_type=MessageMetaType.REQUEST), MessageHeader(), _member_review_meta(), owner_person_id=None)
-    schedules = ScheduleStore(db_path=str(layout.root / "schedules.db"))
-    schedules.add(schedule)
     schedules.add(_person_schedule())
     reviews = MemoryReviewStore(str(layout.root / "reviews.db"), logger=logging.getLogger("test.reviews"))
 
@@ -179,7 +196,14 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         )
 
     yield SimpleNamespace(
-        layout=layout, schedule=schedule, reviews=reviews, agent=agent, tasks=tasks, schedules=schedules
+        layout=layout,
+        schedule=schedule,
+        reviews=reviews,
+        agent=agent,
+        tasks=tasks,
+        schedules=schedules,
+        scheduler=sched.scheduler,
+        verifier=sched.verifier,
     )
     set_agent_ref(None)
     forget_task_context_keys()
@@ -347,9 +371,14 @@ def _record_first_user(world, standing: PersonStanding = PersonStanding.ACTIVE) 
     roles = ("admin", "owner") if standing is PersonStanding.ACTIVE else ()
     AccessRepository(world.tasks.storage_settings).replace_people(
         TEAM,
-        [TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=FIRST_USER, standing=standing, roles=roles, changed_at_utc=NOW)],
+        [
+            TeamPersonV1(person_ref=broker_person_ref(FIRST_USER), team_id=TEAM, person_id=FIRST_USER, standing=standing, roles=roles, changed_at_utc=NOW),
+            TeamPersonV1(person_ref=broker_person_ref(MEMBER), team_id=TEAM, person_id=MEMBER, standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW),
+        ],
         at=NOW,
     )
+    if standing is PersonStanding.ACTIVE:
+        world.scheduler.issue_permit_for_schedule(world.schedule.schedule_id)
 
 
 def _team_lead(world, store: ScheduleStore) -> SimpleNamespace:
@@ -366,8 +395,15 @@ def _admit(world, lead, meta: MessageMeta) -> MessageMeta:
     return admitted
 
 
-def _verified(meta: MessageMeta):
-    return ContextVerifier.from_env().verify(meta.gateway_context.task_context, team_id=TEAM)
+def _verified(world, meta: MessageMeta):
+    gw = meta.gateway_context
+    return resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=gw.task_context,
+        schedule_run=gw.schedule_run,
+        schedule_runs=ScheduleRunLookup.from_storage(world.tasks.storage_settings),
+    )
 
 
 def test_a_maintenance_escalation_works_for_the_schedules_owner(world, caplog) -> None:
@@ -380,8 +416,8 @@ def test_a_maintenance_escalation_works_for_the_schedules_owner(world, caplog) -
     with caplog.at_level(logging.INFO, logger="custom_agents.task_context_runtime"):
         admitted = _admit(world, lead, _escalation(world))
 
-    context = _verified(admitted)
-    assert (context.issuer, context.person_id, context.person_roles) == (ISSUER_SCHEDULER, FIRST_USER, ("admin", "owner"))
+    context = _verified(world, admitted)
+    assert (context.issuer, context.person_id, context.person_roles) == (SCHEDULER_ISSUER_ROLE, FIRST_USER, ("admin", "owner"))
     assert context.schedule_id == world.schedule.schedule_id
     assert admitted.gateway_context.canonical_user_id == FIRST_USER
     assert "event=system_escalation_signed_for_owner" in caplog.text
@@ -399,7 +435,7 @@ def test_a_person_named_in_the_escalation_is_ignored(world) -> None:
 
     admitted = _admit(world, lead, forged)
 
-    context = _verified(admitted)
+    context = _verified(world, admitted)
     assert (context.person_id, context.schedule_id) == (FIRST_USER, world.schedule.schedule_id)
     assert admitted.gateway_context.canonical_user_id == FIRST_USER
 
@@ -429,8 +465,12 @@ def _ownerless_maintenance_schedule() -> ScheduledMessage:
 def test_an_escalation_is_not_signed_for_anyone_without_a_system_schedule_owner(world, caplog, reason) -> None:
     if reason == "schedule_not_system_managed":
         # System work naming a person's own schedule.
-        store, escalation = world.schedules, MessageMeta(gateway_context=GatewayContext())
-        sign_system_context(escalation, team_id=TEAM, schedule_id=_person_schedule().schedule_id)
+        store = world.schedules
+        escalation = MessageMeta(
+            gateway_context=GatewayContext(
+                task_context=signed_scheduler_token(None, team_id=TEAM, schedule_id=_person_schedule().schedule_id)
+            )
+        )
         escalation.manager_escalation = ManagerEscalationContext(escalation_type="worker_result")
     else:
         store, escalation = _store_with(world, "ownerless", _ownerless_maintenance_schedule()), _escalation(world)
@@ -439,7 +479,7 @@ def test_an_escalation_is_not_signed_for_anyone_without_a_system_schedule_owner(
     with caplog.at_level(logging.WARNING, logger="custom_agents.task_context_runtime"):
         admitted = _admit(world, lead, escalation)
 
-    assert admitted is escalation and _verified(admitted).person_id is None
+    assert admitted is escalation and _verified(world, admitted).person_id is None
     assert f"event=system_escalation_refused reason={reason}" in caplog.text
     assert not decide_for(lead, "notify_user", {}).allowed
 
@@ -455,8 +495,8 @@ def test_the_owner_has_no_roles_unless_the_gateway_recorded_them_as_active(world
     with caplog.at_level(logging.WARNING, logger="custom_agents.task_context_runtime"):
         admitted = _admit(world, lead, _escalation(world))
 
-    assert (_verified(admitted).person_id, _verified(admitted).person_roles) == (FIRST_USER, ())
-    assert "event=scheduled_owner_roles_unavailable" in caplog.text
+    assert admitted is not None and _verified(world, admitted).person_id is None
+    assert "event=system_escalation_refused reason=owner_not_active" in caplog.text
     assert not decide_for(lead, "notify_user", {}).allowed
 
 
@@ -469,12 +509,12 @@ async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_p
     from custom_messages.enums import SystemScheduleKind
     from tests.test_turn_action_outbox import _make_agent
 
-    use_scheduler_key(monkeypatch)
-    tasks = TaskManager(db_path=str(tmp_path / "tasks.db"))
+    db_path = str(tmp_path / "tasks.db")
+    tasks = TaskManager(db_path=db_path)
     tasks.set_owner_identity("lead", "Lead", "test_team", "TeamArchitect")
     lead = _make_agent(tmp_path, task_manager=tasks)
     object.__setattr__(lead, "paused", True)  # admit only; no model turn
-    store = ScheduleStore(db_path=str(tmp_path / "schedules.db"))
+    store = ScheduleStore(db_path=db_path, storage_settings=tasks.storage_settings)
     store.add(
         ScheduledMessage(
             schedule_id="int_imp_review_test",
@@ -486,10 +526,21 @@ async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_p
             interval_ms=60_000,
         )
     )
+    AccessRepository(tasks.storage_settings).replace_people(
+        "test_team",
+        [TeamPersonV1(person_ref=broker_person_ref(FIRST_USER), team_id="test_team", person_id=FIRST_USER, standing=PersonStanding.ACTIVE, roles=("admin", "owner"), changed_at_utc=NOW)],
+        at=NOW,
+    )
+    sched = bind_test_scheduler(monkeypatch, store=store, team_id="test_team", storage_settings=tasks.storage_settings)
+    sched.scheduler.renew_permits()
     object.__setattr__(lead, "_schedule_store", store)
-    escalation = MessageMeta(gateway_context=GatewayContext(), requester_type=RequesterType.AGENT_REQUESTER)
-    sign_system_context(escalation, team_id="test_team", schedule_id="int_imp_review_test")
-    escalation.gateway_context.canonical_user_id = "mallory"  # forged; ignored
+    escalation = MessageMeta(
+        gateway_context=GatewayContext(
+            canonical_user_id="mallory",  # forged; ignored
+            task_context=signed_scheduler_token(None, team_id="test_team", schedule_id="int_imp_review_test"),
+        ),
+        requester_type=RequesterType.AGENT_REQUESTER,
+    )
     escalation.manager_escalation = ManagerEscalationContext(escalation_type="worker_result")
 
     try:
@@ -500,7 +551,13 @@ async def test_the_team_leads_admission_signs_the_escalation_for_the_owner(tmp_p
             escalation,
         )
         stored = tasks.get_task_info("escalation_1").meta.gateway_context
-        context = ContextVerifier.from_env().verify(stored.task_context, team_id="test_team")
+        context = resolve_task_identity(
+            verifier=sched.verifier,
+            team_id="test_team",
+            task_context=stored.task_context,
+            schedule_run=stored.schedule_run,
+            schedule_runs=ScheduleRunLookup.from_storage(tasks.storage_settings),
+        )
         assert (stored.canonical_user_id, context.person_id) == (FIRST_USER, FIRST_USER)
     finally:
         forget_task_context_keys()

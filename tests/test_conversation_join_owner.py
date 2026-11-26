@@ -33,7 +33,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from access_control.identity import ContextVerifier
+from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
 from access_control.ownership import conversation_continuation
 from assistant_gateway.gateway import _knowledge_curation_schedules
 from custom_agents import task_message_runtime
@@ -46,7 +46,7 @@ from custom_agents.schedule_store import ScheduleStore
 from custom_agents.scheduled_runtime import _enqueue_owner_run, _prepared_heartbeat_run, _signed_heartbeat_runs
 from custom_agents.task_context_runtime import run_owner
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from custom_messages.contracts.control_v1 import PersonWorkOutcomeV1
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
@@ -56,7 +56,12 @@ from custom_messages.system_schedules import COREMEM_AUDIT_SCHEDULE_NAME_PREFIX,
 from storage.access_repository import AccessRepository
 from storage.person_departure_repository import PersonDepartureRepository
 from tests import test_person_memory_review_schedules as _gateway_schedules
-from tests.broker_access_support import forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import (
+    broker_person_ref,
+    forget_task_context_keys,
+    use_broker_authority_verifier,
+)
+from tests.scheduled_run_support import bind_test_scheduler
 from tests.test_conversation_owner_verified_person import ANN, BOB, _admit, _lead
 from tests.test_knowledge_curation_schedules import TEAM_ID as CURATION_TEAM_ID
 from tests.test_knowledge_curation_schedules import _config
@@ -79,19 +84,25 @@ ADMISSION_TEAM = "test_team"  # the admission harness's team (tests.test_turn_ac
 
 @pytest.fixture
 def signing_keys(monkeypatch: pytest.MonkeyPatch):
-    """Trust the gateway's and the scheduler's test keys (the admission tests do not use ``world``)."""
+    """Trust the protocol 1 test authority (the admission tests do not use ``world``)."""
 
-    use_scheduler_key(monkeypatch)
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
 
-def _agent(tmp_path: Path, agent_type: str = "TeamArchitect") -> SimpleNamespace:
-    """An agent that fires schedules in a process holding the scheduler key (the world fixture sets it)."""
+def _agent(tmp_path: Path, agent_type: str = "TeamArchitect", monkeypatch: pytest.MonkeyPatch | None = None) -> SimpleNamespace:
+    """An agent that fires schedules using protocol 1 permits / ``svc.scheduler``."""
 
     db_path = str(tmp_path / "agent_tasks.db")
     tasks = TaskManager(db_path=db_path)
     tasks.set_owner_identity("agent_1", agent_type, TEAM, agent_type)
+    store = ScheduleStore(db_path=db_path, storage_settings=tasks.storage_settings)
+    sched = (
+        bind_test_scheduler(monkeypatch, store=store, team_id=TEAM, storage_settings=tasks.storage_settings)
+        if monkeypatch is not None
+        else None
+    )
     return SimpleNamespace(
         id="agent_1",
         name=agent_type,
@@ -99,7 +110,8 @@ def _agent(tmp_path: Path, agent_type: str = "TeamArchitect") -> SimpleNamespace
         is_team_lead=agent_type == "TeamArchitect",
         named_agent_type=agent_type,
         task_manager=tasks,
-        _schedule_store=ScheduleStore(db_path=db_path, storage_settings=tasks.storage_settings),
+        _schedule_store=store,
+        _test_scheduler=sched,
         _conversation_store=ConversationStore(db_path, artifacts_dir=tmp_path / "artifacts"),
         paused=False,
         is_executing=True,  # queue the run instead of starting a model turn
@@ -115,7 +127,7 @@ def _people(agent: SimpleNamespace, *people: tuple[str, PersonStanding, tuple[st
     AccessRepository(agent.task_manager.storage_settings).replace_people(
         TEAM,
         [
-            TeamPersonV1(person_ref=new_person_ref(), team_id=TEAM, person_id=person, standing=standing, roles=roles, changed_at_utc=NOW)
+            TeamPersonV1(person_ref=broker_person_ref(person), team_id=TEAM, person_id=person, standing=standing, roles=roles, changed_at_utc=NOW)
             for person, standing, roles in people
         ],
         at=NOW,
@@ -204,6 +216,10 @@ def _store_schedule(agent: SimpleNamespace, schedule: ScheduledMessage) -> Sched
 def _fire(agent: SimpleNamespace, schedule: ScheduledMessage) -> tuple[bool, object]:
     """One fire of the schedule as the scheduler admits it; the queued run, if any."""
 
+    if agent._schedule_store.get_row(schedule.schedule_id) is None:
+        agent._schedule_store.add(schedule, claim_team_id=TEAM, claim_named_agent_type=agent.named_agent_type)
+    if agent._test_scheduler is not None:
+        agent._test_scheduler.scheduler.issue_permit_for_schedule(schedule.schedule_id)
     before = {info.task.task_id for info in agent.task_manager.list_task_infos()}
     # The queued run is inspected here, not started.
     with patch("custom_agents.scheduled_runtime.schedule_pending_work"):
@@ -222,8 +238,15 @@ def _fire(agent: SimpleNamespace, schedule: ScheduledMessage) -> tuple[bool, obj
     return accepted, (queued[0] if queued else None)
 
 
-def _signed(run) -> object:
-    return ContextVerifier.from_env().verify(run.meta.gateway_context.task_context, team_id=TEAM)
+def _signed(agent: SimpleNamespace, run) -> object:
+    gw = run.meta.gateway_context
+    return resolve_task_identity(
+        verifier=agent._test_scheduler.verifier,
+        team_id=TEAM,
+        task_context=gw.task_context,
+        schedule_run=gw.schedule_run,
+        schedule_runs=ScheduleRunLookup.from_storage(agent.task_manager.storage_settings),
+    )
 
 
 # -- the rule ------------------------------------------------------------------------------
@@ -294,13 +317,13 @@ async def test_work_for_no_person_continues_a_conversation_of_no_person(tmp_path
 # -- runs for no person ----------------------------------------------------------------------
 
 
-def test_a_run_for_no_person_starts_its_own_conversation(world) -> None:
+def test_a_run_for_no_person_starts_its_own_conversation(world, monkeypatch) -> None:
     asyncio.run(_gateway(world, more_schedules=(_knowledge_curation_schedules(_config()),)).ensure_all())
     _deliver(world)
     team_run = _stored(world)[CURATION_TEAM_ID]
     proactive = team_run.payload_meta.conversation_id
     assert proactive and team_run.payload_meta.gateway_context.canonical_user_id == OLIVE
-    agent = _agent(world.tmp_path, "KnowledgeCuratorAgent")
+    agent = _agent(world.tmp_path, "KnowledgeCuratorAgent", monkeypatch)
     _people(agent, (OLIVE, PersonStanding.ACTIVE, ("owner",)))
     _say(agent._conversation_store, proactive, OLIVE, "olive_turn", SECRET)
 
@@ -311,7 +334,7 @@ def test_a_run_for_no_person_starts_its_own_conversation(world) -> None:
     assert run.meta.conversation_id not in (None, proactive)
     assert store.get_thread(run.meta.conversation_id)["owner_canonical_user_id"] is None
     assert SECRET not in _shown(store, run)
-    context = _signed(run)
+    context = _signed(agent, run)
     assert context.person_id is None and context.conversation_id == run.meta.conversation_id
     assert [turn["task_id"] for turn in store.get_conversation_turns(conversation_id=proactive, start_turn=1, limit=10)] == ["olive_turn"]
 
@@ -319,8 +342,8 @@ def test_a_run_for_no_person_starts_its_own_conversation(world) -> None:
 # -- schedules that change hands -------------------------------------------------------------
 
 
-def test_a_moved_team_schedule_continues_in_a_new_conversation_of_its_new_owner(world, caplog) -> None:
-    agent = _agent(world.tmp_path)
+def test_a_moved_team_schedule_continues_in_a_new_conversation_of_its_new_owner(world, monkeypatch, caplog) -> None:
+    agent = _agent(world.tmp_path, monkeypatch=monkeypatch)
     _people(agent, (OLIVE, PersonStanding.DISABLED, ()), (OTTO, PersonStanding.ACTIVE, ("admin",)))
     store = agent._conversation_store
     _say(store, "conv_olive_proactive", OLIVE, "olive_turn", SECRET)
@@ -346,8 +369,8 @@ def test_a_moved_team_schedule_continues_in_a_new_conversation_of_its_new_owner(
     assert "conversation_owner_mismatch_refused" not in caplog.text
 
 
-def test_a_restored_persons_conversation_comes_back_untouched_after_a_move(world) -> None:
-    agent = _agent(world.tmp_path)
+def test_a_restored_persons_conversation_comes_back_untouched_after_a_move(world, monkeypatch) -> None:
+    agent = _agent(world.tmp_path, monkeypatch=monkeypatch)
     _people(agent, (OLIVE, PersonStanding.REMOVED, ()), (OTTO, PersonStanding.ACTIVE, ("admin",)))
     store = agent._conversation_store
     _say(store, "conv_olive_proactive", OLIVE, "olive_turn", SECRET)
@@ -374,10 +397,10 @@ def test_a_restored_persons_conversation_comes_back_untouched_after_a_move(world
     assert later_accepted and SECRET not in _shown(store, later)
 
 
-def test_a_refresh_moves_a_schedule_an_older_release_handed_over_into_its_owners_conversation(world) -> None:
+def test_a_refresh_moves_a_schedule_an_older_release_handed_over_into_its_owners_conversation(world, monkeypatch) -> None:
     """The gateway start after an upgrade: the person is unchanged, the conversation was the departed person's."""
 
-    agent = _agent(world.tmp_path)
+    agent = _agent(world.tmp_path, monkeypatch=monkeypatch)
     _people(agent, (OLIVE, PersonStanding.DISABLED, ()), (OTTO, PersonStanding.ACTIVE, ("admin",)))
     _say(agent._conversation_store, "conv_olive_proactive", OLIVE, "olive_turn", SECRET)
     stored = _team_schedule("sched_coremem", OTTO, "conv_olive_proactive")
@@ -392,10 +415,10 @@ def test_a_refresh_moves_a_schedule_an_older_release_handed_over_into_its_owners
     assert SECRET not in _shown(agent._conversation_store, run)
 
 
-def test_a_schedule_still_naming_someone_elses_conversation_is_not_started(world, caplog) -> None:
+def test_a_schedule_still_naming_someone_elses_conversation_is_not_started(world, monkeypatch, caplog) -> None:
     """A schedule an older release moved keeps its old owner's conversation; its runs are refused (logged)."""
 
-    agent = _agent(world.tmp_path)
+    agent = _agent(world.tmp_path, monkeypatch=monkeypatch)
     _people(agent, (OLIVE, PersonStanding.DISABLED, ()), (OTTO, PersonStanding.ACTIVE, ("admin",)))
     _say(agent._conversation_store, "conv_olive_proactive", OLIVE, "olive_turn", SECRET)
     legacy = _store_schedule(agent, _team_schedule("sched_coremem", OTTO, "conv_olive_proactive"))
@@ -503,7 +526,7 @@ def test_a_failed_heartbeat_handover_stays_stopped_until_retry_and_restore_keeps
 ) -> None:
     """Partial item writes and a failed launcher write must keep the old owner for a safe retry."""
 
-    agent = _agent(world.tmp_path)
+    agent = _agent(world.tmp_path, monkeypatch=monkeypatch)
     agent._ensure_schedule_store = lambda: agent._schedule_store
     _people(agent, (OLIVE, PersonStanding.REMOVED, ()), (OTTO, PersonStanding.ACTIVE, ("admin",)))
     store, item, launcher = _heartbeat(agent)
@@ -556,6 +579,9 @@ def test_a_failed_heartbeat_handover_stays_stopped_until_retry_and_restore_keeps
 
     # Reopening the stores proves that the incomplete move stays retryable after restart.
     agent._schedule_store = ScheduleStore(storage_settings=agent.task_manager.storage_settings)
+    agent._test_scheduler = bind_test_scheduler(
+        monkeypatch, store=agent._schedule_store, team_id=TEAM, storage_settings=agent.task_manager.storage_settings
+    )
     store = HeartbeatStore(storage_settings=agent.task_manager.storage_settings)
     retry = PersonWorkOutcomeV1()
     _clear_schedules(agent, OLIVE, retry)
@@ -565,6 +591,7 @@ def test_a_failed_heartbeat_handover_stays_stopped_until_retry_and_restore_keeps
     assert store.get_item(item.heartbeat_item_id).conversation_id != "conv_item"
     assert store.get_item(disabled.heartbeat_item_id).conversation_id != "conv_disabled"
     assert not store.get_item(disabled.heartbeat_item_id).enabled
+    agent._test_scheduler.scheduler.issue_permit_for_schedule(launcher.schedule_id)
 
     # Use actual signed worker admission, which creates a thread for the new owner.
     worker = _make_agent(world.tmp_path, task_manager=agent.task_manager)
@@ -583,7 +610,7 @@ def test_a_failed_heartbeat_handover_stays_stopped_until_retry_and_restore_keeps
         run = runs[0]
         await task_message_runtime._handle_task_request(worker, run.task, run.header, run.meta)
         assert worker.task_manager.get_task_info(run.task.task_id) is not None
-        assert _signed(run).person_id == OTTO
+        assert _signed(agent, run).person_id == OTTO
         assert SECRET not in _shown(agent._conversation_store, run)
         return run
 

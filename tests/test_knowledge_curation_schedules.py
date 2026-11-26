@@ -9,11 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from access_control.identity import ContextVerifier
+from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
 from tests.broker_access_support import broker_authority_verifier
 from assistant_gateway.gateway import _knowledge_curation_schedules
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
-from custom_agents.scheduled_runtime import _runs_for_nobody, _sign_for_nobody
+from custom_agents.scheduled_run_contexts import sign_system_run_async
+from custom_agents.scheduled_runtime import _runs_for_nobody
+from tests.scheduled_run_support import bind_test_scheduler
 from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.enums import ScheduleManagementClass, SystemScheduleKind
 from custom_messages.system_schedules import is_person_system_schedule, person_system_schedule_id
@@ -106,16 +108,34 @@ def test_runs_with_nothing_to_review_are_skipped_and_others_get_counts(world) ->
     assert prepare_knowledge_curation_schedule(curator, _person_id(ACTIVE[1]), stored[_person_id(ACTIVE[1])]) is None
 
 
-def test_the_team_run_is_signed_for_no_person_and_a_person_run_is_not_changed(world) -> None:
+def test_the_team_run_is_signed_for_no_person_and_a_person_run_is_not_changed(world, monkeypatch) -> None:
     asyncio.run(_gateway(world, more_schedules=(_knowledge_curation_schedules(_config()),)).ensure_all())
     _deliver(world)
     stored = _stored(world)
     assert _runs_for_nobody(stored[TEAM_ID]) and not _runs_for_nobody(stored[_person_id(ACTIVE[0])])
 
+    sched = bind_test_scheduler(monkeypatch, store=world.manager._schedule_store, team_id=TEAM)
+    sched.scheduler.renew_permits()
     meta = MessageMeta.model_validate(stored[TEAM_ID].payload_meta.model_dump())
-    agent = SimpleNamespace(team_id=TEAM, id="curator_1", _logger=logging.getLogger("test"))
-    assert _sign_for_nobody(agent, meta, TEAM_ID)
-    context = ContextVerifier.from_env().verify(meta.gateway_context.task_context, team_id=TEAM)
+    agent = SimpleNamespace(
+        team_id=TEAM,
+        id="curator_1",
+        _schedule_store=world.manager._schedule_store,
+        _logger=logging.getLogger("test"),
+    )
+    assert asyncio.run(sign_system_run_async(agent, meta, schedule_id=TEAM_ID))
+    lookup = ScheduleRunLookup.from_storage(
+        resolve_storage_settings(
+            {"backend": "sqlite", "sqlite": {"path": str(world.manager._schedule_store._repository._db_path)}}
+        )
+    )
+    context = resolve_task_identity(
+        verifier=sched.verifier,
+        team_id=TEAM,
+        task_context=meta.gateway_context.task_context,
+        schedule_run=meta.gateway_context.schedule_run,
+        schedule_runs=lookup,
+    )
     assert context.person_id is None and meta.gateway_context.canonical_user_id is None
 
 

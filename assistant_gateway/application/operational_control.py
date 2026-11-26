@@ -20,9 +20,11 @@ from assistant_gateway.application.objective_control_text import (
 from assistant_gateway.application.local_responses import GatewayLocalResponseFactory
 from assistant_gateway.application.ports import GatewayIdGenerator
 from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
     GatewayCommandPerson,
     GatewayRequestContextService,
     GatewayRequestRoute,
+    SIGNER_UNAVAILABLE_USER_MESSAGE,
 )
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_coordinator import (
@@ -367,6 +369,21 @@ class GatewayOperationalControlApplication:
                     msg_header=MessageHeader(from_agent_id=self._settings.response_route),
                     msg_meta=MessageMeta(msg_correlation_id=resolved.correlation_id),
                 ),
+            )
+        except GatewayAuthorityTokenUnavailable:
+            self._logger.warning(
+                "Gateway runtime-work control could not sign a request token yet. "
+                "event=gateway_runtime_work_control_signer_unavailable "
+                "correlation_id=%s conversation_id=%s session_key=%s",
+                resolved.correlation_id,
+                resolved.conversation_id,
+                resolved.session_key,
+            )
+            return self._local_responses.create(
+                text=SIGNER_UNAVAILABLE_USER_MESSAGE,
+                message_type="system_status",
+                correlation_id=resolved.correlation_id,
+                conversation_id=resolved.conversation_id,
             )
         except RuntimeError as exc:
             self._logger.warning(

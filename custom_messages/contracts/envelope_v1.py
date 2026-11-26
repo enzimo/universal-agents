@@ -23,8 +23,6 @@ from custom_messages.contracts.routing_v1 import MessageHeader
 from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.contracts.schedule_v1 import AutomationMessage
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
-from custom_messages.contracts.scheduled_run_context_v1 import ScheduledRunContextReplyV1
-from custom_messages.contracts.scheduled_run_context_v1 import ScheduledRunContextRequestV1
 from custom_messages.contracts.task_v1 import AfterActionReport
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.task_v1 import TaskProgressStatus
@@ -57,8 +55,6 @@ ContentType = Annotated[
         # Read only to answer a command queued before an in-place upgrade (control_v1).
         RetiredGatewayCommand,
         ScheduledMessage,
-        ScheduledRunContextReplyV1,
-        ScheduledRunContextRequestV1,
         ToolSetupRequestV1,
         ToolSetupResultV1,
         SecureCredentialCollectionRequest,
@@ -94,16 +90,6 @@ GATEWAY_MANAGER_CONTROL_TYPES = (
     ManagerRuntimeWorkCommand,
     PersonStandingCommandV1,
     RetiredGatewayCommand,
-)
-
-# Messages only agent runtimes exchange to get a scheduled run its signed task
-# context (custom_agents.scheduled_run_contexts). They travel on their own
-# Core NATS subjects, never through an agent's work queues, and the
-# agent-forgery guard (custom_tools.providers.communication) refuses them
-# from agents.
-SCHEDULED_RUN_CONTEXT_TYPES = (
-    ScheduledRunContextRequestV1,
-    ScheduledRunContextReplyV1,
 )
 
 

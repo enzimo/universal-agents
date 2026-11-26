@@ -65,6 +65,7 @@ async def test_new_thread_is_visible_and_durable_before_the_active_turn_finishes
     delivery = SimpleNamespace(
         envelope=envelope, logical_route=agent.id, source_queue_name=agent.id,
         transport_subject="test.requests", redelivery_count=0, max_deliver=5,
+        stored_at=None,
         ack=AsyncMock(), nak=AsyncMock(),
     )
     try:

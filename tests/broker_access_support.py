@@ -435,11 +435,10 @@ def use_gateway_key(monkeypatch: Any) -> None:
 
 
 def forget_task_context_keys() -> None:
-    """Drop cached signers, process verifier, and access services between tests."""
+    """Drop cached process verifier and access services between tests."""
 
-    from custom_agents import access_runtime, task_context_runtime
+    from custom_agents import access_runtime
 
-    task_context_runtime._scheduler_signer.cache_clear()
     access_runtime._runtime_access.cache_clear()
     set_process_verifier(None)
 

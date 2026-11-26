@@ -39,39 +39,62 @@ class OperationFamily:
     prepare: Optional[Upkeep] = None
     # Long-running background task started once serving and cancelled immediately on LockLost or stop.
     run: Optional[BackgroundRunner] = None
+    # Which protocol 1 service address serves these handlers ("svc.team" or "svc.scheduler").
+    address: str = "svc.team"
 
 
 class TeamServices:
     def __init__(self, sessions: SessionService, families: Iterable[OperationFamily] = ()) -> None:
-        self._handlers: dict[str, Handler] = {
-            "sessions.open": sessions.open,
-            "sessions.renew": sessions.renew,
-            "sessions.close": sessions.close,
+        self._handlers_by_address: dict[str, dict[str, Handler]] = {
+            "svc.team": {
+                "sessions.open": sessions.open,
+                "sessions.renew": sessions.renew,
+                "sessions.close": sessions.close,
+            },
         }
-        side_by_side: set[str] = set()
+        side_by_side_by_address: dict[str, set[str]] = {"svc.team": set()}
         self.upkeep: list[Upkeep] = []
         self.prepare: list[Upkeep] = []
         self.runners: list[BackgroundRunner] = []
         for family in families:
-            overlap = self._handlers.keys() & family.handlers.keys()
+            bucket = self._handlers_by_address.setdefault(family.address, {})
+            overlap = bucket.keys() & family.handlers.keys()
             if overlap:
-                raise ValueError(f"Two handlers for {sorted(overlap)}: each operation has exactly one.")
-            self._handlers.update(family.handlers)
-            side_by_side |= family.side_by_side & family.handlers.keys()
+                raise ValueError(f"Two handlers for {sorted(overlap)} at {family.address}: each operation has exactly one.")
+            bucket.update(family.handlers)
+            side_by_side_by_address.setdefault(family.address, set()).update(
+                family.side_by_side & family.handlers.keys()
+            )
             if family.upkeep is not None:
                 self.upkeep.append(family.upkeep)
             if family.prepare is not None:
                 self.prepare.append(family.prepare)
             if family.run is not None:
                 self.runners.append(family.run)
-        self.side_by_side = frozenset(side_by_side)
+        self._handlers = self._handlers_by_address["svc.team"]
+        self._side_by_side_by_address = {
+            addr: frozenset(kinds) for addr, kinds in side_by_side_by_address.items()
+        }
+        self.side_by_side = self._side_by_side_by_address["svc.team"]
 
     @property
     def served(self) -> frozenset[str]:
-        return frozenset(self._handlers)
+        all_kinds: set[str] = set()
+        for bucket in self._handlers_by_address.values():
+            all_kinds.update(bucket)
+        return frozenset(all_kinds)
+
+    def served_at(self, address: str) -> frozenset[str]:
+        return frozenset(self._handlers_by_address.get(address, ()))
+
+    def side_by_side_at(self, address: str) -> frozenset[str]:
+        return self._side_by_side_by_address.get(address, frozenset())
 
     async def handle(self, verified: VerifiedFrame) -> dict[str, Any]:
-        handler = self._handlers.get(verified.frame.kind)
+        return await self.handle_address("svc.team", verified)
+
+    async def handle_address(self, address: str, verified: VerifiedFrame) -> dict[str, Any]:
+        handler = self._handlers_by_address.get(address, {}).get(verified.frame.kind)
         if handler is None:
             raise Unsupported(verified.frame.kind)
         return await handler(verified)

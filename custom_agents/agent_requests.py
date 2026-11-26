@@ -115,6 +115,16 @@ async def ask_agent(agent: Any, kind: str, body: Mapping[str, Any], target_agent
     return await host.ask(kind, body, target_agent, sender_agent=str(agent.id), timeout=timeout)
 
 
+async def ask_scheduler(agent: Any, kind: str, body: Mapping[str, Any], *,
+                        timeout: Optional[float] = None) -> dict[str, Any]:
+    """Ask the team services' scheduler (``svc.scheduler``), signed as ``agent``."""
+
+    host = process_host()
+    if host is None:
+        raise AgentUnreachable(NO_HOST.reason, clears=False)
+    return await host.ask_scheduler(kind, body, sender_agent=str(agent.id), timeout=timeout)
+
+
 async def ask_each(agent: Any, kind: str, body: Mapping[str, Any], targets: Iterable[str], *,
                    timeout: float) -> dict[str, Union[dict[str, Any], Exception]]:
     """Ask every target at once, all within ``timeout`` seconds; each target's reply body, or its error.

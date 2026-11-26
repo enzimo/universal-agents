@@ -53,6 +53,10 @@ from assistant_gateway.application.identity_service import (
     PersonChange,
     ResolvedGatewayUser,
 )
+from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
+    SIGNER_UNAVAILABLE_USER_MESSAGE,
+)
 from assistant_gateway.application.person_setup import (
     GatewayPersonSetup,
     PersonSetupChoices,
@@ -517,6 +521,19 @@ class GatewayPersonLifecycle:
             response = await self._work.request_person_standing(
                 command, actor_person_id=actor.user.canonical_user_id
             )
+        except GatewayAuthorityTokenUnavailable as exc:
+            self._logger.warning(
+                "Could not sign a person standing command yet; nothing was published. "
+                "event=person_standing_signer_unavailable person_id=%s standing=%s command_id=%s error=%s",
+                person_id,
+                standing.value,
+                command.command_id,
+                exc,
+            )
+            reply.problems.append(SIGNER_UNAVAILABLE_USER_MESSAGE)
+            if standing is not PersonStanding.ACTIVE:
+                reply.lines.append(_MANAGER_NOT_CONFIRMED)
+            return None
         except (RuntimeError, TimeoutError) as exc:
             self._logger.warning(
                 "The manager did not confirm a person standing change yet. event=person_standing_unconfirmed "

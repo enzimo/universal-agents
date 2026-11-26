@@ -33,8 +33,8 @@ from typing import Any
 
 import pytest
 
-from access_control.identity import ContextVerifier
 from access_control.people import effective_roles
+from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
 from assistant_gateway.application.maintenance_schedules import (
     GatewayHeartbeatScheduleSettings,
     GatewayInternalImprovementScheduleSettings,
@@ -65,17 +65,17 @@ from custom_agents.schedule_management import (
 from custom_agents.scheduled_runtime import handle_scheduled_message
 from custom_agents.task_context_runtime import sign_system_escalation
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from custom_messages.contracts.routing_v1 import ManagerEscalationContext, MessageHeader
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, RequesterType, SystemScheduleKind
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import (
     BrokerGatewayTokenSigner,
-    broker_people_store,
+    broker_person_ref,
     forget_task_context_keys,
-    use_scheduler_key,
 )
+from tests.scheduled_run_support import bind_test_scheduler
 from tests.test_internal_improvement_runtime import _Manager, _Worker
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -178,7 +178,7 @@ def _gateway(identity: _Identity, route: _ManagerRoute, *, memory_review: bool =
             ),
             identity=identity,  # type: ignore[arg-type]
             token_signer=BrokerGatewayTokenSigner(team_id=TEAM),
-            person_ref_resolver=lambda pid: broker_people_store().register(TEAM, pid, roles=("owner",)).person_ref,
+            person_ref_resolver=broker_person_ref,
         ),
         delivery=SimpleNamespace(upsert_scheduled_target=lambda **_: None),
         manager=route,  # type: ignore[arg-type]
@@ -203,8 +203,14 @@ async def _install_maintenance(manager: _Manager) -> None:
     await handle_scheduled_message(manager, schedule)
 
 
-def _verified(signed: Any) -> Any:
-    return ContextVerifier.from_env().verify(signed, team_id=TEAM)
+def _verified(world, gateway_context: Any) -> Any:
+    return resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=gateway_context.task_context,
+        schedule_run=gateway_context.schedule_run,
+        schedule_runs=ScheduleRunLookup.from_storage(world.tasks.storage_settings),
+    )
 
 
 def _record_people(world) -> None:
@@ -213,7 +219,7 @@ def _record_people(world) -> None:
     now = datetime.now(timezone.utc)
     people = [
         TeamPersonV1(
-            person_ref=new_person_ref(),
+            person_ref=broker_person_ref(person_id),
             team_id=TEAM,
             person_id=person_id,
             standing=PersonStanding.ACTIVE,
@@ -227,14 +233,24 @@ def _record_people(world) -> None:
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    use_scheduler_key(monkeypatch)
-    manager = _Manager(tmp_path / "schedules.db")
+    db_path = tmp_path / "tasks.db"
+    tasks = TaskManager(db_path=str(db_path))
+    tasks.set_owner_identity("agent-TeamArchitect", "TeamArchitect", TEAM, "TeamArchitect")
+    manager = _Manager(db_path)
     route = _ManagerRoute()
     identity = _Identity()
-    # One task store for every escalation, as in the manager: the access store lives beside it.
-    tasks = TaskManager(db_path=str(tmp_path / "tasks.db"))
-    tasks.set_owner_identity("agent-TeamArchitect", "TeamArchitect", TEAM, "TeamArchitect")
-    world = SimpleNamespace(tmp_path=tmp_path, manager=manager, route=route, identity=identity, tasks=tasks)
+    sched = bind_test_scheduler(
+        monkeypatch, store=manager._schedule_store, team_id=TEAM, storage_settings=tasks.storage_settings
+    )
+    world = SimpleNamespace(
+        tmp_path=tmp_path,
+        manager=manager,
+        route=route,
+        identity=identity,
+        tasks=tasks,
+        scheduler=sched.scheduler,
+        verifier=sched.verifier,
+    )
     _record_people(world)
     yield world
     forget_task_context_keys()
@@ -265,6 +281,7 @@ async def test_gateway_restart_keeps_heartbeat_due_time_and_configured_cadence(w
 def _escalation_for(world, *, task_id: str = ESCALATION_TASK) -> tuple[Any, Any]:
     """A maintenance run's escalation as TeamArchitect admits it, and the team lead handling it."""
 
+    world.scheduler.issue_permit_for_schedule(MAINTENANCE_ID)
     schedule = world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID)
     schedule.next_fire_at = "2026-09-25T12:00:00+00:00"
     world.manager.team_comms.sent.clear()
@@ -299,7 +316,7 @@ def test_an_existing_maintenance_schedule_gets_the_first_users_session_at_gatewa
         asyncio.run(_gateway_start(_gateway(world.identity, world.route), world.route, world.manager))
 
     stored = world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context
-    signed = _verified(stored.task_context)
+    signed = _verified(world, stored)
     assert (signed.issuer, signed.person_id, signed.person_roles) == ("gateway", FIRST_USER, ("admin", "owner"))
     assert (stored.canonical_user_id, stored.session_key, stored.delivery_mode) == (
         FIRST_USER,
@@ -309,7 +326,7 @@ def test_an_existing_maintenance_schedule_gets_the_first_users_session_at_gatewa
     assert "event=schedule_context_refreshed" in caplog.text and MAINTENANCE_ID in caplog.text
 
     admitted, lead = _escalation_for(world)
-    context = _verified(admitted.gateway_context.task_context)
+    context = _verified(world, admitted.gateway_context)
     assert (context.issuer, context.person_id, context.person_roles) == ("scheduler", FIRST_USER, ("admin", "owner"))
     assert admitted.gateway_context.session_key == "session_owner"
     assert decide_for(lead, "notify_user", {}).allowed
@@ -325,7 +342,7 @@ def test_a_schedule_created_after_the_gateways_last_refresh_works_for_its_owner(
 
     admitted, lead = _escalation_for(world)
 
-    context = _verified(admitted.gateway_context.task_context)
+    context = _verified(world, admitted.gateway_context)
     assert (context.person_id, context.person_roles) == (FIRST_USER, ("admin", "owner"))
     assert decide_for(lead, "notify_user", {}).allowed
 
@@ -336,13 +353,14 @@ def test_a_role_change_applies_at_the_next_escalation_without_a_refresh(world) -
     world.identity.roles[FIRST_USER] = "member"
     _record_people(world)
     first, _lead = _escalation_for(world, task_id="escalation_member")
+    first_roles = _verified(world, first.gateway_context).person_roles
 
     world.identity.roles[FIRST_USER] = "admin"
     _record_people(world)
     second, lead = _escalation_for(world, task_id="escalation_admin")
 
-    assert _verified(first.gateway_context.task_context).person_roles == ("member",)
-    assert _verified(second.gateway_context.task_context).person_roles == ("admin",)
+    assert first_roles == ("member",)
+    assert _verified(world, second.gateway_context).person_roles == ("admin",)
     assert decide_for(lead, "notify_user", {}).allowed
 
 
@@ -395,7 +413,7 @@ def test_a_refresh_keeps_pause_disable_cadence_and_next_fire_time(world, how) ->
 
     assert _operator_state(world.manager) == before
     stored = world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context
-    assert _verified(stored.task_context).person_id == FIRST_USER
+    assert _verified(world, stored).person_id == FIRST_USER
 
 
 def test_a_refresh_of_a_missing_schedule_creates_nothing(world, caplog) -> None:
@@ -441,6 +459,7 @@ def test_a_paused_memory_review_schedule_stays_paused_across_gateway_restarts(wo
     assert store.set_paused_until(MEMORY_REVIEW_ID, paused.paused_until, system_mutation_permit=permit)
     before = store.get_scheduled_message(MEMORY_REVIEW_ID)
     world.identity.roles[FIRST_USER] = "admin"
+    _record_people(world)
 
     asyncio.run(_gateway_start(gateway, world.route, world.manager))
 
@@ -452,4 +471,4 @@ def test_a_paused_memory_review_schedule_stays_paused_across_gateway_restarts(wo
         before.interval_ms,
     )
     # Its person and roles are still refreshed.
-    assert _verified(after.payload_meta.gateway_context.task_context).person_roles == ("admin",)
+    assert _verified(world, after.payload_meta.gateway_context).person_roles == ("admin",)

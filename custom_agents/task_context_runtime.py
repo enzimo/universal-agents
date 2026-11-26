@@ -1,42 +1,18 @@
-"""Sign task contexts for work the manager starts on its own (scheduled runs).
+"""Protocol 1 task identity helpers for scheduled runs and lead maintenance tasks.
 
-The gateway signs contexts for people's requests. A schedule keeps firing long
-after the request that created it, so each firing gets a fresh context signed
-by the scheduler (``access_control.identity``, issuer ``scheduler``) for the
-schedule's owner, taken from the authoritative schedule row.
+No model-running process (neither the team lead nor any worker) holds a signing key
+(Decision 58). ``team_services.scheduler`` holds the ``scheduler`` role in its host
+certificate, maintains standing protocol 1 permits (``run_permit_json`` and
+``owner_permit_json``) on schedule rows, and answers ``run_context.sign`` on
+``svc.scheduler`` when no usable permit is stored yet.
 
-Only the manager process holds the scheduler's signing key. An agent running
-inside it (the team lead, and workers the manager starts on demand as
-threads) signs its runs here. A worker running as its own process (started
-from team composition) has no key. It gives the run its schedule's permit
-instead, which the manager signed once for the schedule
-(``custom_agents.schedule_permits``; every check reads the owner's current
-roles and standing, ``access_control.task_identity``). Only when the schedule
-has no usable permit does it ask the manager to sign the run it claimed
-(``custom_agents.scheduled_run_contexts``), and the manager signs with
-``issue_scheduled_context`` below, by the same rules. Permits follow the same
-vouching rule (``gateway_vouches``).
-
-The owner's roles are their current ones, read at every run from the gateway's
-copy of the team's people (``access_control.people_directory``), so a role
-change, a disable or a removal applies at the next run. A disabled or removed
-owner's schedules do not run at all (``inactive_owner``). Roles are given only
-when the owner is vouched for: the schedule is system-managed (trusted runtime
-code sets its owner), or the context saved with it was signed by the gateway
-for that same person (a person's schedule is saved from the task that made
-it; the signature is checked, its expiry ignored). Otherwise the run carries
-no roles, so a person field nobody vouched for gains no one's roles.
-
-Runs of the runtime's own maintenance schedule for built-in system agents are
-the exception: they are system work, signed for no person
-(``sign_system_context``). When such a run escalates to the team lead, the
-lead's task works for that schedule's stored owner (``sign_system_escalation``),
-so maintenance findings reach a person.
-
-A memory review the team lead sends right after a person's turn is not part
-of that person's request, which has usually ended. It works for the person's
-own stale-conversation review schedule, like that schedule's runs, which
-review the same queued jobs (``sign_memory_review``).
+This module holds:
+- ``context_verifier``: the process's live ``AuthorityTokenVerifier``;
+- ``people_directory``, ``run_owner``, ``inactive_owner``, and ``gateway_vouches``;
+- the three special lead-process paths (``sign_system_escalation``,
+  ``sign_for_maintenance_owner``, ``sign_memory_review``), which wrap the schedule's
+  scheduler-signed standing permit in ``ScheduleRunIdentityV1`` with a fresh
+  ``schedule_run_<hex>`` request id per task instead of signing locally.
 """
 
 from __future__ import annotations
@@ -50,28 +26,13 @@ from access_control.authority_verifier import (
     IdentityRejected,
     get_process_verifier,
 )
-from access_control.identity import (
-    ISSUER_SCHEDULER,
-    ContextSigner,
-)
 from access_control.people_directory import PeopleDirectory, PersonNow
-from custom_messages.contracts.access_v2 import PersonStanding, SignedTaskContextV1, TaskContextV1
+from custom_messages.contracts.access_v2 import PersonStanding, TaskContextV1
 from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from storage.access_repository import AccessRepository
 from storage.config import StorageSettings
 
 logger = logging.getLogger(__name__)
-
-
-@lru_cache(maxsize=1)
-def _scheduler_signer() -> ContextSigner | None:
-    return ContextSigner.from_env(ISSUER_SCHEDULER)
-
-
-def scheduler_signer() -> ContextSigner | None:
-    """This process's scheduler signer; only the manager process has one."""
-
-    return _scheduler_signer()
 
 
 def context_verifier(agent: Any = None) -> AuthorityTokenVerifier:
@@ -90,12 +51,6 @@ def context_verifier(agent: Any = None) -> AuthorityTokenVerifier:
     from custom_agents.agent_requests import process_host
 
     return AuthorityTokenVerifier(process_host)
-
-
-def scheduler_contexts_verified() -> bool:
-    """Whether this process verifies protocol 1 authority tokens (always true once trust is active)."""
-
-    return True
 
 
 @lru_cache(maxsize=4)
@@ -117,7 +72,14 @@ def _run_person(meta: Any) -> str | None:
     return str(getattr(gateway_context, "canonical_user_id", "") or "").strip() or None
 
 
-def gateway_vouches(gateway_context: Any, person_id: str, *, team_id: str = "", agent: Any = None) -> bool:
+def gateway_vouches(
+    gateway_context: Any,
+    person_id: str,
+    *,
+    team_id: str = "",
+    agent: Any = None,
+    verifier: AuthorityTokenVerifier | None = None,
+) -> bool:
     """Whether the token saved with the schedule was signed by the gateway for this same person."""
 
     signed = getattr(gateway_context, "task_context", None)
@@ -131,8 +93,9 @@ def gateway_vouches(gateway_context: Any, person_id: str, *, team_id: str = "", 
         )
     if not effective_team:
         return False
+    active_verifier = verifier if verifier is not None else context_verifier(agent)
     try:
-        verified = context_verifier(agent).verify_root_task(
+        verified = active_verifier.verify_root_task(
             signed,
             team_id=effective_team,
             require_issuer="gateway",
@@ -157,29 +120,6 @@ def run_owner(agent: Any, meta: Any) -> PersonNow | None:
     return people_directory(agent).person(person_id) if person_id else None
 
 
-def scheduled_owner_roles(gateway_context: Any, owner: PersonNow, *, schedule_id: str, system_managed: bool) -> tuple[str, ...]:
-    """The owner's current roles when the owner is vouched for (module docstring), else none (logged)."""
-
-    if not (system_managed or gateway_vouches(gateway_context, owner.person_id)):
-        logger.warning(
-            "A scheduled run's person is not vouched for by the gateway, so the run carries no roles and its "
-            "access checks refuse most tools. event=scheduled_owner_not_vouched schedule_id=%s person_id=%s",
-            schedule_id,
-            owner.person_id,
-        )
-        return ()
-    if not owner.active:
-        logger.warning(
-            "A scheduled run's person has no current roles, so its access checks refuse most tools. "
-            "event=scheduled_owner_roles_unavailable schedule_id=%s person_id=%s standing=%s",
-            schedule_id,
-            owner.person_id,
-            owner.describe(),
-        )
-        return ()
-    return owner.roles
-
-
 def inactive_owner(owner: PersonNow | None, *, schedule_id: str) -> bool:
     """Whether the run's person is disabled or removed; such a run must not start (logged).
 
@@ -201,119 +141,39 @@ def inactive_owner(owner: PersonNow | None, *, schedule_id: str) -> bool:
     return True
 
 
-def _signer_for(schedule_id: str) -> ContextSigner | None:
-    """The scheduler's signer; without one the run is unsigned and every tool call is refused, so say so."""
-
-    signer = _scheduler_signer()
-    if signer is None:
-        logger.warning(
-            "No scheduler task-context signing key; scheduled work carries no signed task context. "
-            "event=task_context_signer_missing schedule_id=%s",
-            schedule_id,
-        )
-    return signer
-
-
-def issue_scheduled_context(
-    signer: ContextSigner,
+def scheduled_owner_roles(
     gateway_context: Any,
+    owner: PersonNow,
     *,
-    team_id: str,
     schedule_id: str,
-    conversation_id: str | None,
-    owner: PersonNow | None,
     system_managed: bool,
-) -> SignedTaskContextV1:
-    """A scheduler-signed context for one run of a schedule, for its owner (module docstring).
+    agent: Any = None,
+    owner_vouched: bool = False,
+) -> tuple[str, ...]:
+    """The owner's current roles when the owner is vouched for, else none (logged)."""
 
-    ``gateway_context`` is the one saved with the schedule (it may vouch for
-    the owner) and ``owner`` is ``run_owner`` for that schedule. Used both
-    where the run is signed in this process (``sign_scheduled_context``) and
-    where the manager signs for a worker process
-    (``custom_agents.scheduled_run_contexts``).
-    """
-
-    roles = (
-        scheduled_owner_roles(gateway_context, owner, schedule_id=schedule_id, system_managed=system_managed)
-        if owner is not None
-        else ()
-    )
-    return signer.issue(
-        team_id=team_id,
-        person_id=owner.person_id if owner is not None else None,
-        person_roles=roles,
-        conversation_id=conversation_id,
-        schedule_id=schedule_id,
-    )
-
-
-def sign_scheduled_context(
-    meta: Any, *, team_id: str, schedule_id: str, owner: PersonNow | None, system_managed: bool
-) -> None:
-    """Replace ``meta.gateway_context.task_context`` with a scheduler-signed one for the owner (module docstring).
-
-    ``owner`` is ``run_owner`` for the same ``meta``. Signs in this process;
-    a worker process without the key asks the manager instead
-    (``custom_agents.scheduled_run_contexts.sign_scheduled_run``).
-    """
-
-    gateway_context = getattr(meta, "gateway_context", None)
-    if gateway_context is None:
-        return
-    signer = _signer_for(schedule_id)
-    # A run carries a signed context or a permit-backed run identity, never both.
-    gateway_context.schedule_run = None
-    gateway_context.task_context = (
-        issue_scheduled_context(
-            signer,
-            gateway_context,
-            team_id=team_id,
-            schedule_id=schedule_id,
-            conversation_id=getattr(meta, "conversation_id", None),
-            owner=owner,
-            system_managed=system_managed,
+    if not (system_managed or owner_vouched or gateway_vouches(gateway_context, owner.person_id, agent=agent)):
+        logger.warning(
+            "A scheduled run's person is not vouched for by the gateway, so the run carries no roles and its "
+            "access checks refuse most tools. event=scheduled_owner_not_vouched schedule_id=%s person_id=%s",
+            schedule_id,
+            owner.person_id,
         )
-        if signer is not None
-        else None
-    )
-
-
-def sign_system_context(meta: Any, *, team_id: str, schedule_id: str) -> None:
-    """Sign a run of a runtime-owned maintenance schedule as system work (no person).
-
-    Used only where trusted code hands a maintenance run to a built-in system
-    agent (InternalImprovementAgent's maintenance, access plan 7c); every other
-    scheduled run works for its schedule's owner (``sign_scheduled_context``).
-    With no person, the access hook lets only system agents act, on their
-    duties, and the context names the schedule, so the run may record that
-    schedule's run and nothing of anyone's schedules
-    (``access_control.ownership.system_work_schedule_access``). The person
-    and session fields are cleared too (``PERSON_GATEWAY_FIELDS``), so no part
-    of the run names or reaches a person it does not work for (the broker
-    refuses a request whose person differs from its signed context).
-    """
-
-    gateway_context = getattr(meta, "gateway_context", None)
-    if gateway_context is None:
-        return
-    for name in PERSON_GATEWAY_FIELDS:
-        setattr(gateway_context, name, None)
-    signer = _signer_for(schedule_id)
-    gateway_context.task_context = (
-        signer.issue(
-            team_id=team_id,
-            person_id=None,
-            conversation_id=getattr(meta, "conversation_id", None),
-            schedule_id=schedule_id,
+        return ()
+    if not owner.active:
+        logger.warning(
+            "A scheduled run's person has no current roles, so its access checks refuse most tools. "
+            "event=scheduled_owner_roles_unavailable schedule_id=%s person_id=%s standing=%s",
+            schedule_id,
+            owner.person_id,
+            owner.describe(),
         )
-        if signer is not None
-        else None
-    )
+        return ()
+    return owner.roles
 
 
 def _system_work_context(agent: Any, meta: Any) -> TaskContextV1 | None:
-    """Who the escalation works for, checked like any task (a signed context or a
-    scheduled run identity), when that is system work (no person); else None.
+    """Who the escalation works for, checked like any task, when that is system work (no person); else None.
 
     An unverifiable identity is left alone: the access hook refuses it anyway.
     """
@@ -326,7 +186,7 @@ def _system_work_context(agent: Any, meta: Any) -> TaskContextV1 | None:
 
 def _refuse_escalation(reason: str, schedule_id: str | None, task_id: str) -> None:
     logger.warning(
-        "An escalation from work for no person was not signed for a person; the team lead's task "
+        "An escalation from work for no person was not given its owner's permit; the team lead's task "
         "stays work for no person and its tool calls are refused. event=system_escalation_refused "
         "reason=%s schedule_id=%s task_id=%s",
         reason,
@@ -357,22 +217,21 @@ def _system_schedule_owner(agent: Any, schedule_id: str | None, *, task_id: str)
 
 
 def sign_system_escalation(agent: Any, meta: Any, *, task_id: str) -> Any:
-    """Who the team lead's task for an escalation from system work works for.
+    """Give a team lead task for an escalation from system work its maintenance schedule's owner permit.
 
-    A maintenance run is system work for no person (``sign_system_context``),
-    and a team lead working for no person may call no tool, so its findings
-    would reach nobody. When such a run escalates to the team lead
-    (``manager_escalation``), the lead's task works instead for the owner
-    stored on the system-managed schedule that the verified context names:
-    the first user, an administrator. The scheduler signs it for that owner,
-    with their current roles as for any scheduled run of a system-managed
-    schedule (``scheduled_owner_roles``). Nothing the escalation itself says about a
-    person is used. Runs only in the manager, which holds the scheduler key.
+    A maintenance run is system work for no person, and a team lead working for no
+    person may call no tool, so its findings would reach nobody. When such a run
+    escalates to the team lead (``manager_escalation``), the lead's task carries
+    the scheduler-signed ``owner_permit_json`` from the system-managed schedule
+    wrapped in ``ScheduleRunIdentityV1`` with a fresh ``schedule_run_<hex>`` id.
+    Nothing the escalation itself says about a person is used, and the lead holds
+    no signing key.
 
-    Returns a re-signed copy of ``meta``, or ``meta`` unchanged when this does
-    not apply or is refused (logged): the schedule is missing, not
-    system-managed, has no owner, or there is no signing key.
+    Returns a copy of ``meta`` carrying the owner permit, or ``meta`` unchanged
+    when this does not apply or is refused (logged).
     """
+
+    from custom_agents.schedule_permits import attach_owner_permit
 
     gateway_context = getattr(meta, "gateway_context", None)
     if not getattr(agent, "is_team_lead", False) or getattr(meta, "manager_escalation", None) is None:
@@ -381,14 +240,14 @@ def sign_system_escalation(agent: Any, meta: Any, *, task_id: str) -> Any:
     if context is None:
         return meta
     found = _system_schedule_owner(agent, context.schedule_id, task_id=task_id)
-    signer = _signer_for(context.schedule_id or "") if found is not None else None
-    if found is None or signer is None:
+    if found is None:
         return meta
     schedule, owner = found
+    owner_now = people_directory(agent).person(owner)
+    if not owner_now.active:
+        _refuse_escalation("owner_not_active", schedule.schedule_id, task_id)
+        return meta
     stored_context = getattr(schedule.payload_meta, "gateway_context", None)
-    roles = scheduled_owner_roles(
-        stored_context, people_directory(agent).person(owner), schedule_id=schedule.schedule_id, system_managed=True
-    )
     signed = meta.model_copy(deep=True)
     # Where to reach the owner (their chat session) comes from the schedule the
     # gateway keeps refreshed (custom_agents.schedule_context_refresh), never
@@ -396,13 +255,9 @@ def sign_system_escalation(agent: Any, meta: Any, *, task_id: str) -> Any:
     for name in PERSON_GATEWAY_FIELDS:
         setattr(signed.gateway_context, name, getattr(stored_context, name, None))
     signed.gateway_context.canonical_user_id = owner
-    signed.gateway_context.task_context = signer.issue(
-        team_id=context.team_id,
-        person_id=owner,
-        person_roles=roles,
-        conversation_id=getattr(meta, "conversation_id", None),
-        schedule_id=schedule.schedule_id,
-    )
+    if not attach_owner_permit(agent, signed, schedule_id=schedule.schedule_id, person_id=owner):
+        _refuse_escalation("owner_permit_missing", schedule.schedule_id, task_id)
+        return meta
     logger.info(
         "An escalation from work for no person now works for the maintenance schedule's owner. "
         "event=system_escalation_signed_for_owner schedule_id=%s owner=%s task_id=%s source_task_id=%s roles=%s",
@@ -410,7 +265,7 @@ def sign_system_escalation(agent: Any, meta: Any, *, task_id: str) -> Any:
         owner,
         task_id,
         getattr(meta.manager_escalation, "source_task_id", None),
-        ",".join(roles),
+        ",".join(owner_now.roles),
     )
     return signed
 
@@ -418,80 +273,65 @@ def sign_system_escalation(agent: Any, meta: Any, *, task_id: str) -> Any:
 def sign_for_maintenance_owner(
     agent: Any, meta: Any, *, task_id: str, maintenance_schedule_id: str
 ) -> Any:
-    """Make a team lead task the runtime opened for the team work for an administrator.
+    """Make a team lead task the runtime opened for the team work for the maintenance schedule's owner.
 
     Worker pool reviews (``custom_agents.worker_pool_reviews``) concern the whole
     team, not one person, but the team lead working for no person may call no
-    tool and reach nobody. Like an escalation from maintenance work
-    (``sign_system_escalation``), such a task works for the owner stored on the
-    team's system-managed maintenance schedule (the first user, an
-    administrator), signed by the scheduler with their current roles; the chat
-    route comes from that schedule. Returns a signed copy, or ``meta`` unchanged
-    (logged) when there is no such schedule, owner or signing key.
-
-    The caller passes the schedule id
-    (``internal_improvement_runtime.internal_improvement_schedule_id``):
-    that module imports this one.
+    tool and reach nobody. Like ``sign_system_escalation``, this wraps the
+    scheduler-signed ``owner_permit_json`` from the maintenance schedule in
+    ``ScheduleRunIdentityV1`` without holding a signing key in the lead.
     """
 
+    from custom_agents.schedule_permits import attach_owner_permit
     from custom_messages.contracts.routing_v1 import GatewayContext
 
     if not getattr(agent, "is_team_lead", False):
         return meta
     schedule_id = maintenance_schedule_id
     found = _system_schedule_owner(agent, schedule_id, task_id=task_id)
-    signer = _signer_for(schedule_id) if found is not None else None
-    if found is None or signer is None:
+    if found is None:
         return meta
     schedule, owner = found
+    owner_now = people_directory(agent).person(owner)
+    if not owner_now.active:
+        _refuse_escalation("owner_not_active", schedule_id, task_id)
+        return meta
     stored_context = getattr(schedule.payload_meta, "gateway_context", None)
-    roles = scheduled_owner_roles(
-        stored_context, people_directory(agent).person(owner), schedule_id=schedule_id, system_managed=True
-    )
     signed = meta.model_copy(deep=True)
     if signed.gateway_context is None:
         signed.gateway_context = GatewayContext()
     for name in PERSON_GATEWAY_FIELDS:
         setattr(signed.gateway_context, name, getattr(stored_context, name, None))
     signed.gateway_context.canonical_user_id = owner
-    signed.gateway_context.task_context = signer.issue(
-        team_id=str(agent.team_id),
-        person_id=owner,
-        person_roles=roles,
-        conversation_id=getattr(meta, "conversation_id", None),
-        schedule_id=schedule_id,
-    )
+    if not attach_owner_permit(agent, signed, schedule_id=schedule_id, person_id=owner):
+        _refuse_escalation("owner_permit_missing", schedule_id, task_id)
+        return meta
     logger.info(
         "A runtime task for the team now works for the maintenance schedule's owner. "
         "event=team_task_signed_for_maintenance_owner schedule_id=%s owner=%s task_id=%s roles=%s",
         schedule_id,
         owner,
         task_id,
-        ",".join(roles),
+        ",".join(owner_now.roles),
     )
     return signed
 
 
 def sign_memory_review(agent: Any, meta: Any, *, person_id: str, review_job_id: str) -> Any | None:
-    """Make a memory review sent right after a turn work of the person's own conversation review schedule.
+    """Give a post-turn memory review task the person's conversation review schedule permit.
 
     After a person's turn the team lead sends MemReviewAgent a review of it
-    (``strands_agent._publish_memory_review_task``). The review is not part of
-    the person's request, which has usually ended by then: under the turn's
-    own signed context the change ledger refuses its memory changes as
-    ``request_closed``. It is the same work the person's stale-conversation
-    review schedule does with queued jobs, so it works for that schedule's
-    owner, like its runs: the scheduler signs it for them with their current
-    roles, and the chat route comes from that schedule (as for
-    ``sign_system_escalation``). ``person_id`` is the job's person, whom the
-    turn's verified context named when the job was saved
-    (``memory_review_runtime.enqueue_conversation_window_review_job``).
+    (``strands_agent._publish_memory_review_task``). Rather than holding a signing
+    key in the lead, this wraps the scheduler-signed ``run_permit_json`` from the
+    person's stale-conversation review schedule in ``ScheduleRunIdentityV1`` with a
+    fresh ``schedule_run_<hex>`` id per task.
 
-    Returns a signed copy of ``meta``, or None (logged) when the person has no
-    such schedule, is disabled or removed, or there is no signing key. The job
-    then stays queued for that schedule's next run, which reviews it.
+    Returns a copy of ``meta`` carrying the schedule permit, or None (logged) when
+    the person has no such schedule, is disabled/removed, or the schedule has no
+    usable permit yet (the job then stays queued for that schedule's next run).
     """
 
+    from custom_agents.schedule_permits import attach_run_permit
     from custom_messages.contracts.routing_v1 import GatewayContext
 
     schedule = _conversation_review_schedule(agent, person_id, review_job_id=review_job_id)
@@ -500,9 +340,6 @@ def sign_memory_review(agent: Any, meta: Any, *, person_id: str, review_job_id: 
     owner = people_directory(agent).person(person_id)
     if inactive_owner(owner, schedule_id=schedule.schedule_id):
         return None
-    signer = _signer_for(schedule.schedule_id)
-    if signer is None:
-        return None
     stored_context = getattr(schedule.payload_meta, "gateway_context", None)
     signed = meta.model_copy(deep=True)
     if signed.gateway_context is None:
@@ -510,16 +347,16 @@ def sign_memory_review(agent: Any, meta: Any, *, person_id: str, review_job_id: 
     for name in PERSON_GATEWAY_FIELDS:
         setattr(signed.gateway_context, name, getattr(stored_context, name, None))
     signed.gateway_context.canonical_user_id = person_id
-    signed.gateway_context.schedule_run = None
-    signed.gateway_context.task_context = issue_scheduled_context(
-        signer,
-        stored_context,
-        team_id=str(agent.team_id),
-        schedule_id=schedule.schedule_id,
-        conversation_id=getattr(meta, "conversation_id", None),
-        owner=owner,
-        system_managed=True,
-    )
+    if not attach_run_permit(agent, signed, schedule_id=schedule.schedule_id, person_id=person_id):
+        logger.info(
+            "A memory review sent after a turn has no usable schedule permit yet, so it waits for the "
+            "person's next conversation review run. event=memory_review_not_signed reason=run_permit_missing "
+            "schedule_id=%s person_id=%s review_job_id=%s",
+            schedule.schedule_id,
+            person_id,
+            review_job_id,
+        )
+        return None
     logger.info(
         "A memory review sent after a turn works for the person's conversation review schedule. "
         "event=memory_review_signed_for_schedule schedule_id=%s person_id=%s review_job_id=%s",
@@ -572,14 +409,10 @@ __all__ = [
     "context_verifier",
     "gateway_vouches",
     "inactive_owner",
-    "issue_scheduled_context",
     "people_directory",
     "run_owner",
-    "scheduler_contexts_verified",
-    "scheduler_signer",
+    "scheduled_owner_roles",
     "sign_for_maintenance_owner",
     "sign_memory_review",
-    "sign_scheduled_context",
-    "sign_system_context",
     "sign_system_escalation",
 ]
