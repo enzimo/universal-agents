@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextlib import suppress
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -514,7 +515,7 @@ async def test_signal_app_refuses_single_slash_filename_and_invalid_base64(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad_id",
-    ["../escape", "dir/file", "dir\\file", "x" * 300],
+    [".", "..", ".hidden", "a..b", "../escape", "dir/file", "dir\\file", "id?q=1", "id\nmore", "x" * 300],
 )
 async def test_signal_app_refuses_invalid_attachment_ids(
     tmp_path, caplog, bad_id: str
@@ -654,24 +655,28 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
     chunk_size = 1024
     total_chunks = 512
     chunked_bytes_written = 0
-    cl_body_writes = 0
+    list_route_hits = 0
+    cl_release = asyncio.Event()
+
+    async def handle_list(_request: web.Request) -> web.Response:
+        nonlocal list_route_hits
+        list_route_hits += 1
+        return web.json_response(["other-user-attachment.txt"])
 
     async def handle_attachment(request: web.Request) -> web.StreamResponse:
-        nonlocal chunked_bytes_written, cl_body_writes
+        nonlocal chunked_bytes_written
         att_id = request.match_info["attachment_id"]
+        if att_id == "redirect-me":
+            return web.Response(status=302, headers={"Location": "/v1/attachments/"})
         if att_id == "too-big-cl":
             resp = web.StreamResponse(
                 status=200,
                 headers={"Content-Type": "text/plain", "Content-Length": "100000"},
             )
             await resp.prepare(request)
-            try:
-                for _ in range(100):
-                    await resp.write(b"C" * 1000)
-                    cl_body_writes += 1000
-                    await asyncio.sleep(0)
-            except (ConnectionResetError, asyncio.CancelledError):
-                pass
+            # Do not write body bytes: only the Content-Length check can refuse here.
+            with suppress(asyncio.TimeoutError, ConnectionResetError, asyncio.CancelledError):
+                await asyncio.wait_for(cl_release.wait(), timeout=2.0)
             return resp
         if att_id == "too-big-chunked":
             resp = web.StreamResponse(
@@ -704,6 +709,7 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
         return web.Response(status=404, text="not found")
 
     web_app = web.Application()
+    web_app.router.add_get("/v1/attachments/", handle_list)
     web_app.router.add_get("/v1/attachments/{attachment_id}", handle_attachment)
     server = TestServer(web_app)
     await server.start_server()
@@ -716,9 +722,20 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
                 request_timeout_seconds=10.0,
             )
 
-            # Content-Length over limit is refused immediately.
-            with pytest.raises(signal_module.AttachmentValidationError):
-                await client.serve_attachment("too-big-cl", max_bytes=64)
+            # Redirect answers raise instead of following to another route.
+            with pytest.raises(signal_module.SignalRestError):
+                await client.serve_attachment("redirect-me", max_bytes=64)
+            assert list_route_hits == 0
+
+            # Content-Length over limit is refused immediately with declared length.
+            try:
+                with pytest.raises(
+                    signal_module._SignalAttachmentTooLargeError
+                ) as cl_exc:
+                    await client.serve_attachment("too-big-cl", max_bytes=64)
+                assert cl_exc.value.observed_bytes == 100000
+            finally:
+                cl_release.set()
 
             # Chunked response without Content-Length stops well before the full stream.
             with pytest.raises(signal_module.AttachmentValidationError):
@@ -809,3 +826,26 @@ async def test_signal_app_refused_second_attachment_leaves_no_partial_uploads(
     await app._process_inbound_payload(payload2)
     assert bridge.inbound_messages == []
     assert not any(p.is_file() for p in uploads_dir.rglob("*")) if uploads_dir.exists() else True
+
+    # Policy refusal on 1st attachment stops further downloads immediately.
+    fake_client.serve_calls.clear()
+    payload3 = _direct_payload(message="", timestamp=303)
+    payload3["envelope"]["dataMessage"]["attachments"] = [
+        {"id": "att-empty", "filename": "empty.txt", "contentType": "text/plain"},
+        {"id": "att-1", "filename": "ok.txt", "contentType": "text/plain", "size": 11},
+    ]
+    await app._process_inbound_payload(payload3)
+    assert fake_client.serve_calls == [("att-empty", 32)]
+    assert bridge.inbound_messages == []
+    assert not any(p.is_file() for p in uploads_dir.rglob("*")) if uploads_dir.exists() else True
+
+
+def test_signal_size_and_content_length_parsers_ignore_non_ascii_and_strings() -> None:
+    assert signal_module._parse_declared_attachment_size({"size": 42}) == 42
+    assert signal_module._parse_declared_attachment_size({"size": True}) is None
+    assert signal_module._parse_declared_attachment_size({"size": -1}) is None
+    assert signal_module._parse_declared_attachment_size({"size": "42"}) is None
+    assert signal_module._parse_declared_attachment_size({"size": "²"}) is None
+    assert signal_module._parse_content_length("1024") == 1024
+    assert signal_module._parse_content_length("²") is None
+    assert signal_module._parse_content_length("-5") is None

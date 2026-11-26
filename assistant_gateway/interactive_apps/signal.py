@@ -52,6 +52,8 @@ MAX_DEDUPED_MESSAGE_KEYS = 1024
 MAX_RECEIVE_BACKOFF_SECONDS = 30.0
 ATTACHMENT_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 MAX_SIGNAL_ATTACHMENT_ID_LENGTH = 256
+# Signal attachment ids are numeric or base64url keys plus an optional extension.
+_SIGNAL_ATTACHMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_=-][A-Za-z0-9._=-]{0,255}")
 
 
 class SignalRestError(RuntimeError):
@@ -83,20 +85,14 @@ def _parse_declared_attachment_size(raw: dict[str, Any]) -> int | None:
     """Parse signal-cli's declared attachment ``size`` in bytes when valid."""
 
     value = raw.get("size")
-    if value is None or isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, int):
         return None
-    if isinstance(value, int):
-        return value if value >= 0 else None
-    if isinstance(value, str):
-        text = value.strip()
-        if text.isdigit():
-            return int(text)
-    return None
+    return value if value >= 0 else None
 
 
 def _parse_content_length(header_value: str | None) -> int | None:
     text = str(header_value or "").strip()
-    if text.isdigit():
+    if text.isascii() and text.isdigit():
         return int(text)
     return None
 
@@ -104,9 +100,9 @@ def _parse_content_length(header_value: str | None) -> int | None:
 def _is_valid_signal_attachment_id(attachment_id: str) -> bool:
     if not attachment_id or len(attachment_id) > MAX_SIGNAL_ATTACHMENT_ID_LENGTH:
         return False
-    if "/" in attachment_id or "\\" in attachment_id or ".." in attachment_id:
+    if ".." in attachment_id:
         return False
-    return not any(ord(ch) < 32 or ord(ch) == 127 for ch in attachment_id)
+    return _SIGNAL_ATTACHMENT_ID_PATTERN.fullmatch(attachment_id) is not None
 
 
 def _log_safe_attachment_id(attachment_id: str | None) -> str:
@@ -120,8 +116,7 @@ def _check_base64_encoded_size(
 ) -> str:
     """Check encoded base64 payload size before decoding and return compact text."""
 
-    limit = max(1, int(max_bytes))
-    max_compact_len = ((limit + 2) // 3) * 4
+    max_compact_len = ((max_bytes + 2) // 3) * 4
     # Reject huge whitespace-padded strings in O(1) before allocating a copy.
     if len(encoded) > max_compact_len * 2 + 1024:
         raise _SignalAttachmentTooLargeError(
@@ -131,7 +126,7 @@ def _check_base64_encoded_size(
     compact = "".join(encoded.split())
     unpadded_len = len(compact.rstrip("="))
     estimated_bytes = (unpadded_len * 3) // 4
-    if estimated_bytes > limit:
+    if estimated_bytes > max_bytes:
         raise _SignalAttachmentTooLargeError(
             f"{filename} exceeds the configured upload limit.",
             observed_bytes=estimated_bytes,
@@ -139,20 +134,18 @@ def _check_base64_encoded_size(
     return compact
 
 
-def _decode_bounded_base64(
-    encoded: str, *, max_bytes: int, filename: str
+def _decode_compact_base64(
+    compact: str, *, max_bytes: int, filename: str
 ) -> bytes:
-    """Decode inline base64 only after verifying its size fits within ``max_bytes``."""
+    """Decode pre-checked compact base64 strictly within ``max_bytes``."""
 
-    limit = max(1, int(max_bytes))
-    compact = _check_base64_encoded_size(encoded, max_bytes=limit, filename=filename)
     try:
         data = base64.b64decode(compact, validate=True)
     except (ValueError, binascii.Error) as exc:
         raise AttachmentValidationError(
             f"{filename} contains invalid base64 attachment data."
         ) from exc
-    if len(data) > limit:
+    if len(data) > max_bytes:
         raise _SignalAttachmentTooLargeError(
             f"{filename} exceeds the configured upload limit.",
             observed_bytes=len(data),
@@ -299,9 +292,9 @@ class SignalRestClient:
         )
         url = f"{self.base_url}{path}"
         async with self.session.request(
-            method, url, params=params, timeout=timeout
+            method, url, params=params, timeout=timeout, allow_redirects=False
         ) as response:
-            if response.status >= 400:
+            if response.status < 200 or response.status >= 300:
                 body = await response.text()
                 raise SignalRestError(
                     f"signal-cli-rest-api returned HTTP {response.status}: {body[:1000]}"
@@ -783,32 +776,47 @@ class SignalInteractiveApp(BaseInteractiveApp):
             max_bytes if max_bytes is not None else "-",
         )
 
+    def _attachment_refusal(
+        self,
+        *,
+        reason: str,
+        message: str,
+        item: _SignalInboundAttachment,
+        sender_id: str,
+        max_bytes: int,
+        size_bytes: int | None = None,
+    ) -> AttachmentValidationError:
+        self._log_attachment_refusal(
+            reason=reason,
+            attachment_id=item.attachment_id,
+            sender_id=sender_id,
+            size_bytes=size_bytes,
+            max_bytes=max_bytes,
+        )
+        return AttachmentValidationError(message)
+
     def _validate_attachment_before_read(
         self,
         item: _SignalInboundAttachment,
         *,
         max_bytes: int,
         sender_id: str,
-    ) -> None:
+    ) -> str | None:
         if not item.base64_data and not item.attachment_id:
-            self._log_attachment_refusal(
+            raise self._attachment_refusal(
                 reason="missing_source",
-                attachment_id=None,
+                message=f"{item.filename} does not include an attachment id or inline data.",
+                item=item,
                 sender_id=sender_id,
                 max_bytes=max_bytes,
-            )
-            raise AttachmentValidationError(
-                f"{item.filename} does not include an attachment id or inline data."
             )
         if "/" in item.filename or "\\" in item.filename or "\x00" in item.filename:
-            self._log_attachment_refusal(
+            raise self._attachment_refusal(
                 reason="invalid_filename",
-                attachment_id=item.attachment_id,
+                message=f"{item.filename} is not an allowed attachment filename.",
+                item=item,
                 sender_id=sender_id,
                 max_bytes=max_bytes,
-            )
-            raise AttachmentValidationError(
-                f"{item.filename} is not an allowed attachment filename."
             )
         try:
             validate_raw_attachment_filename(item.filename)
@@ -820,69 +828,62 @@ class SignalInteractiveApp(BaseInteractiveApp):
                 max_bytes=max_bytes,
             )
             raise
-        if not item.base64_data and (
-            item.attachment_id is None
-            or not _is_valid_signal_attachment_id(item.attachment_id)
+        if not item.base64_data and not _is_valid_signal_attachment_id(
+            item.attachment_id or ""
         ):
-            self._log_attachment_refusal(
+            raise self._attachment_refusal(
                 reason="invalid_attachment_id",
-                attachment_id=item.attachment_id,
+                message=f"{item.filename} has an invalid attachment id.",
+                item=item,
                 sender_id=sender_id,
                 max_bytes=max_bytes,
             )
-            raise AttachmentValidationError(
-                f"{item.filename} has an invalid attachment id."
-            )
         if item.declared_size_bytes is not None and item.declared_size_bytes > max_bytes:
-            self._log_attachment_refusal(
+            raise self._attachment_refusal(
                 reason="declared_size_exceeds_limit",
-                attachment_id=item.attachment_id,
+                message=f"{item.filename} exceeds the configured upload limit.",
+                item=item,
                 sender_id=sender_id,
                 size_bytes=item.declared_size_bytes,
                 max_bytes=max_bytes,
             )
-            raise AttachmentValidationError(
-                f"{item.filename} exceeds the configured upload limit."
-            )
         if item.base64_data:
             try:
-                _check_base64_encoded_size(
+                return _check_base64_encoded_size(
                     item.base64_data, max_bytes=max_bytes, filename=item.filename
                 )
             except _SignalAttachmentTooLargeError as exc:
-                self._log_attachment_refusal(
+                raise self._attachment_refusal(
                     reason="base64_size_exceeds_limit",
-                    attachment_id=item.attachment_id,
+                    message=f"{item.filename} exceeds the configured upload limit.",
+                    item=item,
                     sender_id=sender_id,
                     size_bytes=exc.observed_bytes,
                     max_bytes=max_bytes,
-                )
-                raise AttachmentValidationError(
-                    f"{item.filename} exceeds the configured upload limit."
                 ) from exc
+        return None
 
     async def _attachment_bytes(
         self,
         item: _SignalInboundAttachment,
         *,
+        compact_base64: str | None,
         max_bytes: int,
         sender_id: str,
     ) -> tuple[bytes, str]:
-        if item.base64_data:
+        if compact_base64 is not None:
             try:
-                data = _decode_bounded_base64(
-                    item.base64_data, max_bytes=max_bytes, filename=item.filename
+                data = _decode_compact_base64(
+                    compact_base64, max_bytes=max_bytes, filename=item.filename
                 )
             except _SignalAttachmentTooLargeError as exc:
-                self._log_attachment_refusal(
+                raise self._attachment_refusal(
                     reason="base64_size_exceeds_limit",
-                    attachment_id=item.attachment_id,
+                    message=f"{item.filename} exceeds the configured upload limit.",
+                    item=item,
                     sender_id=sender_id,
                     size_bytes=exc.observed_bytes,
                     max_bytes=max_bytes,
-                )
-                raise AttachmentValidationError(
-                    f"{item.filename} exceeds the configured upload limit."
                 ) from exc
             except AttachmentValidationError:
                 self._log_attachment_refusal(
@@ -893,39 +894,32 @@ class SignalInteractiveApp(BaseInteractiveApp):
                 )
                 raise
             return data, item.content_type
-        if item.attachment_id:
-            if self._client is None:
-                raise RuntimeError("Signal app is not running.")
-            try:
-                data, content_type = await self._client.serve_attachment(
-                    item.attachment_id, max_bytes=max_bytes
-                )
-            except _SignalAttachmentTooLargeError as exc:
-                self._log_attachment_refusal(
-                    reason="download_size_exceeds_limit",
-                    attachment_id=item.attachment_id,
-                    sender_id=sender_id,
-                    size_bytes=exc.observed_bytes,
-                    max_bytes=max_bytes,
-                )
-                raise AttachmentValidationError(
-                    f"{item.filename} exceeds the configured upload limit."
-                ) from exc
-            if len(data) > max_bytes:
-                self._log_attachment_refusal(
-                    reason="download_size_exceeds_limit",
-                    attachment_id=item.attachment_id,
-                    sender_id=sender_id,
-                    size_bytes=len(data),
-                    max_bytes=max_bytes,
-                )
-                raise AttachmentValidationError(
-                    f"{item.filename} exceeds the configured upload limit."
-                )
-            return data, content_type
-        raise AttachmentValidationError(
-            f"{item.filename} does not include an attachment id or inline data."
-        )
+        assert item.attachment_id is not None
+        if self._client is None:
+            raise RuntimeError("Signal app is not running.")
+        try:
+            data, content_type = await self._client.serve_attachment(
+                item.attachment_id, max_bytes=max_bytes
+            )
+        except _SignalAttachmentTooLargeError as exc:
+            raise self._attachment_refusal(
+                reason="download_size_exceeds_limit",
+                message=f"{item.filename} exceeds the configured upload limit.",
+                item=item,
+                sender_id=sender_id,
+                size_bytes=exc.observed_bytes,
+                max_bytes=max_bytes,
+            ) from exc
+        if len(data) > max_bytes:
+            raise self._attachment_refusal(
+                reason="download_size_exceeds_limit",
+                message=f"{item.filename} exceeds the configured upload limit.",
+                item=item,
+                sender_id=sender_id,
+                size_bytes=len(data),
+                max_bytes=max_bytes,
+            )
+        return data, content_type
 
     async def _store_signal_attachments(
         self,
@@ -936,29 +930,40 @@ class SignalInteractiveApp(BaseInteractiveApp):
         caption: Optional[str],
         sender_id: str,
     ) -> list[Any]:
-        max_bytes = max(1, int(self.attachments.max_file_bytes))
+        max_bytes = self.attachments.max_file_bytes
         items = [
             self._normalize_signal_attachment(raw, index=index)
             for index, raw in enumerate(raw_attachments)
         ]
         # Validate every attachment before fetching or decoding any bytes.
-        for item in items:
-            self._validate_attachment_before_read(
-                item, max_bytes=max_bytes, sender_id=sender_id
+        validated = [
+            (
+                item,
+                self._validate_attachment_before_read(
+                    item, max_bytes=max_bytes, sender_id=sender_id
+                ),
             )
+            for item in items
+        ]
+        # Fetch and policy-check each payload before moving to the next so a
+        # policy refusal stops further downloads immediately. Holding checked
+        # payloads of one message in memory until all pass matches
+        # adapter_host/gateway_application.py so a refused attachment leaves no
+        # partial uploads on disk (bounded per attachment by max_file_bytes).
         fetched: list[tuple[_SignalInboundAttachment, bytes, str]] = []
-        for item in items:
+        for item, compact_base64 in validated:
             data, content_type = await self._attachment_bytes(
-                item, max_bytes=max_bytes, sender_id=sender_id
+                item,
+                compact_base64=compact_base64,
+                max_bytes=max_bytes,
+                sender_id=sender_id,
             )
-            fetched.append((item, data, content_type or item.content_type))
-        # Check every payload against storage policy before saving any file.
-        for item, data, content_type in fetched:
+            resolved_content_type = content_type or item.content_type
             try:
                 self.attachments.check_bytes(
                     data=data,
                     filename=item.filename,
-                    content_type=content_type,
+                    content_type=resolved_content_type,
                 )
             except AttachmentValidationError:
                 self._log_attachment_refusal(
@@ -969,6 +974,7 @@ class SignalInteractiveApp(BaseInteractiveApp):
                     max_bytes=max_bytes,
                 )
                 raise
+            fetched.append((item, data, resolved_content_type))
         return [
             self.attachments.store_bytes(
                 data=data,
