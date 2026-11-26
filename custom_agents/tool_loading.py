@@ -513,12 +513,16 @@ class OnRequestToolHook(HookProvider):
         registry.add_callback(BeforeToolCallEvent, self.before_tool_call, order=ON_REQUEST_TOOL_HOOK_ORDER)
 
     def before_tool_call(self, event: BeforeToolCallEvent) -> None:
+        if getattr(event, "cancel_tool", False):
+            return
         from custom_agents.access_runtime import runtime_access
 
         name = str(event.tool_use.get("name") or "")
         catalog = runtime_access(self.agent).catalog
         if in_tool_script():
             self._script_call(event, name)
+            return
+        if name in catalog.not_offered or name in withheld_functions(self.agent, catalog):
             return
         tool_id = group_of(self.agent, name, catalog)
         if tool_id is None:

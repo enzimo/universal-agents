@@ -195,7 +195,7 @@ def test_with_an_index_the_team_lead_starts_with_its_core_and_the_index_lists_th
     prompt = prompt_after_call(lead, registry, hook)
 
     core = functions_of_tools(CATALOG, CATALOG.always_shown)
-    assert {"notify_user", "file_read", "find_tools", "describe_tools", "use_tools", "request_access"} <= shown
+    assert {"notify_user", "file_read", "find_tools", "describe_tools", "use_tools", "call_tool", "request_access"} <= shown
     assert "knowledge_search" not in shown and "memory" not in shown, "outside the core"
     assert "plan_runtime_setting_change" in shown, "kept-shown functions stay shown"
     assert prompt.startswith("BASE\n\nYour other tools:")
@@ -270,6 +270,7 @@ def test_with_full_definitions_nothing_changes(storage, tmp_path) -> None:
     shown = next_model_call(hook, registry)
 
     assert "knowledge_search" in shown and "memory" in shown
+    assert "call_tool" not in shown, "call_tool is withheld in full_definitions mode"
     assert "objectives" not in shown, "the catalog's on_request groups still wait"
 
 

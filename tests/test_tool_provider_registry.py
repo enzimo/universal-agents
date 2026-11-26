@@ -36,7 +36,8 @@ def test_tool_providers_have_unique_names_and_tool_ownership() -> None:
     # workspace_file_link was added to FILES_PROVIDER (fn:files).
     # describe_tools (fn:tool_loading) and run_tool_script (fn:tool_scripts) were added
     # for the tool index experiment (2026-11-26).
-    assert len(ALL_PROVIDER_TOOLS) == 182
+    # call_tool (fn:tool_loading) was added for round two of the tool index experiment (2026-11-26).
+    assert len(ALL_PROVIDER_TOOLS) == 183
 
 
 def test_agent_catalog_does_not_reexport_tool_registry_ownership() -> None:

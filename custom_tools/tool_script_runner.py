@@ -124,8 +124,12 @@ def main(argv: list[str]) -> int:
         namespace: dict[str, Any] = {"__name__": "__tool_script__", "__builtins__": __builtins__}
         exec(code, namespace)
         result = namespace[FUNCTION_NAME](_Tools(bridge), ToolError)
+        sys.stdout.flush()
+        sys.stderr.flush()
         bridge.send({"kind": "done", "result": result})
     except BaseException as exc:  # noqa: BLE001 - every failure goes back to the agent as text
+        sys.stdout.flush()
+        sys.stderr.flush()
         bridge.send({"kind": "error", "error": _error_text(exc)})
     return 0
 

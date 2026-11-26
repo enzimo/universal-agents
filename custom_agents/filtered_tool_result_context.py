@@ -882,11 +882,14 @@ class FilteredToolResultConversationManager(ConversationManager):
 
     @staticmethod
     def _tool_name_for(messages: list[dict[str, Any]], tool_use_id: str) -> str:
+        from custom_agents.tool_calling import unwrap_tool_use
+
         for message in messages:
             for content in message.get("content", []) or []:
                 tool_use = content.get("toolUse") if isinstance(content, dict) else None
                 if isinstance(tool_use, dict) and tool_use.get("toolUseId") == tool_use_id:
-                    return str(tool_use.get("name") or "unknown")
+                    unwrapped = unwrap_tool_use(tool_use)
+                    return unwrapped.name or str(tool_use.get("name") or "unknown")
         return "unknown"
 
     def _build_replacement_text(

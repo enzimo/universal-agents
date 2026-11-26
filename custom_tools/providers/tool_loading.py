@@ -472,7 +472,38 @@ def describe_tools(names: list[str]) -> str:
     return _guarded(run)
 
 
-TOOL_LOADING_TOOLS = (find_tools, describe_tools, use_tools)
+@tool
+def call_tool(name: str, inputs: dict[str, Any] | None = None) -> str:
+    """Call a tool function listed in your tool index in one step, without loading its group first.
+
+    Args:
+        name: Exact name of the catalog tool function to call (for example 'knowledge_search').
+        inputs: Named arguments for that function as a JSON object; omit or pass {} when it takes none.
+    """
+
+    # CallToolHook rewrites every valid call_tool invocation into the real tool
+    # call before execution. This fallback body runs only if invoked directly
+    # outside the index runtime hook, and fails closed.
+    return _json(
+        {
+            "status": "error",
+            "error": (
+                f"call_tool cannot execute {name!r} outside the tool index runtime hook. "
+                "Call the target function directly or enable the tool index."
+            ),
+        }
+    )
+
+
+TOOL_LOADING_TOOLS = (find_tools, describe_tools, use_tools, call_tool)
 PROVIDER = ToolProvider("tool_loading", TOOL_LOADING_TOOLS)
 
-__all__ = ["PROVIDER", "STATUS_ALREADY_SHOWN", "TOOL_LOADING_TOOLS", "describe_tools", "find_tools", "use_tools"]
+__all__ = [
+    "PROVIDER",
+    "STATUS_ALREADY_SHOWN",
+    "TOOL_LOADING_TOOLS",
+    "call_tool",
+    "describe_tools",
+    "find_tools",
+    "use_tools",
+]

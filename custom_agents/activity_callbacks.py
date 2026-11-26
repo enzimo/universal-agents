@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Any, Callable, Dict, Optional, TextIO
 
+from custom_agents.tool_calling import unwrap_tool_use
 from custom_messages.enums import TaskActivityStage, TaskActivityType
 
 
@@ -20,16 +21,28 @@ class ActivityPhaseCallbackHandler:
         self.emit_activity = emit_activity
         self.task_id = task_id
         self.previous_tool_use: Optional[Dict[str, Any]] = None
+        self._emitted_call_keys: set[tuple[str, str]] = set()
 
     def __call__(self, **kwargs: Any) -> None:
         current_tool_use = kwargs.get("current_tool_use") or {}
         if not current_tool_use or not current_tool_use.get("name"):
             return
-        normalized_tool_use = dict(current_tool_use)
-        if self.previous_tool_use == normalized_tool_use:
+        unwrapped = unwrap_tool_use(current_tool_use)
+        if not unwrapped.name:
+            # Streaming call_tool chunks before the target name is readable wait until it arrives.
             return
-        self.previous_tool_use = normalized_tool_use
-        tool_name = str(normalized_tool_use.get("name") or "unknown")
+        tool_name = unwrapped.name
+        tool_use_id = current_tool_use.get("toolUseId")
+        if tool_use_id:
+            call_key = (str(tool_use_id), tool_name)
+            if call_key in self._emitted_call_keys:
+                return
+            self._emitted_call_keys.add(call_key)
+        else:
+            normalized_tool_use = dict(current_tool_use)
+            if self.previous_tool_use == normalized_tool_use:
+                return
+            self.previous_tool_use = normalized_tool_use
         summary, detail = self._classify_tool_use(tool_name)
         self.emit_activity(
             activity_type=TaskActivityType.TOOL_PHASE,

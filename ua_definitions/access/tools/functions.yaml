@@ -595,6 +595,7 @@ tools:
       find_tools: read
       describe_tools: read
       use_tools: read
+      call_tool: read
 
   # A short sandboxed script that chains read-level tool calls (agent.tool_presentation
   # index_and_scripts; custom_agents.tool_script_runtime). The script reaches

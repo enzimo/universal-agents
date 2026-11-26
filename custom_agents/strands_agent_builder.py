@@ -73,6 +73,7 @@ def build_strands_parts(agent: Any, *, agent_class: Any, loaded: Optional[Loaded
     tool_sync = install_tool_sync(agent, model_tools, parts)
     parts.sync = tool_sync
     from custom_agents.access_runtime import runtime_access
+    from custom_agents.tool_calling import CallToolHook
     from custom_agents.tool_index import ToolIndexHook
     from custom_agents.tool_loading import OnRequestToolHook, ToolLimitHook, loadable_tools_text
     from custom_agents.tool_presentation import index_enabled
@@ -126,6 +127,7 @@ def build_strands_parts(agent: Any, *, agent_class: Any, loaded: Optional[Loaded
         PersonModelHook(agent),
         ToolLimitHook(agent, parts),
         OnRequestToolHook(agent, parts),
+        CallToolHook(agent),
     ]
     if tool_index_hook is not None:
         agent_hooks.append(tool_index_hook)
