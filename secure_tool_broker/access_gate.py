@@ -42,7 +42,7 @@ from access_catalog.catalog import UNLISTED_WEB_TOOL, CatalogSource, ToolCatalog
 from access_control.account_sharing import TeamAccountSharing, fixed_sharing, fixed_sharing_text
 from access_control.caller_tokens import BrokerCaller
 from access_control.cedar import CedarAccessClient
-from access_control.decisions import AccessService
+from access_control.decisions import FILES_TOOL_ID, AccessService
 from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
 from access_control.identity import ContextVerifier, IdentityRejected
 from access_control.task_identity import ScheduleRunLookup, job_schedule_id, resolve_task_identity
@@ -51,6 +51,8 @@ from custom_messages.contracts.access_v2 import (
     REASON_ACCOUNT_LINK_MISSING,
     REASON_ACCOUNT_LINK_OUTDATED,
     REASON_GATE_LINK_MISSING,
+    AccessDecisionV1,
+    AccessLevel,
     AccountLinkV1,
     AccountMode,
     AccountSharing,
@@ -84,6 +86,8 @@ class GateResult:
     resolution: OperationResolutionV1 | None = None
     person_id: str | None = None
     work_id: str | None = None
+    person_roles: tuple[str, ...] = ()
+    schedule_id: str | None = None
     account_link: AccountLinkV1 | None = None
     gate_link: AccountLinkV1 | None = None
 
@@ -247,7 +251,64 @@ class BrokerAccessGate:
             )
             if not decision.allowed:
                 return GateResult(False, REASON_ACCESS_DENIED, decision.reason, decision.next_step, resolution)
-        return self._with_account(resolution, person_id, context, work_id=work_id)
+        return self._with_account(
+            resolution,
+            person_id,
+            context,
+            work_id=work_id,
+            person_roles=tuple(person.roles) if person is not None else (),
+            schedule_id=schedule_id,
+        )
+
+    def decide_folder_for_context(
+        self,
+        context: Any,
+        target_id: str,
+        *,
+        is_file: bool = True,
+        level: AccessLevel = AccessLevel.WRITE,
+    ) -> AccessDecisionV1 | None:
+        """Decide one file or folder use with the same verified agent and person as ``check``.
+
+        Returns ``None`` when authorization is disabled, matching ``custom_tools.file_access``.
+        """
+
+        if self.access is None:
+            return None
+        operation = f"{'file' if is_file else 'folder'}.{level.value}"
+        agent_id = str(getattr(context, "agent_id", None) or "").strip()
+        agent_type = str(getattr(context, "named_agent_type", None) or "").strip()
+        if not agent_id or not agent_type:
+            return AccessDecisionV1(
+                allowed=False,
+                tool_id=FILES_TOOL_ID,
+                operation=operation,
+                level=level,
+                reason="The request does not name the agent that makes it.",
+                next_step="Run this action from a verified agent task context.",
+            )
+        person_id = str(getattr(context, "canonical_user_id", None) or "").strip() or None
+        person_roles = tuple(getattr(context, "person_roles", ()) or ())
+        person = PersonPrincipal(person_id, self.team_id, person_roles) if person_id is not None else None
+        work_id = str(getattr(context, "work_id", None) or "").strip() or None
+        schedule_id = str(getattr(context, "schedule_id", None) or "").strip() or None
+        agent = AgentPrincipal(
+            agent_id,
+            agent_type,
+            self.access.agent_role_of(agent_type),
+            self.team_id,
+            schedule_id=schedule_id,
+            work_id=work_id,
+        )
+        return self.access.decide_folder(
+            agent=agent,
+            person=person,
+            target_id=target_id,
+            is_file=is_file,
+            level=level,
+            task_id=work_id,
+            hand_on_for_task=True,
+        )
 
     def account_sharing(self) -> TeamAccountSharing | None:
         """The team's sharing choices, from the access store the links are in (both authorization modes).
@@ -381,10 +442,19 @@ class BrokerAccessGate:
         context: Mapping[str, Any],
         *,
         work_id: str | None = None,
+        person_roles: tuple[str, ...] = (),
+        schedule_id: str | None = None,
     ) -> GateResult:
         tool = self.catalog.tools.get(resolution.tool_id)
         if tool is None:
-            return GateResult(True, resolution=resolution, person_id=person_id, work_id=work_id)
+            return GateResult(
+                True,
+                resolution=resolution,
+                person_id=person_id,
+                work_id=work_id,
+                person_roles=person_roles,
+                schedule_id=schedule_id,
+            )
         gate_link, refusal = self._check_gate_link(tool, resolution, person_id, context)
         if refusal is not None:
             return refusal
@@ -394,6 +464,8 @@ class BrokerAccessGate:
                 resolution=resolution,
                 person_id=person_id,
                 work_id=work_id,
+                person_roles=person_roles,
+                schedule_id=schedule_id,
                 gate_link=gate_link,
             )
         if tool_sign_in(tool.tool_id) is not None:
@@ -427,6 +499,8 @@ class BrokerAccessGate:
                 resolution=resolution,
                 person_id=person_id,
                 work_id=work_id,
+                person_roles=person_roles,
+                schedule_id=schedule_id,
                 account_link=team_link,
                 gate_link=gate_link,
             )
@@ -479,6 +553,8 @@ class BrokerAccessGate:
             resolution=resolution,
             person_id=person_id,
             work_id=work_id,
+            person_roles=person_roles,
+            schedule_id=schedule_id,
             account_link=link,
             gate_link=gate_link,
         )

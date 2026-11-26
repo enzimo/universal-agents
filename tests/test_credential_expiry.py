@@ -39,6 +39,7 @@ from secure_tool_broker.credential_expiry import (
     EXPIRY_PRESET_SECONDS,
     MAX_CAPTURE_EXPIRY_SECONDS,
     CredentialExpiryError,
+    capture_expiry_window,
     format_expiry_label,
     format_utc_timestamp,
     is_expired,
@@ -115,11 +116,18 @@ def test_storage_expiry_accepts_short_ttl_while_form_enforces_five_minute_minimu
 
 def test_validate_capture_expiry_enforces_required_min_5m_and_max_90d() -> None:
     now = BASE_NOW
+    broker_now, earliest, latest = capture_expiry_window(now=now)
+    assert broker_now == "2026-03-07T12:00:00Z"
+    assert earliest == "2026-03-07T12:05:00Z"
+    assert latest == "2026-06-05T12:00:00Z"
 
     for missing in (None, "", "   "):
         with pytest.raises(CredentialExpiryError) as exc:
             validate_capture_expiry(missing, now=now)
         assert exc.value.code == CREDENTIAL_EXPIRY_REQUIRED
+        assert broker_now in exc.value.message
+        assert earliest in exc.value.message
+        assert latest in exc.value.message
 
     for bad in ("2026-03-08T12:00:00", "not-a-timestamp", 12345):
         with pytest.raises(CredentialExpiryError) as exc:
@@ -130,9 +138,25 @@ def test_validate_capture_expiry_enforces_required_min_5m_and_max_90d() -> None:
         with pytest.raises(CredentialExpiryError) as exc:
             validate_capture_expiry(too_soon, now=now)
         assert exc.value.code == CREDENTIAL_EXPIRY_TOO_SOON
+        assert broker_now in exc.value.message
+        assert earliest in exc.value.message
+        assert latest in exc.value.message
 
     five_minutes = now + timedelta(seconds=300)
     assert validate_capture_expiry(five_minutes, now=now) == five_minutes
+
+    # Sub-second clock: earliest rounds up so passing earliest back always succeeds (C08).
+    half_second_now = BASE_NOW.replace(microsecond=500_000)
+    sub_now, sub_earliest, sub_latest = capture_expiry_window(now=half_second_now)
+    assert sub_now == "2026-03-07T12:00:00Z"
+    assert sub_earliest == "2026-03-07T12:05:01Z"
+    assert sub_latest == "2026-06-05T12:00:00Z"
+    assert validate_capture_expiry(sub_earliest, now=half_second_now) == datetime(
+        2026, 3, 7, 12, 5, 1, tzinfo=timezone.utc
+    )
+    assert validate_capture_expiry(sub_latest, now=half_second_now) == datetime(
+        2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc
+    )
 
     # Offset string is normalized to whole-second UTC.
     offset_input = "2026-03-07T14:15:00.987654+02:00"
@@ -144,6 +168,9 @@ def test_validate_capture_expiry_enforces_required_min_5m_and_max_90d() -> None:
     with pytest.raises(CredentialExpiryError) as too_far_exc:
         validate_capture_expiry(exact_max + timedelta(seconds=1), now=now)
     assert too_far_exc.value.code == CREDENTIAL_EXPIRY_TOO_FAR
+    assert broker_now in too_far_exc.value.message
+    assert earliest in too_far_exc.value.message
+    assert latest in too_far_exc.value.message
 
 
 def test_resolve_form_expiry_presets_and_disabled() -> None:

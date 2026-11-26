@@ -965,17 +965,22 @@ def collect_credential(
     scope: CredentialOwnerScope | None = None,
     expires_at: datetime | str | None = None,
     allow_expiry_change: bool = False,
+    overwrite_guard: Callable[[CatalogCredential | None], ToolResult | None] | None = None,
+    approval: Mapping[str, Any] | None = None,
     now: datetime | None = None,
 ) -> ToolResult:
     """Store a credential from trusted form submission or broker-side storage.
 
     ``expires_at`` is accepted only as an explicit keyword argument (never read
     from ``request_payload``) and only when ``allow_expiry_change=True`` (set
-    by the secure form submission handler, team transfer import, and trusted
-    broker capture). When ``allow_expiry_change=False`` (the default, used by
-    agent-callable ``credential.collect``), overwriting a key that currently
-    has ``expires_at`` preserves that expiry and writes every Sealbox record
-    with the remaining TTL, or refuses if the expiry has already passed.
+    by the secure form submission handler, team transfer import, and
+    ``credential.capture_file``). When ``allow_expiry_change=False`` (the
+    default, used by agent-callable ``credential.collect``), overwriting a key
+    that currently has ``expires_at`` preserves that expiry and writes every
+    Sealbox record with the remaining TTL, or refuses if the expiry has already
+    passed. When provided, ``overwrite_guard`` runs under the key and scope
+    locks before writing to the credential store and again before committing
+    the catalog row, returning a ``ToolResult`` to refuse the write.
     """
 
     try:
@@ -1096,6 +1101,10 @@ def collect_credential(
             with _scope_catalog_lock(resolved_scope):
                 catalog_snapshot = load_catalog(scope=resolved_scope)
                 existing_credential = catalog_snapshot.credentials.get(credential_key)
+                if overwrite_guard is not None:
+                    guard_refusal = overwrite_guard(existing_credential)
+                    if guard_refusal is not None:
+                        return guard_refusal
                 if not allow_expiry_change and existing_credential is not None and existing_credential.expires_at is not None:
                     lock_now = now if now is not None else datetime.now(timezone.utc)
                     if is_expired(existing_credential.expires_at, now=lock_now):
@@ -1185,10 +1194,16 @@ def collect_credential(
                 public_fields=public_fields,
                 write_result=write_result,
                 expires_at=normalized_expires_at,
+                approval=approval,
             )
             with _scope_catalog_lock(resolved_scope):
-                if write_source == "sealbox":
+                if write_source == "sealbox" or overwrite_guard is not None:
                     latest_catalog = load_catalog(scope=resolved_scope)
+                    if overwrite_guard is not None:
+                        guard_refusal = overwrite_guard(latest_catalog.credentials.get(credential_key))
+                        if guard_refusal is not None:
+                            return guard_refusal
+                if write_source == "sealbox":
                     shared = _find_shared_sealbox_record(
                         latest_catalog,
                         exclude_key=credential_key,
@@ -2014,6 +2029,7 @@ def build_catalog_credential(
     public_fields: Mapping[str, str],
     write_result: CredentialWriteResult,
     expires_at: str | None = None,
+    approval: Mapping[str, Any] | None = None,
 ) -> CatalogCredential:
     fields: dict[str, CatalogCredentialField] = {}
     for field_name, spec in field_specs.items():
@@ -2036,18 +2052,23 @@ def build_catalog_credential(
                 value=public_fields.get(field_name) or _string(spec.get("value")) or None,
             )
     now = utc_now_iso()
+    approval_record = (
+        dict(approval)
+        if approval is not None
+        else {
+            "status": "approved",
+            "approved_by": "user",
+            "approved_at": now,
+            "remember": True,
+        }
+    )
     return CatalogCredential(
         display_name=_string(request_payload.get("display_name")) or credential_key,
         purpose=_string(request_payload.get("purpose")) or "Credential collected for approved agent workflow.",
         created_at=now,
         updated_at=now,
         expires_at=expires_at,
-        approval={
-            "status": "approved",
-            "approved_by": "user",
-            "approved_at": now,
-            "remember": True,
-        },
+        approval=approval_record,
         fields=fields,
     )
 
@@ -3464,6 +3485,11 @@ def execute_credential_catalog_action(action: ValidatedAction, context: ToolCont
             return ToolResult(
                 status="error",
                 error="signup.manual_fallback_session is available through the broker HTTP session API, not secure_cli.",
+            )
+        if action.action == "credential.capture_file":
+            return ToolResult(
+                status="error",
+                error="credential.capture_file runs through the broker executor with the active access gate.",
             )
     except Exception as exc:
         return ToolResult(status="error", error=f"credential_catalog.{action.action} failed: {exc}")

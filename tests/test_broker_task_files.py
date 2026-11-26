@@ -138,14 +138,17 @@ def test_an_existing_output_that_is_a_link_is_not_overwritten(layout, monkeypatc
 
 
 def test_locate_task_file_resolves_person_shared_folders_and_folder_ids(layout):
-    from access_control.folders import person_folder_id
+    from access_control.folders import FolderRoots, person_folder_id
     from secure_tool_broker.task_files import LocatedTaskFile, TaskFileRejected, locate_task_file
+
+    roots = FolderRoots(layout.workspaces_dir)
 
     rel = locate_task_file("scratch/token.txt", instance_root=str(layout.root), person_id="alice")
     assert isinstance(rel, LocatedTaskFile)
     assert rel.root == layout.person_dir("alice")
     assert rel.parts == ("scratch", "token.txt")
     assert rel.folder_id == f"{person_folder_id('alice')}/scratch/token.txt"
+    assert rel.folder_id == roots.folder_id_of(rel.display)
 
     team_file = locate_task_file(
         str(layout.team_dir / "finance" / "notes.md"),
@@ -155,6 +158,7 @@ def test_locate_task_file_resolves_person_shared_folders_and_folder_ids(layout):
     assert team_file.root == layout.team_dir
     assert team_file.parts == ("finance", "notes.md")
     assert team_file.folder_id == "team/finance/notes.md"
+    assert team_file.folder_id == roots.folder_id_of(team_file.display)
 
     agents_file = locate_task_file(
         str(layout.agents_dir / "shared.pem"),
@@ -164,6 +168,7 @@ def test_locate_task_file_resolves_person_shared_folders_and_folder_ids(layout):
     assert agents_file.root == layout.agents_dir
     assert agents_file.parts == ("shared.pem",)
     assert agents_file.folder_id == "agents/shared.pem"
+    assert agents_file.folder_id == roots.folder_id_of(agents_file.display)
 
     for bad_path in (
         "",

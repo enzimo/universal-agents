@@ -1302,10 +1302,15 @@ def _publish_staged_files(checked: CheckedCommand | None, *, succeeded: bool) ->
 PERSONAL_LOGIN_PROVIDERS = frozenset({"github", "google"})
 
 
-def execute_validated_action(action: ValidatedAction, context: ToolContext) -> ToolResult:
+def execute_validated_action(
+    action: ValidatedAction,
+    context: ToolContext,
+    *,
+    access_gate: Any = None,
+) -> ToolResult:
     if context.canonical_user_id:
         with credential_owner_context(context.require_user()):
-            return _execute_validated_action_for_owner(action, context)
+            return _execute_validated_action_for_owner(action, context, access_gate=access_gate)
     if action.provider in PERSONAL_LOGIN_PROVIDERS:
         return ToolResult(
             status="error",
@@ -1314,10 +1319,15 @@ def execute_validated_action(action: ValidatedAction, context: ToolContext) -> T
         )
     # The authenticated HTTP service rejects missing owners; direct helpers for
     # the credential sources (Bitwarden and the like) still run here.
-    return _execute_validated_action_for_owner(action, context)
+    return _execute_validated_action_for_owner(action, context, access_gate=access_gate)
 
 
-def _execute_validated_action_for_owner(action: ValidatedAction, context: ToolContext) -> ToolResult:
+def _execute_validated_action_for_owner(
+    action: ValidatedAction,
+    context: ToolContext,
+    *,
+    access_gate: Any = None,
+) -> ToolResult:
     from secure_tools.hub_providers import HF_PROVIDER, X_PROVIDER
     from secure_tools.installed_clis import InstalledCliProvider
     from secure_tools.registry import get_provider
@@ -1332,6 +1342,10 @@ def _execute_validated_action_for_owner(action: ValidatedAction, context: ToolCo
 
         return execute_hub_cli(action, context)
     if action.provider == "credential_catalog":
+        if action.action == "credential.capture_file":
+            from secure_tool_broker.credential_capture import capture_file_credential
+
+            return capture_file_credential(action.params, context=context, access_gate=access_gate)
         return execute_credential_catalog_action(action, context)
     if action.provider == "secure_requests":
         return execute_secure_requests_action(action, context)

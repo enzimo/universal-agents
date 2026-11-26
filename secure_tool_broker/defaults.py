@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 
 DEFAULT_BIND_HOST = "0.0.0.0"
@@ -92,3 +93,32 @@ def is_decline(form: Mapping[str, object]) -> bool:
     """Whether a submitted page form is its Decline button."""
 
     return str(form.get(DECLINE_FIELD) or "").strip().lower() == DECLINE_VALUE
+
+
+ENV_CREDENTIAL_MAX_FILE_BYTES = "SECURE_TOOL_BROKER_CREDENTIAL_COLLECTION_MAX_FILE_BYTES"
+DEFAULT_CREDENTIAL_MAX_FILE_BYTES = 262_144
+MAX_CREDENTIAL_MAX_FILE_BYTES = 1_048_576
+ENV_NOTIFY_ON_AGENT_CAPTURE = "SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE"
+DEFAULT_NOTIFY_ON_AGENT_CAPTURE = True
+_FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def credential_max_file_bytes() -> int:
+    """Maximum credential file size in bytes, shared by the secure form and agent file capture."""
+
+    raw = str(os.getenv(ENV_CREDENTIAL_MAX_FILE_BYTES) or "").strip()
+    if not raw:
+        return DEFAULT_CREDENTIAL_MAX_FILE_BYTES
+    try:
+        return max(1, min(int(raw), MAX_CREDENTIAL_MAX_FILE_BYTES))
+    except ValueError:
+        return DEFAULT_CREDENTIAL_MAX_FILE_BYTES
+
+
+def notify_on_agent_capture_enabled() -> bool:
+    """Whether the broker sends an Inbox notice after credential.capture_file stores a credential."""
+
+    raw = str(os.getenv(ENV_NOTIFY_ON_AGENT_CAPTURE) or "").strip().lower()
+    if not raw:
+        return DEFAULT_NOTIFY_ON_AGENT_CAPTURE
+    return raw not in _FALSY_ENV_VALUES

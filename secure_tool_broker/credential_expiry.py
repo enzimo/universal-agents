@@ -16,9 +16,10 @@ from secure_tool_broker.credential_diagnostics import (
     CREDENTIAL_EXPIRED,
 )
 
-# The form requires a chosen deletion time to be at least 5 minutes in the
-# future. Storage paths (transfer import, automated capture, live tests) only
-# require a timestamp strictly in the future so short TTLs remain possible.
+# Both the secure form and agent file capture require a chosen deletion time to
+# be at least 5 minutes in the future. Lower-level storage paths (transfer
+# import, live tests) only require a timestamp strictly in the future so short
+# TTLs remain possible.
 MIN_EXPIRY_LEAD_SECONDS = 300
 
 CUSTOM_EXPIRY_OPTION = "custom"
@@ -34,9 +35,11 @@ EXPIRY_PRESET_SECONDS: dict[str, int] = {
     "90d": 90 * 24 * 60 * 60,
 }
 
-# Agent-captured temporary credentials must expire at least 5 minutes and at
-# most 90 days (3 months) ahead.
-MAX_CAPTURE_EXPIRY_SECONDS = EXPIRY_PRESET_SECONDS["90d"]
+# Owner decision (2026-11-26): agent-captured temporary credentials always
+# expire, at least 5 minutes and at most 90 days (3 months) ahead. Kept
+# independent of the form's preset table so changing form presets never alters
+# the capture limit.
+MAX_CAPTURE_EXPIRY_SECONDS = 90 * 24 * 60 * 60
 
 EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
     ("15m", "In 15 minutes"),
@@ -205,27 +208,51 @@ def validate_form_expiry(
     return parsed
 
 
+def capture_expiry_window(*, now: datetime | None = None) -> tuple[str, str, str]:
+    """Return ``(broker_now_utc, earliest_expires_at, latest_expires_at)`` as whole-second UTC strings.
+
+    ``earliest_expires_at`` rounds up across any sub-second fraction on ``now``
+    so passing ``earliest_expires_at`` back into ``validate_capture_expiry`` at
+    that exact instant is always accepted; ``latest_expires_at`` rounds down so
+    it is likewise always accepted.
+    """
+
+    current = _utc_now(now)
+    floor_now = current.replace(microsecond=0)
+    ceil_now = floor_now + timedelta(seconds=1) if current.microsecond else floor_now
+    broker_now = format_utc_timestamp(floor_now)
+    earliest = format_utc_timestamp(ceil_now + timedelta(seconds=MIN_EXPIRY_LEAD_SECONDS))
+    latest = format_utc_timestamp(floor_now + timedelta(seconds=MAX_CAPTURE_EXPIRY_SECONDS))
+    return broker_now, earliest, latest
+
+
 def validate_capture_expiry(
     expires_at: datetime | str | None,
     *,
     now: datetime | None = None,
-    min_lead_seconds: int = MIN_EXPIRY_LEAD_SECONDS,
-    max_lead_seconds: int = MAX_CAPTURE_EXPIRY_SECONDS,
 ) -> datetime:
     """Validate a required expiry timestamp for agent file capture (5 minutes to 90 days, whole-second UTC)."""
 
+    current = _utc_now(now)
+    broker_now, earliest, latest = capture_expiry_window(now=current)
+    window_note = f"Broker UTC time is {broker_now}; accepted expires_at range is {earliest} to {latest}."
     if expires_at is None or (isinstance(expires_at, str) and not expires_at.strip()):
         raise CredentialExpiryError(
             CREDENTIAL_EXPIRY_REQUIRED,
-            "An expiry timestamp (expires_at) is required for captured credentials (5 minutes to 90 days from now).",
+            "An expiry timestamp (expires_at) is required for captured credentials "
+            f"(5 minutes to 90 days from now). {window_note}",
         )
-    current = _utc_now(now)
-    parsed = validate_form_expiry(expires_at, now=current, min_lead_seconds=min_lead_seconds)
+    try:
+        parsed = validate_form_expiry(expires_at, now=current, min_lead_seconds=MIN_EXPIRY_LEAD_SECONDS)
+    except CredentialExpiryError as exc:
+        if exc.code == CREDENTIAL_EXPIRY_TOO_SOON:
+            raise CredentialExpiryError(CREDENTIAL_EXPIRY_TOO_SOON, f"{exc.message} {window_note}") from exc
+        raise
     remaining = (parsed - current).total_seconds()
-    if remaining > max_lead_seconds:
+    if remaining > MAX_CAPTURE_EXPIRY_SECONDS:
         raise CredentialExpiryError(
             CREDENTIAL_EXPIRY_TOO_FAR,
-            "Captured credentials can expire at most 90 days (3 months) from now.",
+            f"Captured credentials can expire at most 90 days (3 months) from now. {window_note}",
         )
     return parsed
 
@@ -376,6 +403,7 @@ __all__ = [
     "EXPIRY_PRESET_SECONDS",
     "MAX_CAPTURE_EXPIRY_SECONDS",
     "MIN_EXPIRY_LEAD_SECONDS",
+    "capture_expiry_window",
     "format_expiry_label",
     "format_utc_timestamp",
     "is_expired",
