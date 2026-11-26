@@ -614,3 +614,131 @@ def test_without_authorization_skips_symlinked_workspace_root_and_canonicalizes_
     assert planned.read_only == (real_reports.resolve(),)
     assert any("team/" in note and "symbolic link" in note for note in planned.notes)
     assert "event=code_access_folder_link_skipped" in caplog.text
+
+
+def test_symlink_in_intermediate_component_skips_granted_subfolder(world, tmp_path: Path, caplog) -> None:
+    """C04(1): a symlink higher up in a granted folder path (team/a -> outside) keeps team/a/b out."""
+
+    outside = tmp_path / "outside"
+    (outside / "b").mkdir(parents=True)
+    link_a = world.layout.team_dir / "a"
+    os.symlink(outside, link_a)
+    _give_worker(world, TargetRefV1(kind=TargetKind.FOLDER, id="team/a/b"), AccessLevel.WRITE)
+
+    with caplog.at_level(logging.WARNING, logger="custom_agents.code_access"):
+        planned = code_access(world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID)
+
+    mounted = planned.read_write + planned.read_only
+    assert (link_a / "b") not in mounted
+    assert (outside / "b") not in mounted
+    assert all(not str(Path(os.path.realpath(path))).startswith(str(outside.resolve())) for path in mounted)
+    assert any("team/a/b/" in note and "symbolic link" in note for note in planned.notes)
+    assert "event=code_access_folder_link_skipped" in caplog.text
+    assert "folder_id=team/a/b" in caplog.text
+
+
+def test_linked_person_folder_with_authorization_on_is_skipped_and_noted(world, caplog) -> None:
+    """C04(2): replacing the task person's own folder with a link to another person's folder is refused."""
+
+    from runtime_settings.instance_layout import person_folder_name
+
+    alice_dir = world.layout.person_dir("alice")
+    alice_dir.mkdir(parents=True, exist_ok=True)
+    owner_dir = world.layout.person_dir(OWNER.person_id)
+    if owner_dir.exists():
+        shutil.rmtree(owner_dir)
+    os.symlink(alice_dir, owner_dir)
+    owner_id = f"users/{person_folder_name(OWNER.person_id)}"
+
+    with caplog.at_level(logging.WARNING, logger="custom_agents.code_access"):
+        planned = code_access(world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID)
+
+    mounted = planned.read_write + planned.read_only
+    assert owner_dir not in mounted
+    assert alice_dir not in mounted
+    assert any(f"{owner_id}/" in note and "symbolic link" in note for note in planned.notes)
+    assert "event=code_access_folder_link_skipped" in caplog.text
+    assert f"folder_id={owner_id}" in caplog.text
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory read permission checks")
+def test_unreadable_granted_folder_fails_closed_with_unsafe_skip(world, tmp_path: Path, caplog) -> None:
+    """C04(3): a granted folder the runtime cannot open for listing fails closed with a warning and note."""
+
+    reports = tmp_path / "reports"
+    sub = reports / "sub"
+    sub.mkdir(parents=True)
+    folders = (DataFolder("reports", reports),)
+    _give_worker(world, TargetRefV1(kind=TargetKind.FOLDER, id="data/reports/sub"), AccessLevel.READ)
+    os.chmod(sub, 0o311)
+    try:
+        with caplog.at_level(logging.WARNING, logger="custom_agents.code_access"):
+            planned = code_access(
+                world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID, data_folders=folders
+            )
+    finally:
+        os.chmod(sub, 0o755)
+
+    assert sub not in planned.read_write + planned.read_only
+    assert "event=code_access_folder_unsafe_skipped" in caplog.text
+    assert "folder_id=data/reports/sub" in caplog.text
+    assert any("data/reports/sub/" in note and "could not be verified as a safe folder" in note for note in planned.notes)
+
+
+def test_granted_folder_not_yet_created_stays_in_planned_mounts(world, tmp_path: Path) -> None:
+    """C04(4): a granted folder that does not exist yet on disk stays planned (REASON_NOT_FOUND)."""
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    future = reports / "future"
+    folders = (DataFolder("reports", reports),)
+    _give_worker(world, TargetRefV1(kind=TargetKind.FOLDER, id="data/reports/future"), AccessLevel.READ)
+
+    planned = code_access(
+        world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID, data_folders=folders
+    )
+
+    assert future.resolve() in planned.read_only
+    assert all("data/reports/future" not in note for note in planned.notes)
+
+
+def test_ungranted_data_folder_with_file_block_produces_no_note(world, tmp_path: Path) -> None:
+    """C06: a FILE block inside an ungranted data folder never leaks the file name in sandbox notes."""
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "salaries.xlsx").write_text("confidential\n", encoding="utf-8")
+    folders = (DataFolder("reports", reports),)
+    _give_worker(
+        world, TargetRefV1(kind=TargetKind.FILE, id="data/reports/salaries.xlsx"), AccessLevel.FULL, kind=GrantKind.BLOCK
+    )
+
+    planned = code_access(
+        world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID, data_folders=folders
+    )
+
+    assert reports not in planned.read_write + planned.read_only
+    assert planned.notes == ()
+
+
+def test_workspace_root_outside_workspaces_is_skipped_with_warning(world, tmp_path: Path, caplog) -> None:
+    """C05: a WorkspaceScope root outside workspaces/ is skipped with a warning rather than resolved and mounted."""
+
+    from runtime_settings.instance_layout import WorkspaceScope
+
+    outside = tmp_path / "outside_root"
+    outside.mkdir()
+    bad_scope = WorkspaceScope(
+        workspaces_dir=world.layout.workspaces_dir,
+        person_id=OWNER.person_id,
+        home=world.layout.team_dir,
+        roots=(outside, world.layout.team_dir),
+    )
+
+    world.agent.authorization_config = {"enabled": False}
+    with caplog.at_level(logging.WARNING, logger="custom_agents.code_access"):
+        planned = code_access(world.agent, bad_scope, tool_id=CODE_SHELL_TOOL_ID)
+
+    assert outside not in planned.read_write
+    assert world.layout.team_dir in planned.read_write
+    assert "event=code_access_root_outside_workspaces" in caplog.text

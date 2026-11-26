@@ -184,12 +184,6 @@ class FolderRoots:
             return Path(os.path.realpath(folder.path)), tuple(parts[2:])
         return Path(os.path.realpath(self.workspaces_dir)), tuple(parts)
 
-    def path_of(self, folder_id: str) -> Path:
-        """The host path of a folder id (the id must name a registered root)."""
-
-        base, relative = self.root_and_parts(folder_id)
-        return base.joinpath(*relative)
-
 
 def data_folder_problem(path: Path, protected: Iterable[Path]) -> str | None:
     """Why a data folder cannot be registered, or None.

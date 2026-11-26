@@ -189,33 +189,46 @@ def _folder_skip_note(
     return f"{folder_id}/ is not available to code because its path could not be verified as a safe folder."
 
 
+def _workspace_root_parts(root: Path, workspaces_dir: Path, *, agent_id: str | None) -> tuple[str, ...] | None:
+    """Return ``root``'s parts below ``workspaces_dir`` without following links, or None with a warning."""
+
+    workspaces_raw = Path(os.path.normpath(workspaces_dir))
+    root_raw = Path(os.path.normpath(root))
+    try:
+        return root_raw.relative_to(workspaces_raw).parts
+    except ValueError:
+        logger.warning(
+            "Skipping a workspace root outside workspaces/ from the code sandbox. "
+            "event=code_access_root_outside_workspaces agent_id=%s root=%s workspaces_dir=%s",
+            agent_id,
+            root,
+            workspaces_dir,
+        )
+        return None
+
+
 def _without_authorization(
     scope: WorkspaceScope,
     data_folders: tuple[DataFolder, ...],
     unconfined: bool,
     *,
     agent_id: str | None = None,
-    task_id: str | None = None,
 ) -> CodeAccess:
     if unconfined:
         raise CodeAccessRefused(UNCONFINED_WITH_AUTHORIZATION_OFF, reason_code=REASON_UNCONFINED_UNAVAILABLE)
     workspaces = Path(os.path.realpath(scope.workspaces_dir))
-    workspaces_raw = Path(os.path.normpath(scope.workspaces_dir))
     read_write: list[Path] = []
     read_only: list[Path] = []
     notes: list[str] = []
     for root in scope.roots:
-        root_raw = Path(os.path.normpath(root))
-        try:
-            parts = root_raw.relative_to(workspaces_raw).parts
-        except ValueError:
-            read_write.append(Path(os.path.realpath(root)))
+        parts = _workspace_root_parts(root, scope.workspaces_dir, agent_id=agent_id)
+        if parts is None:
             continue
         canonical = workspaces.joinpath(*parts)
         problem = _directory_problem(workspaces, parts)
         if problem is not None:
             notes.append(
-                _folder_skip_note("/".join(parts), canonical, problem, agent_id=agent_id, task_id=task_id)
+                _folder_skip_note("/".join(parts), canonical, problem, agent_id=agent_id, task_id=None)
             )
             continue
         read_write.append(canonical)
@@ -225,7 +238,7 @@ def _without_authorization(
         if problem is not None:
             notes.append(
                 _folder_skip_note(
-                    f"{FOLDER_ROOT_DATA}/{folder.name}", canonical, problem, agent_id=agent_id, task_id=task_id
+                    f"{FOLDER_ROOT_DATA}/{folder.name}", canonical, problem, agent_id=agent_id, task_id=None
                 )
             )
             continue
@@ -356,26 +369,30 @@ class _Planner:
         return None
 
 
-def _scope_root_folder_id(root: Path, scope: WorkspaceScope, roots: FolderRoots) -> str | None:
+def _scope_root_folder_id(
+    root: Path, scope: WorkspaceScope, roots: FolderRoots, *, agent_id: str | None
+) -> str | None:
     """Resolve a workspace root to its folder id without following a symlink at the root itself."""
 
-    workspaces_raw = Path(os.path.normpath(scope.workspaces_dir))
-    root_raw = Path(os.path.normpath(root))
-    try:
-        relative = root_raw.relative_to(workspaces_raw)
-    except ValueError:
-        return roots.folder_id_of(Path(os.path.realpath(root)))
-    return roots.folder_id_of(roots.workspaces_dir.joinpath(*relative.parts))
+    parts = _workspace_root_parts(root, scope.workspaces_dir, agent_id=agent_id)
+    if parts is None:
+        return None
+    return roots.folder_id_of(roots.workspaces_dir.joinpath(*parts))
 
 
 def _candidate_folders(
-    scope: WorkspaceScope, roots: FolderRoots, data_folders: tuple[DataFolder, ...], agent_grants: list[GrantV1]
+    scope: WorkspaceScope,
+    roots: FolderRoots,
+    data_folders: tuple[DataFolder, ...],
+    agent_grants: list[GrantV1],
+    *,
+    agent_id: str | None = None,
 ) -> list[str]:
     """The task's folders, the data folders, and the folders in the agent's lasting grants."""
 
     candidates: dict[str, None] = {}
     for root in scope.roots:
-        folder_id = _scope_root_folder_id(root, scope, roots)
+        folder_id = _scope_root_folder_id(root, scope, roots, agent_id=agent_id)
         if folder_id:
             candidates[folder_id] = None
     for folder in data_folders:
@@ -429,13 +446,13 @@ def _plan_candidate_folder(
         base, parts = roots.root_and_parts(folder_id)
     except FolderIdError:
         return None  # a grant on a data folder the operator no longer registers
-    block_reason = _block_note(folder_id, blocked)
-    if block_reason is not None:
-        return block_reason
     data = roots.data_folder(folder_id)
     level = planner.level(folder_id, writable_root=data is None or data.writable)
     if level is None:
         return None
+    block_reason = _block_note(folder_id, blocked)
+    if block_reason is not None:
+        return block_reason
     path = base.joinpath(*parts)
     problem = _directory_problem(base, parts)
     if problem is not None:
@@ -473,7 +490,9 @@ def code_access(
     ]
     mounts: dict[AccessLevel, list[Path]] = {AccessLevel.WRITE: [], AccessLevel.READ: []}
     notes: list[str] = []
-    for folder_id in _candidate_folders(scope, roots, data_folders, agent_grants):
+    for folder_id in _candidate_folders(
+        scope, roots, data_folders, agent_grants, agent_id=planner.principal.agent_id
+    ):
         outcome = _plan_candidate_folder(folder_id, roots, planner, blocked)
         if isinstance(outcome, str):
             notes.append(outcome)

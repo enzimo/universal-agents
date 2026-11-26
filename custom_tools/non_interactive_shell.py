@@ -54,9 +54,10 @@ from custom_tools.code_sandbox import (
     prepare_sandboxed_command,
     release_sandboxed_command,
     sandbox_denial_note,
+    sandbox_link_refusal_path,
 )
 from custom_tools.openshell_sandboxes import OpenShellSandboxError, ensure_sandbox, workspace_mount
-from custom_tools.runtime_context import get_agent_ref
+from custom_tools.runtime_context import bound_task_id, get_agent_ref
 from runtime_hosting.process_run import PROCESS_RUN_ENV_PREFIX
 from runtime_settings.security import SECURITY_LAYER_MODE_BROKER, SECURITY_LAYER_MODE_OPENSHELL
 from custom_tools.shell_execution import (
@@ -656,10 +657,22 @@ def _planned_access(cmd_str: str, *, code_tool: str, unconfined: bool) -> tuple[
         return _refused(cmd_str, str(exc), reason_code=exc.reason_code, termination_reason="spawn_error")
 
 
-def _sandbox_note(planned_notes: tuple[str, ...], sandboxed: Any, completed: Any) -> str:
+def _sandbox_note(
+    planned_notes: tuple[str, ...],
+    sandboxed: Any,
+    completed: Any,
+    *,
+    refused_link: str | None = None,
+) -> str:
     """Folders left out of the sandbox, and what the sandbox allows when the command hit it."""
 
     notes = list(planned_notes)
+    if refused_link is not None:
+        notes.append(
+            "The command was not started because one of its mounted folder paths contains a symbolic link; "
+            "the sandbox never mounts a folder reached through a link."
+        )
+        return " ".join(notes)
     denial = sandbox_denial_note(sandboxed, completed.stderr) if completed.exit_code != 0 else None
     return " ".join([*notes, denial] if denial else notes)
 
@@ -791,6 +804,16 @@ def _run_in_sandbox(
         )
     finally:
         release_sandboxed_command(sandboxed)
+    refused_link = sandbox_link_refusal_path(sandboxed, completed.exit_code, completed.stderr)
+    if refused_link is not None:
+        agent = get_agent_ref()
+        logger.warning(
+            "Refused to start a sandboxed command because a mounted path became a symbolic link. "
+            "event=code_sandbox_link_refused agent_id=%s task_id=%s path=%s",
+            getattr(agent, "id", None),
+            bound_task_id(),
+            refused_link,
+        )
     error = completed.stderr
     if completed.termination_reason == "timeout":
         error = f"{error}\nCommand timed out after {timeout} seconds".strip()
@@ -808,7 +831,7 @@ def _run_in_sandbox(
         "duration_seconds": completed.duration_seconds,
         "sandbox": sandboxed.sandbox,
     }
-    note = _sandbox_note(grants.notes, sandboxed, completed)
+    note = _sandbox_note(grants.notes, sandboxed, completed, refused_link=refused_link)
     if note:
         result["sandbox_note"] = note
     return result
