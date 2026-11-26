@@ -474,7 +474,11 @@ def test_landlock_helper_refuses_rule_path_with_symlink_component(
     outside = tmp_path / "outside"
     (outside / "sub").mkdir(parents=True)
     (outside / "sub" / "secret.txt").write_text("outside-secret\n", encoding="utf-8")
-    marker = tmp_path / "ran.txt"
+    # The marker lives in a writable folder without links, so a command that
+    # ran despite the linked rule path could write it and fail the test.
+    writable = Path(os.path.realpath(tmp_path)) / "writable"
+    writable.mkdir()
+    marker = writable / "ran.txt"
     base = tmp_path / "base"
     base.mkdir()
     if link_position == "final":
@@ -484,18 +488,27 @@ def test_landlock_helper_refuses_rule_path_with_symlink_component(
         os.symlink(outside, base / "mid")
         rule_path = base / "mid" / "sub"
 
-    policy = {
-        "read": list(dict.fromkeys(os.path.realpath(p) for p in code_sandbox.SYSTEM_READ_PATHS)),
-        "write": [str(rule_path)],
-        "device": [os.path.realpath(p) for p in code_sandbox.DEVICE_PATHS],
-        "network": False,
-    }
-    completed = subprocess.run(
-        [sys.executable, "-I", "-S", str(helper), json.dumps(policy), "/bin/sh", "-c", f"echo ran > {marker}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    def run_helper(write_paths: list[str]) -> subprocess.CompletedProcess[str]:
+        policy = {
+            "read": list(dict.fromkeys(os.path.realpath(p) for p in code_sandbox.SYSTEM_READ_PATHS)),
+            "write": write_paths,
+            "device": [os.path.realpath(p) for p in code_sandbox.DEVICE_PATHS],
+            "network": False,
+        }
+        return subprocess.run(
+            [sys.executable, "-I", "-S", str(helper), json.dumps(policy), "/bin/sh", "-c", f"echo ran > {marker}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    # Control: without the linked rule path the command runs and writes the marker.
+    control = run_helper([str(writable)])
+    assert control.returncode == 0, control.stderr
+    assert marker.read_text(encoding="utf-8") == "ran\n"
+    marker.unlink()
+
+    completed = run_helper([str(writable), str(rule_path)])
 
     assert completed.returncode == SANDBOX_FAILURE_EXIT_CODE
     assert code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX in completed.stderr

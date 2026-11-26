@@ -775,7 +775,13 @@ works for, checked for every command:
   here, because a command keeps its folders until it ends. The sandbox cannot
   leave out part of a folder, so a folder with a blocked folder or file inside
   it is left out entirely; the command result's sandbox note says so, and file
-  tools still reach the rest. Code mounts are folders only, and the sandbox
+  tools still reach the rest. This holds for a block on a single file too: a
+  block on one file in a person's own folder or in `team/` keeps that whole
+  folder out of every shell and Python command the block applies to, even
+  when it is the folder commands start in, and for as long as the block
+  exists, including after the file itself is deleted. To give code the folder
+  back, remove the block with `/access unblock <block id>` (`/access list`
+  shows its id). Code mounts are folders only, and the sandbox
   never mounts a folder whose path contains a symbolic link or that the runtime
   itself cannot open; those are skipped with a sandbox note and a warning log
   (and any link appearing after planning is refused before the command starts).
