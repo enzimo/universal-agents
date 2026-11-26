@@ -15,9 +15,9 @@ patched clock). A one-time schedule due immediately instructs the agent to call
 
 Run with ``RUN_LIVE_TIMED_WAIT=1`` against a private NATS server (``NATS_URL`` /
 ``NATS_SERVERS``). Configuration and model credentials are loaded only inside
-the test process from ``TEAM_NATS_LIVE_CONFIG`` / ``../ua-private-config`` and
-``TEAM_NATS_LIVE_ENV`` / ``../ua-private-config/*.env`` via ``ModelKeys``, never
-printed or logged.
+the test process from ``TEAM_NATS_LIVE_CONFIG`` (default ``config.yaml``) and
+``TEAM_NATS_LIVE_ENV`` (default ``debug.env``) via ``ModelKeys``, never printed
+or logged.
 """
 
 from __future__ import annotations
@@ -42,7 +42,12 @@ from custom_agents.model_keys import ModelKeyError, ModelKeys
 from custom_agents.pool_intake import may_take_pool_task
 from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build_strands_model
 from custom_agents.task_human_interaction_blockers import get_human_interaction_blocker
-from custom_agents.timed_waits import TIMED_WAIT_KIND, parse_utc
+from custom_agents.timed_waits import (
+    TIMED_WAIT_ENDED_EVENT,
+    TIMED_WAIT_KIND,
+    TIMED_WAIT_STARTED_EVENT,
+    parse_utc,
+)
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
@@ -60,7 +65,8 @@ from test_live_multi_agent_state_boundaries import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_CONFIG_DIR = PROJECT_ROOT.parent / "ua-private-config"
+DEFAULT_LIVE_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+DEFAULT_LIVE_ENV_PATH = PROJECT_ROOT / "debug.env"
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -78,56 +84,29 @@ _ISO_UTC_RE = re.compile(
 )
 
 
-def _find_existing_file(candidates: list[Path]) -> Path | None:
-    for candidate in candidates:
-        resolved = candidate.expanduser().resolve()
-        if resolved.is_file():
-            return resolved
-    return None
-
-
 def _load_live_env_values() -> dict[str, str]:
-    explicit = os.getenv("TEAM_NATS_LIVE_ENV") or os.getenv("UA_LIVE_MODEL_ENV_FILE")
-    candidates = (
-        [Path(explicit)]
-        if explicit
-        else [
-            PRIVATE_CONFIG_DIR / "hosted-model.env",
-            PRIVATE_CONFIG_DIR / "team.env",
-            PRIVATE_CONFIG_DIR / "debug.env",
-            PROJECT_ROOT / "debug.env",
-        ]
-    )
-    merged: dict[str, str] = {}
-    for candidate in reversed(candidates):
-        resolved = candidate.expanduser().resolve()
-        if not resolved.is_file():
-            continue
-        for key, value in dotenv_values(resolved).items():
-            if key and value:
-                merged[str(key)] = str(value).strip()
-    return merged
+    env_path = Path(
+        os.getenv("TEAM_NATS_LIVE_ENV") or str(DEFAULT_LIVE_ENV_PATH)
+    ).expanduser()
+    if not env_path.is_file():
+        pytest.skip(
+            f"No live env file at {env_path}; set TEAM_NATS_LIVE_CONFIG and TEAM_NATS_LIVE_ENV."
+        )
+    return {
+        str(key): str(value).strip()
+        for key, value in dotenv_values(env_path).items()
+        if key and value
+    }
 
 
 def _build_live_model() -> tuple[Any, dict[str, Any]]:
-    explicit_cfg = (
-        os.getenv("TEAM_NATS_LIVE_CONFIG")
-        or os.getenv("UA_LIVE_CONFIG")
-        or os.getenv("UA_LIVE_INSTANCE_CONFIG")
-    )
-    cfg_candidates = (
-        [Path(explicit_cfg)]
-        if explicit_cfg
-        else [
-            PRIVATE_CONFIG_DIR / "instance_config.yaml",
-            PRIVATE_CONFIG_DIR / "config.yml",
-            PRIVATE_CONFIG_DIR / "config.yaml",
-            PROJECT_ROOT / "config.yaml",
-        ]
-    )
-    config_path = _find_existing_file(cfg_candidates)
-    if config_path is None:
-        pytest.skip("No live instance config found in TEAM_NATS_LIVE_CONFIG or ../ua-private-config.")
+    config_path = Path(
+        os.getenv("TEAM_NATS_LIVE_CONFIG") or str(DEFAULT_LIVE_CONFIG_PATH)
+    ).expanduser()
+    if not config_path.is_file():
+        pytest.skip(
+            f"No live config file at {config_path}; set TEAM_NATS_LIVE_CONFIG and TEAM_NATS_LIVE_ENV."
+        )
 
     env_values = _load_live_env_values()
 
@@ -294,7 +273,19 @@ async def test_live_scheduled_one_time_job_waits_one_minute_and_resumes_in_same_
                 assert archived is not None
                 assert archived["status"] == ProgressState.COMPLETED.value, archived
                 reply_task = archived["main_task"]
-                assert reply_task.task_id == paused_task_id
+                history_details = [
+                    entry.details
+                    for entry in (reply_task.execution_history or [])
+                    if isinstance(entry.details, dict)
+                ]
+                started_events = [d for d in history_details if d.get("event") == TIMED_WAIT_STARTED_EVENT]
+                ended_events = [d for d in history_details if d.get("event") == TIMED_WAIT_ENDED_EVENT]
+                assert len(started_events) == 1, history_details
+                assert started_events[0].get("minutes") == 1, started_events[0]
+                assert len(ended_events) == 1, history_details
+                assert ended_events[0].get("how") == "live_turn", ended_events[0]
+                waited = ended_events[0].get("waited_minutes")
+                assert isinstance(waited, (int, float)) and waited >= 1.0, ended_events[0]
 
                 # 4. Verify real elapsed time (>= 1 minute), clean blocker removal, and reported UTC timestamp.
                 assert completed_at - requested_at >= timedelta(seconds=59)
