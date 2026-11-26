@@ -299,6 +299,8 @@ agent:
   max_queued_top_level_tasks: 50                # Maximum admitted top-level tasks tracked at once.
   max_tool_calls_per_task: 150                  # Cumulative tool calls across one ordinary local task-processing invocation, not per model turn. Accepted Objective work profiles use their own session total. Set null or <=0 to disable.
   max_tool_result_tokens_per_call: 20000        # Per-tool-result token safety cap. Oversized results are offloaded to artifacts and replaced with compact previews. Set null or <=0 to disable.
+  max_wait_minutes_without_approval: 20         # Minutes one task may pause itself in total with the wait tool (all its waits together), without anyone's approval. Agents cannot change it.
+  max_wait_minutes_with_approval: 1440          # Minutes one task may pause itself in total once a person approved long_wait for it or its scheduled job; at least the value above, at most 1440 (24 hours). Agents cannot change it.
 
   # Policy for recoverable runtime budget/overload pauses.
   runtime_budget_policy:

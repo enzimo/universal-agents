@@ -593,3 +593,82 @@ def test_version_15_export_upgrades_with_blob_defaults_and_v16_carries_blob_sett
     imported_v16 = GatewayInstanceConfig.load(target2 / "instance_config.yaml")
     assert imported_v16.agent.blob_retention_days == 14
     assert imported_v16.transport.queues.max_bytes.blobs == 256 * MIB
+
+
+def test_version_16_export_upgrades_with_wait_limit_defaults_and_v17_carries_the_pair(tmp_path: Path) -> None:
+    """Settings v17 carries both timed-wait limits together and upgrades v16 exports with their defaults.
+
+    The round-trip pair (5, 10) has ``with_approval`` below the default ``without_approval`` (20),
+    so importing proves both settings are applied together before cross-field validation runs.
+    """
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    class ExportedAsV16(SettingsSection):
+        schema_version = 16
+
+        def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
+            record = SettingV1(path=("heartbeat", "enabled"), value=False)
+            return SectionExport(records=[record.model_dump(mode="json")])
+
+    path, _config = _old_instance(tmp_path / "src-v16")
+    target = tmp_path / "from-v16"
+    plan = _import(_export(tmp_path / "src-v16", path, ExportedAsV16()), target, dry_run=False)
+    assert not plan.by_outcome(RecordOutcome.REFUSED)
+    imported_v16 = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported_v16.agent.max_wait_minutes_without_approval == 20
+    assert imported_v16.agent.max_wait_minutes_with_approval == 1440
+
+    def customized_waits(config: Any) -> None:
+        config.agent.max_wait_minutes_without_approval = 5
+        config.agent.max_wait_minutes_with_approval = 10
+
+    path2, _config2 = _old_instance(tmp_path / "src-v17", customized_waits)
+    out2 = _export(tmp_path / "src-v17", path2)
+    assert {record.dotted: record.value for record in _records(out2)} == {
+        "agent.max_wait_minutes_without_approval": 5,
+        "agent.max_wait_minutes_with_approval": 10,
+    }
+    target2 = tmp_path / "to-v17"
+    plan2 = _import(out2, target2, dry_run=False)
+    assert not plan2.by_outcome(RecordOutcome.REFUSED)
+    imported_v17 = GatewayInstanceConfig.load(target2 / "instance_config.yaml")
+    assert imported_v17.agent.max_wait_minutes_without_approval == 5
+    assert imported_v17.agent.max_wait_minutes_with_approval == 10
+
+
+def test_an_invalid_wait_limit_pair_refuses_carried_agent_settings(tmp_path: Path) -> None:
+    """A wait-limit ordering failure blames ``('agent',)`` and refuses carried ``agent.*`` settings together."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    class CraftedConflict(SettingsSection):
+        def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
+            records = [
+                SettingV1(path=("heartbeat", "enabled"), value=False),
+                SettingV1(path=("agent", "blob_retention_days"), value=14),
+                SettingV1(path=("agent", "max_wait_minutes_without_approval"), value=30),
+                SettingV1(path=("agent", "max_wait_minutes_with_approval"), value=25),
+            ]
+            return SectionExport(records=[record.model_dump(mode="json") for record in records])
+
+    path, _config = _old_instance(tmp_path)
+    out = _export(tmp_path, path, CraftedConflict())
+    target = tmp_path / "new"
+
+    plan = _import(out, target, dry_run=False)
+
+    outcomes = {record.key: record for record in plan.records}
+    assert outcomes["heartbeat.enabled"].outcome is RecordOutcome.IMPORT
+    for refused_key in (
+        "agent.blob_retention_days",
+        "agent.max_wait_minutes_without_approval",
+        "agent.max_wait_minutes_with_approval",
+    ):
+        assert outcomes[refused_key].outcome is RecordOutcome.REFUSED, refused_key
+        assert "must be at least agent.max_wait_minutes_without_approval (30)" in outcomes[refused_key].reason
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported.heartbeat.enabled is False
+    assert imported.agent.blob_retention_days == 7
+    assert imported.agent.max_wait_minutes_without_approval == 20
+    assert imported.agent.max_wait_minutes_with_approval == 1440
