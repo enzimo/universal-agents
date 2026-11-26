@@ -245,14 +245,16 @@ async def test_live_timed_wait_allows_b_meanwhile_resumes_a_and_runs_c() -> None
 
                 # 1. Task A runs real wait(5, "Portainer redeploy") and frees the worker slot.
                 await channel.publish(manager_id, _chat(task_a, "TASK_A_WAIT: wait 5 minutes", replies.name, manager_id))
-                # The record is saved before WAITING, and only WAITING frees the slot,
-                # so wait for both before checking the slot.
+                # Task operations run on their own thread: the record is saved first,
+                # then the state shows WAITING, and the slot is released only after
+                # that state change's history entry commits. Wait for all three; the
+                # timeout fails the test if the slot is never freed.
                 await _wait_for(
                     lambda: (get_human_interaction_blocker(tasks, task_a) or {}).get("kind") == "timed_wait"
-                    and getattr(tasks.get_task_info(task_a), "state", None) == ProgressState.WAITING,
+                    and getattr(tasks.get_task_info(task_a), "state", None) == ProgressState.WAITING
+                    and tasks.task_state.current_in_progress_task_id is None,
                     timeout=15.0,
                 )
-                assert tasks.task_state.current_in_progress_task_id is None
 
                 # 2. Task B arrives while A waits and is answered.
                 await channel.publish(manager_id, _chat(task_b, "TASK_B_WORK: quick question", replies.name, manager_id))
