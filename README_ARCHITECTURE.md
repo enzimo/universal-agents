@@ -1646,7 +1646,12 @@ records) through `custom_agents/paused_wait_resume.py` and
   `orphaned_work_takeover.take_over_orphaned_work` starts a replacement, which
   adopts the task transactionally via `agent_liveness` /
   `commit_task_runtime_recovery`, stays alive via `worker_holds_work`, and
-  resumes it at `resume_at`.
+  resumes it at `resume_at`. Once a wait has ended and the resumed turn is
+  actively executing, normal executing-task restart recovery applies: if power
+  is lost during that running turn and the worker comes back after
+  `agent.restart_executing_task_grace_seconds` (900 s by default), recovery
+  fails the task as stale and notifies the requester (operators can raise or
+  unset `restart_executing_task_grace_seconds`).
 - **Recurring schedules**: in a recurring scheduled run (verified
   scheduler-issued task context), waits that would reach or pass the schedule's
   next fire time are refused so the next occurrence is not skipped. After a
@@ -1659,10 +1664,12 @@ records) through `custom_agents/paused_wait_resume.py` and
   treats an active timer as `WaitReason.TIMED_WAIT` (with a 5-minute grace
   window past `resume_at`) and a held answer as `WaitReason.ANSWER_HELD`, while
   overdue unheld waits are reported as stuck. During lease-loss wind-down
-  (`custom_agents/lease_loss_wind_down.py`), any `WAITING` timed wait whose
-  `resume_at` already outlasts the worker's shutdown deadline (with no held
-  answer and not yet resumed) fails immediately at classification and on each
-  poll (`timed_wait_runtime.fail_timed_wait_outlasting_deadline`, logging
+  (`custom_agents/lease_loss_wind_down.py`), `_wait_for_resumable_tasks`
+  resumes any already-due timed waits before checking the deadline, and fails
+  any `WAITING` timed wait whose `resume_at` falls after the deadline (or
+  within the final `WIND_DOWN_POLL_SECONDS` poll margin, with no held answer
+  and not yet resumed) immediately on entry and on each poll
+  (`timed_wait_runtime.fail_timed_wait_outlasting_deadline`, logging
   `event=worker_wind_down_timed_wait_outlasts_deadline`), stops pending
   delegated subtasks, clears its blocker and paused turn, and tells the
   requester with a dedicated early-shutdown message; waits due before the

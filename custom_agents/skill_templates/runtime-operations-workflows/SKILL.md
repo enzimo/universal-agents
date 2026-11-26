@@ -76,8 +76,9 @@ or a stale plan fails the call because that change was not applied.
 
 When a worker loses its launch lease it winds down: it returns unstarted and
 running tasks to you, immediately fails any `WAITING` timed wait whose resume
-time already outlasts `agent.schedule_workers.lease_loss_wait_timeout_seconds`
-(with no held answer, stopping its pending subtasks and notifying the requester
+time is already after the wind-down deadline
+(`agent.schedule_workers.lease_loss_wait_timeout_seconds` after lease loss,
+with no held answer, stopping its pending subtasks and notifying the requester
 instead of holding the old worker alive), keeps tasks waiting on a person, a
 subtask, or a timed wait due before that deadline until the deadline, then
 exits. Your runtime,

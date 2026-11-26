@@ -239,15 +239,38 @@ async def stage_run(
     return run_id
 
 
-async def start_run(agent: Any, *, task_id: str, run_id: str) -> None:
-    """Post-``WAITING`` step for a staged setup run: announce its workflow, then open pieces."""
+def _workflow_announce_attempted(agent: Any) -> set[str]:
+    """Run ids whose workflow chat announcement was already attempted in this process."""
 
+    attempted: set[str] | None = getattr(agent, "_setup_workflow_announce_attempted", None)
+    if attempted is None:
+        attempted = set()
+        agent._setup_workflow_announce_attempted = attempted
+    return attempted
+
+
+async def start_run(agent: Any, *, task_id: str, run_id: str) -> None:
+    """Post-``WAITING`` step for a staged setup run: announce its workflow, then open pieces.
+
+    If a concurrent decision already settled the run during ``stage_run`` (before
+    ``WAITING`` was saved), resume the task directly instead of leaving it for a
+    later recovery pass.
+    """
+
+    settled_run: ToolSetupRunV1 | None = None
     async with _lock(agent, run_id):
         run = await _load(agent, run_id)
         if run is None:
             return
-        # The link comes before any page, so the person knows what the pages are for.
-        run = await _announce_workflow(agent, run)
+        if run.status != RUN_WAITING:
+            settled_run = run
+        else:
+            # The link comes before any page, so the person knows what the pages are for.
+            _workflow_announce_attempted(agent).add(run_id)
+            run = await _announce_workflow(agent, run)
+    if settled_run is not None:
+        await _resume(agent, settled_run, None, None)
+        return
     logger.info(
         "A task waits for its tools to be set up. event=tool_setup_run_waiting run_id=%s task_id=%s pieces=%s",
         run_id,
@@ -927,10 +950,18 @@ async def _announce_workflow_if_needed(agent: Any, run: ToolSetupRunV1) -> ToolS
 
     if run.status != RUN_WAITING or not run.workflow_id or run.workflow_announced:
         return run
+    attempted = _workflow_announce_attempted(agent)
+    if run.run_id in attempted:
+        return run
+    if any(piece.attempt > 0 or piece.setup_request_id for piece in run.pieces):
+        # Pages were already opened, so start_run already ran for this run.
+        attempted.add(run.run_id)
+        return run
     async with _lock(agent, run.run_id):
         current = await _load(agent, run.run_id)
         if current is None or current.status != RUN_WAITING or current.workflow_announced:
             return current or run
+        attempted.add(run.run_id)
         return await _announce_workflow(agent, current)
 
 

@@ -687,6 +687,15 @@ While a task is in a timed wait:
     on-demand or pool worker), TeamLead's orphaned-work takeover starts a
     replacement of the same type, which adopts the waiting task and resumes it
     when due.
+  - **Outage during an already-resumed running turn:** once a wait has ended
+    and the resumed turn is actively running, the normal executing-task restart
+    grace applies. If power is lost while that resumed turn is running and the
+    system comes back after `agent.restart_executing_task_grace_seconds`
+    (900 seconds / 15 minutes by default), restart recovery marks the task
+    failed as stale and tells the requester rather than re-running it
+    automatically. Operators can raise or unset
+    `restart_executing_task_grace_seconds` if running turns should recover
+    after longer outages.
 
 ## Change the worker or launch rules
 

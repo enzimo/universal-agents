@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from custom_agents import timed_waits as timed_waits_rules
@@ -344,19 +344,52 @@ def clear_answered_blocker_with_resume_note(
         return clear_human_interaction_blocker(manager, task_id), None
 
     task_info = manager.get_task_info(task_id)
-    note = timed_waits_rules.resume_note(blocker, now=now or timed_waits_rules.utc_now())
+    moment = (now or timed_waits_rules.utc_now()).astimezone(timezone.utc)
+    now_iso = moment.isoformat()
+    note = timed_waits_rules.resume_note(blocker, now=moment)
+    raw_minutes = blocker.get("minutes")
+    fallback_minutes = raw_minutes if isinstance(raw_minutes, int) and not isinstance(raw_minutes, bool) else 0
+    elapsed = timed_waits_rules.waited_minutes(blocker.get("requested_at"), moment, fallback_minutes)
+    ended_entry = (
+        build_task_history_entry(
+            manager,
+            task_id,
+            f"Timed wait ended after {elapsed} minutes; resuming paused turn.",
+            entry_type=TaskHistoryType.QUERY_EVENT,
+            importance=TaskHistoryImportance.HIGH,
+            timestamp=now_iso,
+            details={
+                "event": timed_waits_rules.TIMED_WAIT_ENDED_EVENT,
+                "interrupt_id": blocker.get("interrupt_id"),
+                "call_id": blocker.get("call_id"),
+                "tool": blocker.get("tool"),
+                "tool_use_id": blocker.get("tool_use_id"),
+                "minutes": blocker.get("minutes"),
+                "waited_minutes": elapsed,
+                "resumed_at": now_iso,
+                "how": "live_turn",
+            },
+        )
+        if task_info is not None
+        else None
+    )
     unmarked_blocker = unmark_wait_record(blocker)
     previous_directive = snapshot_runtime_resume_directive(manager.task_state, task_id)
+    previous_history_count = len(task_info.task.execution_history) if task_info is not None else 0
     manager.task_state.human_interaction_blockers.pop(task_id, None)
     if replace_directives:
         drop_resume_directive_blocks(manager.task_state, task_id, replace_directives)
     added = add_runtime_resume_directive(manager.task_state, task_id, note)
+    if task_info is not None and ended_entry is not None:
+        task_info.task.execution_history.append(ended_entry)
     try:
         manager._persist_runtime_state()
     except Exception:
         if task_info is None or manager.get_task_info(task_id) is task_info:
             manager.task_state.human_interaction_blockers[task_id] = unmarked_blocker
             restore_runtime_resume_directive(manager.task_state, task_id, previous_directive)
+            if task_info is not None:
+                del task_info.task.execution_history[previous_history_count:]
         raise
     if task_info is not None and manager.get_task_info(task_id) is not task_info:
         return False, None

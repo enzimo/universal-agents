@@ -55,7 +55,6 @@ from custom_agents import timed_waits as timed_waits_rules
 from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS
 from custom_agents.paused_wait_resume import (
     WaitLogSpec,
-    append_wait_history,
     drop_paused_turn,
     hand_answer_to_paused_turn,
     paused_turn_waits,
@@ -630,32 +629,10 @@ async def _answer_paused_turn(agent: Any, *, task_id: str, blocker: dict[str, An
     raw_minutes = blocker.get("minutes")
     fallback_minutes = raw_minutes if isinstance(raw_minutes, int) and not isinstance(raw_minutes, bool) else 0
     elapsed = waited_minutes(blocker.get("requested_at"), now, fallback_minutes)
-    try:
-        await append_wait_history(
-            agent,
-            task_id,
-            f"Timed wait ended after {elapsed} minutes; resuming paused turn.",
-            {
-                "event": TIMED_WAIT_ENDED_EVENT,
-                "interrupt_id": interrupt_id,
-                "call_id": blocker.get("call_id"),
-                "tool": blocker.get("tool"),
-                "tool_use_id": blocker.get("tool_use_id"),
-                "minutes": blocker.get("minutes"),
-                "waited_minutes": elapsed,
-                "resumed_at": now_iso,
-                "how": "live_turn",
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 - answer is already held and waking the drain
-        logger.warning(
-            "Timed wait answer was held, but writing its history entry failed. "
-            "event=timed_wait_history_failed task_id=%s interrupt_id=%s agent_id=%s error_type=%s",
-            task_id,
-            interrupt_id,
-            getattr(agent, "id", "-"),
-            type(exc).__name__,
-        )
+    # The ``timed_wait_ended`` history entry is written atomically when the live
+    # paused turn consumes the blocker (``clear_answered_blocker_with_resume_note``)
+    # so a crash while the answer is only held in memory cannot leave two end
+    # entries after restart note-resume.
     logger.info(
         "Timed wait ended; answer waits for the task's lane. "
         "event=timed_wait_answer_held task_id=%s interrupt_id=%s agent_id=%s waited_minutes=%s",
@@ -1022,14 +999,47 @@ async def fail_timed_wait_outlasting_deadline(
         task_info, blocker, pending_subtasks = found
         message = message_for_blocker(blocker)
         now_iso = timed_waits_rules.utc_now().isoformat()
-        failed = bool(await run_ops(manager.fail_task, task_id, message, now_iso))
+        try:
+            failed = bool(await run_ops(manager.fail_task, task_id, message, now_iso))
+        except Exception as exc:
+            # fail_task commits FAILED before appending its history entry; if a
+            # post-transition write raised, the task is already terminal and the
+            # next wind-down poll will skip it, so finish follow-ups now instead
+            # of claiming a retry.
+            info_after = await run_ops(manager.get_task_info, task_id)
+            already_terminal = info_after is None or bool(
+                await run_ops(manager.is_terminal_state, info_after.state)
+            )
+            if not already_terminal:
+                raise
+            logger.warning(
+                "Timed wait moved to FAILED during wind-down, but a post-transition write failed; "
+                "continuing subtask stop and requester notification. "
+                "event=timed_wait_wind_down_fail_post_write_error task_id=%s agent_id=%s error_type=%s",
+                task_id,
+                getattr(agent, "id", "-"),
+                type(exc).__name__,
+                exc_info=True,
+            )
+            failed = True
         if not failed:
             return None
-        await discard_steering(
-            agent,
-            task_id=task_id,
-            reason="wind_down_timed_wait_outlasts_deadline",
-        )
+        try:
+            await discard_steering(
+                agent,
+                task_id=task_id,
+                reason="wind_down_timed_wait_outlasts_deadline",
+            )
+        except Exception as exc:  # noqa: BLE001 - task is already FAILED; still stop subtasks and notify requester
+            logger.warning(
+                "Timed wait moved to FAILED during wind-down, but discarding steering state failed; "
+                "continuing subtask stop and requester notification. "
+                "event=timed_wait_wind_down_discard_steering_failed task_id=%s agent_id=%s error_type=%s",
+                task_id,
+                getattr(agent, "id", "-"),
+                type(exc).__name__,
+                exc_info=True,
+            )
         return HopelessTimedWaitFailure(
             task_info=task_info,
             resume_at=str(blocker.get("resume_at") or ""),

@@ -152,12 +152,16 @@ def _snapshot_runtime_rows(db_path: Path) -> list[tuple[str, str]]:
     return [(str(owner), str(payload)) for owner, payload in rows]
 
 
-def _snapshot_agent_state_row(db_path: Path, agent_id: str) -> tuple[Any, ...] | None:
+def _snapshot_agent_state_row(db_path: Path, agent_id: str) -> tuple[str, int] | None:
+    """Return ``(agent_id, is_exiting)`` without racing on concurrent heartbeat ``last_seen_at`` updates (F2)."""
     with sqlite3.connect(db_path) as conn:
-        return conn.execute(
-            "SELECT agent_id, is_exiting, last_seen_at, full_status_json FROM agent_states WHERE agent_id = ?",
+        row = conn.execute(
+            "SELECT agent_id, is_exiting FROM agent_states WHERE agent_id = ?",
             (agent_id,),
         ).fetchone()
+    if row is None:
+        return None
+    return (str(row[0]), int(row[1]))
 
 
 async def _abruptly_kill_agent(agent: UniversalAgent, agent_task: asyncio.Task[Any]) -> None:
@@ -454,8 +458,8 @@ async def _run_power_loss_scenario(
                 assert rows_after_kill == rows_before_kill, (
                     "Abrupt kill must not run shutdown mutations on active_task_runtime"
                 )
-                assert state_after_kill == state_before_kill, (
-                    "Abrupt kill must not mark agent_states as exiting or alter last_seen_at"
+                assert state_after_kill == state_before_kill == (first_agent_id, 0), (
+                    "Abrupt kill must not mark agent_states as exiting"
                 )
 
             # --- Phase 3: advance clock, restart nats-server from SAME JetStream store_dir, start fresh agent ---

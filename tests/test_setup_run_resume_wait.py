@@ -1228,3 +1228,152 @@ async def test_c09_resume_refuses_note_path_while_task_is_executing(lead, woken,
     assert list(lead.task_manager.task_state.task_queue) == []
     assert woken == []
     assert "event=tool_setup_run_executing_with_blocker" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_f7_setup_run_settled_inside_stage_run_window_resumes_immediately_in_start_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F7: a setup run settled between stage_run's blocker write and interrupt_id save resumes immediately in start_run."""
+
+    import threading
+    from custom_tools.runtime_context import task_work
+    from custom_tools.tool_stop import ToolStop
+
+    woken: list = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    manager = TaskManager(db_path=str(tmp_path / "f7_gap.db"))
+    manager.set_owner_identity(AGENT_ID, "TeamArchitect", "team", "TeamArchitect")
+    task = Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Set up GitHub")
+    header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway_chat")
+    meta = MessageMeta(conversation_id="conv-1", msg_correlation_id="corr-1")
+    assert manager.add_task(task, header, meta, owner_person_id="user-1")
+    assert manager.get_next_task_to_process() == TASK
+    manager.update_main_task_state(TASK, ProgressState.IN_PROGRESS, _now())
+    agent = SimpleNamespace(
+        id=AGENT_ID,
+        name="TeamArchitect",
+        team_id="team",
+        named_agent_type="TeamArchitect",
+        task_manager=manager,
+        _interrupted_turn_sessions={},
+        _pending_interrupt_responses={},
+        _set_active_execution_context=lambda tid: ToolStop(agent_id=AGENT_ID, task_id=tid),
+        _clear_active_execution_context=lambda: None,
+        _refresh_self_agent_state=AsyncMock(),
+        _logger=logging.getLogger("test.f7"),
+        _agent_id_by_name={},
+        named_agent_type_queue_map={},
+        mid_turn_steering_config={},
+    )
+    run_repository(agent).create(
+        ToolSetupRunV1(
+            run_id="run-f7",
+            team_id="team",
+            person_id="user-1",
+            task_id=TASK,
+            agent_id=AGENT_ID,
+            agent_type="TeamArchitect",
+            tool_ids=("cli:github",),
+            interrupt_id="",
+            pieces=(RunPieceV1(piece_id="access", tool_id="cli:github", kind="access", status=DONE, attempt=1),),
+        )
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_complete(_agent, _run) -> None:
+        entered.set()
+        assert release.wait(timeout=5.0)
+
+    monkeypatch.setattr(tool_setup_run_runtime, "complete_access_steps", slow_complete)
+    advance_task = asyncio.create_task(tool_setup_run_runtime.advance(agent, "run-f7"))
+    for _ in range(200):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.005)
+    assert entered.is_set()
+
+    orig_run = manager.operations_runtime.run
+    advance_result: list[bool] = []
+
+    async def intercept(fn, *args, **kwargs):
+        result = await orig_run(fn, *args, **kwargs)
+        target = getattr(fn, "func", None)
+        if target is not None and target.__name__ == "record_human_interaction_blocker" and not advance_result:
+            # Blocker just written by stage_run; interrupt_id not yet saved on the run.
+            release.set()
+            advance_result.append(await advance_task)
+        return result
+
+    monkeypatch.setattr(manager.operations_runtime, "run", intercept)
+    fake_result = SimpleNamespace(
+        interrupts=[
+            SimpleNamespace(
+                id="int-f7",
+                name="tool_setup_run",
+                reason={"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-f7", "summary": "s"},
+            )
+        ]
+    )
+    with task_work(TASK) as work:
+        work.strands = SimpleNamespace(replace_before_next_turn=False)
+        await task_steering_runtime.send_interrupt_request_for_result(
+            agent,
+            result=fake_result,
+            task=task,
+            msg_header=header,
+            msg_meta=meta,
+            invoke_kwargs={},
+            callback_handler=lambda **_kw: None,
+            full_prompt="s",
+        )
+
+    assert advance_result == [False]
+    assert TASK in agent._pending_interrupt_responses
+    assert len(woken) == 1
+    blocker = get_human_interaction_blocker(manager, TASK)
+    assert blocker is not None and answer_held(blocker, AGENT_ID)
+
+
+@pytest.mark.asyncio
+async def test_f8_setup_run_recovery_does_not_repeat_failed_workflow_announcement_every_pass(
+    lead, woken, monkeypatch, caplog
+) -> None:
+    """F8: a permanent workflow-notice send failure is attempted at most once per process, not on every recovery pass."""
+
+    pause_on_setup(lead)
+    run = run_repository(lead).get("run-1")
+    assert run is not None
+    run_repository(lead).save(
+        run.model_copy(
+            update={
+                "workflow_id": "wf-f8",
+                "workflow_announced": False,
+                "pieces": (
+                    RunPieceV1(piece_id="access", tool_id="cli:github", kind="access", status="waiting", attempt=0),
+                ),
+            }
+        )
+    )
+    send_mock = AsyncMock(side_effect=RuntimeError("chat transport down"))
+    lead.name = "TeamArchitect"
+    lead.team_comms = SimpleNamespace(send_message=send_mock)
+    monkeypatch.setattr(tool_setup_run_runtime, "RECENT_RUN_SECONDS", 0.0)
+    monkeypatch.setattr(tool_setup_run_runtime, "_names", lambda _a, _r: {"cli:github": "GitHub"})
+    monkeypatch.setattr(
+        tool_setup_run_runtime,
+        "_chat_envelope",
+        lambda _a, notice, _ti, **_k: (notice, "gateway_chat"),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        lead._setup_run_check_after = 0.0
+        await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=100.0)
+        lead._setup_run_check_after = 0.0
+        await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=200.0)
+        lead._setup_run_check_after = 0.0
+        await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=300.0)
+
+    assert send_mock.await_count == 1
+    assert caplog.text.count("event=tool_setup_workflow_notice_failed") == 1
