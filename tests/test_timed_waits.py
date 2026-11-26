@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from strands.interrupt import Interrupt, InterruptException, _InterruptState
 from strands.types.tools import ToolContext
 
 from access_control.identity import ENV_SCHEDULER_SIGNING_KEY, ISSUER_GATEWAY, ISSUER_SCHEDULER, ContextSigner
-from custom_agents import schedule_store as schedule_store_module
+from custom_agents import timed_waits as timed_waits_rules
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.task_manager import TaskManager
 from custom_agents.timed_waits import (
@@ -45,7 +46,6 @@ from custom_messages.enums import (
     TaskHistoryImportance,
     TaskHistoryType,
 )
-from custom_tools.providers import timed_waits as timed_waits_provider
 from custom_tools.providers.timed_waits import long_wait, wait
 from custom_tools.runtime_context import set_agent_ref, task_work
 from runtime_settings.timed_waits import TimedWaitLimits
@@ -61,11 +61,27 @@ TASK_ID = "task-timed-wait"
 AGENT_ID = "agent-worker-1"
 
 
-def _make_tool_context(tool_use_id: str, *, interrupt_state: _InterruptState | None = None) -> ToolContext:
+def _make_tool_context(
+    tool_use_id: str,
+    *,
+    interrupt_state: _InterruptState | None = None,
+    step_tracking_id: str | None = None,
+    tool_name_str: str = "wait",
+    messages: list[dict[str, Any]] | None = None,
+) -> ToolContext:
     state = interrupt_state if interrupt_state is not None else _InterruptState()
-    fake_strands = SimpleNamespace(_interrupt_state=state)
+    msg_list = list(messages) if messages is not None else []
+    if step_tracking_id is not None:
+        msg_list.append(
+            {
+                "role": "assistant",
+                "tracking_id": step_tracking_id,
+                "content": [{"toolUse": {"toolUseId": tool_use_id, "name": tool_name_str, "input": {}}}],
+            }
+        )
+    fake_strands = SimpleNamespace(_interrupt_state=state, messages=msg_list)
     return ToolContext(
-        tool_use={"toolUseId": tool_use_id, "name": "wait", "input": {}},
+        tool_use={"toolUseId": tool_use_id, "name": tool_name_str, "input": {}},
         agent=fake_strands,  # type: ignore[arg-type]
         invocation_state={},
     )
@@ -77,25 +93,29 @@ def _record_started_wait(
     *,
     tool_use_id: str,
     minutes: int,
+    call_id: str | None = None,
     tool: str = WAIT_TOOL_NAME,
     requested_at: datetime = BASE_TIME,
     reason: str = "wait for deploy",
 ) -> None:
     resume_at = requested_at + timedelta(minutes=minutes)
+    details: dict[str, Any] = {
+        "event": TIMED_WAIT_STARTED_EVENT,
+        "tool": tool,
+        "tool_use_id": tool_use_id,
+        "minutes": minutes,
+        "requested_at": requested_at.isoformat(),
+        "resume_at": resume_at.isoformat(),
+        "reason": reason,
+    }
+    if call_id:
+        details["call_id"] = call_id
     manager.append_history_entry(
         task_id,
         f"Waiting {minutes} minutes.",
         entry_type=TaskHistoryType.QUERY_EVENT,
         importance=TaskHistoryImportance.HIGH,
-        details={
-            "event": TIMED_WAIT_STARTED_EVENT,
-            "tool": tool,
-            "tool_use_id": tool_use_id,
-            "minutes": minutes,
-            "requested_at": requested_at.isoformat(),
-            "resume_at": resume_at.isoformat(),
-            "reason": reason,
-        },
+        details=details,
     )
 
 
@@ -186,13 +206,13 @@ def test_wait_ledger_counts_both_tools_deduplicates_tool_use_id_and_survives_res
 
 
 def test_budget_refusal_messages_match_auth_mode_and_limits() -> None:
-    ledger = WaitLedger(entries_by_tool_use_id={}, total_minutes=15)
+    ledger = WaitLedger(entries_by_call_id={}, total_minutes=15)
     limits = TimedWaitLimits(without_approval=20, with_approval=1440)
 
     assert budget_refusal(ledger, 5, WAIT_TOOL_NAME, limits) is None
 
-    # Auth on: mentions used/left, request_access, fn:long_wait, long_wait, 24 hours.
-    msg_auth_on = budget_refusal(ledger, 6, WAIT_TOOL_NAME, limits, authorization_on=True)
+    # Auth on, without long_wait: mentions used/left, request_access, fn:long_wait, long_wait, 24 hours.
+    msg_auth_on = budget_refusal(ledger, 6, WAIT_TOOL_NAME, limits, authorization_on=True, has_long_wait_tool=False)
     assert msg_auth_on is not None
     assert "15 minutes already used" in msg_auth_on
     assert "5 minutes left" in msg_auth_on
@@ -200,6 +220,12 @@ def test_budget_refusal_messages_match_auth_mode_and_limits() -> None:
     assert LONG_WAIT_TOOL_ID in msg_auth_on
     assert LONG_WAIT_TOOL_NAME in msg_auth_on
     assert "24 hours" in msg_auth_on
+
+    # Auth on, agent already holds long_wait (C17): tells it directly to use long_wait.
+    msg_auth_on_has = budget_refusal(ledger, 6, WAIT_TOOL_NAME, limits, authorization_on=True, has_long_wait_tool=True)
+    assert msg_auth_on_has is not None
+    assert "Use long_wait instead" in msg_auth_on_has
+    assert "request_access" not in msg_auth_on_has
 
     # Auth off, agent has long_wait (C04).
     msg_auth_off_has = budget_refusal(ledger, 6, WAIT_TOOL_NAME, limits, authorization_on=False, has_long_wait_tool=True)
@@ -217,7 +243,7 @@ def test_budget_refusal_messages_match_auth_mode_and_limits() -> None:
     assert "request_access" not in msg_auth_off_missing
 
     # long_wait ceiling.
-    heavy_ledger = WaitLedger(entries_by_tool_use_id={}, total_minutes=1430)
+    heavy_ledger = WaitLedger(entries_by_call_id={}, total_minutes=1430)
     assert budget_refusal(heavy_ledger, 10, LONG_WAIT_TOOL_NAME, limits) is None
     msg_ceiling = budget_refusal(heavy_ledger, 11, LONG_WAIT_TOOL_NAME, limits)
     assert msg_ceiling is not None
@@ -312,12 +338,12 @@ async def test_wait_raises_interrupt_and_resumed_call_returns_waited_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now_box = [BASE_TIME]
-    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: now_box[0])
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
 
     mgr = _make_manager(tmp_path / "manager.db")
     agent = _make_agent(mgr)
     state = _InterruptState()
-    ctx = _make_tool_context("tu-pause-1", interrupt_state=state)
+    ctx = _make_tool_context("tu-pause-1", interrupt_state=state, step_tracking_id="step-1")
 
     set_agent_ref(agent)  # type: ignore[arg-type]
     try:
@@ -332,13 +358,21 @@ async def test_wait_raises_interrupt_and_resumed_call_returns_waited_time(
     assert interrupt.reason["kind"] == TIMED_WAIT_KIND
     assert interrupt.reason["tool"] == WAIT_TOOL_NAME
     assert interrupt.reason["tool_use_id"] == "tu-pause-1"
+    assert interrupt.reason["call_id"].startswith("tool_call:")
     assert interrupt.reason["minutes"] == 10
     assert interrupt.reason["reason"] == "Portainer redeploy"
     assert interrupt.reason["requested_at"] == BASE_TIME.isoformat()
     assert interrupt.reason["resume_at"] == (BASE_TIME + timedelta(minutes=10)).isoformat()
 
     # Simulate begin_timed_wait recording the start entry and the timer answering the interrupt 10m later.
-    _record_started_wait(mgr, TASK_ID, tool_use_id="tu-pause-1", minutes=10, requested_at=BASE_TIME)
+    _record_started_wait(
+        mgr,
+        TASK_ID,
+        tool_use_id="tu-pause-1",
+        call_id=interrupt.reason["call_id"],
+        minutes=10,
+        requested_at=BASE_TIME,
+    )
     interrupt.response = {"kind": TIMED_WAIT_RESPONSE_KIND, "interrupt_id": interrupt.id}
     now_box[0] = BASE_TIME + timedelta(minutes=10, seconds=6)
 
@@ -358,11 +392,77 @@ async def test_wait_raises_interrupt_and_resumed_call_returns_waited_time(
 
 
 @pytest.mark.asyncio
+async def test_repeated_tool_use_id_in_later_step_pauses_and_charges_separately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C14: a model server that repeats toolUseId in a later step gets a distinct call_id and charge."""
+
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    mgr = _make_manager(tmp_path / "manager.db")
+    agent = _make_agent(mgr)
+
+    # Step 1: wait(8, "first redeploy") with toolUseId="call_0".
+    ctx_step1 = _make_tool_context("call_0", step_tracking_id="step-uuid-1")
+    set_agent_ref(agent)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID), pytest.raises(InterruptException) as first_exc:
+            await wait(8, "first redeploy", ctx_step1)
+    finally:
+        set_agent_ref(None)
+
+    first_reason = first_exc.value.interrupt.reason
+    _record_started_wait(
+        mgr,
+        TASK_ID,
+        tool_use_id="call_0",
+        call_id=first_reason["call_id"],
+        minutes=8,
+        requested_at=BASE_TIME,
+        reason="first redeploy",
+    )
+
+    # Step 2 (2 hours later): server reuses toolUseId="call_0" for wait(12, "second redeploy").
+    now_box[0] = BASE_TIME + timedelta(hours=2)
+    ctx_step2 = _make_tool_context(
+        "call_0",
+        step_tracking_id="step-uuid-2",
+        messages=ctx_step1.agent.messages,  # step 1 still in transcript, step 2 appended
+    )
+    set_agent_ref(agent)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID), pytest.raises(InterruptException) as second_exc:
+            await wait(12, "second redeploy", ctx_step2)
+    finally:
+        set_agent_ref(None)
+
+    second_reason = second_exc.value.interrupt.reason
+    assert second_reason["call_id"] != first_reason["call_id"]
+    assert second_reason["minutes"] == 12
+    assert second_reason["reason"] == "second redeploy"
+    assert second_reason["resume_at"] == (now_box[0] + timedelta(minutes=12)).isoformat()
+
+    _record_started_wait(
+        mgr,
+        TASK_ID,
+        tool_use_id="call_0",
+        call_id=second_reason["call_id"],
+        minutes=12,
+        requested_at=now_box[0],
+        reason="second redeploy",
+    )
+    ledger = WaitLedger.from_history(mgr.get_task_info(TASK_ID))
+    assert ledger.total_minutes == 20
+    assert ledger.entry_for(first_reason["call_id"]) is not None
+    assert ledger.entry_for(second_reason["call_id"]) is not None
+
+
+@pytest.mark.asyncio
 async def test_wait_resumed_with_non_timer_answer_returns_ended_early_and_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     now_box = [BASE_TIME + timedelta(minutes=3)]
-    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: now_box[0])
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
 
     mgr = _make_manager(tmp_path / "manager.db")
     _record_started_wait(mgr, TASK_ID, tool_use_id="tu-early", minutes=10, requested_at=BASE_TIME)
@@ -387,17 +487,46 @@ async def test_wait_resumed_with_non_timer_answer_returns_ended_early_and_logs(
 
 
 @pytest.mark.asyncio
+async def test_wait_unexpected_store_error_logs_and_returns_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C18: unexpected failure inside wait logs structured identifiers and returns refused."""
+
+    mgr = _make_manager(tmp_path / "manager.db")
+
+    def boom(_task_id: str) -> Any:
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(mgr, "get_task_info", boom)
+    agent = _make_agent(mgr)
+    set_agent_ref(agent)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID), caplog.at_level(logging.WARNING):
+            result = json.loads(await wait(5, "redeploy", _make_tool_context("tu-fail")))
+    finally:
+        set_agent_ref(None)
+
+    assert result["status"] == "refused"
+    assert "nothing was charged" in result["reason"]
+    assert "event=timed_wait_failed" in caplog.text
+    assert f"task_id={TASK_ID}" in caplog.text
+    assert "tool=wait" in caplog.text
+    assert "tool_use_id=tu-fail" in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_wait_and_long_wait_share_persisted_budget_across_restart_and_auth_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: BASE_TIME)
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: BASE_TIME)
     db_path = tmp_path / "manager.db"
     mgr = _make_manager(db_path)
     _record_started_wait(mgr, TASK_ID, tool_use_id="tu-prior", minutes=12, tool=WAIT_TOOL_NAME)
 
     # Fresh TaskManager simulates restart.
     restarted = _reload_manager(db_path)
-    agent_on = _make_agent(restarted, auth_enabled=True)
+    agent_on = _make_agent(restarted, auth_enabled=True, tools=(wait,))
 
     set_agent_ref(agent_on)  # type: ignore[arg-type]
     try:
@@ -422,6 +551,20 @@ async def test_wait_and_long_wait_share_persisted_budget_across_restart_and_auth
 
             with pytest.raises(InterruptException):
                 await long_wait(1428, "fits 24h", _make_tool_context("tu-long-fit"))
+    finally:
+        set_agent_ref(None)
+
+    # C17: auth-on agent that already holds long_wait in its active Strands registry gets direct guidance.
+    agent_on_with_long = _make_agent(restarted, auth_enabled=True, tools=(wait,))
+    agent_on_with_long._strands_agent = SimpleNamespace(
+        tool_registry=SimpleNamespace(registry={"wait": wait}, dynamic_tools={"long_wait": long_wait})
+    )
+    set_agent_ref(agent_on_with_long)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID):
+            refused_held = json.loads(await wait(9, "over", _make_tool_context("tu-on-held")))
+            assert "Use long_wait instead" in refused_held["reason"]
+            assert "request_access" not in refused_held["reason"]
     finally:
         set_agent_ref(None)
 
@@ -514,7 +657,7 @@ async def test_recurring_interval_and_cron_schedules_refuse_overlapping_wait_via
 ) -> None:
     use_scheduler_key(monkeypatch)
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: now)
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now)
     try:
         db_path = tmp_path / "team.db"
         store = ScheduleStore(db_path=str(db_path))
@@ -585,12 +728,12 @@ async def test_recurring_interval_and_cron_schedules_refuse_overlapping_wait_via
 
 
 @pytest.mark.asyncio
-async def test_one_time_schedule_finishing_final_run_chat_and_missing_or_unreadable_schedule(
+async def test_one_time_schedule_chat_and_missing_or_unreadable_schedule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     use_scheduler_key(monkeypatch)
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: now)
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now)
     try:
         db_path = tmp_path / "team.db"
         store = ScheduleStore(db_path=str(db_path))
@@ -606,27 +749,7 @@ async def test_one_time_schedule_finishing_final_run_chat_and_missing_or_unreada
         )
         store.add(one_time)
 
-        # Counted recurring schedule on its final run, retained as finishing (remaining_count == 0).
-        finishing_sched = ScheduledMessage(
-            schedule_id="sched-final",
-            management_class=ScheduleManagementClass.USER,
-            payload=Task(task_id="t-final", task_type=MessageMetaType.REQUEST, problem_statement="final"),
-            interval_ms=5 * 60 * 1000,
-            repeat_count=2,
-            next_fire_at=(now - timedelta(seconds=5)).isoformat(),
-            enabled=True,
-        )
-        store.add(finishing_sched)
-        # Simulate that the 2nd (final) run was admitted and retained as finishing.
-        monkeypatch.setattr(schedule_store_module, "is_finishing", lambda row: row.get("schedule_id") == "sched-final")
-
         mgr = _make_manager(db_path, task_id="task-once", meta=_scheduler_signed_meta("sched-one-time"))
-        mgr.add_task(
-            Task(task_id="task-final", task_type=MessageMetaType.REQUEST, problem_statement="final"),
-            MessageHeader(from_agent_id="scheduler"),
-            _scheduler_signed_meta("sched-final"),
-            owner_person_id=None,
-        )
         mgr.add_task(
             Task(task_id="task-missing", task_type=MessageMetaType.REQUEST, problem_statement="deleted"),
             MessageHeader(from_agent_id="scheduler"),
@@ -652,10 +775,6 @@ async def test_one_time_schedule_finishing_final_run_chat_and_missing_or_unreada
             # One-time schedule allows waiting.
             with task_work("task-once"), pytest.raises(InterruptException):
                 await wait(15, "one-time wait", _make_tool_context("tu-once"))
-
-            # Finishing final run of counted recurring schedule allows waiting.
-            with task_work("task-final"), pytest.raises(InterruptException):
-                await wait(15, "final run wait", _make_tool_context("tu-final"))
 
             # Chat task allows waiting.
             with task_work("task-chat"), pytest.raises(InterruptException):
@@ -687,5 +806,54 @@ async def test_one_time_schedule_finishing_final_run_chat_and_missing_or_unreada
             assert "reason=schedule_unreadable" in caplog.text
         finally:
             set_agent_ref(None)
+    finally:
+        forget_task_context_keys()
+
+
+def test_real_final_run_allows_wait_and_first_of_two_interval_runs_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C16: verify finishing flag on real claimed/admitted schedule runs without monkeypatching is_finishing."""
+
+    from tests.scheduled_run_support import build_world
+    from tests.test_schedule_final_runs import start_final_run
+
+    try:
+        # 1. Final run of a schedule with no interval and no repeat_count -> allowed.
+        world_final = build_world(tmp_path / "final", monkeypatch)
+        run_final = start_final_run(world_final, interval=None, count=None)
+        agent_final = _make_agent(world_final.tasks, schedule_store=world_final.store)
+        agent_final.team_id = world_final.worker.team_id
+
+        async def _call_final() -> None:
+            set_agent_ref(agent_final)  # type: ignore[arg-type]
+            try:
+                with task_work(run_final.task.task_id), pytest.raises(InterruptException):
+                    await wait(15, "final run wait", _make_tool_context("tu-real-final"))
+            finally:
+                set_agent_ref(None)
+
+        asyncio.run(_call_final())
+
+        # 2. First of two 10-minute interval runs -> 11-minute wait refused, 5-minute wait allowed.
+        world_two = build_world(tmp_path / "two", monkeypatch)
+        run_first = start_final_run(world_two, interval=10 * 60 * 1000, count=2)
+        agent_two = _make_agent(world_two.tasks, schedule_store=world_two.store)
+        agent_two.team_id = world_two.worker.team_id
+
+        async def _call_first_of_two() -> dict[str, Any]:
+            set_agent_ref(agent_two)  # type: ignore[arg-type]
+            try:
+                with task_work(run_first.task.task_id):
+                    refused = json.loads(await wait(11, "past second run", _make_tool_context("tu-two-over")))
+                    with pytest.raises(InterruptException):
+                        await wait(5, "fits before second run", _make_tool_context("tu-two-ok"))
+                    return refused
+            finally:
+                set_agent_ref(None)
+
+        refused_first = asyncio.run(_call_first_of_two())
+        assert refused_first["status"] == "refused"
+        assert "next run" in refused_first["reason"]
     finally:
         forget_task_context_keys()

@@ -22,16 +22,17 @@ from strands.interrupt import InterruptException
 from strands.types.tools import ToolContext
 
 from access_control.identity import ISSUER_SCHEDULER
+from custom_agents import timed_waits as timed_waits_rules
 from custom_agents.timed_waits import (
     LONG_WAIT_TOOL_NAME,
     TIMED_WAIT_KIND,
+    TIMED_WAIT_REFUSED_RESPONSE_KIND,
     TIMED_WAIT_RESPONSE_KIND,
     WAIT_TOOL_NAME,
     WaitEntry,
     WaitLedger,
     budget_refusal,
     next_run_refusal,
-    utc_now,
     validate_wait_args,
     wait_result,
     wait_summary_text,
@@ -62,6 +63,7 @@ def _refused(reason: str) -> str:
 
 def _interrupt_reason(
     *,
+    call_id: str,
     tool: str,
     tool_use_id: str,
     minutes: int,
@@ -71,6 +73,7 @@ def _interrupt_reason(
 ) -> dict[str, Any]:
     return {
         "kind": TIMED_WAIT_KIND,
+        "call_id": call_id,
         "tool": tool,
         "tool_use_id": tool_use_id,
         "minutes": minutes,
@@ -82,17 +85,34 @@ def _interrupt_reason(
 
 
 def _agent_has_tool(agent: Any, name: str) -> bool:
-    """Whether ``name`` is in this agent's tools or active Strands registry (auth-off guidance)."""
+    """Whether ``name`` is currently offered to this agent's model.
 
-    for item in getattr(agent, "tools", ()) or ():
-        if tool_name(item) == name:
-            return True
+    When a Strands agent with a ``tool_registry`` is attached, reads that
+    registry directly (so authorization-on reflects actual granted tools from
+    ``GrantToolSync``, and authorization-off reflects ``startup_tools``). Falls
+    back to ``agent.tools`` only when no Strands registry is present.
+    """
+
     from custom_agents.strands_parts import turn_strands_agent
 
     registry = getattr(turn_strands_agent(agent), "tool_registry", None)
-    if registry is None:
-        return False
-    return name in getattr(registry, "registry", {}) or name in getattr(registry, "dynamic_tools", {})
+    if registry is not None:
+        return name in getattr(registry, "registry", {}) or name in getattr(registry, "dynamic_tools", {})
+    return any(tool_name(item) == name for item in (getattr(agent, "tools", ()) or ()))
+
+
+def _call_id(agent: Any, tool_context: ToolContext, tool_use_id: str, tool_id_name: str) -> str:
+    """Stable call id for this tool invocation (step tracking_id + toolUseId), falling back to tool_use_id."""
+
+    from custom_agents.access_runtime import step_tool_call_id
+
+    resolved = step_tool_call_id(
+        agent,
+        getattr(tool_context, "agent", None),
+        tool_use_id,
+        tool_name=tool_id_name,
+    )
+    return resolved or tool_use_id
 
 
 def _verified_scheduler_schedule_id(agent: Any, task_id: str) -> str | None:
@@ -194,9 +214,11 @@ async def _check_schedule_next_run(
 
 
 def _handle_resume_response(entry: WaitEntry, response: Any, *, task_id: str) -> str:
-    """Turn the interrupt answer into the tool's JSON result (timer wake-up or early non-timer answer)."""
+    """Turn the interrupt answer into the tool's JSON result (timer wake-up, refusal, or early non-timer answer)."""
 
-    now = utc_now()
+    if isinstance(response, Mapping) and response.get("kind") == TIMED_WAIT_REFUSED_RESPONSE_KIND:
+        return _refused(str(response.get("reason") or "The timed wait could not be started."))
+    now = timed_waits_rules.utc_now()
     if isinstance(response, Mapping) and response.get("kind") == TIMED_WAIT_RESPONSE_KIND:
         return _json(
             wait_result(
@@ -208,9 +230,10 @@ def _handle_resume_response(entry: WaitEntry, response: Any, *, task_id: str) ->
         )
     logger.warning(
         "Timed wait ended with a non-timer answer. "
-        "event=timed_wait_answered_by_other task_id=%s tool_use_id=%s answer_type=%s",
+        "event=timed_wait_answered_by_other task_id=%s tool_use_id=%s call_id=%s answer_type=%s",
         task_id,
         entry.tool_use_id,
+        entry.call_id,
         type(response).__name__,
     )
     return _json(
@@ -249,13 +272,15 @@ async def _timed_wait(
     if task_info is None:
         return _refused(f"Task {task_id} is no longer tracked.")
     ledger = WaitLedger.from_history(task_info)
+    call_id = _call_id(agent, tool_context, tool_use_id, tool_id_name)
 
-    # A resumed call finds its started wait by tool_use_id and takes the stored answer.
-    existing = ledger.entry_for(tool_use_id)
+    # A resumed call finds its started wait by call_id (model step + tool_use_id) and takes the stored answer.
+    existing = ledger.entry_for(call_id)
     if existing is not None:
         response = tool_context.interrupt(
             TIMED_WAIT_KIND,
             reason=_interrupt_reason(
+                call_id=existing.call_id,
                 tool=existing.tool,
                 tool_use_id=existing.tool_use_id,
                 minutes=existing.minutes,
@@ -280,7 +305,7 @@ async def _timed_wait(
 
     limits = getattr(agent, "timed_wait_limits", None) or TimedWaitLimits()
     auth_on = authorization_enabled(getattr(agent, "authorization_config", None))
-    has_long_wait = False if auth_on else _agent_has_tool(agent, LONG_WAIT_TOOL_NAME)
+    has_long_wait = _agent_has_tool(agent, LONG_WAIT_TOOL_NAME)
     over_budget = budget_refusal(
         ledger,
         valid_minutes,
@@ -300,7 +325,7 @@ async def _timed_wait(
         )
         return _refused(over_budget)
 
-    now = utc_now()
+    now = timed_waits_rules.utc_now()
     resume_at = now + timedelta(minutes=valid_minutes)
     overlap = await _check_schedule_next_run(agent, task_id, now=now, resume_at=resume_at)
     if overlap is not None:
@@ -309,6 +334,7 @@ async def _timed_wait(
     requested_at_iso = now.isoformat()
     resume_at_iso = resume_at.isoformat()
     payload = _interrupt_reason(
+        call_id=call_id,
         tool=tool_id_name,
         tool_use_id=tool_use_id,
         minutes=valid_minutes,
@@ -317,8 +343,9 @@ async def _timed_wait(
         resume_at=resume_at_iso,
     )
     response = tool_context.interrupt(TIMED_WAIT_KIND, reason=payload)
-    # Only reached if the interrupt already carried a response before being charged.
+    # Only reached if the interrupt already carried a response before being charged (e.g. refused at start).
     entry = WaitEntry(
+        call_id=call_id,
         tool_use_id=tool_use_id,
         tool=tool_id_name,
         minutes=valid_minutes,
@@ -327,6 +354,30 @@ async def _timed_wait(
         reason=cleaned_reason,
     )
     return _handle_resume_response(entry, response, task_id=task_id)
+
+
+async def _run_timed_wait(
+    tool_id_name: str,
+    minutes: int,
+    reason: str,
+    tool_context: ToolContext,
+) -> str:
+    try:
+        return await _timed_wait(tool_id_name, minutes, reason, tool_context)
+    except InterruptException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - structured log and plain refusal on any unexpected tool failure
+        tool_use_id = str((getattr(tool_context, "tool_use", None) or {}).get("toolUseId") or "").strip()
+        logger.warning(
+            "Timed wait failed unexpectedly; nothing was charged. "
+            "event=timed_wait_failed task_id=%s tool=%s tool_use_id=%s error_type=%s",
+            bound_task_id() or "-",
+            tool_id_name,
+            tool_use_id or "-",
+            type(exc).__name__,
+            exc_info=exc,
+        )
+        return _refused(f"Could not start {tool_id_name} ({type(exc).__name__}); nothing was charged.")
 
 
 @tool(context=True)
@@ -351,10 +402,7 @@ async def wait(minutes: int, reason: str, tool_context: ToolContext) -> str:
             (shown in task history and status summaries; 1 to 500 characters).
     """
 
-    try:
-        return await _timed_wait(WAIT_TOOL_NAME, minutes, reason, tool_context)
-    except InterruptException:
-        raise
+    return await _run_timed_wait(WAIT_TOOL_NAME, minutes, reason, tool_context)
 
 
 @tool(context=True)
@@ -376,10 +424,7 @@ async def long_wait(minutes: int, reason: str, tool_context: ToolContext) -> str
             (shown in task history and status summaries; 1 to 500 characters).
     """
 
-    try:
-        return await _timed_wait(LONG_WAIT_TOOL_NAME, minutes, reason, tool_context)
-    except InterruptException:
-        raise
+    return await _run_timed_wait(LONG_WAIT_TOOL_NAME, minutes, reason, tool_context)
 
 
 WAIT_PROVIDER = ToolProvider("wait", (wait,))

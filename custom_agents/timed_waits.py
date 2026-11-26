@@ -19,9 +19,10 @@ from typing import Any
 from custom_messages.contracts.schedule_v1 import ScheduledMessage, is_recurring_schedule
 from runtime_settings.timed_waits import TimedWaitLimits
 
-# Interrupt kind, blocker record kind, and interrupt-response kind (defined once).
+# Interrupt kind, blocker record kind, and interrupt-response kinds (defined once).
 TIMED_WAIT_KIND = "timed_wait"
 TIMED_WAIT_RESPONSE_KIND = "timed_wait_resumed"
+TIMED_WAIT_REFUSED_RESPONSE_KIND = "timed_wait_refused"
 
 # Tool names and catalog tool ids.
 WAIT_TOOL_NAME = "wait"
@@ -88,6 +89,7 @@ def validate_wait_args(minutes: Any, reason: Any) -> tuple[int, str]:
 class WaitEntry:
     """One timed wait charged against a task's budget, reconstructed from history."""
 
+    call_id: str
     tool_use_id: str
     tool: str
     minutes: int
@@ -101,18 +103,22 @@ class WaitEntry:
 class WaitLedger:
     """Per-task timed-wait budget reconstructed from persisted task history.
 
-    Each ``timed_wait_started`` entry counts once per ``tool_use_id`` (written
-    when the wait begins). Reading the budget from task history means it
-    survives restarts without a new database table or snapshot schema field.
+    Resumed-call lookup is keyed by ``call_id`` (agent id + model step
+    ``tracking_id`` + ``tool_use_id`` via ``access_runtime.step_tool_call_id``),
+    so a later model step whose server reuses a ``tool_use_id`` is never
+    mistaken for an earlier paused call. Every distinct started wait entry
+    counts toward ``total_minutes``. Reading the budget from task history means
+    it survives restarts without a new database table or snapshot schema field.
     """
 
-    entries_by_tool_use_id: Mapping[str, WaitEntry]
+    entries_by_call_id: Mapping[str, WaitEntry]
     total_minutes: int
 
     @classmethod
     def from_history(cls, task: Any) -> WaitLedger:
         history = _extract_history(task)
         entries: dict[str, WaitEntry] = {}
+        total = 0
         for idx, item in enumerate(history):
             details = _entry_details(item)
             if not details or details.get("event") != TIMED_WAIT_STARTED_EVENT:
@@ -121,10 +127,12 @@ class WaitLedger:
             if not isinstance(raw_minutes, int) or isinstance(raw_minutes, bool) or raw_minutes < 1:
                 continue
             tool_use_id = str(details.get("tool_use_id") or "").strip()
-            key = tool_use_id or f"history:{idx}"
+            call_id = str(details.get("call_id") or "").strip() or tool_use_id
+            key = call_id or f"history:{idx}"
             if key in entries:
                 continue
             entries[key] = WaitEntry(
+                call_id=key,
                 tool_use_id=tool_use_id,
                 tool=str(details.get("tool") or WAIT_TOOL_NAME),
                 minutes=raw_minutes,
@@ -133,16 +141,17 @@ class WaitLedger:
                 reason=str(details.get("reason") or ""),
                 interrupt_id=str(details.get("interrupt_id") or "") or None,
             )
+            total += raw_minutes
         return cls(
-            entries_by_tool_use_id=entries,
-            total_minutes=sum(entry.minutes for entry in entries.values()),
+            entries_by_call_id=entries,
+            total_minutes=total,
         )
 
-    def entry_for(self, tool_use_id: str) -> WaitEntry | None:
-        return self.entries_by_tool_use_id.get(tool_use_id)
+    def entry_for(self, call_id: str) -> WaitEntry | None:
+        return self.entries_by_call_id.get(call_id)
 
-    def has_started(self, tool_use_id: str) -> bool:
-        return tool_use_id in self.entries_by_tool_use_id
+    def has_started(self, call_id: str) -> bool:
+        return call_id in self.entries_by_call_id
 
 
 def _extract_history(task: Any) -> Iterable[Any]:
@@ -205,14 +214,14 @@ def budget_refusal(
                 f"{header} {LONG_WAIT_TOOL_NAME} has the same {max_phrase} team limit here; "
                 "finish what you can or report where things stand."
             )
+        if has_long_wait_tool:
+            return f"{header} Use {LONG_WAIT_TOOL_NAME} instead (up to {max_phrase} in total for this task)."
         if authorization_on:
             return (
                 f"{header} For longer waits (up to {max_phrase} in total for this task), ask a person for "
                 f"approval with request_access(tool_id={LONG_WAIT_TOOL_ID!r}, level='write', reason='...') "
                 f"and then call {LONG_WAIT_TOOL_NAME}."
             )
-        if has_long_wait_tool:
-            return f"{header} Use {LONG_WAIT_TOOL_NAME} instead (allows up to {max_phrase} in total for this task)."
         return (
             f"{header} Longer waits need {LONG_WAIT_TOOL_NAME} (up to {max_phrase} in total); with authorization "
             f"off, an operator must add {LONG_WAIT_TOOL_ID!r} to this agent type's default_tools."
@@ -299,10 +308,11 @@ def timed_wait_record(
     reason: str,
     requested_at: str,
     resume_at: str,
+    call_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the saved blocker record stored in ``TaskRuntimeState.human_interaction_blockers``."""
 
-    return {
+    record: dict[str, Any] = {
         "kind": TIMED_WAIT_KIND,
         "interrupt_id": interrupt_id,
         "tool": tool,
@@ -313,6 +323,9 @@ def timed_wait_record(
         "resume_at": resume_at,
         "summary": wait_summary_text(minutes=minutes, resume_at=resume_at, reason=reason),
     }
+    if call_id:
+        record["call_id"] = call_id
+    return record
 
 
 def resume_at_of(record: Mapping[str, Any] | None) -> datetime | None:
@@ -404,6 +417,7 @@ __all__ = [
     "OVERDUE_GRACE_SECONDS",
     "TIMED_WAIT_ENDED_EVENT",
     "TIMED_WAIT_KIND",
+    "TIMED_WAIT_REFUSED_RESPONSE_KIND",
     "TIMED_WAIT_RESPONSE_KIND",
     "TIMED_WAIT_STARTED_EVENT",
     "WAIT_TOOL_ID",
