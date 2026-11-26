@@ -117,9 +117,10 @@ tools:
   - tool_id: procedure:credentials
     broker_provider: credential_catalog
     display_name: Saved credentials
-    description: Collect credentials through the secure form, and use the accounts linked to tools in web requests and OpenShell code.
+    description: Collect credentials through the secure form, capture temporary credentials from task files, and use the accounts linked to tools in web requests and OpenShell code.
     actions:
       credential.collect: write
+      credential.capture_file: write
       credential.get_metadata: read
       credential.register_existing_source: write
       # Hands code the linked credential of the tool named by params.tool_id,

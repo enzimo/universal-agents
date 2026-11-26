@@ -932,3 +932,20 @@ tools:
     message = str(caught.value)
     assert str(idn_file) in message
     assert "xn--bcher-kva.example.com" in message
+
+
+def test_credential_capture_file_action_is_classified_at_write_and_aliases_normalize(catalog) -> None:
+    provider = get_provider("credential_catalog")
+    spec = provider.actions["credential.capture_file"]
+    assert spec.returns_secret is False
+
+    for alias in ("credential.capture_file", "credential_capture_file", "capture_file"):
+        validated = provider.validate(alias, {"path": "scratch/token.txt"})
+        assert validated.action == "credential.capture_file"
+
+    resolution = catalog.resolve_broker_action("credential_catalog", "credential.capture_file", {})
+    assert (resolution.tool_id, resolution.operation, resolution.level) == (
+        "procedure:credentials",
+        "credential.capture_file",
+        WRITE,
+    )

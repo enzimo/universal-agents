@@ -34,6 +34,10 @@ EXPIRY_PRESET_SECONDS: dict[str, int] = {
     "90d": 90 * 24 * 60 * 60,
 }
 
+# Agent-captured temporary credentials must expire at least 5 minutes and at
+# most 90 days (3 months) ahead.
+MAX_CAPTURE_EXPIRY_SECONDS = EXPIRY_PRESET_SECONDS["90d"]
+
 EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
     ("15m", "In 15 minutes"),
     ("1h", "In 1 hour"),
@@ -47,7 +51,9 @@ EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
 CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE = "credential_expiry_unsupported_source"
 CREDENTIAL_EXPIRY_FORM_ONLY = "credential_expiry_form_only"
 CREDENTIAL_EXPIRY_SHARED_RECORD = "credential_expiry_shared_record"
+CREDENTIAL_EXPIRY_REQUIRED = "credential_expiry_required"
 CREDENTIAL_EXPIRY_TOO_SOON = "credential_expiry_too_soon"
+CREDENTIAL_EXPIRY_TOO_FAR = "credential_expiry_too_far"
 CREDENTIAL_EXPIRY_INVALID = "credential_expiry_invalid"
 
 # IANA offsets span UTC-12 to UTC+14; allow +-14h (840 minutes).
@@ -199,6 +205,31 @@ def validate_form_expiry(
     return parsed
 
 
+def validate_capture_expiry(
+    expires_at: datetime | str | None,
+    *,
+    now: datetime | None = None,
+    min_lead_seconds: int = MIN_EXPIRY_LEAD_SECONDS,
+    max_lead_seconds: int = MAX_CAPTURE_EXPIRY_SECONDS,
+) -> datetime:
+    """Validate a required expiry timestamp for agent file capture (5 minutes to 90 days, whole-second UTC)."""
+
+    if expires_at is None or (isinstance(expires_at, str) and not expires_at.strip()):
+        raise CredentialExpiryError(
+            CREDENTIAL_EXPIRY_REQUIRED,
+            "An expiry timestamp (expires_at) is required for captured credentials (5 minutes to 90 days from now).",
+        )
+    current = _utc_now(now)
+    parsed = validate_form_expiry(expires_at, now=current, min_lead_seconds=min_lead_seconds)
+    remaining = (parsed - current).total_seconds()
+    if remaining > max_lead_seconds:
+        raise CredentialExpiryError(
+            CREDENTIAL_EXPIRY_TOO_FAR,
+            "Captured credentials can expire at most 90 days (3 months) from now.",
+        )
+    return parsed
+
+
 def _parse_local_datetime(value: str | None) -> datetime:
     text = str(value or "").strip()
     if not text:
@@ -334,13 +365,16 @@ __all__ = [
     "CREDENTIAL_EXPIRED",
     "CREDENTIAL_EXPIRY_FORM_ONLY",
     "CREDENTIAL_EXPIRY_INVALID",
+    "CREDENTIAL_EXPIRY_REQUIRED",
     "CREDENTIAL_EXPIRY_SHARED_RECORD",
+    "CREDENTIAL_EXPIRY_TOO_FAR",
     "CREDENTIAL_EXPIRY_TOO_SOON",
     "CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE",
     "CUSTOM_EXPIRY_OPTION",
     "CredentialExpiryError",
     "EXPIRY_PRESET_OPTIONS",
     "EXPIRY_PRESET_SECONDS",
+    "MAX_CAPTURE_EXPIRY_SECONDS",
     "MIN_EXPIRY_LEAD_SECONDS",
     "format_expiry_label",
     "format_utc_timestamp",
@@ -348,6 +382,7 @@ __all__ = [
     "parse_utc_timestamp",
     "remaining_ttl_seconds",
     "resolve_form_expiry",
+    "validate_capture_expiry",
     "validate_form_expiry",
     "validate_storage_expiry",
 ]

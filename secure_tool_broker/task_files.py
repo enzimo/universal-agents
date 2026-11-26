@@ -41,27 +41,54 @@ class TaskFileRejected(ValueError):
 
 
 @dataclass(frozen=True)
-class _Located:
+class LocatedTaskFile:
     root: Path  # one of the scope roots
     parts: tuple[str, ...]  # components below the root
     display: Path
+    folder_id: str  # canonical id under workspaces/ (users/<folder>/..., team/..., agents/...)
 
 
-def _locate(raw: str, scope: WorkspaceScope) -> _Located:
+def _locate(raw: str, scope: WorkspaceScope) -> LocatedTaskFile:
     text = str(raw or "").strip()
     if not text:
         raise TaskFileRejected("A local file path is empty.")
+    if "\x00" in text:
+        raise TaskFileRejected("A local file path cannot contain NUL bytes.")
     candidate = Path(text).expanduser()
     if not candidate.is_absolute():
         candidate = scope.home / candidate
     normalized = Path(os.path.normpath(candidate))
     for root in scope.roots:
         if normalized == root or root in normalized.parents:
-            return _Located(root, normalized.relative_to(root).parts, normalized)
+            parts = normalized.relative_to(root).parts
+            root_parts = root.relative_to(scope.workspaces_dir).parts
+            folder_id = "/".join((*root_parts, *parts))
+            return LocatedTaskFile(root, parts, normalized, folder_id)
     raise TaskFileRejected(
         f"Local files must be in this task's folders ({scope.home} or the shared team/ "
         f"and agents/ folders): {normalized}"
     )
+
+
+def locate_task_file(
+    raw: str,
+    *,
+    instance_root: str | None,
+    person_id: str | None,
+    require_file: bool = True,
+) -> LocatedTaskFile:
+    """Resolve one path inside the task person's folders without following symlinks."""
+
+    root = str(instance_root or "").strip()
+    if not root:
+        raise TaskFileRejected(
+            "Local files are not available through the broker here: the instance root is unknown."
+        )
+    scope = InstanceLayout.at(root).scope_for(person_id)
+    located = _locate(raw, scope)
+    if require_file and not located.parts:
+        raise TaskFileRejected(f"A task folder is not a file: {located.display}")
+    return located
 
 
 @contextmanager
@@ -72,7 +99,7 @@ def _rejected_when_unsafe() -> Iterator[None]:
         raise TaskFileRejected(str(exc)) from exc
 
 
-def _require_folder(located: _Located, parts: tuple[str, ...]) -> None:
+def _require_folder(located: LocatedTaskFile, parts: tuple[str, ...]) -> None:
     """The folder ``root/parts`` must exist now and be reached without links."""
 
     with _rejected_when_unsafe():
@@ -85,7 +112,7 @@ class TaskFileStage:
 
     scope: WorkspaceScope
     temp_dir: Path
-    _outputs: list[tuple[Path, _Located, bool]] = field(default_factory=list)
+    _outputs: list[tuple[Path, LocatedTaskFile, bool]] = field(default_factory=list)
     _counter: int = 0
 
     @classmethod
@@ -163,7 +190,7 @@ class TaskFileStage:
         return written
 
     @staticmethod
-    def _write_into(located: _Located, parts: tuple[str, ...], source: Path) -> None:
+    def _write_into(located: LocatedTaskFile, parts: tuple[str, ...], source: Path) -> None:
         """Write a new file, or replace a one-link regular file in one rename; never through a link."""
 
         with _rejected_when_unsafe():
@@ -174,4 +201,10 @@ class TaskFileStage:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
-__all__ = ["MAX_STAGED_FILE_BYTES", "TaskFileRejected", "TaskFileStage"]
+__all__ = [
+    "LocatedTaskFile",
+    "MAX_STAGED_FILE_BYTES",
+    "TaskFileRejected",
+    "TaskFileStage",
+    "locate_task_file",
+]

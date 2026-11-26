@@ -254,6 +254,14 @@ class CredentialCatalogProvider(DeclaredProvider):
             "credential.collect",
             "Broker-owned create/update in the current user's catalog after values arrive from a secure broker form or store generation; does not create a user-facing form. Owner selection comes from trusted context. Defaults to write_source=sealbox, stores username/password pairs with sealbox-cli credential set, stores custom secret fields with sealbox-cli secret set, and records only catalog metadata/source refs.",
         ),
+        "credential.capture_file": ActionSpec(
+            "credential.capture_file",
+            "Capture a secret from a task file into the current verified person's Sealbox-backed temporary "
+            "credential catalog without passing the secret in parameters or returning it. Requires path, "
+            "credential_key, display_name, purpose, and expires_at (UTC, 5 minutes to 90 days ahead); optional "
+            "field_name (default secret). Never replaces a person-entered, external-source, or team credential, "
+            "respects folder access, deletes the source file after commit, and notifies the person unless disabled.",
+        ),
         "credential.get_metadata": ActionSpec(
             "credential.get_metadata",
             "Fetch the current user's catalog metadata for a named credential without returning secret values.",
@@ -310,6 +318,8 @@ class CredentialCatalogProvider(DeclaredProvider):
     action_aliases = {
         "credential_collect": "credential.collect",
         "collect": "credential.collect",
+        "credential_capture_file": "credential.capture_file",
+        "capture_file": "credential.capture_file",
         "credential_metadata": "credential.get_metadata",
         "credential_get_metadata": "credential.get_metadata",
         "register_existing_source": "credential.register_existing_source",
