@@ -1031,6 +1031,263 @@ def test_start_isolated_recovery_tool_queues_fresh_manager_task(tmp_path, monkey
     assert any(action.action_type.value == "user_notice" for action in plan.plan_actions)
 
 
+def test_start_isolated_recovery_in_permit_backed_objective_work_session_installs_checkpoint(
+    tmp_path, monkeypatch
+):
+    """C32: a permit-backed objective work session can call start_isolated_recovery and create its checkpoint."""
+    from custom_messages.contracts.access_v2 import PersonStanding, ScheduleRunIdentityV1, TeamPersonV1
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.enums import RequesterType, ScheduleManagementClass, SystemScheduleKind
+    from custom_transport.protocol1.authority_tokens import schedule_permit_token
+    from storage.access_repository import AccessRepository
+    from tests.broker_access_support import broker_person_ref, broker_scheduler_identity
+    from tests.change_approval_support import use_signed_contexts
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    use_signed_contexts(monkeypatch)
+    db_path = str(tmp_path / "obj_session_recovery.db")
+    task_manager = TaskManager(db_path=db_path)
+    task_manager.set_owner_identity(
+        agent_id="manager_agent",
+        agent_name="Manager",
+        team_id="team_1",
+        named_agent_type="TeamArchitect",
+    )
+    now = datetime.now(timezone.utc)
+    AccessRepository(task_manager.storage_settings).replace_people(
+        "team_1",
+        [
+            TeamPersonV1(
+                person_ref=broker_person_ref("live-test-user"),
+                team_id="team_1",
+                person_id="live-test-user",
+                standing=PersonStanding.ACTIVE,
+                roles=("owner",),
+                changed_at_utc=now,
+            )
+        ],
+        at=now,
+    )
+    schedule_store = ScheduleStore(db_path=db_path, storage_settings=task_manager.storage_settings)
+    bind_test_scheduler(
+        monkeypatch,
+        store=schedule_store,
+        team_id="team_1",
+        storage_settings=task_manager.storage_settings,
+    )
+    obj_schedule = ScheduledMessage(
+        schedule_id="objwork_sched_live",
+        schedule_name="objective_work_session:obj_live",
+        management_class=ScheduleManagementClass.SYSTEM,
+        system_schedule_kind=SystemScheduleKind.OBJECTIVE_WORK_SESSION,
+        objective_id="obj_live",
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Resume objective."),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="live-test-user")),
+        interval_ms=3_600_000,
+        repeat_count=None,
+    )
+    schedule_store.add(obj_schedule, claim_team_id="team_1")
+    permit = schedule_permit_token(
+        broker_scheduler_identity("team_1"),
+        team="team_1",
+        schedule_id="objwork_sched_live",
+        person_ref=broker_person_ref("live-test-user"),
+        issued=now,
+    )
+    task = Task(
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Objective work session task.",
+    )
+    task_manager.add_task(
+        task,
+        MessageHeader(
+            from_agent_id="live-test-user",
+            response_routing_key="user_queue",
+            agent_signature="",
+        ),
+        MessageMeta(
+            from_agent_name="team_services",
+            requester_type=RequesterType.TIMER_REQUESTER,
+            is_response_requested=False,
+            msg_correlation_id="corr_obj_session",
+            conversation_id="conversation_obj_session",
+            gateway_context=GatewayContext(
+                canonical_user_id="live-test-user",
+                scheduled_job_id="objwork_sched_live",
+                schedule_run=ScheduleRunIdentityV1(
+                    permit=permit,
+                    context_id="schedule_run_obj_session",
+                    conversation_id="conversation_obj_session",
+                    started_at_utc=now,
+                ),
+            ),
+        ),
+        owner_person_id="live-test-user",
+    )
+    task_manager.set_task_plan(
+        task.task_id,
+        "Run objective work session and recover if a specialist times out.",
+        goal_summary="Advance objective.",
+        current_focus="Work session.",
+    )
+    task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
+    set_agent_ref(
+        _FakeAgent(
+            task_manager,
+            agent_id="manager_agent",
+            name="Manager",
+            named_agent_type="TeamArchitect",
+            schedule_store=schedule_store,
+        )
+    )
+
+    result = tool_json(
+        start_isolated_recovery(
+            failure_type="delegated_specialist_timeout",
+            failure_summary="Specialist timed out during objective work session.",
+            recovery_brief="Diagnose the timeout and choose a smaller retry.",
+            notify_user=True,
+            checkpoint_delay_seconds=300,
+        )
+    )
+
+    assert result["queued"] is True
+    assert result["recovery_started"] is True
+    assert result["checkpoint_schedule"] == {"scheduled": True}, result
+    links = [
+        link for link in task_manager.plan_state.recovery_links.values() if link.original_task_id == task.task_id
+    ]
+    assert len(links) == 1 and links[0].checkpoint_schedule_id is not None
+    ckpt = schedule_store.get_scheduled_message(links[0].checkpoint_schedule_id)
+    assert ckpt is not None
+    assert ckpt.system_schedule_kind == SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT
+    assert schedule_store.run_permit(ckpt.schedule_id) is not None
+
+
+def test_start_isolated_recovery_logs_and_reports_refused_checkpoint_install(
+    tmp_path, monkeypatch, caplog
+):
+    """C32: when checkpoint schedule installation is refused, it is logged and clearly reported to the caller."""
+    import logging
+    from custom_messages.contracts.access_v2 import PersonStanding, ScheduleRunIdentityV1, TeamPersonV1
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.enums import RequesterType, ScheduleManagementClass, SystemScheduleKind
+    from custom_transport.protocol1.authority_tokens import schedule_permit_token
+    from storage.access_repository import AccessRepository
+    from tests.broker_access_support import broker_person_ref, broker_scheduler_identity
+    from tests.change_approval_support import use_signed_contexts
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    use_signed_contexts(monkeypatch)
+    db_path = str(tmp_path / "refused_ckpt.db")
+    task_manager = TaskManager(db_path=db_path)
+    task_manager.set_owner_identity(
+        agent_id="manager_agent",
+        agent_name="Manager",
+        team_id="team_1",
+        named_agent_type="TeamArchitect",
+    )
+    now = datetime.now(timezone.utc)
+    AccessRepository(task_manager.storage_settings).replace_people(
+        "team_1",
+        [
+            TeamPersonV1(
+                person_ref=broker_person_ref("live-test-user"),
+                team_id="team_1",
+                person_id="live-test-user",
+                standing=PersonStanding.ACTIVE,
+                roles=("owner",),
+                changed_at_utc=now,
+            )
+        ],
+        at=now,
+    )
+    schedule_store = ScheduleStore(db_path=db_path, storage_settings=task_manager.storage_settings)
+    bind_test_scheduler(
+        monkeypatch,
+        store=schedule_store,
+        team_id="team_1",
+        storage_settings=task_manager.storage_settings,
+    )
+    maint = ScheduledMessage(
+        schedule_id="sched_internal_imp_refused",
+        schedule_name="internal_improvement:team_1",
+        management_class=ScheduleManagementClass.SYSTEM,
+        system_schedule_kind=SystemScheduleKind.INTERNAL_IMPROVEMENT,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Maintain team."),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="live-test-user")),
+        interval_ms=3_600_000,
+        repeat_count=None,
+    )
+    schedule_store.add(maint, claim_team_id="team_1")
+    owner_permit = schedule_permit_token(
+        broker_scheduler_identity("team_1"),
+        team="team_1",
+        schedule_id="sched_internal_imp_refused",
+        person_ref=broker_person_ref("live-test-user"),
+        owner_permit=True,
+        issued=now,
+    )
+    task = Task(task_type=MessageMetaType.REQUEST, problem_statement="Escalation task.")
+    task_manager.add_task(
+        task,
+        MessageHeader(from_agent_id="live-test-user", response_routing_key="user_queue", agent_signature=""),
+        MessageMeta(
+            from_agent_name="team_services",
+            requester_type=RequesterType.TIMER_REQUESTER,
+            is_response_requested=False,
+            msg_correlation_id="corr_escalation",
+            conversation_id="conversation_escalation",
+            gateway_context=GatewayContext(
+                canonical_user_id="live-test-user",
+                schedule_run=ScheduleRunIdentityV1(
+                    permit=owner_permit,
+                    context_id="schedule_run_owner_permit",
+                    conversation_id="conversation_escalation",
+                    started_at_utc=now,
+                ),
+            ),
+        ),
+        owner_person_id="live-test-user",
+    )
+    task_manager.set_task_plan(
+        task.task_id,
+        "Run objective work session and recover if a specialist times out.",
+        goal_summary="Advance objective.",
+        current_focus="Work session.",
+    )
+    task_manager.task_state.current_in_progress_task_id = task.task_id
+    bind_task(task_manager.task_state.current_in_progress_task_id)
+    agent = _FakeAgent(
+        task_manager,
+        agent_id="manager_agent",
+        name="Manager",
+        named_agent_type="TeamArchitect",
+        schedule_store=schedule_store,
+    )
+    agent._logger = logging.getLogger("test.isolated_recovery_refusal")
+    set_agent_ref(agent)
+
+    with caplog.at_level(logging.WARNING, logger="test.isolated_recovery_refusal"):
+        result = tool_json(
+            start_isolated_recovery(
+                failure_type="delegated_specialist_timeout",
+                failure_summary="Subtask timed out.",
+                recovery_brief="Inspect timeout.",
+                notify_user=True,
+                checkpoint_delay_seconds=300,
+            )
+        )
+
+    assert result["queued"] is True
+    ckpt_info = result["checkpoint_schedule"]
+    assert ckpt_info["scheduled"] is False
+    assert "owner permits" in ckpt_info["error"].lower()
+    assert "no isolated-recovery checkpoint" in ckpt_info["notice"].lower()
+    assert "event=isolated_recovery_checkpoint_install_failed" in caplog.text
+
+
 def test_start_isolated_recovery_tool_is_manager_only(tmp_path):
     task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
     task_manager.set_owner_identity(

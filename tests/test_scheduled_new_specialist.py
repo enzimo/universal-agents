@@ -259,6 +259,7 @@ def test_google_requirement_named_by_function_says_which_operations_exist(tmp_pa
     draft = install_scheduled_worker_draft(
         lead, lead._schedule_store, schedule,
         target_agent_type=BOA, worker_policy_json="", requirements_json=json.dumps(GOOGLE_BY_FUNCTION_NAME),
+        source_meta=schedule.payload_meta,
     )
 
     assert draft["configured"] is True and draft["enabled"] is False, draft
@@ -290,6 +291,7 @@ def test_inspection_reports_the_new_specialist_eligible(tmp_path, monkeypatch, s
     install_scheduled_worker_draft(
         lead, lead._schedule_store, schedule,
         target_agent_type=BOA, worker_policy_json="", requirements_json=json.dumps(GOOGLE_READS),
+        source_meta=schedule.payload_meta,
     )
 
     eligibility = inspect_schedule_worker(lead, "sched_summary")["eligibility"]
@@ -302,7 +304,8 @@ def test_with_authorization_on_the_named_operations_resolve_to_access_to_give(tm
     config, lead = _live_sequence(tmp_path, monkeypatch, "started_elsewhere")
     schedule = _schedule(lead, config, "sched_gmail_on")
     install_scheduled_worker_draft(
-        lead, lead._schedule_store, schedule, target_agent_type=BOA, worker_policy_json="", requirements_json=""
+        lead, lead._schedule_store, schedule, target_agent_type=BOA, worker_policy_json="", requirements_json="",
+        source_meta=schedule.payload_meta,
     )
     lead.authorization_config = authorization_config(True)
     access_runtime._runtime_access.cache_clear()

@@ -1128,6 +1128,40 @@ def test_agent_created_schedules_from_member_chat_route_replies_and_chat_list(
             assert event.chat_id == "tg_bo_99"
             assert event.user_id == "bo_tg"
             assert event.scheduled_job_id == saved.schedule_id
+            # C31: first delivery_ref match records a gateway_scheduled_targets row so later runs never scan.
+            recorded_target = delivery.get_scheduled_target(saved.schedule_id)
+            assert recorded_target is not None
+            assert recorded_target.session_key == "session_bo_telegram"
+            assert recorded_target.owner_canonical_user_id == "bo"
+
+        # C31: subsequent runs of an agent-made recurring schedule hit scheduled_targets with zero session scans.
+        scan_calls: list[str] = []
+        orig_list_sessions = gw_store.session_repository.list_sessions
+        orig_list_unowned = gw_store.session_repository.list_unowned_sessions
+
+        def _counting_list_sessions(*args: Any, **kwargs: Any) -> Any:
+            scan_calls.append("list_sessions")
+            return orig_list_sessions(*args, **kwargs)
+
+        def _counting_list_unowned(*args: Any, **kwargs: Any) -> Any:
+            scan_calls.append("list_unowned_sessions")
+            return orig_list_unowned(*args, **kwargs)
+
+        monkeypatch.setattr(gw_store.session_repository, "list_sessions", _counting_list_sessions)
+        monkeypatch.setattr(gw_store.session_repository, "list_unowned_sessions", _counting_list_unowned)
+        second_run = projection.project(
+            envelope=MessageEnvelope(
+                msg_content=Task(task_type=MessageMetaType.RESPONSE, problem_statement="run 2", answer="Standup!"),
+                msg_header=MessageHeader(from_agent_id="manager_1", to_routing_path="gateway_queue"),
+                msg_meta=saved_recurring.payload_meta.model_copy(deep=True),
+            ),
+            rendered_text="Standup!",
+            request_record=None,
+        )
+        assert second_run.session_key == "session_bo_telegram"
+        assert scan_calls == []
+        monkeypatch.setattr(gw_store.session_repository, "list_sessions", orig_list_sessions)
+        monkeypatch.setattr(gw_store.session_repository, "list_unowned_sessions", orig_list_unowned)
 
         # 6. Owner "ada" creating a reminder in her non-default chat routes back to session_ada_work.
         ada_gc = _build_chat_ctx("ada", "session_ada_work", "tg_ada_work", "ada_tg", "conv_ada_work")
@@ -1179,6 +1213,7 @@ def test_agent_created_schedules_from_member_chat_route_replies_and_chat_list(
         # 7. Cross-person guard: bo's reply carrying ada's delivery_ref never resolves to ada's session.
         spoofed_meta = saved_one_shot.payload_meta.model_copy(deep=True)
         spoofed_meta.conversation_id = "conv_unknown"
+        spoofed_meta.gateway_context.scheduled_job_id = "sched_spoofed_untracked"
         spoofed_meta.gateway_context.delivery_ref = refs.ref("session_ada_work")
         with pytest.raises(DeliveryPersonMismatch):
             projection.project(
@@ -1190,5 +1225,168 @@ def test_agent_created_schedules_from_member_chat_route_replies_and_chat_list(
                 rendered_text="Nope",
                 request_record=None,
             )
+    finally:
+        forget_task_context_keys()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_runs_install_agent_person_system_kinds_and_refuse_owner_permits_and_missing_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C32: permit-backed and per-run scheduled tasks install agent person system schedules
+    (isolated_recovery_checkpoint, objective_work_session) when their backing schedule is active
+    and vouched/system-managed, while owner permits, team-scope kinds, and missing source schedules
+    are refused."""
+
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
+    from custom_transport.protocol1.authority_tokens import root_task_token, schedule_permit_token
+    from tests.broker_access_support import (
+        broker_gateway_identity,
+        broker_people_store,
+        broker_person_ref,
+        broker_scheduler_identity,
+        forget_task_context_keys,
+    )
+    from tests.scheduled_run_support import _verified_team_frame, bind_test_scheduler
+
+    forget_task_context_keys()
+    try:
+        people_store = broker_people_store()
+        people_store.register(TEAM, "ada", roles=("owner",))
+        store = ScheduleStore(db_path=str(tmp_path / "c32_system_kinds.db"))
+        bound = bind_test_scheduler(monkeypatch, store=store, team_id=TEAM, people_store=people_store)
+
+        now = datetime.now(timezone.utc)
+        gw_id = broker_gateway_identity(TEAM)
+        sched_id = broker_scheduler_identity(TEAM)
+        ada_gw_token = root_task_token(
+            gw_id, team=TEAM, root_task_id="task_ada_gw", request_id="req_ada_gw", person_ref=broker_person_ref("ada"), issued=now
+        )
+
+        async def _send(body: dict[str, Any], token: dict[str, Any]) -> dict[str, Any]:
+            frame = _verified_team_frame("schedules.install", body, sender_agent="lead_1", authority=token, team=TEAM)
+            return checked_reply("schedules.install", await bound.schedule_ops.handle(frame))
+
+        def _ckpt_body(req_id: str, sid: str) -> dict[str, Any]:
+            return {
+                "request_id": req_id,
+                "schedule_id": sid,
+                "mode": "create",
+                "name": f"isolated_recovery_checkpoint:task_orig:{sid}",
+                "management_class": "system",
+                "system_schedule_kind": "isolated_recovery_checkpoint",
+                "timing": {"kind": "once", "at": "2030-01-01T00:10:00.000Z"},
+                "repeat_count": 1,
+                "enabled": True,
+                "action": {"type": "task", "instruction": {"type": "inline", "text": "Checkpoint."}},
+            }
+
+        # Install a vouched objective_work_session from a gateway-signed request and obtain its standing permit.
+        obj_body = {
+            "request_id": "req-obj-1",
+            "schedule_id": "objwork_sched_1",
+            "mode": "create",
+            "name": "objective_work_session:obj_1",
+            "management_class": "system",
+            "system_schedule_kind": "objective_work_session",
+            "objective_id": "obj_1",
+            "timing": {"kind": "interval", "interval_ms": 3_600_000},
+            "repeat_count": 0,
+            "enabled": True,
+            "action": {"type": "task", "instruction": {"type": "inline", "text": "Resume objective."}},
+        }
+        created_obj = await _send(obj_body, ada_gw_token)
+        assert created_obj["outcome"] == "ok"
+        obj_permit = store.run_permit("objwork_sched_1")
+        assert obj_permit is not None
+
+        # 1. Permit-backed run of objective_work_session installs an isolated_recovery_checkpoint.
+        ckpt_from_permit = await _send(
+            _ckpt_body("req-ckpt-permit", "recov_ckpt_from_permit"),
+            obj_permit.model_dump(mode="json", exclude_none=True),
+        )
+        assert ckpt_from_permit["outcome"] == "ok", ckpt_from_permit
+        assert store.get_scheduled_message("recov_ckpt_from_permit") is not None
+        assert store.run_permit("recov_ckpt_from_permit") is not None
+
+        # 2. Scheduler-signed per-run token (run_context.sign) for an active schedule installs a checkpoint.
+        run_token = root_task_token(
+            sched_id,
+            team=TEAM,
+            root_task_id="run_obj_1",
+            request_id="schedule_run_obj_1",
+            person_ref=broker_person_ref("ada"),
+            schedule_id="objwork_sched_1",
+            issued=now,
+        )
+        ckpt_from_run = await _send(_ckpt_body("req-ckpt-run", "recov_ckpt_from_run"), run_token)
+        assert ckpt_from_run["outcome"] == "ok", ckpt_from_run
+        assert store.get_scheduled_message("recov_ckpt_from_run") is not None
+
+        # 3. Permit-backed run CANNOT install team/maintenance system kinds (heartbeat_launcher).
+        hb_refused = await _send(
+            {
+                "request_id": "req-hb-from-permit",
+                "schedule_id": "sched_hb_from_permit",
+                "mode": "create",
+                "management_class": "system",
+                "system_schedule_kind": "heartbeat_launcher",
+                "timing": {"kind": "interval", "interval_ms": 600_000},
+                "repeat_count": 0,
+                "enabled": True,
+                "action": {"type": "task", "instruction": {"type": "inline", "text": "Heartbeat."}},
+            },
+            obj_permit.model_dump(mode="json", exclude_none=True),
+        )
+        assert hb_refused["outcome"] == "not_allowed"
+        assert store.get_scheduled_message("sched_hb_from_permit") is None
+
+        # 4. Administrator owner permit (schedule_owner_permit:*) CANNOT install isolated_recovery_checkpoint
+        #    or objective_work_session.
+        maint = ScheduledMessage(
+            schedule_id="sched_internal_imp_c32",
+            schedule_name="internal_improvement:team",
+            management_class=ScheduleManagementClass.SYSTEM,
+            system_schedule_kind=SystemScheduleKind.INTERNAL_IMPROVEMENT,
+            payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Maintain team."),
+            payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="ada")),
+            interval_ms=3_600_000,
+            repeat_count=None,
+        )
+        store.add(maint, claim_team_id=TEAM)
+        owner_permit = schedule_permit_token(
+            sched_id,
+            team=TEAM,
+            schedule_id="sched_internal_imp_c32",
+            person_ref=broker_person_ref("ada"),
+            owner_permit=True,
+            issued=now,
+        )
+        owner_permit_ckpt = await _send(_ckpt_body("req-op-ckpt", "recov_ckpt_from_op"), owner_permit)
+        assert owner_permit_ckpt["outcome"] == "not_allowed"
+        assert store.get_scheduled_message("recov_ckpt_from_op") is None
+
+        owner_permit_obj = await _send(
+            {**obj_body, "request_id": "req-op-obj", "schedule_id": "objwork_from_op"},
+            owner_permit,
+        )
+        assert owner_permit_obj["outcome"] == "not_allowed"
+        assert store.get_scheduled_message("objwork_from_op") is None
+
+        # 5. Per-run token whose source_schedule_id does not exist in the store is REFUSED.
+        missing_source_token = root_task_token(
+            sched_id,
+            team=TEAM,
+            root_task_id="run_missing_1",
+            request_id="schedule_run_missing_1",
+            person_ref=broker_person_ref("ada"),
+            schedule_id="sched_does_not_exist",
+            issued=now,
+        )
+        missing_refused = await _send(_ckpt_body("req-missing-src", "recov_ckpt_missing_src"), missing_source_token)
+        assert missing_refused["outcome"] == "not_allowed"
+        assert store.get_scheduled_message("recov_ckpt_missing_src") is None
     finally:
         forget_task_context_keys()

@@ -24,6 +24,7 @@ from typing import Optional
 
 from access_control.people_directory import PeopleDirectory
 from custom_messages.wire.authority_bindings import (
+    SCHEDULE_OWNER_PERMIT_PREFIX,
     SCHEDULER_ISSUER_ROLE,
     is_schedule_permit_binding,
 )
@@ -78,6 +79,7 @@ class InstallActorCheck:
     owner_vouched: bool = False
     permit_schedule_id: Optional[str] = None
     source_schedule_id: Optional[str] = None
+    is_owner_permit: bool = False
     agent_id: Optional[str] = None
 
 
@@ -157,6 +159,7 @@ def schedule_install_actor(
     issuer_roles = authority.certificate.roles
     has_schedule_id = isinstance(authority.token.schedule_id, str)
     is_permit = is_schedule_permit_binding(bound.id)
+    is_owner_permit = bool(is_permit and bound.id.startswith(SCHEDULE_OWNER_PERMIT_PREFIX))
     permit_schedule_id: Optional[str] = None
     source_schedule_id: Optional[str] = None
     owner_vouched = False
@@ -199,6 +202,7 @@ def schedule_install_actor(
             owner_vouched=False,
             permit_schedule_id=permit_schedule_id,
             source_schedule_id=source_schedule_id,
+            is_owner_permit=is_owner_permit,
         )
     if not now.active or not now.roles:
         reason = f"The person is {now.describe()} in this team."
@@ -217,6 +221,7 @@ def schedule_install_actor(
             owner_vouched=False,
             permit_schedule_id=permit_schedule_id,
             source_schedule_id=source_schedule_id,
+            is_owner_permit=is_owner_permit,
         )
     return InstallActorCheck(
         person=CommandPerson(now.person_id, people.team_id, now.roles),
@@ -227,7 +232,8 @@ def schedule_install_actor(
         owner_vouched=owner_vouched,
         permit_schedule_id=permit_schedule_id,
         source_schedule_id=source_schedule_id,
-        agent_id=verified.frame.issuer.agent,
+        is_owner_permit=is_owner_permit,
+        agent_id=verified.frame.issuer.agent if isinstance(verified.frame.issuer.agent, str) else None,
     )
 
 

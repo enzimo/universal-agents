@@ -86,6 +86,12 @@ class SessionRepository(Protocol):
         owner_canonical_user_id: str | None = None,
     ) -> list[SessionRecord]: ...
 
+    def list_unowned_sessions(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[SessionRecord]: ...
+
     def count_sessions(
         self,
         *,

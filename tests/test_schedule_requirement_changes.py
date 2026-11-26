@@ -74,6 +74,7 @@ def _create_job(agent, *, worker_policy_json: str) -> dict:
         target_agent_type=WORKER,
         worker_policy_json=worker_policy_json,
         requirements_json=json.dumps(BY_FUNCTION_NAME),
+        source_meta=schedule.payload_meta,
     )
 
 

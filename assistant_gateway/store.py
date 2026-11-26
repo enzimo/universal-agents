@@ -263,6 +263,13 @@ class GatewayStateStore:
             owner_canonical_user_id=owner_canonical_user_id,
         )
 
+    def list_unowned_sessions(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[SessionRecord]:
+        return self._repository.list_unowned_sessions(limit=limit)
+
     def count_sessions(
         self,
         *,

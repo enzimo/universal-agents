@@ -1348,8 +1348,8 @@ def start_isolated_recovery(
     checkpoint_schedule = None
     checkpoint_link_fields: dict[str, str] = {}
     if _coerce_tool_bool(notify_user) and checkpoint_delay_seconds > 0:
+        checkpoint_schedule_id = new_id("recov_ckpt")
         try:
-            checkpoint_schedule_id = new_id("recov_ckpt")
             checkpoint_schedule = ScheduledMessage(
                 schedule_id=checkpoint_schedule_id,
                 schedule_name=(
@@ -1425,7 +1425,28 @@ def start_isolated_recovery(
             )
             wake_scheduler(agent)
         except Exception as exc:
-            checkpoint_schedule = {"error": str(exc)}
+            outcome = getattr(exc, "outcome", None)
+            getattr(agent, "_logger", logger).warning(
+                "Failed to install isolated-recovery checkpoint schedule; no checkpoint was set. "
+                "event=isolated_recovery_checkpoint_install_failed schedule_id=%s objective_id=%s "
+                "recovery_task_id=%s outcome=%s error_type=%s error=%s",
+                checkpoint_schedule_id,
+                objective_id,
+                recovery_task_id,
+                outcome,
+                type(exc).__name__,
+                exc,
+            )
+            checkpoint_schedule = {
+                "scheduled": False,
+                "error": str(exc),
+                "outcome": outcome,
+                "notice": (
+                    "No isolated-recovery checkpoint schedule was set, so the person will not be "
+                    "asked automatically whether to continue, stop, or abort. Inform the person "
+                    "directly or follow up on the recovery task."
+                ),
+            }
 
     return json.dumps(
         {

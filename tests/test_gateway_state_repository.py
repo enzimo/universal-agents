@@ -113,6 +113,13 @@ def test_gateway_state_repository_roundtrips_deliveries_queries_and_scheduled_ta
         conversation_id="conv_alpha",
         manager_agent_id="manager_1",
     )
+    repo.create_session(
+        session_key="session_owned",
+        conversation_id="conv_owned",
+        manager_agent_id="manager_1",
+        owner_canonical_user_id="usr_owned",
+    )
+    assert [s.session_key for s in repo.list_unowned_sessions(limit=10)] == ["session_alpha"]
     delivery_id = repo.add_deferred_delivery(
         session_key="session_alpha",
         origin_kind="cron",

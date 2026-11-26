@@ -329,31 +329,25 @@ class ScheduleOperations:
     def _check_permit_source(self, actor: InstallActorCheck, now: datetime) -> None:
         if actor.person is None:
             return
-        if actor.permit_schedule_id is not None:
-            source = self._store.read_scheduled_message(actor.permit_schedule_id)
-            if (
-                source is None
-                or source.claim_team_id != actor.person.team_id
-                or owner_canonical_user_id_for_schedule(source) != actor.person.person_id
-                or schedule_stopped_reason(source, now) is not None
-                or not (self._store.is_owner_vouched(actor.permit_schedule_id) or is_system_managed_schedule(source))
-            ):
-                raise ScheduleInstallRefused(
-                    "not_allowed",
-                    "The schedule permit backing this task is no longer active or vouched.",
-                )
+        backing_schedule_id = actor.permit_schedule_id or actor.source_schedule_id
+        if backing_schedule_id is None:
             return
-        if actor.source_schedule_id is not None:
-            source = self._store.read_scheduled_message(actor.source_schedule_id)
-            if source is not None and (
-                source.claim_team_id != actor.person.team_id
-                or owner_canonical_user_id_for_schedule(source) != actor.person.person_id
-                or schedule_stopped_reason(source, now) is not None
-            ):
-                raise ScheduleInstallRefused(
-                    "not_allowed",
-                    "The schedule backing this task is paused, turned off, or no longer belongs to this person.",
-                )
+        source = self._store.read_scheduled_message(backing_schedule_id)
+        if (
+            source is None
+            or source.claim_team_id != actor.person.team_id
+            or owner_canonical_user_id_for_schedule(source) != actor.person.person_id
+            or schedule_stopped_reason(source, now) is not None
+            or not (
+                self._store.is_owner_vouched(backing_schedule_id)
+                or is_system_managed_schedule(source)
+            )
+        ):
+            raise ScheduleInstallRefused(
+                "not_allowed",
+                "The schedule backing this task is missing, paused, turned off, unvouched, "
+                "or no longer belongs to this person.",
+            )
 
     def _authorize_install(
         self,
@@ -368,11 +362,6 @@ class ScheduleOperations:
         person = actor.person
         if management_class != ScheduleManagementClass.SYSTEM:
             return False
-        if not actor.owner_vouched:
-            raise ScheduleInstallRefused(
-                "not_allowed",
-                "System-managed schedules require a gateway-signed person request or command.",
-            )
         mode = str(body["mode"])
         spec = system_schedule_spec(system_kind) if system_kind is not None else None
         if actor.from_gateway:
@@ -381,12 +370,22 @@ class ScheduleOperations:
             if not self._may_change_system(person):
                 raise ScheduleInstallRefused("not_allowed", SYSTEM_NOT_ALLOWED_TEXT)
             return bool(spec is not None and spec.scope is SystemScheduleScope.TEAM)
+        if actor.is_owner_permit:
+            raise ScheduleInstallRefused(
+                "not_allowed",
+                "Maintenance owner permits cannot install system-managed schedules.",
+            )
         if system_kind in _AGENT_PERSON_SYSTEM_KINDS:
             if system_kind == SystemScheduleKind.OBJECTIVE_WORK_SESSION and not body.get("objective_id"):
                 raise ScheduleInstallRefused(
                     "invalid_request", "An objective_work_session schedule requires objective_id."
                 )
             return False
+        if not actor.owner_vouched:
+            raise ScheduleInstallRefused(
+                "not_allowed",
+                "Team and maintenance system schedules require a gateway-signed person request or command.",
+            )
         if not self._may_change_system(person):
             raise ScheduleInstallRefused("not_allowed", SYSTEM_NOT_ALLOWED_TEXT)
         return False

@@ -55,6 +55,9 @@ class DeliveryPersonMismatch(RuntimeError):
     """A message for one person would have been delivered to another person's session."""
 
 
+_DELIVERY_REF_SCAN_LIMIT = 10_000
+
+
 class GatewayDeliveryProjection:
     """Resolve trusted gateway state into a channel-neutral delivery event."""
 
@@ -166,6 +169,20 @@ class GatewayDeliveryProjection:
             session = self._session_by_delivery_ref(metadata)
             if session is not None:
                 session_key = session.session_key
+                if metadata.scheduled_job_id:
+                    person_id = (
+                        getattr(metadata.gateway_context, "canonical_user_id", None)
+                        if metadata.gateway_context is not None
+                        else None
+                    )
+                    # Record the resolved chat in gateway_scheduled_targets (plan 13C.6)
+                    # so subsequent runs take the direct target lookup and never scan again.
+                    self._delivery.upsert_scheduled_target(
+                        scheduled_job_id=metadata.scheduled_job_id,
+                        session_key=session.session_key,
+                        conversation_id=metadata.conversation_id or session.conversation_id,
+                        owner_canonical_user_id=person_id or session.owner_canonical_user_id,
+                    )
         if session is None and metadata.conversation_id:
             session = self._sessions.get_session_by_conversation_id(
                 metadata.conversation_id
@@ -203,7 +220,7 @@ class GatewayDeliveryProjection:
             else None
         )
         candidates = self._sessions.list_sessions(
-            limit=10_000,
+            limit=_DELIVERY_REF_SCAN_LIMIT,
             owner_canonical_user_id=person_id,
         )
         for candidate in candidates:
@@ -212,17 +229,36 @@ class GatewayDeliveryProjection:
                 metadata.delivery_ref,
             ):
                 return candidate
+        if len(candidates) >= _DELIVERY_REF_SCAN_LIMIT:
+            self._logger.warning(
+                "Delivery reference lookup reached the person session scan limit without a match. "
+                "event=gateway_delivery_ref_scan_limit_reached scope=person person_id=%s "
+                "limit=%d scheduled_job_id=%s correlation_id=%s",
+                person_id,
+                _DELIVERY_REF_SCAN_LIMIT,
+                metadata.scheduled_job_id,
+                metadata.correlation_id,
+            )
         if person_id is not None:
             # Legacy single-user sessions may have owner_canonical_user_id=None;
-            # never match a session owned by another person.
-            for candidate in self._sessions.list_sessions(limit=10_000):
-                if candidate.owner_canonical_user_id is not None:
-                    continue
+            # query only ownerless sessions so a miss never scans other people's chats.
+            unowned = self._sessions.list_unowned_sessions(limit=_DELIVERY_REF_SCAN_LIMIT)
+            for candidate in unowned:
                 if hmac.compare_digest(
                     self._delivery_refs.ref(candidate.session_key),
                     metadata.delivery_ref,
                 ):
                     return candidate
+            if len(unowned) >= _DELIVERY_REF_SCAN_LIMIT:
+                self._logger.warning(
+                    "Delivery reference lookup reached the unowned session scan limit without a match. "
+                    "event=gateway_delivery_ref_scan_limit_reached scope=unowned person_id=%s "
+                    "limit=%d scheduled_job_id=%s correlation_id=%s",
+                    person_id,
+                    _DELIVERY_REF_SCAN_LIMIT,
+                    metadata.scheduled_job_id,
+                    metadata.correlation_id,
+                )
         return None
 
     def _refuse_other_persons_session(self, metadata: _DeliveryMetadata, session: SessionRecord | None) -> None:

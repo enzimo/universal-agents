@@ -756,6 +756,55 @@ def _knowledge_blobs(runtime: object, *, team: str) -> Any:
     )
 
 
+def _gateway_service_tasks(gateway: "UserGateway") -> list[asyncio.Task]:
+    """Start optional background loops owned by the gateway's application services."""
+
+    stop_event = gateway._stop_event
+    tasks = [
+        asyncio.create_task(
+            gateway._maintenance_schedules.run(stop_event),
+            name="gateway_maintenance_schedule_retry_loop",
+        ),
+        asyncio.create_task(
+            gateway._deferred_delivery_application.run(stop_event),
+            name="gateway_delivery_loop",
+        ),
+        asyncio.create_task(
+            gateway.stored_data.uploads.run(stop_event),
+            name="gateway_upload_retention_loop",
+        ),
+        asyncio.create_task(
+            _history_cleanup(gateway.config, gateway.state_store, gateway.access_inbox).run(stop_event),
+            name="gateway_history_cleanup_loop",
+        ),
+        asyncio.create_task(
+            gateway.stored_data.usage.run(stop_event),
+            name="gateway_storage_usage_loop",
+        ),
+    ]
+    tasks.extend(
+        _access_maintenance_tasks(
+            gateway.config,
+            access_inbox=gateway.access_inbox,
+            broker=gateway._secure_broker,
+            tool_setups=gateway._credential_workflow.tool_setups,
+            credential_workflow=gateway._credential_workflow,
+            status_page=gateway.application.status,
+            stop_event=stop_event,
+            # With a team view the lead follower sends them once the records name the lead.
+            resend_kept_results_at_start=gateway._team_lead is None,
+        )
+    )
+    if gateway._activity_notices.enabled:
+        tasks.append(
+            asyncio.create_task(
+                gateway._activity_notices.run(stop_event),
+                name="gateway_activity_plan_notice_loop",
+            )
+        )
+    return tasks
+
+
 class UserGateway:
     """User-facing NATS gateway with delivery and autonomy services."""
 
@@ -1625,48 +1674,7 @@ class UserGateway:
 
         if start_services:
             await self._maintenance_schedules.ensure_all()
-            self._background_tasks += [
-                asyncio.create_task(
-                    self._maintenance_schedules.run(self._stop_event),
-                    name="gateway_maintenance_schedule_retry_loop",
-                ),
-                asyncio.create_task(
-                    self._deferred_delivery_application.run(self._stop_event),
-                    name="gateway_delivery_loop",
-                ),
-                asyncio.create_task(
-                    self.stored_data.uploads.run(self._stop_event),
-                    name="gateway_upload_retention_loop",
-                ),
-                asyncio.create_task(
-                    _history_cleanup(self.config, self.state_store, self.access_inbox).run(self._stop_event),
-                    name="gateway_history_cleanup_loop",
-                ),
-                asyncio.create_task(
-                    self.stored_data.usage.run(self._stop_event),
-                    name="gateway_storage_usage_loop",
-                ),
-            ]
-            self._background_tasks.extend(
-                _access_maintenance_tasks(
-                    self.config,
-                    access_inbox=self.access_inbox,
-                    broker=self._secure_broker,
-                    tool_setups=self._credential_workflow.tool_setups,
-                    credential_workflow=self._credential_workflow,
-                    status_page=self.application.status,
-                    stop_event=self._stop_event,
-                    # With a team view the lead follower sends them once the records name the lead.
-                    resend_kept_results_at_start=self._team_lead is None,
-                )
-            )
-            if self._activity_notices.enabled:
-                self._background_tasks.append(
-                    asyncio.create_task(
-                        self._activity_notices.run(self._stop_event),
-                        name="gateway_activity_plan_notice_loop",
-                    )
-                )
+            self._background_tasks.extend(_gateway_service_tasks(self))
 
     async def close(self) -> None:
         self._stop_event.set()
