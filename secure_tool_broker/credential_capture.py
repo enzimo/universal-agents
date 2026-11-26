@@ -301,26 +301,12 @@ def _build_capture_notice(
 
 
 def _check_folder_access(
-    access_gate: BrokerAccessGate | None,
+    access_gate: BrokerAccessGate,
     context: ToolContext,
     located: LocatedTaskFile,
     *,
     credential_key: str,
 ) -> ToolResult | None:
-    if access_gate is None:
-        LOGGER.warning(
-            "Refusing credential.capture_file because no BrokerAccessGate was provided. "
-            "event=credential_capture_access_gate_missing credential_key=%s person_id=%s folder_id=%s",
-            credential_key,
-            context.canonical_user_id,
-            located.folder_id,
-        )
-        return _refuse(
-            CAPTURE_ACCESS_GATE_REQUIRED,
-            "credential.capture_file requires the broker access gate to enforce folder access.",
-            credential_key=credential_key,
-            folder_id=located.folder_id,
-        )
     if access_gate.access is None:
         return None
     try:

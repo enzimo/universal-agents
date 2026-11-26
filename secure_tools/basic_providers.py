@@ -260,7 +260,9 @@ class CredentialCatalogProvider(DeclaredProvider):
             "credential catalog without passing the secret in parameters or returning it. Requires path, "
             "credential_key, display_name, purpose, and expires_at (UTC, 5 minutes to 90 days ahead); optional "
             "field_name (default secret). Never replaces a person-entered, external-source, or team credential, "
-            "respects folder access, deletes the source file after commit, and notifies the person unless disabled.",
+            "respects folder access, deletes the source file after commit (source_file_deleted), and reports "
+            "notice_status ('sent', 'off', or 'failed') beside notice_sent. Error capture_access_gate_required "
+            "is a broker fault to stop and report; capture_folder_check_unavailable is transient and worth one retry.",
         ),
         "credential.get_metadata": ActionSpec(
             "credential.get_metadata",

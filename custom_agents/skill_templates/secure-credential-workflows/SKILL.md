@@ -321,6 +321,34 @@ When a workflow needs a new named credential:
 - Saving a new value without automatic deletion over a temporary credential
   through the secure form clears its expiry; direct agent `credential.collect`
   or `credential.register_existing_source` calls cannot set or clear an expiry.
+- **Capturing a secret you already hold (`credential.capture_file`)**: when you
+  already hold a temporary secret in a file (for example an auth file a sign-in
+  wrote in the sandbox), store it in the verified person's Sealbox credential
+  store with `secure_cli(provider="credential_catalog",
+  action="credential.capture_file", params=...)`. If you hold a temporary
+  password or token in text, first write it to a file inside the person's
+  `scratch/` folder with the file tool and capture it immediately with
+  `credential.capture_file` — never pass a secret value in a tool parameter or
+  your reply.
+  - Required `params`: `path` (regular UTF-8 file in the person's folder or
+    shared `team/` / `agents/`, no symbolic links), `credential_key`,
+    `display_name`, `purpose`, and `expires_at` (required timezone-aware UTC
+    ISO-8601 timestamp, 5 minutes to 90 days ahead; because the 5-minute floor
+    moves with the clock, pick a time comfortably past it). Optional
+    `field_name` defaults to `"secret"` (pass the specific field name an
+    account link expects, such as `token` or `api_token`).
+  - `credential.capture_file` works only for a verified person's task (never
+    system work, never team scope) and refuses to replace a credential the
+    person entered, an external-source key, or a team key. After a successful
+    save, the broker deletes the source file (check `source_file_deleted`) and
+    sends the person one Inbox notice unless the operator turned it off (check
+    `notice_status`: `sent`, `off`, or `failed` beside `notice_sent`).
+  - On any refusal the source file stays in place. Treat
+    `capture_access_gate_required` as a broker fault to stop and report; treat
+    `capture_folder_check_unavailable` as a transient check error worth one
+    retry. Tell the person in plain language that the temporary credential was
+    saved and when it will be deleted, without repeating any secret or machine
+    error code.
 
 ## Updating Or Repairing Credentials
 
@@ -568,7 +596,8 @@ raw credential in any field.
   returned with `redirect_location`, not followed. The broker returns redacted
   response content.
 - `credential_catalog` actions: `credential.collect`,
-  `credential.get_metadata`, `credential.register_existing_source`,
+  `credential.capture_file`, `credential.get_metadata`,
+  `credential.register_existing_source`,
   `template.list`, `template.get`, `template.render_request`,
   `template.save_approved_variant`, `credential.bind_for_openshell`,
   `credential.release_openshell_binding`, `credential.api_request`,
@@ -581,6 +610,14 @@ raw credential in any field.
     `credential.collect` is the post-form storage action; `signup.prepare` only
     validates. A user-facing form requires the terminal
     `secure_credential_collection_request` structured action.
+  - `credential.capture_file` stores a temporary person-scoped Sealbox
+    credential directly from a task file (required `path`, `credential_key`,
+    `display_name`, `purpose`, `expires_at` 5 minutes to 90 days ahead;
+    optional `field_name`, default `secret`), deletes the source file after
+    commit (`source_file_deleted`), and reports `notice_status` (`sent`, `off`,
+    or `failed`). See Temporary Credentials above; report
+    `capture_access_gate_required` as a broker fault and retry
+    `capture_folder_check_unavailable` at most once.
   - New instances default to `write_source="sealbox"`: username/password fields
     become Sealbox credential records, custom secret fields become Sealbox
     secrets, and the catalog retains only source refs.

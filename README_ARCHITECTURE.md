@@ -3793,11 +3793,51 @@ timestamp through the broker's secure credential collection form (presets from
 15 minutes to 3 months, or a local date and time at least 5 minutes in the
 future; `secure_tool_broker/credential_expiry.py`,
 `secure_tool_broker/credential_collection_form.py`). An agent may pre-fill a
-proposed UTC `expires_at` in `SecureCredentialCollectionRequest`, but only the
-person's form submission (or team transfer import re-applying remaining TTL)
-stores or clears an expiry; direct `credential.collect` and
-`credential.register_existing_source` calls cannot set or clear one, and
-non-Sealbox write sources refuse an expiry (`credential_expiry_unsupported_source`).
+proposed UTC `expires_at` in `SecureCredentialCollectionRequest`, or store a
+secret it already holds in a task file through `credential.capture_file`
+(`secure_tool_broker/credential_capture.py`). Only those three paths — the
+person's form submission, team transfer import (re-applying remaining TTL), and
+`credential.capture_file` — may set or clear an expiry; direct
+`credential.collect` and `credential.register_existing_source` calls cannot set
+or clear one, and non-Sealbox write sources refuse an expiry
+(`credential_expiry_unsupported_source`).
+
+- **Agent file-only capture (`secure_tool_broker/credential_capture.py`).**
+  `credential.capture_file` (`procedure:credentials`, level `write`) lets an
+  agent save an auth file or temporary secret it already holds in a task file
+  into the verified task person's Sealbox tenant without the secret ever
+  crossing a tool parameter, reply, log, or notice. Rationale for its
+  invariants:
+  - *File-only single read*: parameters use a strict allowlist that rejects
+    secret-bearing keys (`capture_secret_param_rejected`); the broker locates
+    the file via `secure_tool_broker.task_files.locate_task_file` (the person's
+    folder plus `team/` and `agents/`), requires a `BrokerAccessGate` and
+    checks folder write access (`access_gate.decide_folder_for_context`), then
+    reads the file once through `access_control.safe_open.opened_file` (no
+    symlinks, regular UTF-8 files only, non-empty, capped at the broker's
+    256 KiB credential file limit).
+  - *Required bounded expiry*: every capture requires a timezone-aware UTC
+    `expires_at` between 5 minutes and 90 days ahead (`validate_capture_expiry`),
+    reusing `collect_credential`'s Sealbox `--ttl` and catalog `expires_at`
+    storage so immediate expiry checks, the janitor, link revocation, and team
+    transfer apply identically to form-entered temporary credentials.
+  - *Strict person scope and overwrite protection*: captures work only for a
+    verified `user` task context (never system work, never team scope) and
+    record capture provenance in `CatalogCredential.approval`
+    (`source="agent_file_capture"`, `captured_by_agent_type`,
+    `captured_for_person_id`). An overwrite guard inside `credential_key_lock`
+    and `_scope_catalog_lock` refuses team keys (`capture_team_key_refused`),
+    external non-Sealbox keys (`capture_external_source_key_refused`), and any
+    key not created by `agent_file_capture` for that same person
+    (`capture_person_credential_refused`), so an agent can never overwrite a
+    credential the person entered.
+  - *Post-commit source deletion and Inbox notice*: after catalog commit, the
+    broker removes the source file with `safe_open.remove_file(...,
+    expected_identity=...)` so a concurrently swapped file is never deleted,
+    leaves the source file untouched on every refusal or storage failure, and
+    sends the person one `AccessNoticeKind.CREDENTIAL_CAPTURED` Inbox notice
+    naming the agent type, display name, and UTC deletion time unless
+    `security_layer.credential_catalog.notify_on_agent_capture` is `false`.
 
 - **Why catalog expiry checks are the primary guard and Sealbox TTL is a second
   guard.** Every Sealbox write for a temporary credential passes `--ttl <seconds

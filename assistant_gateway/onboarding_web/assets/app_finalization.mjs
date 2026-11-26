@@ -344,6 +344,7 @@ function currentSecurityLayerSettings() {
         default_write_source: sharedState.state.credentialCatalogDefaultWriteSource || "sealbox",
         collection_session_ttl_seconds: numberOrDefault(sharedState.state.credentialCatalogCollectionSessionTtlSeconds, 900),
         secret_cache_ttl_seconds: numberOrDefault(sharedState.state.credentialCatalogSecretCacheTtlSeconds, 300),
+        notify_on_agent_capture: Boolean(sharedState.state.credentialCatalogNotifyOnAgentCapture),
       },
       bitwarden_server_url: sharedState.state.bitwardenServerUrl || null,
       sealbox: {

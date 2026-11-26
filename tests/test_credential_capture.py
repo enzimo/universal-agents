@@ -1538,7 +1538,6 @@ async def test_notify_on_agent_capture_setting_schemas_config_loader_and_launch_
     # 5. assistant_cli._run_secure_tool_broker_service exports the setting to the broker env.
     observed: dict[str, object] = {}
     monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", "test-token")
-    monkeypatch.setenv(ENV_NOTIFY_ON_AGENT_CAPTURE, "unset-sentinel")
     monkeypatch.delenv(ENV_NOTIFY_ON_AGENT_CAPTURE, raising=False)
 
     async def fake_run_secure_tool_broker(*, host, port, token, **_kwargs):
@@ -1547,3 +1546,95 @@ async def test_notify_on_agent_capture_setting_schemas_config_loader_and_launch_
     monkeypatch.setattr("assistant_cli.run_secure_tool_broker", fake_run_secure_tool_broker)
     await _run_secure_tool_broker_service(str(saved_path))
     assert observed["notify_env"] == "false"
+
+
+def test_notify_on_agent_capture_env_warns_on_unrecognized_value(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C13: invalid env spellings log a warning naming the variable instead of silently falling back."""
+
+    from secure_tool_broker.defaults import notify_on_agent_capture_enabled
+
+    for truthy in ("1", "true", "YES", "on"):
+        monkeypatch.setenv(ENV_NOTIFY_ON_AGENT_CAPTURE, truthy)
+        assert notify_on_agent_capture_enabled() is True
+    for falsy in ("0", "false", "NO", "off"):
+        monkeypatch.setenv(ENV_NOTIFY_ON_AGENT_CAPTURE, falsy)
+        assert notify_on_agent_capture_enabled() is False
+
+    for invalid in ("disabled", "none", "n", "f"):
+        caplog.clear()
+        monkeypatch.setenv(ENV_NOTIFY_ON_AGENT_CAPTURE, invalid)
+        with caplog.at_level(logging.WARNING, logger="secure_tool_broker.defaults"):
+            assert notify_on_agent_capture_enabled() is True
+        assert any(
+            ENV_NOTIFY_ON_AGENT_CAPTURE in rec.getMessage() and invalid in rec.getMessage()
+            for rec in caplog.records
+        )
+
+
+@pytest.mark.asyncio
+async def test_onboarding_import_and_assets_preserve_notify_on_agent_capture(tmp_path: Path) -> None:
+    """C13: onboarding migration import and form JS preserve notify_on_agent_capture=false."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+    from assistant_gateway.onboarding_web.server import OnboardingWebService, OnboardingWebSettings
+
+    instance_root = tmp_path / "migrated_instance"
+    service = OnboardingWebService(
+        OnboardingWebSettings(
+            host="127.0.0.1",
+            port=0,
+            instance_root=str(instance_root),
+            restart_on_complete=False,
+        )
+    )
+    config_yaml = """
+schema_version: 1
+agent:
+  default_team_id: team_capture_mig
+  default_request_timezone: UTC
+security_layer:
+  mode: broker
+  credential_catalog:
+    notify_on_agent_capture: false
+"""
+    async with TestClient(TestServer(service.build_app())) as client:
+        import_resp = await client.post(
+            "/api/onboarding/import-config",
+            json={"filename": "config.yaml", "content": config_yaml},
+        )
+        imported = await import_resp.json()
+        assert import_resp.status == 200
+        assert imported["skipped"] == []
+        assert imported["settings"]["security_layer"]["credential_catalog"]["notify_on_agent_capture"] is False
+
+        complete_resp = await client.post(
+            "/api/onboarding/complete",
+            json={
+                "instance_name": "instance_capture_mig",
+                "team_id": "team_capture_mig",
+                "assistant_name": "Nova",
+                "user_display_name": "First Admin",
+                "timezone": "UTC",
+                "model_provider": "OpenAI Compatible",
+                "model_id": "test-model",
+                "web_chat_auth_token": "uaweb_test_token",
+                "generate_internal_credentials": False,
+                "security_layer": imported["settings"]["security_layer"],
+            },
+        )
+        assert complete_resp.status == 200
+
+    loaded = GatewayInstanceConfig.load(instance_root / "instance_config.yaml")
+    assert loaded.security_layer.credential_catalog.notify_on_agent_capture is False
+
+    assets_dir = Path(__file__).resolve().parents[1] / "assistant_gateway" / "onboarding_web" / "assets"
+    assert "credentialCatalogNotifyOnAgentCapture" in (assets_dir / "app.js").read_text(encoding="utf-8")
+    assert "credential_catalog_notify_on_agent_capture" in (assets_dir / "app_configuration.mjs").read_text(
+        encoding="utf-8"
+    )
+    assert "notify_on_agent_capture: Boolean(sharedState.state.credentialCatalogNotifyOnAgentCapture)" in (
+        assets_dir / "app_finalization.mjs"
+    ).read_text(encoding="utf-8")

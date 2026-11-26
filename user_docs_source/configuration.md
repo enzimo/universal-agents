@@ -1637,6 +1637,7 @@ security_layer:
     default_write_source: bitwarden
     openshell_binding_ttl_seconds: 900
     collection_session_ttl_seconds: 900
+    notify_on_agent_capture: true
 ```
 
 For broker-only credentials, prefer:
@@ -1705,6 +1706,11 @@ for newly collected workflow credentials. Passwords and tokens are submitted
 through broker forms and stay in the configured credential store. Which tool
 uses a credential, and where the broker puts its values, is an
 [account link](permissions.md#account-links), not part of the saved credential.
+When an agent captures a temporary credential from a task file with
+`credential.capture_file`, the person receives one Inbox notice naming the
+agent type, display name, and UTC deletion time unless
+`security_layer.credential_catalog.notify_on_agent_capture` is set to `false`
+(default `true`; restart the broker after changing it).
 
 Agent web requests through the broker (`secure_requests` and
 `credential.api_request`) reach only hosts that a

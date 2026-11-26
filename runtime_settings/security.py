@@ -10,6 +10,7 @@ from pydantic import ValidationInfo, BaseModel, Field, field_validator, model_va
 from runtime_settings.code_sandbox_contract import CODE_SANDBOX_MODES, CODE_SANDBOX_REQUIRED
 from default_values import SECURITY_LAYER_DEFAULTS
 from runtime_settings.common import _normalized_optional_string
+from runtime_settings.values import parse_bool_env_value
 
 
 class CodeExecutionSecuritySettings(BaseModel):
@@ -296,11 +297,13 @@ class CredentialCatalogSettings(BaseModel):
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
-            lowered = value.strip().lower()
-            if lowered in {"1", "true", "yes", "on"}:
-                return True
-            if lowered in {"0", "false", "no", "off"}:
-                return False
+            try:
+                return parse_bool_env_value(
+                    "security_layer.credential_catalog.notify_on_agent_capture",
+                    value,
+                )
+            except ValueError:
+                pass
         raise ValueError(
             "security_layer.credential_catalog.notify_on_agent_capture must be a boolean."
         )

@@ -616,6 +616,7 @@ sharedState.state = {
     credentialCatalogDefaultWriteSource: window.localStorage.getItem("ua.preview.security.credential_catalog.default_write_source") || "sealbox",
     credentialCatalogCollectionSessionTtlSeconds: appearance.loadNumberSetting("ua.preview.security.credential_catalog.collection_session_ttl_seconds", 900, 1, 86400),
     credentialCatalogSecretCacheTtlSeconds: appearance.loadNumberSetting("ua.preview.security.credential_catalog.secret_cache_ttl_seconds", 300, 0, 86400),
+    credentialCatalogNotifyOnAgentCapture: window.localStorage.getItem("ua.preview.security.credential_catalog.notify_on_agent_capture") !== "false",
     bitwardenServerUrl: window.localStorage.getItem("ua.preview.security.bitwarden_server_url") || "",
     sealboxEnabled: window.localStorage.getItem("ua.preview.security.sealbox.enabled") !== "false",
     sealboxManageService: window.localStorage.getItem("ua.preview.security.sealbox.manage_service") !== "false",
@@ -2327,6 +2328,7 @@ function renderSafetyAdvanced() {
         ], "ua.preview.security.credential_catalog.default_write_source", "credentialCatalogDefaultWriteSource"));
         catalogGrid.appendChild(advancedInput("Collection session TTL seconds", "number", sharedState.state.credentialCatalogCollectionSessionTtlSeconds, "ua.preview.security.credential_catalog.collection_session_ttl_seconds", "credentialCatalogCollectionSessionTtlSeconds", { min: 1 }));
         catalogGrid.appendChild(advancedInput("Secret cache TTL seconds", "number", sharedState.state.credentialCatalogSecretCacheTtlSeconds, "ua.preview.security.credential_catalog.secret_cache_ttl_seconds", "credentialCatalogSecretCacheTtlSeconds", { min: 0 }));
+        catalogGrid.appendChild(advancedToggle("Notify on agent credential capture", sharedState.state.credentialCatalogNotifyOnAgentCapture, "ua.preview.security.credential_catalog.notify_on_agent_capture", "credentialCatalogNotifyOnAgentCapture"));
         body.appendChild(catalogGrid);
 
         var bitwardenGrid = renderAdvancedGrid();

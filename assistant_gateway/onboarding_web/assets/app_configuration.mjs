@@ -308,12 +308,14 @@ function applyImportedSettings(settings, options) {
         settings.credential_catalog_default_write_source = security.credential_catalog.default_write_source;
         settings.credential_catalog_collection_session_ttl_seconds = security.credential_catalog.collection_session_ttl_seconds;
         settings.credential_catalog_secret_cache_ttl_seconds = security.credential_catalog.secret_cache_ttl_seconds;
+        settings.credential_catalog_notify_on_agent_capture = security.credential_catalog.notify_on_agent_capture;
         applyBoolean("credential_catalog_enabled", "credentialCatalogEnabled", "ua.preview.security.credential_catalog.enabled");
         applyString("credential_catalog_database_path", "credentialCatalogDatabasePath", "ua.preview.security.credential_catalog.database_path");
         applyString("credential_catalog_template_overrides_path", "credentialCatalogTemplateOverridesPath", "ua.preview.security.credential_catalog.template_overrides_path");
         applyString("credential_catalog_default_write_source", "credentialCatalogDefaultWriteSource", "ua.preview.security.credential_catalog.default_write_source");
         applyNumber("credential_catalog_collection_session_ttl_seconds", "credentialCatalogCollectionSessionTtlSeconds", "ua.preview.security.credential_catalog.collection_session_ttl_seconds", 1, 86400);
         applyNumber("credential_catalog_secret_cache_ttl_seconds", "credentialCatalogSecretCacheTtlSeconds", "ua.preview.security.credential_catalog.secret_cache_ttl_seconds", 0, 86400);
+        applyBoolean("credential_catalog_notify_on_agent_capture", "credentialCatalogNotifyOnAgentCapture", "ua.preview.security.credential_catalog.notify_on_agent_capture");
       }
       settings.bitwarden_server_url = security.bitwarden_server_url;
       applyString("bitwarden_server_url", "bitwardenServerUrl", "ua.preview.security.bitwarden_server_url");

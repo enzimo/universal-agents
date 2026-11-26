@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_BIND_HOST = "0.0.0.0"
 DEFAULT_BIND_PORT = 18600
@@ -100,6 +103,7 @@ DEFAULT_CREDENTIAL_MAX_FILE_BYTES = 262_144
 MAX_CREDENTIAL_MAX_FILE_BYTES = 1_048_576
 ENV_NOTIFY_ON_AGENT_CAPTURE = "SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE"
 DEFAULT_NOTIFY_ON_AGENT_CAPTURE = True
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 
 
@@ -118,7 +122,18 @@ def credential_max_file_bytes() -> int:
 def notify_on_agent_capture_enabled() -> bool:
     """Whether the broker sends an Inbox notice after credential.capture_file stores a credential."""
 
-    raw = str(os.getenv(ENV_NOTIFY_ON_AGENT_CAPTURE) or "").strip().lower()
-    if not raw:
+    raw = os.getenv(ENV_NOTIFY_ON_AGENT_CAPTURE)
+    if raw is None or not raw.strip():
         return DEFAULT_NOTIFY_ON_AGENT_CAPTURE
-    return raw not in _FALSY_ENV_VALUES
+    lowered = raw.strip().lower()
+    if lowered in _TRUTHY_ENV_VALUES:
+        return True
+    if lowered in _FALSY_ENV_VALUES:
+        return False
+    LOGGER.warning(
+        "Ignoring unrecognized boolean value %r for %s; using default %s.",
+        raw,
+        ENV_NOTIFY_ON_AGENT_CAPTURE,
+        DEFAULT_NOTIFY_ON_AGENT_CAPTURE,
+    )
+    return DEFAULT_NOTIFY_ON_AGENT_CAPTURE

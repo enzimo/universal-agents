@@ -117,6 +117,25 @@ Once the expiry time passes:
 - Replacing a temporary credential through the secure form with **Delete
   automatically** unticked saves a lasting credential and clears its expiry.
 
+An agent working for you can also save a temporary secret it already holds in a
+file in your workspace (such as an auth file written during a sandbox sign-in or
+a temporary password written to your `scratch/` folder) directly into your
+Sealbox credential store through `credential.capture_file`:
+
+- The secret value is read from the file by the broker and never passes through
+  a tool parameter or reply.
+- Agent-captured credentials always expire (between 5 minutes and 3 months
+  ahead) and obey the same immediate expiry checks and 6-hour janitor cleanup as
+  form-entered temporary credentials.
+- The broker deletes the source file right after saving succeeds (and leaves it
+  in place if the save is refused or fails).
+- An agent can only save into your own personal credential store, never the
+  team's, and can never overwrite a credential you entered yourself, an
+  external-source credential, or a team credential.
+- You receive one Inbox notice naming the agent type, credential display name,
+  and deletion time (with no secret value). Operators can turn off capture
+  notices with `security_layer.credential_catalog.notify_on_agent_capture: false`.
+
 ## What Is Sent to the Agent
 
 Credential material is submitted directly to the secure broker. The agent sees
