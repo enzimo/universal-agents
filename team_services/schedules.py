@@ -370,11 +370,6 @@ class ScheduleOperations:
             if not self._may_change_system(person):
                 raise ScheduleInstallRefused("not_allowed", SYSTEM_NOT_ALLOWED_TEXT)
             return bool(spec is not None and spec.scope is SystemScheduleScope.TEAM)
-        if actor.is_owner_permit:
-            raise ScheduleInstallRefused(
-                "not_allowed",
-                "Maintenance owner permits cannot install system-managed schedules.",
-            )
         if system_kind in _AGENT_PERSON_SYSTEM_KINDS:
             if system_kind == SystemScheduleKind.OBJECTIVE_WORK_SESSION and not body.get("objective_id"):
                 raise ScheduleInstallRefused(

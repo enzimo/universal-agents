@@ -55,18 +55,8 @@ from access_control.caller_tokens import (
     agent_caller_label,
     derive_caller_token,
 )
-from access_control.identity import (
-    ENV_GATEWAY_SIGNING_KEY,
-    ENV_SCHEDULER_SIGNING_KEY,
-    ENV_VERIFY_KEYS,
-    ISSUER_GATEWAY,
-    ISSUER_SCHEDULER,
-    public_entry,
-    verify_keys_value,
-)
 from assistant_gateway.config import GatewayInstanceConfig, StartupAgentSettings
 from assistant_gateway.instance_secrets import (
-    ENVIRONMENT_SECRETS_DOCS,
     missing_secrets,
     missing_secrets_text,
 )
@@ -82,9 +72,11 @@ from assistant_gateway.config import (
 from runtime_settings.governance import reject_removed_file_access_env_vars
 from runtime_settings.network import reject_removed_public_url_env_vars
 from runtime_settings.security import (
+    REMOVED_SIGNING_KEY_ENV_VARS,
     reject_removed_credential_catalog_env_vars,
     reject_removed_sealbox_env_vars,
     reject_removed_secure_cli_env_var,
+    reject_removed_signing_key_env_vars,
     reject_removed_tool_credential_env_vars,
 )
 from runtime_settings.services import reject_removed_web_service_env_vars
@@ -434,19 +426,11 @@ def resolve_env_file_path(
 def warn_missing_environment_secrets(
     config: GatewayInstanceConfig, env: Mapping[str, str]
 ) -> None:
-    """With secrets from the environment, name required secrets it lacks (names only).
-
-    The signing keys refuse the launch on their own (task_context_keys_missing);
-    the rest would fail later in the service that needs them, so say it now.
-    """
+    """With secrets from the environment, name required secrets it lacks (names only)."""
 
     if not config.launch.secrets_from_environment:
         return
-    missing = [
-        item
-        for item in missing_secrets(config, env=env)
-        if item.name not in TASK_CONTEXT_SIGNING_KEYS
-    ]
+    missing = list(missing_secrets(config, env=env))
     if missing:
         LOGGER.warning(
             "Secrets this configuration needs are missing from the environment. "
@@ -814,6 +798,7 @@ def build_process_env(
     *,
     env_path: Path | None,
     base_env: Mapping[str, str] | None = None,
+    allow_legacy_signing_keys: bool = False,
 ) -> dict[str, str]:
     env_file_values = load_env_file_values(env_path)
     # team.env never carries the bundled server's store folder; the inherited environment
@@ -829,6 +814,8 @@ def build_process_env(
     reject_removed_tool_credential_env_vars(runtime_env)
     reject_removed_secure_cli_env_var(runtime_env)
     reject_removed_web_service_env_vars(runtime_env)
+    if not allow_legacy_signing_keys:
+        reject_removed_signing_key_env_vars(runtime_env)
     materialize_secret_file_envs(runtime_env)
     process_env = dict(build_instance_env_defaults(config, env=runtime_env))
     process_env.update(env_file_values)
@@ -985,7 +972,6 @@ def _log_consumer_check_not_run(reason: ConsumerCheckNotRunReason, detail: str) 
 
 
 BROKER_TOKEN_ENV = "SECURE_TOOL_BROKER_TOKEN"
-TASK_CONTEXT_SIGNING_KEYS = frozenset({ENV_GATEWAY_SIGNING_KEY, ENV_SCHEDULER_SIGNING_KEY})
 
 
 def scoped_environment(
@@ -1015,80 +1001,6 @@ def scoped_environment(
         ",".join(sorted(withheld)) or "-",
     )
     return scoped
-
-
-def missing_task_context_keys(env: Mapping[str, str]) -> list[str]:
-    """Private signing keys the env lacks (after Docker secret files are read).
-
-    The public verification list is derived from them (``with_verify_keys``),
-    so only the two private keys are required.
-    """
-
-    return [
-        name
-        for name in (ENV_GATEWAY_SIGNING_KEY, ENV_SCHEDULER_SIGNING_KEY)
-        if not str(env.get(name) or "").strip()
-    ]
-
-
-def with_verify_keys(env: Mapping[str, str]) -> dict[str, str]:
-    """The env with ACCESS_CONTEXT_VERIFY_KEYS derived from the private keys.
-
-    Verification keys are by definition the public halves of the two signing
-    keys (``internal_credentials`` writes them the same way), so the
-    supervisor derives them for every child. A different value in team.env or
-    a secret file is replaced and logged.
-    """
-
-    derived = verify_keys_value(
-        [
-            public_entry(ISSUER_GATEWAY, str(env[ENV_GATEWAY_SIGNING_KEY])),
-            public_entry(ISSUER_SCHEDULER, str(env[ENV_SCHEDULER_SIGNING_KEY])),
-        ]
-    )
-    configured = str(env.get(ENV_VERIFY_KEYS) or "").strip()
-    if configured and configured != derived:
-        LOGGER.warning(
-            "ACCESS_CONTEXT_VERIFY_KEYS does not match the signing keys; using the keys derived from them. "
-            "event=task_context_verify_keys_mismatch"
-        )
-    result = {key: value for key, value in env.items() if key != f"{ENV_VERIFY_KEYS}_FILE"}
-    result[ENV_VERIFY_KEYS] = derived
-    return result
-
-
-def task_context_keys_message(
-    config: GatewayInstanceConfig, env_path: Path | None, missing: list[str]
-) -> str:
-    """Without these keys no task says who it works for, so the broker would
-    refuse every agent tool call; starting would only hide that."""
-
-    reason = (
-        f"No {', '.join(missing)} is set (reason_code=task_context_keys_missing). The gateway "
-        "and the scheduler sign who each task works for with these keys, and the broker refuses "
-        "agent tool calls without them."
-    )
-    if config.launch.secrets_from_environment:
-        # No env file is read in this mode, so the fix is a Docker secret.
-        files = " and ".join(f"{name}_FILE" for name in missing)
-        return (
-            f"{reason} This instance's secrets come from the environment "
-            "(launch.secrets_source: environment). Add each missing key as a Docker secret and set "
-            f"{files} to the mounted file, then start again. Print new values with:\n"
-            f"python3 -m scripts.generate_internal_credentials --instance-name "
-            f"{shlex.quote(config.instance_name)} --print\n"
-            f"The docs ({ENVIRONMENT_SECRETS_DOCS}) also show a one-line command for each key."
-        )
-    env_file = shlex.quote(str(env_path)) if env_path else "<path to team.env>"
-    return (
-        f"{reason} Add the missing keys to team.env (existing values are "
-        "kept), then start again:\n"
-        f"python3 -m scripts.generate_internal_credentials --instance-name "
-        f"{shlex.quote(config.instance_name)} --env-file {env_file} --write\n"
-        "To use Docker secrets instead, set ACCESS_GATEWAY_SIGNING_KEY_FILE and "
-        "ACCESS_SCHEDULER_SIGNING_KEY_FILE to files holding the values that "
-        "`python3 -m scripts.generate_internal_credentials --instance-name <name> --print` shows."
-    )
 
 
 def broker_token_missing(env: Mapping[str, str]) -> bool:
@@ -1134,12 +1046,91 @@ def missing_secret_refusal(
     instead of a service failing later.
     """
 
-    missing_keys = missing_task_context_keys(env)
-    if missing_keys:
-        return task_context_keys_message(config, env_path, missing_keys)
     if broker_token_missing(env):
         return broker_token_message(config, env_path)
     return None
+
+
+def _strip_removed_signing_keys(env: dict[str, str]) -> dict[str, str]:
+    """Remove legacy task-context signing keys (and _FILE variants) from ``env`` and return what was removed."""
+
+    extracted: dict[str, str] = {}
+    for name in REMOVED_SIGNING_KEY_ENV_VARS:
+        for key in (name, f"{name}_FILE"):
+            value = env.pop(key, None)
+            if value is not None:
+                extracted[key] = value
+    return extracted
+
+
+def prepare_authority_tokens_for_launch(
+    config: GatewayInstanceConfig,
+    config_path: Path,
+    inherited_env: dict[str, str],
+    *,
+    python_executable: str | None = None,
+) -> Callable[[], None] | None:
+    """Enforce removal of old signing keys and, if 0.9 legacy rows exist, return the one-shot conversion hook.
+
+    - Marker already present for this team: refuse any removed signing-key variable immediately.
+    - Marker missing and no legacy rows exist (fresh 0.10 install): refuse any removed signing-key
+      variable immediately; otherwise write the marker without touching NATS.
+    - Marker missing and legacy rows exist (upgraded 0.9.x install): move the old signing/verify
+      variables out of ``inherited_env`` (so no runtime service ever receives them) into the
+      one-shot ``assistant_cli upgrade authority-tokens`` command that runs after
+      ``installation-authority`` is ready and before ``team-services`` starts.
+    """
+
+    from instance_upgrades.authority_tokens import (
+        authority_tokens_upgrade_done,
+        has_legacy_authority_records,
+        upgrade_authority_tokens,
+    )
+
+    if authority_tokens_upgrade_done(config):
+        reject_removed_signing_key_env_vars(inherited_env)
+        return None
+
+    if not has_legacy_authority_records(config, env=inherited_env):
+        reject_removed_signing_key_env_vars(inherited_env)
+        upgrade_authority_tokens(config, env=inherited_env)
+        return None
+
+    legacy_keys = _strip_removed_signing_keys(inherited_env)
+    command = [
+        python_executable or sys.executable,
+        "-u",
+        str(resolve_python_entrypoint(REPO_ROOT / "assistant_cli.py")),
+        "upgrade",
+        "authority-tokens",
+        "--config",
+        str(config_path),
+    ]
+
+    def _run_authority_token_upgrade() -> None:
+        if authority_tokens_upgrade_done(config):
+            return
+        # Pass the current inherited_env (which includes local NATS updates applied after
+        # build_process_env) plus the isolated legacy signing/verify keys only to this
+        # one-shot converter process.
+        conversion_env = {**inherited_env, **legacy_keys}
+        LOGGER.info(
+            "Running one-time authority-token conversion after installation authority is ready. "
+            "event=authority_token_upgrade_start"
+        )
+        result = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            env=conversion_env,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Authority-token first-start conversion exited with status {result.returncode}; "
+                "see the error above."
+            )
+
+    return _run_authority_token_upgrade
 
 
 def build_service_process_environments(
@@ -3117,14 +3108,26 @@ def main() -> int:
     if gateway_args and gateway_args[0] == "--":
         gateway_args = gateway_args[1:]
 
-    inherited_env = build_process_env(config, env_path=env_path)
+    from instance_upgrades.authority_tokens import authority_tokens_upgrade_done
+
+    try:
+        inherited_env = build_process_env(
+            config,
+            env_path=env_path,
+            allow_legacy_signing_keys=not authority_tokens_upgrade_done(config),
+        )
+        authority_tokens_after_authority = prepare_authority_tokens_for_launch(
+            config, config_path, inherited_env
+        )
+    except ValueError as exc:
+        LOGGER.error("Headless launch refused. %s", exc)
+        return 2
     use_process_timezone(inherited_env)
     refusal = missing_secret_refusal(config, env_path, inherited_env)
     if refusal:
         LOGGER.error("Headless launch refused. %s", refusal)
         return 2
     warn_missing_environment_secrets(config, inherited_env)
-    inherited_env = with_verify_keys(inherited_env)
     try:
         refresh_external_skills_before_launch(
             config,
@@ -3295,6 +3298,7 @@ def main() -> int:
         build_team_services_command(config_path, repo_root=REPO_ROOT),
         environment_for(PROCESS_TEAM_SERVICES, inherited_env, renamed=renamed_secrets),
         cwd=REPO_ROOT,
+        after_authority_ready=authority_tokens_after_authority,
     )
     stopped_or_refused = start_message_services_before_services(
         message_services,

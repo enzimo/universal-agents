@@ -377,6 +377,49 @@ def reject_removed_tool_credential_env_vars(env: Mapping[str, str] | None = None
         raise ValueError("Removed tool credential variable(s) are set. " + " ".join(problems))
 
 
+# Task-context signing keys that used to live in team.env or Docker secrets.
+# From 0.10, only host certificates issued by the installation authority sign
+# protocol 1 authority tokens (gateway for people's requests, team services as
+# scheduler for scheduled runs and permits), and verifiers read host
+# certificates and revocations from UA1_CERTS.
+REMOVED_SIGNING_KEY_ENV_VARS: tuple[str, ...] = (
+    "ACCESS_GATEWAY_SIGNING_KEY",
+    "ACCESS_SCHEDULER_SIGNING_KEY",
+    "ACCESS_CONTEXT_VERIFY_KEYS",
+)
+
+
+def present_removed_signing_key_env_vars(env: Mapping[str, str] | None = None) -> list[str]:
+    """Names of removed task-context signing-key variables (including _FILE forms) set in ``env``."""
+
+    source = os.environ if env is None else env
+    present: list[str] = []
+    for name in REMOVED_SIGNING_KEY_ENV_VARS:
+        for key in (name, f"{name}_FILE"):
+            if str(source.get(key) or "").strip():
+                present.append(key)
+    return present
+
+
+def removed_signing_key_env_problems(env: Mapping[str, str] | None = None) -> list[str]:
+    """One plain message per removed signing-key variable (or its _FILE form) that is set."""
+
+    return [
+        f"{key} is set, but task-context signing keys were removed in 0.10: host certificates issued by "
+        f"the installation authority now sign and verify protocol 1 authority tokens. Remove {key} from "
+        f"team.env or Docker secrets and unset it."
+        for key in present_removed_signing_key_env_vars(env)
+    ]
+
+
+def reject_removed_signing_key_env_vars(env: Mapping[str, str] | None = None) -> None:
+    """Refuse to start while a removed task-context signing-key variable (or its _FILE form) is set."""
+
+    problems = removed_signing_key_env_problems(env)
+    if problems:
+        raise ValueError("Removed task-context signing key variable(s) are set. " + " ".join(problems))
+
+
 class SealboxSecuritySettings(BaseModel):
     enabled: bool = SECURITY_LAYER_DEFAULTS.sealbox_enabled.value
     manage_service: bool = SECURITY_LAYER_DEFAULTS.sealbox_manage_service.value

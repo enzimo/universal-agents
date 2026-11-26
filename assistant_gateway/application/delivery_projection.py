@@ -154,34 +154,30 @@ class GatewayDeliveryProjection:
                 metadata.conversation_id,
                 session_key,
             )
+        existing_target = None
+        target_checked = False
         if session_key is None and metadata.scheduled_job_id:
-            target = self._delivery.get_scheduled_target(metadata.scheduled_job_id)
-            if target is not None and target.session_key:
+            existing_target = self._delivery.get_scheduled_target(metadata.scheduled_job_id)
+            target_checked = True
+            if existing_target is not None and existing_target.session_key:
                 person = (
                     getattr(metadata.gateway_context, "canonical_user_id", None)
                     if metadata.gateway_context
                     else None
                 )
-                if not person or not target.owner_canonical_user_id or person == target.owner_canonical_user_id:
-                    session_key = target.session_key
+                if not person or not existing_target.owner_canonical_user_id or person == existing_target.owner_canonical_user_id:
+                    session_key = existing_target.session_key
         session = self._sessions.get_session(session_key) if session_key else None
         if session is None and metadata.delivery_ref and self._delivery_refs is not None:
             session = self._session_by_delivery_ref(metadata)
             if session is not None:
                 session_key = session.session_key
                 if metadata.scheduled_job_id:
-                    person_id = (
-                        getattr(metadata.gateway_context, "canonical_user_id", None)
-                        if metadata.gateway_context is not None
-                        else None
-                    )
-                    # Record the resolved chat in gateway_scheduled_targets (plan 13C.6)
-                    # so subsequent runs take the direct target lookup and never scan again.
-                    self._delivery.upsert_scheduled_target(
-                        scheduled_job_id=metadata.scheduled_job_id,
-                        session_key=session.session_key,
-                        conversation_id=metadata.conversation_id or session.conversation_id,
-                        owner_canonical_user_id=person_id or session.owner_canonical_user_id,
+                    self._record_scheduled_target(
+                        metadata=metadata,
+                        session=session,
+                        existing_target=existing_target,
+                        target_checked=target_checked,
                     )
         if session is None and metadata.conversation_id:
             session = self._sessions.get_session_by_conversation_id(
@@ -208,6 +204,70 @@ class GatewayDeliveryProjection:
                 session_key,
             )
         return session_key, session
+
+    def _record_scheduled_target(
+        self,
+        *,
+        metadata: _DeliveryMetadata,
+        session: SessionRecord,
+        existing_target: object,
+        target_checked: bool,
+    ) -> None:
+        """Record a schedule's resolved chat in gateway_scheduled_targets (plan 13C.6) without
+        overwriting another person's existing target or letting a write error break delivery."""
+
+        scheduled_job_id = metadata.scheduled_job_id
+        if not scheduled_job_id:
+            return
+        person_id = (
+            getattr(metadata.gateway_context, "canonical_user_id", None)
+            if metadata.gateway_context is not None
+            else None
+        )
+        reply_owner = person_id or session.owner_canonical_user_id
+        try:
+            existing = existing_target if target_checked else self._delivery.get_scheduled_target(scheduled_job_id)
+        except Exception as exc:
+            self._logger.warning(
+                "Could not read existing scheduled target before recording resolved chat "
+                "(event=gateway_scheduled_target_record_failed scheduled_job_id=%s session_key=%s "
+                "correlation_id=%s error=%s).",
+                scheduled_job_id,
+                session.session_key,
+                metadata.correlation_id,
+                exc,
+            )
+            return
+        if existing is not None:
+            existing_owner = getattr(existing, "owner_canonical_user_id", None)
+            if existing_owner and existing_owner != reply_owner:
+                self._logger.warning(
+                    "Refused to overwrite another person's scheduled target from reply delivery_ref "
+                    "(event=gateway_scheduled_target_owner_mismatch scheduled_job_id=%s "
+                    "target_owner=%s reply_person=%s correlation_id=%s).",
+                    scheduled_job_id,
+                    existing_owner,
+                    reply_owner or "",
+                    metadata.correlation_id,
+                )
+                return
+        try:
+            self._delivery.upsert_scheduled_target(
+                scheduled_job_id=scheduled_job_id,
+                session_key=session.session_key,
+                conversation_id=metadata.conversation_id or session.conversation_id,
+                owner_canonical_user_id=reply_owner,
+            )
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to record resolved chat in gateway_scheduled_targets; continuing delivery "
+                "(event=gateway_scheduled_target_record_failed scheduled_job_id=%s session_key=%s "
+                "correlation_id=%s error=%s).",
+                scheduled_job_id,
+                session.session_key,
+                metadata.correlation_id,
+                exc,
+            )
 
     def _session_by_delivery_ref(self, metadata: _DeliveryMetadata) -> SessionRecord | None:
         """Resolve an opaque ``delivery_ref`` against the person's own gateway sessions."""

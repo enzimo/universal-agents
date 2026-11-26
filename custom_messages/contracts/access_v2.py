@@ -1501,6 +1501,7 @@ class AccessNoticeKind(StrEnum):
     HISTORY_CLEANED_UP = "history_cleaned_up"  # TeamLead deleted some of your chat history or finished tasks (assistant_gateway.history_cleanup)
     SAVED_OUTPUT_RETENTION = "saved_output_retention"  # saved tool outputs will start being deleted after the grace period (custom_agents.output_retention)
     STORAGE_USAGE = "storage_usage"  # the data the team stores for you passed another step (assistant_gateway.storage_usage)
+    AUTHORITY_TOKEN_UPGRADE = "authority_token_upgrade"  # stored contexts or permits that could not be converted at the 0.10 first start (instance_upgrades.authority_tokens)
 
 
 class AccessNoticeV1(AccessContractModel):

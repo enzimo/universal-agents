@@ -823,9 +823,6 @@ ending in `*` covers every variable that starts with the text before it.
 | Variable | Processes that receive it | Secret file | What it is |
 | --- | --- | --- | --- |
 | `SECURE_TOOL_BROKER_TOKEN` | `secure_broker` | contents | The broker's root token; every other process that calls the broker gets its own token derived from it. |
-| `ACCESS_GATEWAY_SIGNING_KEY` | `gateway` | contents | Private key the gateway uses to sign the task context of each person's request. |
-| `ACCESS_SCHEDULER_SIGNING_KEY` | `manager` | contents | Private key the team lead's scheduler uses to sign scheduled runs. |
-| `ACCESS_CONTEXT_VERIFY_KEYS` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host` | contents | Public keys every Universal Agents process uses to check signed task contexts. |
 | `OPENSHELL_SSH_HANDSHAKE_SECRET` | `openshell_gateway` | contents | Secret the managed openshell-gateway uses for its SSH connections to sandboxes. |
 
 #### Credentials of the tools the secure tool broker runs

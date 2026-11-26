@@ -1219,6 +1219,7 @@ def test_start_isolated_recovery_logs_and_reports_refused_checkpoint_install(
         payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="live-test-user")),
         interval_ms=3_600_000,
         repeat_count=None,
+        enabled=False,
     )
     schedule_store.add(maint, claim_team_id="team_1")
     owner_permit = schedule_permit_token(
@@ -1283,7 +1284,7 @@ def test_start_isolated_recovery_logs_and_reports_refused_checkpoint_install(
     assert result["queued"] is True
     ckpt_info = result["checkpoint_schedule"]
     assert ckpt_info["scheduled"] is False
-    assert "owner permits" in ckpt_info["error"].lower()
+    assert "paused" in ckpt_info["error"].lower() or "turned off" in ckpt_info["error"].lower()
     assert "no isolated-recovery checkpoint" in ckpt_info["notice"].lower()
     assert "event=isolated_recovery_checkpoint_install_failed" in caplog.text
 

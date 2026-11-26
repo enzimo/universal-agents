@@ -156,6 +156,7 @@ ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME = "adapter-host-files.started"
 ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
 ADAPTER_HOST_FILES_WITHOUT_RECORDS_FILENAME = "adapter-host-files.without-records.txt"
 PROTOCOL1_IDS_CHECK_FILENAME = "protocol1-ids.json"
+AUTHORITY_TOKENS_UPGRADE_FILENAME = "authority-tokens.json"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
 EXPORTS_DIRNAME = "exports"
@@ -797,6 +798,19 @@ class InstanceLayout:
         no agent tool or sandboxed code can reach it."""
 
         return self.state_dir / UPGRADES_DIRNAME / PROTOCOL1_IDS_CHECK_FILENAME
+
+    @property
+    def authority_tokens_upgrade_path(self) -> Path:
+        """The record that the one-time conversion of stored signed task contexts and
+        schedule permits to protocol 1 authority tokens finished at the first start of 0.10.
+
+        Written by ``instance_upgrades.authority_tokens`` once every store has been
+        scanned and converted (or immediately on a fresh 0.10 install with no legacy rows).
+        While this file exists, startup refuses the removed task-context signing-key
+        environment variables (``runtime_settings.security.REMOVED_SIGNING_KEY_ENV_VARS``).
+        Under ``state/``, so no agent tool or sandboxed code can reach it."""
+
+        return self.state_dir / UPGRADES_DIRNAME / AUTHORITY_TOKENS_UPGRADE_FILENAME
 
     @property
     def storage_levels_path(self) -> Path:

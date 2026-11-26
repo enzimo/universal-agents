@@ -10,22 +10,8 @@ from pathlib import Path
 from typing import Iterable, Mapping
 from urllib.parse import quote
 
-from access_control.identity import (
-    ENV_GATEWAY_SIGNING_KEY,
-    ENV_SCHEDULER_SIGNING_KEY,
-    ENV_VERIFY_KEYS,
-    ISSUER_GATEWAY,
-    ISSUER_SCHEDULER,
-    generate_signing_key,
-    public_entry,
-    verify_keys_value,
-)
-
 
 INTERNAL_ENV_KEYS = {
-    "ACCESS_GATEWAY_SIGNING_KEY",
-    "ACCESS_SCHEDULER_SIGNING_KEY",
-    "ACCESS_CONTEXT_VERIFY_KEYS",
     "NATS_USER",
     "NATS_PASSWORD",
     "POSTGRES_DSN",
@@ -156,7 +142,6 @@ def generate_internal_credentials(
     if gog_keyring_password is not None:
         values["GOG_KEYRING_PASSWORD"] = gog_keyring_password
 
-    values.update(_task_context_keys(existing_values, rotate=request.rotate))
     return values
 
 
@@ -181,30 +166,7 @@ def internal_credential_names(request: InternalCredentialRequest) -> tuple[str, 
     if str(request.storage_backend or "sqlite").strip().lower() in {"postgres", "postgresql"}:
         names.append("POSTGRES_DSN")
     names += ["SECURE_TOOL_BROKER_TOKEN", "GOG_KEYRING_PASSWORD"]
-    names += [ENV_GATEWAY_SIGNING_KEY, ENV_SCHEDULER_SIGNING_KEY, ENV_VERIFY_KEYS]
     return tuple(names)
-
-
-def _task_context_keys(existing: Mapping[str, str], *, rotate: bool) -> dict[str, str]:
-    """Ed25519 keys that sign task contexts (access_control.identity).
-
-    The gateway and the scheduler each get a private key; the verification list
-    is always derived from those private keys, so the two can never disagree.
-    """
-
-    keys: dict[str, str] = {}
-    entries = []
-    for issuer, name in (
-        (ISSUER_GATEWAY, ENV_GATEWAY_SIGNING_KEY),
-        (ISSUER_SCHEDULER, ENV_SCHEDULER_SIGNING_KEY),
-    ):
-        value = "" if rotate else str(existing.get(name) or "").strip()
-        if not value:
-            value, _entry = generate_signing_key(issuer)
-        keys[name] = value
-        entries.append(public_entry(issuer, value))
-    keys[ENV_VERIFY_KEYS] = verify_keys_value(entries)
-    return keys
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -248,9 +210,7 @@ def merge_env_file(
     for key in stale_keys:
         merged.pop(key, None)
     for key, value in generated_values.items():
-        # The verification list is derived from the private keys, so it is
-        # always rewritten to match them.
-        if rotate or not merged.get(key) or key == ENV_VERIFY_KEYS:
+        if rotate or not merged.get(key):
             merged[key] = str(value)
 
     existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []

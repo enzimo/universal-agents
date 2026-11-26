@@ -1600,6 +1600,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="The adapter host's transfer folder is gone for good: handle every file not found as one to send again",
     )
+    authority_tokens = upgrade_commands.add_parser(
+        "authority-tokens",
+        help="Convert stored 0.9 signed task contexts and schedule permits to protocol 1 authority tokens (one-time)",
+    )
+    authority_tokens.add_argument("--config", required=True, help="Path to instance_config.yaml")
+    authority_tokens.add_argument(
+        "--allow-unverifiable",
+        action="store_true",
+        help="Proceed even if the 0.9 signing/verify keys are missing (clears unverifiable contexts and reports them to administrators)",
+    )
 
     migrate_config = subparsers.add_parser(
         "migrate-config",
@@ -2627,6 +2637,49 @@ def _resolve_instance_config_path(config_path: str | None) -> str:
         "Path to instance_config.yaml is required. Pass --config <path>, set TEAM_INSTANCE_CONFIG, "
         "or set TEAM_INSTANCE_ROOT to an onboarded instance directory."
     )
+
+
+def _upgrade_authority_tokens(args: argparse.Namespace) -> None:
+    """``upgrade authority-tokens`` (``instance_upgrades.authority_tokens``).
+
+    Converts stored 0.9 signed task contexts and schedule permits into protocol 1
+    authority tokens signed by the active ``gateway`` and ``team-services`` host
+    certificates. Exits non-zero if legacy records exist without 0.9 verification
+    keys (unless ``--allow-unverifiable`` is passed), if removed signing-key
+    variables are set on a fresh 0.10 install, or on any storage/authority error.
+    """
+
+    from instance_upgrades.authority_tokens import (
+        MissingLegacyVerifyKeysError,
+        upgrade_authority_tokens,
+    )
+
+    config = GatewayInstanceConfig.load_for_process(args.config)
+    try:
+        result = upgrade_authority_tokens(
+            config,
+            allow_unverifiable=bool(getattr(args, "allow_unverifiable", False)),
+        )
+    except (MissingLegacyVerifyKeysError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if result.already_done:
+        print("Stored 0.9 contexts and permits were already converted to protocol 1 authority tokens.")
+        return
+    if not result.had_legacy_records:
+        print("No legacy 0.9 signed contexts or permits found; marked authority-token upgrade complete.")
+        return
+    counts = result.counts
+    print(
+        f"Converted {counts.converted_contexts} context(s), {counts.converted_schedule_runs} schedule run(s), "
+        f"and {counts.converted_permits} permit(s) ({counts.vouched_schedules} vouched schedule(s), "
+        f"{counts.fresh_permits_issued} fresh permit(s), {counts.ledger_digests_backfilled} ledger digest(s)); "
+        f"{counts.expired} expired and {counts.unverifiable} unverifiable record(s) cleared and reported."
+    )
+    if result.removed_keys_still_set:
+        print(
+            "Remove these obsolete signing-key variables from team.env or Docker secrets before the next restart: "
+            + ", ".join(result.removed_keys_still_set)
+        )
 
 
 def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
@@ -5611,7 +5664,10 @@ def main() -> None:
         run_team_command(args)
         return
     if args.command == "upgrade":
-        _upgrade_adapter_host_files(args)
+        if args.upgrade_command == "authority-tokens":
+            _upgrade_authority_tokens(args)
+        else:
+            _upgrade_adapter_host_files(args)
         return
     if args.command == "mcp-operation-levels":
         _mcp_operation_levels(args)

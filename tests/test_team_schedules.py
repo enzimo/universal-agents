@@ -1230,12 +1230,12 @@ def test_agent_created_schedules_from_member_chat_route_replies_and_chat_list(
 
 
 @pytest.mark.asyncio
-async def test_scheduled_runs_install_agent_person_system_kinds_and_refuse_owner_permits_and_missing_source(
+async def test_scheduled_runs_install_agent_person_system_kinds_and_refuse_team_kinds_and_missing_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """C32: permit-backed and per-run scheduled tasks install agent person system schedules
-    (isolated_recovery_checkpoint, objective_work_session) when their backing schedule is active
-    and vouched/system-managed, while owner permits, team-scope kinds, and missing source schedules
+    """C32/C34: permit-backed, owner-permit, and per-run scheduled tasks install agent person system
+    schedules (isolated_recovery_checkpoint, objective_work_session) when their backing schedule is
+    active and vouched/system-managed, while team/maintenance kinds and missing source schedules
     are refused."""
 
     from custom_messages.contracts.schedule_v1 import ScheduledMessage
@@ -1343,8 +1343,9 @@ async def test_scheduled_runs_install_agent_person_system_kinds_and_refuse_owner
         assert hb_refused["outcome"] == "not_allowed"
         assert store.get_scheduled_message("sched_hb_from_permit") is None
 
-        # 4. Administrator owner permit (schedule_owner_permit:*) CANNOT install isolated_recovery_checkpoint
-        #    or objective_work_session.
+        # 4. Administrator owner permit (schedule_owner_permit:*) CAN install isolated_recovery_checkpoint
+        #    and objective_work_session in the vouched administrator's name (C34), while team/maintenance
+        #    kinds (heartbeat_launcher) remain refused (owner_vouched is False).
         maint = ScheduledMessage(
             schedule_id="sched_internal_imp_c32",
             schedule_name="internal_improvement:team",
@@ -1365,15 +1366,32 @@ async def test_scheduled_runs_install_agent_person_system_kinds_and_refuse_owner
             issued=now,
         )
         owner_permit_ckpt = await _send(_ckpt_body("req-op-ckpt", "recov_ckpt_from_op"), owner_permit)
-        assert owner_permit_ckpt["outcome"] == "not_allowed"
-        assert store.get_scheduled_message("recov_ckpt_from_op") is None
+        assert owner_permit_ckpt["outcome"] == "ok", owner_permit_ckpt
+        assert store.get_scheduled_message("recov_ckpt_from_op") is not None
 
         owner_permit_obj = await _send(
             {**obj_body, "request_id": "req-op-obj", "schedule_id": "objwork_from_op"},
             owner_permit,
         )
-        assert owner_permit_obj["outcome"] == "not_allowed"
-        assert store.get_scheduled_message("objwork_from_op") is None
+        assert owner_permit_obj["outcome"] == "ok", owner_permit_obj
+        assert store.get_scheduled_message("objwork_from_op") is not None
+
+        owner_permit_hb = await _send(
+            {
+                "request_id": "req-op-hb",
+                "schedule_id": "sched_hb_from_op",
+                "mode": "create",
+                "management_class": "system",
+                "system_schedule_kind": "heartbeat_launcher",
+                "timing": {"kind": "interval", "interval_ms": 600_000},
+                "repeat_count": 0,
+                "enabled": True,
+                "action": {"type": "task", "instruction": {"type": "inline", "text": "Heartbeat."}},
+            },
+            owner_permit,
+        )
+        assert owner_permit_hb["outcome"] == "not_allowed"
+        assert store.get_scheduled_message("sched_hb_from_op") is None
 
         # 5. Per-run token whose source_schedule_id does not exist in the store is REFUSED.
         missing_source_token = root_task_token(
