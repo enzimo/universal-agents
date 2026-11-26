@@ -1609,7 +1609,7 @@ async def send_interrupt_request_for_result(
             agent, task_id=task.task_id, interrupt_id=setup_run.interrupt_id, reason=setup_run.reason, msg_meta=msg_meta
         )
     for timed_wait in timed_waits:
-        # Called last (C01): any other wait of this step already holds the blocker, so a second wait defers.
+        # Called last: any other wait of this step already holds the blocker, so a second wait defers.
         from custom_agents.timed_wait_runtime import begin_timed_wait
 
         assert isinstance(timed_wait.reason, dict)

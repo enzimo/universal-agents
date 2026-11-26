@@ -366,7 +366,7 @@ async def begin_timed_wait(
         ledger = WaitLedger.from_history(task_info)
         existing_entry = ledger.entry_for(call_id)
         if existing_entry is not None:
-            # Re-raise of an already-charged call (C01): no second charge, keep original times, clear held mark.
+            # Re-raise of an already-charged call: no second charge, keep original times, clear held mark.
             record = timed_wait_record(
                 interrupt_id=interrupt_id,
                 call_id=existing_entry.call_id,
@@ -397,7 +397,7 @@ async def begin_timed_wait(
             )
             return False
 
-        # C15: runtime clock is the single source of truth for start/resume times when recording a new wait.
+        # The runtime clock is the single source of truth for start/resume times when recording a new wait.
         now = timed_waits_rules.utc_now()
         resume_at = now + timedelta(minutes=minutes)
         refusal = await check_schedule_next_run(agent, task_id, now=now, resume_at=resume_at, meta=msg_meta)
@@ -417,7 +417,7 @@ async def begin_timed_wait(
             requested_at=requested_at_iso,
             resume_at=resume_at_iso,
         )
-        # Charge (history) first, then save the blocker record (C01).
+        # Charge (history) first, then save the blocker record.
         await append_wait_history(
             agent,
             task_id,
