@@ -14,7 +14,8 @@ Every agent holds these through its role's standard tool set
   least recently used loaded groups, and is refused if it still does not fit.
   An MCP server (``mcp:<name>``) is never loaded this way: its tools load
   before model calls from the agent's access (``custom_agents.mcp_server_tools``),
-  so use_tools and skills say that, or give the request_access call.
+  so use_tools and skills say that; use_tools gives the request_access call
+  when the agent lacks the server, and a skill says it is not available.
 """
 
 from __future__ import annotations
@@ -48,6 +49,8 @@ MCP_LOADS_ON_ITS_OWN = (
     "MCP server tools load on their own before your next model call while you have access to the server; "
     "nothing to load. find_tools shows a server's load status when its tools are missing."
 )
+# Marks a refusal for missing access: a skill's note says "not available to you" instead of the request_access call.
+NO_ACCESS_KEY = "no_access"
 # Every installed MCP server's catalog id starts with this (access_catalog.catalog.mcp_tool_id).
 MCP_TOOL_ID_PREFIX = mcp_tool_id("")
 
@@ -354,6 +357,12 @@ def _higher_cap_hint(agent: Any, model_id: str) -> str:
     )
 
 
+def _no_access(tool_id: str, refusal: str) -> dict[str, Any]:
+    """A refusal because the agent may not use the group (use_tools shows ``reason``, with its request_access call)."""
+
+    return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": refusal, NO_ACCESS_KEY: True}
+
+
 def _mcp_server_answer(agent: Any, catalog: Any, tool_id: str) -> dict[str, Any]:
     """What use_tools and skills say about an MCP server: nothing loads it, so say what is true.
 
@@ -373,7 +382,7 @@ def _mcp_server_answer(agent: Any, catalog: Any, tool_id: str) -> dict[str, Any]
         servers = server_loader(agent)
         refusal = "" if servers is not None and servers.shows(tool_id) else f"{tool_id} is not set up for your agent type."
     if refusal:
-        return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": refusal}
+        return _no_access(tool_id, refusal)
     registry = _registry(agent)
     names = (set(registry.registry) | set(registry.dynamic_tools)) if registry is not None else set()
     shown = sorted(mcp_function_names(catalog, tool_id) & names)
@@ -411,7 +420,7 @@ def _load_one(agent: Any, catalog: Any, tool_id: str, keep: set[str]) -> dict[st
         }
     refusal = _may_load(agent, catalog, tool_id)
     if refusal:
-        return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": refusal}
+        return _no_access(tool_id, refusal)
     functions = group_functions(agent, catalog, tool_id)
     if not functions:
         return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": "Your tool settings offer no functions from this group."}
@@ -495,7 +504,16 @@ def _skill_note(skill_name: str, results: list[dict[str, Any]]) -> str:
     lines.extend(
         f"- {item['tool_id']} has not loaded: {item['load_status']}" for item in results if item.get("load_status")
     )
-    lines.extend(f"- Not loaded, {item['tool_id']}: {item['reason']}" for item in results if item["status"] == STATUS_REFUSED)
+    # A declaration says what the skill can use, not what this agent's task needs (lead direction on C22): a
+    # group the agent lacks is named without a request_access call, so workers do not ask for TeamLead's tools.
+    # Asking stays the agent's own decision through find_tools and request_access.
+    if unavailable := [item["tool_id"] for item in results if item.get(NO_ACCESS_KEY)]:
+        lines.append(f"- Not available to you: {', '.join(unavailable)}.")
+    lines.extend(
+        f"- Not loaded, {item['tool_id']}: {item['reason']}"
+        for item in results
+        if item["status"] == STATUS_REFUSED and not item.get(NO_ACCESS_KEY)
+    )
     if unloaded := sorted({tool_id for item in results for tool_id in item.get("unloaded_to_make_room", ())}):
         lines.append(f"- Unloaded to make room: {', '.join(unloaded)}. Call one of their functions to load it again.")
     return "\n".join(lines)
@@ -507,15 +525,14 @@ def _index_group(agent: Any, catalog: Any, tool_id: str) -> dict[str, Any]:
     The index already lists the group's held, offered functions with their
     signatures and call_tool reaches them in one step, so loading their full
     definitions would put back the tokens the index saves (lead ruling at turn
-    4 of the round-two run). A group the agent lacks gets use_tools' own
-    refusal, with the request_access call.
+    4 of the round-two run). A group the agent lacks is marked ``NO_ACCESS_KEY``.
     """
 
     from custom_agents.tool_loading import group_functions
 
     refusal = _may_load(agent, catalog, tool_id)
     if refusal:
-        return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": refusal}
+        return _no_access(tool_id, refusal)
     offered_functions = group_functions(agent, catalog, tool_id)
     if not offered_functions:
         return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": "Your tool settings offer no functions from this group."}
@@ -605,9 +622,9 @@ def skill_tools_fallback_note(agent: Any, tool_ids: list[str]) -> str:
     groups = [tool_id for tool_id in tool_ids if tool_id not in servers]
     parts = ["The tool groups this skill uses could not be checked automatically."]
     if groups and index_enabled(agent):
-        parts.append(f"Call the functions of {', '.join(groups)} from your tool index with {CALL_TOOL_HINT}.")
+        parts.append(f"Call those functions of {', '.join(groups)} that are in your tool index with {CALL_TOOL_HINT}.")
     elif groups:
-        parts.append(f"Load them with {_use_tools_ids(groups)} if the procedure needs them.")
+        parts.append(f"Groups you may use load with {_use_tools_ids(groups)} if the procedure needs them.")
     if servers:
         parts.append(f"{', '.join(servers)}: {MCP_LOADS_ON_ITS_OWN}")
     return " ".join(parts)

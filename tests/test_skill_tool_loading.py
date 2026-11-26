@@ -35,6 +35,7 @@ pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-aut
 
 storage = loading_storage
 HEARTBEAT = "fn:heartbeat"
+SECURE_CREDENTIAL_SKILL_DIR = Path(__file__).resolve().parents[1] / "custom_agents" / "skill_templates" / "secure-credential-workflows"
 SERVER = "mcp:tickets"
 INSTRUCTIONS = "Plan the work, then track it as an objective."
 
@@ -140,7 +141,7 @@ def test_in_the_index_setups_a_declared_mcp_server_goes_through_the_use_tools_pa
 
     assert handed == [[SERVER]], "only the MCP server goes to the loader; the catalog group is in the index"
     assert f"- In your tool index, nothing to load: {OBJECTIVES}." in result
-    assert f"- Not loaded, {SERVER}: You have no access to {SERVER}" in result and f"request_access(tool_id='{SERVER}'" in result
+    assert f"- Not available to you: {SERVER}." in result and "request_access" not in result.split("(ua-tools):", 1)[1]
 
 
 @pytest.mark.parametrize("presentation", [TOOL_PRESENTATION_INDEX, "full_definitions"])
@@ -187,7 +188,7 @@ def test_with_authorization_off_an_mcp_server_follows_the_agent_types_its_record
     if shows:
         assert answer["status"] == tool_loading.STATUS_LOADS_ON_ITS_OWN
     else:
-        assert answer == {"tool_id": SERVER, "status": "refused", "reason": f"{SERVER} is not set up for your agent type."}
+        assert answer == {"tool_id": SERVER, "status": "refused", "reason": f"{SERVER} is not set up for your agent type.", "no_access": True}
 
 
 def test_in_the_index_setups_a_group_the_setting_withholds_is_not_called_in_the_index(storage, tmp_path) -> None:
@@ -216,21 +217,46 @@ def test_groups_unloaded_to_make_room_are_named_in_the_skill_result(storage, tmp
     assert loaded_tools(lead).loaded() == {OBJECTIVES}
 
 
-def test_a_group_the_agent_lacks_is_reported_with_the_request_access_call_and_not_loaded(storage, tmp_path) -> None:
+def worker_agent(storage, tmp_path: Path):
     worker = make_agent(storage, tmp_path, agent_type="WebResearchAgent")
     worker.tools, worker.tool_filter, worker.default_tools = list(ALL_PROVIDER_TOOLS), {}, ()
     set_agent_ref(worker)
+    return worker
+
+
+def test_a_group_the_agent_lacks_is_named_as_not_available_without_a_request_access_call(storage, tmp_path) -> None:
+    # Lead direction on C22: a declaration says what the skill can use, not what this agent's task needs.
+    worker = worker_agent(storage, tmp_path)
     registry, hook = model_view(worker)
     next_model_call(hook, registry)
     version = owner_service(storage).store.version(TEAM)
 
     result = activate(skill(ua_tools=OBJECTIVES))
+    [asked] = use(OBJECTIVES)["tools"]
 
-    assert f"- Not loaded, {OBJECTIVES}: You have no access to {OBJECTIVES}" in result
-    assert f"request_access(tool_id='{OBJECTIVES}'" in result
+    assert f"- Not available to you: {OBJECTIVES}." in result
+    assert "request_access" not in result and "You have no access" not in result
+    assert f"request_access(tool_id='{OBJECTIVES}'" in asked["reason"], "use_tools still answers the agent's own request"
     assert loaded_tools(worker).loaded() == frozenset()
     assert "create_objective" not in next_model_call(hook, registry)
     assert owner_service(storage).store.version(TEAM) == version
+
+
+@pytest.mark.parametrize("presentation", [TOOL_PRESENTATION_INDEX, "full_definitions"])
+def test_a_worker_activating_any_standard_skill_is_not_told_to_request_access(storage, tmp_path, presentation) -> None:
+    from custom_agents.strands_team import STANDARD_RUNTIME_SKILL_DIRS
+
+    worker = worker_agent(storage, tmp_path)
+    worker.tool_filter = {"tool_presentation": presentation}
+    model_view(worker)
+
+    for skill_dir in STANDARD_RUNTIME_SKILL_DIRS:
+        found = Skill.from_file(Path(skill_dir) / "SKILL.md")
+        result = activate(found)
+        note = result.partition("Tool groups the skill")[2]  # the skill's own instructions may mention request_access
+        assert "request_access" not in note, found.name
+    credential_note = activate(Skill.from_file(Path(SECURE_CREDENTIAL_SKILL_DIR) / "SKILL.md"))
+    assert "- Not available to you: fn:access_workflows, fn:access_proposals." in credential_note
 
 
 def test_a_group_that_does_not_fit_under_the_cap_is_reported_and_the_rest_still_load(storage, tmp_path) -> None:
@@ -275,7 +301,7 @@ def test_a_failure_while_loading_still_returns_the_instructions_with_the_use_too
     # In the index setups the note sends catalog groups to call_tool and only MCP servers to use_tools.
     lead.tool_filter = {"tool_presentation": TOOL_PRESENTATION_INDEX}
     indexed = activate(skill(name="indexed", ua_tools=f"{OBJECTIVES} {SERVER}"))
-    assert f"Call the functions of {OBJECTIVES} from your tool index with call_tool(name='<function>', inputs={{...}})." in indexed
+    assert f"Call those functions of {OBJECTIVES} that are in your tool index with call_tool(name='<function>', inputs={{...}})." in indexed
     assert f"{SERVER}: {tool_loading.MCP_LOADS_ON_ITS_OWN}" in indexed
     assert "use_tools" not in indexed, "neither catalog groups nor MCP servers are sent to use_tools here"
     lead.tool_filter = {}
