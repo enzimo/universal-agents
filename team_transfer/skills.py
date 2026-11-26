@@ -32,10 +32,18 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Final, Iterator, Optional
 
-from pydantic import BaseModel, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from runtime_settings.instance_layout import SKILLS_DIRNAME
 from team_transfer.container import TransferFileError, check_member_name, iter_files
+from team_transfer.errors import TransferError
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     TEAM_ID_RENAMES,
@@ -54,11 +62,24 @@ logger = logging.getLogger(__name__)
 ATTESTATIONS_DIRNAME: Final = "attestations"
 SKILL_FILENAME: Final = "SKILL.md"
 _INSTALLED_PREFIX: Final = "installed"
-# Leading-dot sibling names follow the existing .incoming-* / .ua-*-backup-* conventions
-# so a killed import never looks like a skill folder to the loader or the next export.
+# Leading-dot sibling names follow the existing .incoming-* / .ua-*-backup-* conventions.
+# The next export skips them, and archive skill names may not use them. They are not hidden
+# from the skill loader: a process killed mid-import can leave one behind, and only the
+# unfinished-import marker (team_transfer.runtime_guard) keeps that instance from starting.
 _STAGING_PREFIX: Final = ".incoming-transfer-"
 _BACKUP_PREFIX: Final = ".ua-transfer-backup-"
 _TRANSFER_TEMP_PREFIXES: Final = (_STAGING_PREFIX, _BACKUP_PREFIX)
+# The usual file-name limit (NAME_MAX) of Linux and macOS filesystems, in bytes.
+_MAX_NAME_BYTES: Final = 255
+
+
+def _check_name_part(value: str, what: str) -> None:
+    """Refuse a name part a filesystem would refuse or a terminal would garble."""
+
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{what} must not contain control characters: {value!r}.")
+    if len(value.encode("utf-8")) > _MAX_NAME_BYTES:
+        raise ValueError(f"{what} is longer than {_MAX_NAME_BYTES} bytes: {value!r}.")
 
 
 def _validate_skill_name(value: str) -> str:
@@ -68,6 +89,11 @@ def _validate_skill_name(value: str) -> str:
         check_member_name(value)
     except TransferFileError as exc:
         raise ValueError(f"Skill name must be a single safe folder name: {value!r}.") from exc
+    _check_name_part(value, "Skill name")
+    if value.startswith(_TRANSFER_TEMP_PREFIXES):
+        raise ValueError(
+            f"Skill name uses a name the import keeps for its own temporary folders: {value!r}."
+        )
     return value
 
 
@@ -80,6 +106,8 @@ def _validate_skill_file_path(value: str) -> str:
         raise ValueError(
             f"Skill file path must be a normalized relative POSIX path: {value!r}."
         ) from exc
+    for part in value.split("/"):
+        _check_name_part(part, "Each part of a skill file path")
     return value
 
 
@@ -295,24 +323,56 @@ class SkillsSection:
                     if attestation_path.is_file()
                     else None
                 )
-            carried = [self._carry(path, entry, kind, files) for path in members]
-            units.append(
-                SkillUnitV1(
-                    name=entry.name, kind=kind, files=tuple(carried), attestation=attestation
-                )
-            )
+            units.append(self._export_unit(entry, kind, members, files, attestation))
         return units
+
+    def _export_unit(
+        self,
+        entry: Path,
+        kind: SkillKind,
+        members: list[Path],
+        files: SectionFiles,
+        attestation: Optional[dict[str, JsonValue]],
+    ) -> SkillUnitV1:
+        """One exported unit; a name the import would refuse stops the export and names the entry.
+
+        The same exporter reads the destination before a later batch
+        (``team_transfer.batches.snapshot_target``), so the error names the entry
+        there too instead of surfacing a raw validation error. Names and paths are
+        checked before any file is added, so nothing is carried for a refused entry.
+        """
+
+        try:
+            _validate_skill_name(entry.name)
+            carried = [self._carry(path, entry, kind, files) for path in members]
+            return SkillUnitV1(
+                name=entry.name, kind=kind, files=tuple(carried), attestation=attestation
+            )
+        except ValueError as exc:
+            reason = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else str(exc)
+            logger.warning(
+                "A skill entry holds a name a team transfer cannot carry. "
+                "event=team_transfer_skill_entry_unsupported kind=%s entry=%r root=%s",
+                kind.value,
+                entry.name,
+                entry.parent,
+            )
+            raise TransferError(
+                f"The skill entry {kind.value}/{entry.name!r} in {entry.parent} cannot be "
+                f"carried by a team transfer: {reason} Rename or remove it, then try again."
+            ) from exc
 
     def _carry(self, path: Path, entry: Path, kind: SkillKind, files: SectionFiles) -> SkillFileV1:
         relative = path.relative_to(entry).as_posix() if entry.is_dir() else ""
         data = path.read_bytes()
-        files.add(_member(kind, entry.name, relative), data)
-        return SkillFileV1(
+        record = SkillFileV1(
             path=relative or ".",
             size=len(data),
             sha256=hashlib.sha256(data).hexdigest(),
             executable=bool(path.stat().st_mode & stat.S_IXUSR),
         )
+        files.add(_member(kind, entry.name, relative), data)
+        return record
 
     # -- import ----------------------------------------------------------------
 
@@ -479,7 +539,9 @@ class SkillsSection:
                 tree_sha256=staged_manifest.tree_sha256,
             )
             attestation = dict(raw_attestation)
-            attestation["installed_path"] = str(destination.resolve())
+            # The folder the swap creates, not what ``destination`` points at now: an existing
+            # entry may be a link, and the swap replaces the link itself.
+            attestation["installed_path"] = str(installed.resolve() / unit.name)
             attestation_bytes = (
                 json.dumps(attestation, indent=2, sort_keys=True) + "\n"
             ).encode("utf-8")

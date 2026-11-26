@@ -10,6 +10,7 @@ SkillSpector report is required before an artifact can be considered safe.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 import hashlib
 import json
 import os
@@ -426,32 +427,50 @@ def _validate_skill_tree_path(relative: str) -> str:
 def _parent_directory_paths(relative: str) -> Iterator[str]:
     parts = relative.split("/")
     for index in range(1, len(parts)):
-        yield "/".join(parts[:index]).casefold()
+        yield "/".join(parts[:index])
+
+
+@dataclass
+class _SkillTreePaths:
+    """Paths seen so far in one skill tree, for its collision rules."""
+
+    casefolded: set[str] = dataclass_field(default_factory=set)
+    files: set[str] = dataclass_field(default_factory=set)
+    directories: set[str] = dataclass_field(default_factory=set)
 
 
 def _register_skill_tree_path(
     relative: str,
-    casefold_paths: set[str],
-    directory_paths: set[str],
+    seen: _SkillTreePaths,
     *,
     check_parent_collisions: bool,
 ) -> None:
+    """Apply the tree's collision rules to one more file path.
+
+    Both builders refuse two file paths that differ only in case. Only the
+    in-memory builder needs the file/folder check: a folder can never share its
+    exact path with a file on disk. That check compares exact names, so a tree
+    holding ``Docs`` and ``docs/a.md`` passes here as it does on a case-sensitive
+    disk, and a reviewed skill the installer accepted still transfers.
+    """
+
     _check_skill_tree_control_characters(relative)
     casefolded = relative.casefold()
-    if casefolded in casefold_paths:
+    if casefolded in seen.casefolded:
         raise SkillRepositoryError(f"Skill contains case-colliding paths: {relative}")
     if check_parent_collisions:
-        if casefolded in directory_paths:
+        if relative in seen.directories:
             raise SkillRepositoryError(
                 f"Skill contains colliding file and folder paths: {relative}"
             )
         for parent in _parent_directory_paths(relative):
-            if parent in casefold_paths:
+            if parent in seen.files:
                 raise SkillRepositoryError(
                     f"Skill contains colliding file and folder paths: {relative}"
                 )
-            directory_paths.add(parent)
-    casefold_paths.add(casefolded)
+            seen.directories.add(parent)
+        seen.files.add(relative)
+    seen.casefolded.add(casefolded)
 
 
 def _build_skill_tree_manifest_core(
@@ -463,14 +482,12 @@ def _build_skill_tree_manifest_core(
     check_parent_collisions: bool = False,
 ) -> SkillTreeManifest:
     entries: list[SkillTreeEntry] = []
-    casefold_paths: set[str] = set()
-    directory_paths: set[str] = set()
+    seen = _SkillTreePaths()
     total_bytes = 0
     for relative, data in files:
         _register_skill_tree_path(
             relative,
-            casefold_paths,
-            directory_paths,
+            seen,
             check_parent_collisions=check_parent_collisions,
         )
         if data.startswith(_LFS_POINTER_PREFIX):

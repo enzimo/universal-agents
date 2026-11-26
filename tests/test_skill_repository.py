@@ -229,14 +229,36 @@ def test_tree_manifest_from_files_matches_disk_and_enforces_limits(tmp_path: Pat
             [("SKILL.md", b"a"), ("extra.txt", b"b")],
             max_files=1,
         )
+    # Only an exact file/folder clash is refused: no disk can hold one.
     for colliding in (
         [("SKILL.md", b"a"), ("docs", b"b"), ("docs/x.md", b"c")],
         [("SKILL.md", b"a"), ("docs/x.md", b"c"), ("docs", b"b")],
-        [("SKILL.md", b"a"), ("Docs/x.md", b"c"), ("docs", b"b")],
-        [("SKILL.md", b"a"), ("docs", b"b"), ("Docs/x.md", b"c")],
     ):
         with pytest.raises(SkillRepositoryError, match="colliding file and folder paths"):
             build_skill_tree_manifest_from_files(colliding)
+
+
+def test_tree_manifest_from_files_accepts_case_differing_file_and_folder_like_disk(
+    tmp_path: Path,
+) -> None:
+    """``Docs`` beside ``docs/x.md`` passes in memory as it does on a case-sensitive disk."""
+
+    skill = _write_skill(tmp_path, "skills/case-docs")
+    (skill / "Docs").write_bytes(b"file\n")
+    (skill / "docs").mkdir()
+    if not (skill / "Docs").is_file():
+        pytest.skip("filesystem is case-insensitive")
+    (skill / "docs" / "x.md").write_bytes(b"doc\n")
+    disk_manifest = build_skill_tree_manifest(skill)
+
+    for ordering in (
+        [("Docs", b"file\n"), ("docs/x.md", b"doc\n")],
+        [("docs/x.md", b"doc\n"), ("Docs", b"file\n")],
+    ):
+        in_memory = build_skill_tree_manifest_from_files(
+            [("SKILL.md", (skill / "SKILL.md").read_bytes()), *ordering]
+        )
+        assert in_memory == disk_manifest
 
 
 def test_tree_manifest_on_disk_keeps_allowing_backslash_names_while_in_memory_refuses(

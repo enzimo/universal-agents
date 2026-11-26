@@ -6253,8 +6253,11 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   `custom_agents.skill_installation.verify_managed_skill_attestation_digest`).
   These checks run before the unfinished-import marker is written. During apply,
   after the marker is written, each skill is staged and checked in a sibling
-  temporary entry beside its destination and swapped in only when complete; a
-  failure restores the previous folder and attestation.
+  temporary entry beside its destination and swapped in only when complete. A
+  failure the import catches restores the previous folder and attestation. A
+  process killed mid-import restores nothing and can leave a dot-named staging or
+  backup folder that the skill loader would read; the unfinished-import marker
+  (`team_transfer.runtime_guard`) keeps that instance from starting.
 - **Credentials stay with their owners.** A passphrase-derived key
   authenticates the manifest and encrypts secrets. Operator secrets from
   `team.env` travel encrypted in the file. The other sections are plain,
