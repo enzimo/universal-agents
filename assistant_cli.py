@@ -2660,7 +2660,7 @@ def _upgrade_authority_tokens(args: argparse.Namespace) -> None:
             config,
             allow_unverifiable=bool(getattr(args, "allow_unverifiable", False)),
         )
-    except (MissingLegacyVerifyKeysError, ValueError) as exc:
+    except (MissingLegacyVerifyKeysError, ValueError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from exc
     if result.already_done:
         print("Stored 0.9 contexts and permits were already converted to protocol 1 authority tokens.")

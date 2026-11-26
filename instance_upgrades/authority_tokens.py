@@ -514,12 +514,17 @@ class _ConversionContext:
     team_id: str
     now: datetime
     keyring: _LegacyKeyring
-    identities: SigningIdentities
+    identities: SigningIdentities | None
     people: Mapping[str, TeamPersonV1]
     system_work_schedule_ids: frozenset[str]
     counts: ConversionCounts = field(default_factory=ConversionCounts)
     issues: list[ConversionIssue] = field(default_factory=list)
     ledger_backfills: list[tuple[str, str, str, str]] = field(default_factory=list)  # (team_id, request_id, person_id, token_digest)
+
+    def _require_identities(self) -> SigningIdentities:
+        if self.identities is None:
+            raise RuntimeError("Signing identities are required to re-sign verifiable 0.9 records.")
+        return self.identities
 
     def add_issue(self, category: Literal["unverifiable", "expired"], table: str, record_id: str, reason: str, detail: str = "") -> None:
         self.issues.append(ConversionIssue(category=category, table=table, record_id=record_id, reason=reason, detail=detail))
@@ -584,10 +589,11 @@ class _ConversionContext:
             self.add_issue("expired", table, record_id, f"expired at {_utc(legacy.expires_at_utc).isoformat()}")
             return None, None
         expires_at = self.bounded_expiry(legacy.expires_at_utc, table=table, record_id=record_id)
+        identities = self._require_identities()
         identity = (
-            self.identities.gateway
+            identities.gateway
             if legacy.issuer == "gateway" and legacy.schedule_id is None
-            else self.identities.scheduler
+            else identities.scheduler
         )
         root_task_id = legacy.root_task_id or task_id_hint or legacy.context_id
         try:
@@ -640,7 +646,7 @@ class _ConversionContext:
         is_owner_permit = permit.person_id is not None and permit.schedule_id in self.system_work_schedule_ids
         try:
             token = schedule_permit_token(
-                self.identities.scheduler,
+                self._require_identities().scheduler,
                 team=self.team_id,
                 schedule_id=permit.schedule_id,
                 issued=self.now,
@@ -1122,11 +1128,12 @@ def _convert_one_schedule_row(conn: Any, dialect: SqlDialect, ctx: _ConversionCo
     elif vouched_by_context or vouched_by_permit:
         final_vouched = True
         ctx.counts.vouched_schedules += 1
+        scheduler_id = ctx._require_identities().scheduler
         owner_person = ctx.people.get(str(effective_owner_id)) if effective_owner_id else None
         if is_system_work:
             if new_run_permit_dict is None and enabled:
                 new_run_permit_dict = schedule_permit_token(
-                    ctx.identities.scheduler,
+                    scheduler_id,
                     team=ctx.team_id,
                     schedule_id=schedule_id,
                     issued=ctx.now,
@@ -1137,7 +1144,7 @@ def _convert_one_schedule_row(conn: Any, dialect: SqlDialect, ctx: _ConversionCo
                 ctx.counts.fresh_permits_issued += 1
             if owner_person is not None and owner_person.standing is PersonStanding.ACTIVE and not raw_owner_permit_json:
                 new_owner_permit_dict = schedule_permit_token(
-                    ctx.identities.scheduler,
+                    scheduler_id,
                     team=ctx.team_id,
                     schedule_id=schedule_id,
                     issued=ctx.now,
@@ -1146,7 +1153,7 @@ def _convert_one_schedule_row(conn: Any, dialect: SqlDialect, ctx: _ConversionCo
                 )
         elif new_run_permit_dict is None and owner_person is not None and owner_person.standing is PersonStanding.ACTIVE:
             new_run_permit_dict = schedule_permit_token(
-                ctx.identities.scheduler,
+                scheduler_id,
                 team=ctx.team_id,
                 schedule_id=schedule_id,
                 issued=ctx.now,
@@ -1161,7 +1168,7 @@ def _convert_one_schedule_row(conn: Any, dialect: SqlDialect, ctx: _ConversionCo
         new_owner_permit_dict = None
     elif permit_expired and is_system_work and enabled:
         new_run_permit_dict = schedule_permit_token(
-            ctx.identities.scheduler,
+            ctx._require_identities().scheduler,
             team=ctx.team_id,
             schedule_id=schedule_id,
             issued=ctx.now,
@@ -1274,7 +1281,7 @@ def _convert_schedule_doc(
                             legacy.expires_at_utc, table="scheduled_messages", record_id=schedule_id
                         )
                         gw["task_context"] = root_task_token(
-                            ctx.identities.gateway,
+                            ctx._require_identities().gateway,
                             team=ctx.team_id,
                             root_task_id=legacy.root_task_id or legacy.context_id,
                             request_id=legacy.context_id,
@@ -1332,7 +1339,7 @@ def _convert_schedule_row_permit(
         return None, None, vouched, True, False, permit.person_id
     expires_at = ctx.bounded_expiry(permit.expires_at_utc, table="scheduled_messages", record_id=schedule_id)
     token = schedule_permit_token(
-        ctx.identities.scheduler,
+        ctx._require_identities().scheduler,
         team=ctx.team_id,
         schedule_id=schedule_id,
         issued=ctx.now,
@@ -1379,10 +1386,10 @@ def _report_issues(
         )
 
     if manager_storage is None:
-        return False
-    connect = _open_connection_if_exists(manager_storage)
-    if connect is None:
-        return False
+        raise RuntimeError(
+            "Could not store the authority-token conversion notice for administrators: "
+            "manager storage is not configured."
+        )
 
     summary_lines: list[str] = [
         "Some stored 0.9 task contexts or schedule permits could not be converted into protocol 1 authority tokens "
@@ -1435,13 +1442,111 @@ def _report_issues(
     try:
         AccessRepository(manager_storage).create_notice_if_absent(notice)
         return True
-    except Exception:
+    except Exception as exc:
         LOGGER.exception(
-            "Could not store the authority-token conversion notice for administrators. "
-            "event=authority_token_conversion_notice_failed team_id=%s",
+            "Could not store the authority-token conversion notice for administrators; keeping the pending "
+            "report for the next start. event=authority_token_conversion_notice_failed team_id=%s",
             team_id,
         )
-        return False
+        raise RuntimeError(
+            f"Could not store the authority-token conversion notice for administrators ({exc}); "
+            "the pending report was kept so the next start will retry."
+        ) from exc
+
+
+def _issue_key(issue: ConversionIssue) -> tuple[str, str, str, str, str]:
+    return (issue.category, issue.table, issue.record_id, issue.reason, issue.detail)
+
+
+def _merge_issues(
+    existing: Sequence[ConversionIssue], new: Sequence[ConversionIssue]
+) -> list[ConversionIssue]:
+    seen: set[tuple[str, str, str, str, str]] = set()
+    merged: list[ConversionIssue] = []
+    for item in (*existing, *new):
+        key = _issue_key(item)
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
+def _load_pending_report(path: Path, team_id: str) -> list[ConversionIssue]:
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return []
+    if not isinstance(body, dict) or body.get("team_id") != team_id:
+        return []
+    raw_issues = body.get("issues")
+    if not isinstance(raw_issues, list):
+        return []
+    loaded: list[ConversionIssue] = []
+    for item in raw_issues:
+        if not isinstance(item, Mapping):
+            continue
+        category = item.get("category")
+        if category not in ("unverifiable", "expired"):
+            continue
+        loaded.append(
+            ConversionIssue(
+                category=category,
+                table=str(item.get("table") or ""),
+                record_id=str(item.get("record_id") or ""),
+                reason=str(item.get("reason") or ""),
+                detail=str(item.get("detail") or ""),
+            )
+        )
+    return loaded
+
+
+def _write_pending_report(
+    path: Path, *, team_id: str, issues: Sequence[ConversionIssue], now: datetime
+) -> None:
+    """Persist cleared-record issues atomically (fsync + replace) before committing any database write."""
+
+    from id_generation import new_id_suffix
+
+    body = {
+        "team_id": team_id,
+        "recorded_at": now.isoformat(),
+        "issues": [
+            {
+                "category": item.category,
+                "table": item.table,
+                "record_id": item.record_id,
+                "reason": item.reason,
+                "detail": item.detail,
+            }
+            for item in issues
+        ],
+    }
+    content = (json.dumps(body, indent=2) + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{new_id_suffix()}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _remove_pending_report(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def has_pending_authority_token_report(config: "GatewayInstanceConfig") -> bool:
+    """Whether an earlier conversion attempt saved cleared-record issues whose notice is still undelivered."""
+
+    return bool(
+        _load_pending_report(
+            config.layout.authority_tokens_pending_report_path,
+            str(config.manager.team_id),
+        )
+    )
 
 
 def _marker_matches_team(path: Path, team_id: str) -> bool:
@@ -1536,19 +1641,59 @@ def upgrade_authority_tokens(
     """Run the one-time first-start conversion of stored 0.9 signed contexts and permits.
 
     Idempotent: once ``InstanceLayout.authority_tokens_upgrade_path`` records the current
-    team id, a second start returns ``already_done=True`` without touching any store or NATS.
+    team id and no pending report remains, a second start returns ``already_done=True``
+    without touching any store or NATS.
     """
 
     team_id = str(config.manager.team_id)
     marker_path = config.layout.authority_tokens_upgrade_path
+    pending_path = config.layout.authority_tokens_pending_report_path
     moment = _utc(now) if now is not None else datetime.now(timezone.utc)
     source_env = os.environ if env is None else env
 
-    if _marker_matches_team(marker_path, team_id):
+    pending_issues = _load_pending_report(pending_path, team_id)
+    if _marker_matches_team(marker_path, team_id) and not pending_issues:
         return AuthorityTokenUpgradeResult(already_done=True)
 
+    manager_storage, _ = _resolve_storages(config, env=source_env)
     had_legacy = has_legacy_authority_records(config, env=source_env)
     if not had_legacy:
+        if pending_issues:
+            # A previous conversion committed cleared rows before crashing or failing to store
+            # the Access Inbox notice. Deliver that durable report before writing the marker.
+            notice_stored = _report_issues(
+                manager_storage, team_id=team_id, issues=pending_issues, now=moment
+            )
+            _remove_pending_report(pending_path)
+            pending_counts = ConversionCounts(
+                expired=sum(1 for item in pending_issues if item.category == "expired"),
+                unverifiable=sum(1 for item in pending_issues if item.category == "unverifiable"),
+            )
+            _write_marker(marker_path, team_id=team_id, counts=pending_counts, now=moment)
+            still_set = tuple(present_removed_signing_key_env_vars(source_env))
+            if still_set:
+                LOGGER.warning(
+                    "Finished reporting converted 0.9 records. Remove these obsolete signing-key variables "
+                    "from team.env or Docker secrets before the next restart (future starts will refuse "
+                    "them): %s. event=authority_token_conversion_remove_old_keys variables=%s",
+                    ", ".join(still_set),
+                    ",".join(still_set),
+                )
+            LOGGER.info(
+                "Delivered pending authority-token conversion report and recorded upgrade complete. "
+                "event=authority_tokens_upgraded team_id=%s had_legacy=true expired=%d unverifiable=%d",
+                team_id,
+                pending_counts.expired,
+                pending_counts.unverifiable,
+            )
+            return AuthorityTokenUpgradeResult(
+                already_done=False,
+                had_legacy_records=True,
+                counts=pending_counts,
+                issues=tuple(pending_issues),
+                notice_stored=notice_stored,
+                removed_keys_still_set=still_set,
+            )
         # Fresh 0.10 install (no legacy rows): refuse removed signing key env vars immediately.
         reject_removed_signing_key_env_vars(source_env)
         _write_marker(marker_path, team_id=team_id, counts=ConversionCounts(), now=moment)
@@ -1564,16 +1709,23 @@ def upgrade_authority_tokens(
         raise MissingLegacyVerifyKeysError(
             "Stored 0.9 signed task contexts or schedule permits need one-time conversion to protocol 1 authority "
             "tokens, but none of ACCESS_CONTEXT_VERIFY_KEYS, ACCESS_GATEWAY_SIGNING_KEY, or "
-            "ACCESS_SCHEDULER_SIGNING_KEY (or their _FILE variants) are set. Restore the 0.9 keys for this first "
-            "start so stored records can be verified and re-signed, or run "
-            f"`assistant_cli upgrade authority-tokens --config {config.config_path} --allow-unverifiable` if the "
-            "old keys were permanently lost (unverifiable contexts will be cleared and reported to administrators)."
+            "ACCESS_SCHEDULER_SIGNING_KEY (or their _FILE variants) are set. Keep or restore the 0.9 keys for this "
+            "first 0.10 start so stored records can be verified and re-signed (and remove them after the first start "
+            "finishes). If the old keys were permanently lost, start once with --allow-unverifiable-authority-tokens "
+            f"(or run `assistant_cli.py upgrade authority-tokens --config {config.config_path} --allow-unverifiable` "
+            "while the instance is stopped) to clear unverifiable contexts and report them to administrators."
         )
 
-    signing_identities = identities if identities is not None else acquire_identities(config)
+    # Without any 0.9 verification key, no legacy record can verify or be re-signed, so no live
+    # installation-authority join is needed (allowing offline CLI recovery as well as the launcher flag).
+    if identities is not None:
+        signing_identities: SigningIdentities | None = identities
+    elif keyring.is_empty and allow_unverifiable:
+        signing_identities = None
+    else:
+        signing_identities = acquire_identities(config)
 
     # Ensure every 0.9 access_people row has a persistent person_ref before converting.
-    manager_storage, _ = _resolve_storages(config, env=source_env)
     people: dict[str, TeamPersonV1] = {}
     if manager_storage is not None and _open_connection_if_exists(manager_storage) is not None:
         access_repo = AccessRepository(manager_storage)
@@ -1627,9 +1779,17 @@ def upgrade_authority_tokens(
             _convert_simple_json_table(
                 conn, dialect, ctx, table="gateway_held_guidance", pk_column="correlation_id", json_column="steering_json",
             )
+            # Persist cleared-record issues durably BEFORE committing so a crash or notice-store
+            # error between commit and notice delivery can never lose the administrator report.
+            merged_issues = _merge_issues(pending_issues, ctx.issues)
+            if merged_issues:
+                _write_pending_report(pending_path, team_id=team_id, issues=merged_issues, now=moment)
             conn.commit()
 
-    notice_stored = _report_issues(manager_storage, team_id=team_id, issues=ctx.issues, now=moment)
+    all_issues = _merge_issues(pending_issues, ctx.issues)
+    notice_stored = _report_issues(manager_storage, team_id=team_id, issues=all_issues, now=moment)
+    if all_issues:
+        _remove_pending_report(pending_path)
     _write_marker(marker_path, team_id=team_id, counts=ctx.counts, now=moment)
 
     still_set = tuple(present_removed_signing_key_env_vars(source_env))
@@ -1660,7 +1820,7 @@ def upgrade_authority_tokens(
         already_done=False,
         had_legacy_records=True,
         counts=ctx.counts,
-        issues=tuple(ctx.issues),
+        issues=tuple(all_issues),
         notice_stored=notice_stored,
         removed_keys_still_set=still_set,
     )
@@ -1675,5 +1835,6 @@ __all__ = [
     "acquire_signing_identities",
     "authority_tokens_upgrade_done",
     "has_legacy_authority_records",
+    "has_pending_authority_token_report",
     "upgrade_authority_tokens",
 ]

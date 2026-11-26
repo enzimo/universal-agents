@@ -13,7 +13,6 @@ from typing import Any
 
 import pytest
 
-from access_control.identity import ISSUER_GATEWAY, ContextSigner, generate_signing_key, public_entry, verify_keys_value
 from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents.local_schedule_policy import local_schedule_service_id
 from custom_agents.schedule_execution_identity import execution_digest
@@ -33,7 +32,8 @@ from custom_messages.contracts.schedule_v1 import (
 from custom_messages.contracts.schedule_worker_v1 import ScheduleWorkerBindingV1, ScheduleWorkerPolicySpecV1
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
-from internal_credentials import parse_env_file
+from custom_transport.protocol1.delivery_refs import DeliveryRefs, ensure_delivery_ref_key
+from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
 from runtime_hosting.execution_contracts import (
     AutomationJobV2,
     AutomationScheduleKind,
@@ -64,25 +64,15 @@ LONG_AGO = "2020-01-01T00:00:00+00:00"
 TELEGRAM = {"channel_name": "telegram", "user_id": "tg-42", "chat_id": "42"}
 
 
-@pytest.fixture(autouse=True)
-def _fresh_verifier():
-    from custom_agents import task_context_runtime
-
-    task_context_runtime._verifier.cache_clear()
-    yield
-    task_context_runtime._verifier.cache_clear()
-
-
-def _schedule(schedule_id: str, owner: str | None, *, signer: ContextSigner | None = None, session: str = "sess_ana", **fields: Any) -> ScheduledMessage:
+def _schedule(schedule_id: str, owner: str | None, *, session: str | None = "sess_ana", delivery_ref: str | None = None, **fields: Any) -> ScheduledMessage:
     context = GatewayContext(
         gateway_instance_name="alpha",
         canonical_user_id=owner,
         session_key=session,
+        delivery_ref=delivery_ref,
         delivery_mode="proactive",
-        **TELEGRAM,
+        **(TELEGRAM if session is not None else {}),
     )
-    if signer is not None and owner:
-        context.task_context = signer.issue(team_id=TEAM, person_id=owner, person_roles=("owner",), schedule_id=schedule_id)
     values: dict[str, Any] = {
         "schedule_id": schedule_id,
         "schedule_name": schedule_id,
@@ -123,28 +113,28 @@ def _sessions(repository: Any) -> None:
     )
 
 
-def _schedules(store: ScheduleStore, signer: ContextSigner, heartbeat_source: str) -> None:
+def _schedules(store: ScheduleStore, heartbeat_source: str) -> None:
     daily = _schedule(
-        "sched_daily", "usr_ana", signer=signer,
+        "sched_daily", "usr_ana",
         schedule_memory=ScheduleTaskMemory(policy=ScheduleMemoryPolicy(notify="always"), ledger=ScheduleMemoryLedger(total_runs=5)),
     )
     launcher = _system("heartbeat_launcher", SystemScheduleKind.HEARTBEAT_LAUNCHER, schedule_name="heartbeat:alpha")
     launcher.payload_meta.gateway_context.heartbeat_source_id = heartbeat_source
-    for schedule in (
-        daily,
-        _schedule("sched_paused", "usr_ana", signer=signer, interval_ms=None, cron_expression="0 9 * * *",
-                  cron_timezone="Europe/Lisbon", paused_until=FAR_FUTURE, next_fire_at=None),
-        _schedule("sched_once_past", "usr_ana", signer=signer, interval_ms=None, repeat_count=1),
-        _schedule("sched_once_future", "usr_ana", signer=signer, interval_ms=None, repeat_count=1, next_fire_at=FAR_FUTURE),
-        _schedule("sched_gone", "usr_gone", signer=signer, session="sess_gone"),
-        _schedule("sched_unvouched", "usr_ana"),
-        _schedule("sched_worker", "usr_ana", signer=signer, claim_named_agent_type=WORKER),
-        launcher,
-        _system("sched_aar", SystemScheduleKind.AFTER_ACTION_REPORT_REVIEW, interval_ms=None, repeat_count=1, next_fire_at=FAR_FUTURE),
-        _system("mem_rev_core", SystemScheduleKind.MEMORY_REVIEW_COREMEM, enabled=False),
-        _system("sched_sys_worker", SystemScheduleKind.MEMORY_REVIEW_USERMEM, claim_named_agent_type=WORKER),
+    for schedule, vouched in (
+        (daily, True),
+        (_schedule("sched_paused", "usr_ana", interval_ms=None, cron_expression="0 9 * * *",
+                   cron_timezone="Europe/Lisbon", paused_until=FAR_FUTURE, next_fire_at=None), True),
+        (_schedule("sched_once_past", "usr_ana", interval_ms=None, repeat_count=1), True),
+        (_schedule("sched_once_future", "usr_ana", interval_ms=None, repeat_count=1, next_fire_at=FAR_FUTURE), True),
+        (_schedule("sched_gone", "usr_gone", session="sess_gone"), True),
+        (_schedule("sched_unvouched", "usr_ana"), False),
+        (_schedule("sched_worker", "usr_ana", claim_named_agent_type=WORKER), True),
+        (launcher, False),
+        (_system("sched_aar", SystemScheduleKind.AFTER_ACTION_REPORT_REVIEW, interval_ms=None, repeat_count=1, next_fire_at=FAR_FUTURE), False),
+        (_system("mem_rev_core", SystemScheduleKind.MEMORY_REVIEW_COREMEM, enabled=False), False),
+        (_system("sched_sys_worker", SystemScheduleKind.MEMORY_REVIEW_USERMEM, claim_named_agent_type=WORKER), False),
     ):
-        store.add(schedule)
+        store.add(schedule, owner_vouched=vouched)
 
 
 def _binding(store: ScheduleStore, schedule_id: str, **fields: Any) -> None:
@@ -202,12 +192,9 @@ def _heartbeat_and_execution(config: Any) -> None:
 
 def _old_instance(tmp_path: Path) -> tuple[Path, ScheduleStore]:
     path, config = new_instance(tmp_path, "alpha", TEAM)
-    old_key, _entry = generate_signing_key(ISSUER_GATEWAY)
-    config.layout.team_env_path.parent.mkdir(parents=True, exist_ok=True)
-    config.layout.team_env_path.write_text(f"ACCESS_GATEWAY_SIGNING_KEY={old_key}\n", encoding="utf-8")
     _sessions(_people(config))
     store = ScheduleStore(storage_settings=config.manager_storage_settings, default_cron_timezone="UTC")
-    _schedules(store, ContextSigner.from_value(ISSUER_GATEWAY, old_key), config.heartbeat.source_id)
+    _schedules(store, config.heartbeat.source_id)
     _workers_and_pools(config, store)
     _heartbeat_and_execution(config)
     return path, store
@@ -252,10 +239,8 @@ def test_transfer_keeps_zero_remaining_runs_so_an_exhausted_job_cannot_replay(tm
     assert destination.get_scheduled_message("sched_once_future") is None
 
 
-def test_a_persons_recurring_schedule_arrives_signed_by_the_new_gateway(moved: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    from custom_agents.task_context_runtime import gateway_vouches
-
-    outcomes, config, old_store, new_store = moved
+def test_a_persons_recurring_schedule_carries_owner_vouched_without_signing_keys(moved: Any) -> None:
+    outcomes, config, _old_store, new_store = moved
     assert _outcome(outcomes, "schedule/sched_daily") is RecordOutcome.IMPORT
     schedule = new_store.get_scheduled_message("sched_daily")
     assert schedule.enabled
@@ -263,15 +248,86 @@ def test_a_persons_recurring_schedule_arrives_signed_by_the_new_gateway(moved: A
     assert datetime.now(timezone.utc) < next_run <= datetime.now(timezone.utc) + timedelta(hours=1), "computed from now"
     assert schedule.schedule_memory.policy.notify == "always" and schedule.schedule_memory.ledger.total_runs == 0
 
-    # Derived from the new signing key, as the launcher does (docker/launch_headless.with_verify_keys).
-    new_key = parse_env_file(config.layout.team_env_path)["ACCESS_GATEWAY_SIGNING_KEY"]
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", verify_keys_value([public_entry(ISSUER_GATEWAY, new_key)]))
-    new_context = schedule.payload_meta.gateway_context
-    old_context = old_store.get_scheduled_message("sched_daily").payload_meta.gateway_context
-    assert gateway_vouches(new_context, "usr_ana")
-    assert not gateway_vouches(old_context, "usr_ana"), "the old signature does not verify under the new key"
-    assert new_context.task_context.context.person_roles == ("admin", "owner")
-    assert new_context.task_context.context.schedule_id == "sched_daily"
+    # No legacy signing keys are read on export or written on import (A7).
+    env_text = config.layout.team_env_path.read_text(encoding="utf-8")
+    for removed in REMOVED_SIGNING_KEY_ENV_VARS:
+        assert removed not in env_text
+    assert new_store.is_owner_vouched("sched_daily") is True
+    assert schedule.payload_meta.gateway_context.task_context is None
+    assert new_store.is_owner_vouched("sched_unvouched") is False
+
+
+def test_agent_installed_member_recurring_schedule_carries_chat_target_via_delivery_ref(tmp_path: Path) -> None:
+    """C31: an agent-made recurring schedule for a member that has never run yet has only a
+    delivery_ref (no gateway_scheduled_targets row and no gateway_context.session_key). Export
+    resolves it with the source DeliveryRefs key into a scheduled_target + session, and import
+    writes the target and recomputes the destination delivery_ref so replies and chat listing work."""
+
+    path, old_config = new_instance(tmp_path / "old", "alpha", TEAM)
+    ensure_delivery_ref_key(old_config.layout)
+    old_refs = DeliveryRefs.load(old_config.layout, TEAM)
+    repo = _people(old_config)
+    repo.upsert_session(
+        session_key="sess_ben_dm",
+        session_alias="ben-chat",
+        conversation_id="conv_ben_dm",
+        last_task_id="task_ben_1",
+        manager_agent_id="mgr_old",
+        status="active",
+        owner_canonical_user_id="usr_ben",
+        channel_name="telegram",
+        user_id="tg-99",
+        chat_id="99",
+    )
+    old_ref = old_refs.ref("sess_ben_dm")
+    old_store = ScheduleStore(storage_settings=old_config.manager_storage_settings, default_cron_timezone="UTC")
+    # Agent-made recurring schedule: no session_key in GatewayContext, dedicated conversation_id,
+    # no gateway_scheduled_targets row yet — only delivery_ref + owner_vouched=True.
+    member_sched = _schedule(
+        "sched_ben_weekly",
+        "usr_ben",
+        session=None,
+        delivery_ref=old_ref,
+        payload_meta=MessageMeta(
+            conversation_id="conv_ben_weekly_dedicated",
+            gateway_context=GatewayContext(
+                gateway_instance_name="alpha",
+                canonical_user_id="usr_ben",
+                session_key=None,
+                delivery_ref=old_ref,
+                delivery_mode="proactive",
+            ),
+        ),
+    )
+    old_store.add(member_sched, owner_vouched=True, delivery_ref=old_ref)
+    assert repo.get_scheduled_target("sched_ben_weekly") is None
+
+    plan, new_config = _transfer(tmp_path, path)
+    outcomes = {r.key: r for r in plan.records if r.section == "schedules"}
+    assert outcomes["session/sess_ben_dm"].outcome is RecordOutcome.IMPORT
+    assert outcomes["schedule/sched_ben_weekly"].outcome is RecordOutcome.IMPORT
+    assert outcomes["scheduled_target/sched_ben_weekly"].outcome is RecordOutcome.IMPORT
+
+    new_repo = create_gateway_state_repository(new_config.state_storage_settings)
+    target = new_repo.get_scheduled_target("sched_ben_weekly")
+    assert target is not None
+    assert (target.session_key, target.conversation_id, target.owner_canonical_user_id) == (
+        "sess_ben_dm",
+        "conv_ben_weekly_dedicated",
+        "usr_ben",
+    )
+    new_session = new_repo.get_session("sess_ben_dm")
+    assert new_session is not None and new_session.owner_canonical_user_id == "usr_ben"
+
+    new_store = ScheduleStore(storage_settings=new_config.manager_storage_settings, default_cron_timezone="UTC")
+    assert new_store.is_owner_vouched("sched_ben_weekly") is True
+    new_refs = DeliveryRefs.load(new_config.layout, TEAM)
+    expected_new_ref = new_refs.ref("sess_ben_dm")
+    assert expected_new_ref != old_ref, "destination uses its own delivery-ref key"
+    assert new_store.delivery_ref_of("sched_ben_weekly") == expected_new_ref
+    imported_sched = new_store.get_scheduled_message("sched_ben_weekly")
+    assert imported_sched is not None
+    assert imported_sched.payload_meta.gateway_context.delivery_ref == expected_new_ref
 
 
 def test_pause_one_time_runs_and_unvouched_schedules(moved: Any) -> None:

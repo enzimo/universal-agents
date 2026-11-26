@@ -240,6 +240,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-unverifiable-authority-tokens",
+        action="store_true",
+        help=(
+            "One-shot recovery option when 0.9 signing/verify keys were lost: proceed with the "
+            "authority-token upgrade, clearing unverifiable legacy contexts/permits and reporting "
+            "them to administrators."
+        ),
+    )
+    parser.add_argument(
         "gateway_args",
         nargs=argparse.REMAINDER,
         help="Additional arguments forwarded to assistant_cli.py run-gateway",
@@ -1069,10 +1078,15 @@ def prepare_authority_tokens_for_launch(
     inherited_env: dict[str, str],
     *,
     python_executable: str | None = None,
+    allow_unverifiable: bool = False,
 ) -> Callable[[], None] | None:
     """Enforce removal of old signing keys and, if 0.9 legacy rows exist, return the one-shot conversion hook.
 
-    - Marker already present for this team: refuse any removed signing-key variable immediately.
+    - Marker already present for this team (and no pending conversion report): refuse any removed
+      signing-key variable immediately.
+    - Marker missing and no legacy rows exist, but a pending conversion report remains from an
+      earlier crashed or failed notice delivery: strip removed keys so runtime services never see
+      them, deliver the pending report and write the marker now (no NATS needed).
     - Marker missing and no legacy rows exist (fresh 0.10 install): refuse any removed signing-key
       variable immediately; otherwise write the marker without touching NATS.
     - Marker missing and legacy rows exist (upgraded 0.9.x install): move the old signing/verify
@@ -1084,14 +1098,20 @@ def prepare_authority_tokens_for_launch(
     from instance_upgrades.authority_tokens import (
         authority_tokens_upgrade_done,
         has_legacy_authority_records,
+        has_pending_authority_token_report,
         upgrade_authority_tokens,
     )
 
-    if authority_tokens_upgrade_done(config):
+    pending_report = has_pending_authority_token_report(config)
+    if authority_tokens_upgrade_done(config) and not pending_report:
         reject_removed_signing_key_env_vars(inherited_env)
         return None
 
     if not has_legacy_authority_records(config, env=inherited_env):
+        if pending_report:
+            legacy_keys = _strip_removed_signing_keys(inherited_env)
+            upgrade_authority_tokens(config, env={**inherited_env, **legacy_keys})
+            return None
         reject_removed_signing_key_env_vars(inherited_env)
         upgrade_authority_tokens(config, env=inherited_env)
         return None
@@ -1106,9 +1126,11 @@ def prepare_authority_tokens_for_launch(
         "--config",
         str(config_path),
     ]
+    if allow_unverifiable:
+        command.append("--allow-unverifiable")
 
     def _run_authority_token_upgrade() -> None:
-        if authority_tokens_upgrade_done(config):
+        if authority_tokens_upgrade_done(config) and not has_pending_authority_token_report(config):
             return
         # Pass the current inherited_env (which includes local NATS updates applied after
         # build_process_env) plus the isolated legacy signing/verify keys only to this
@@ -3108,18 +3130,27 @@ def main() -> int:
     if gateway_args and gateway_args[0] == "--":
         gateway_args = gateway_args[1:]
 
-    from instance_upgrades.authority_tokens import authority_tokens_upgrade_done
+    from instance_upgrades.authority_tokens import (
+        authority_tokens_upgrade_done,
+        has_pending_authority_token_report,
+    )
 
     try:
         inherited_env = build_process_env(
             config,
             env_path=env_path,
-            allow_legacy_signing_keys=not authority_tokens_upgrade_done(config),
+            allow_legacy_signing_keys=(
+                not authority_tokens_upgrade_done(config)
+                or has_pending_authority_token_report(config)
+            ),
         )
         authority_tokens_after_authority = prepare_authority_tokens_for_launch(
-            config, config_path, inherited_env
+            config,
+            config_path,
+            inherited_env,
+            allow_unverifiable=bool(args.allow_unverifiable_authority_tokens),
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         LOGGER.error("Headless launch refused. %s", exc)
         return 2
     use_process_timezone(inherited_env)

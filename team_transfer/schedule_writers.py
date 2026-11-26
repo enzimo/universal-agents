@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import Any, Callable, Optional
 
 from team_transfer.schedule_records import (
     CarriedScheduleV2,
@@ -22,34 +22,15 @@ from team_transfer.schedule_records import (
     ScheduleRecordKind,
     ScheduleTransferRecordV2,
     SessionRouteV1,
-    gateway_signing_key,
     is_one_time,
     run_time_passed,
 )
 from team_transfer.sections import ImportContext
 
-if TYPE_CHECKING:
-    from access_control.identity import ContextSigner
-    from custom_messages.contracts.schedule_v1 import ScheduledMessage
-
 logger = logging.getLogger(__name__)
 
 # Recorded as who set a carried pool size when its history names nobody.
 _TRANSFER_ACTOR = "team_transfer"
-
-
-def _signer(config: Any, context: ImportContext) -> Optional["ContextSigner"]:
-    from access_control.identity import ISSUER_GATEWAY, ContextSigner
-
-    value = gateway_signing_key(config, context.layout)
-    if value is None:
-        logger.warning(
-            "The new instance has no gateway signing key, so people's schedules are imported unsigned and run "
-            "without their owners' roles. event=team_transfer_schedules_no_signing_key root=%s",
-            context.layout.root,
-        )
-        return None
-    return ContextSigner.from_value(ISSUER_GATEWAY, value)
 
 
 @dataclass
@@ -59,8 +40,9 @@ class ScheduleWriter:
     gateway: Any
     heartbeat: Any
     pools: Any
-    signer: Optional["ContextSigner"]
+    layout: Any = None
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    _delivery_refs: Any = field(default=None, init=False, repr=False)
 
     @classmethod
     def open(cls, context: ImportContext) -> "ScheduleWriter":
@@ -80,8 +62,18 @@ class ScheduleWriter:
             gateway=create_gateway_state_repository(config.state_storage_settings),
             heartbeat=HeartbeatStore(storage_settings=storage),
             pools=WorkerPoolRepository(storage),
-            signer=_signer(config, context),
+            layout=context.layout,
         )
+
+    def _delivery_ref_for(self, session_key: Optional[str]) -> Optional[str]:
+        if not session_key or self.layout is None:
+            return None
+        if self._delivery_refs is None:
+            from custom_transport.protocol1.delivery_refs import DeliveryRefs, ensure_delivery_ref_key
+
+            ensure_delivery_ref_key(self.layout)
+            self._delivery_refs = DeliveryRefs.load(self.layout, self.team_id)
+        return str(self._delivery_refs.ref(session_key))
 
     def write(self, record: ScheduleTransferRecordV2) -> None:
         writers: dict[ScheduleRecordKind, Callable[[Any], None]] = {
@@ -153,6 +145,9 @@ class ScheduleWriter:
             conversation_id=target.conversation_id,
             owner_canonical_user_id=target.owner_person_id,
         )
+        delivery_ref = self._delivery_ref_for(target.session_key)
+        if delivery_ref is not None:
+            self.store.set_delivery_ref(target.schedule_id, delivery_ref)
 
     # -- schedules ----------------------------------------------------------------------
 
@@ -172,45 +167,20 @@ class ScheduleWriter:
         else:
             # Computed from now by the store, so runs missed during the move are skipped.
             schedule.next_fire_at = None
-        self._sign_again(schedule, vouched=entry.owner_vouched)
-        self.store.add(schedule, remaining_count_override=entry.remaining_count)
-
-    def _sign_again(self, schedule: "ScheduledMessage", *, vouched: bool) -> None:
-        """Sign a person's schedule context with the new gateway key (``team_transfer.schedules`` docstring)."""
-
-        from custom_agents.schedule_management import is_system_managed_schedule
-        from custom_agents.schedule_store import owner_canonical_user_id_for_schedule
-
         gateway_context = getattr(schedule.payload_meta, "gateway_context", None)
-        owner = owner_canonical_user_id_for_schedule(schedule)
-        if gateway_context is None or is_system_managed_schedule(schedule) or not owner:
-            return
-        if vouched and self.signer is not None:
-            gateway_context.task_context = self.signer.issue(
-                team_id=self.team_id,
-                person_id=owner,
-                person_roles=self._roles(owner),
-                schedule_id=schedule.schedule_id,
-            )
-        elif gateway_context.task_context is not None:
-            # Signed with the old key, it would only fail every check; say so once here.
+        delivery_ref: Optional[str] = None
+        if gateway_context is not None:
+            # Credentials and source-instance delivery_ref never carry across instances;
+            # vouching travels in owner_vouched and team_services issues fresh permits on start.
             gateway_context.task_context = None
-            logger.warning(
-                "A person's schedule is imported without a signed context, so its runs carry no roles. "
-                "event=team_transfer_schedule_unsigned schedule_id=%s owner=%s vouched=%s",
-                schedule.schedule_id,
-                owner,
-                vouched,
-            )
-
-    def _roles(self, person_id: str) -> tuple[str, ...]:
-        from access_control.people import MEMBERSHIP_STATUS_ACTIVE, effective_roles
-
-        return effective_roles(
-            membership.role
-            for membership in self.gateway.list_team_memberships(person_id)
-            if membership.team_id == self.team_id
-            and membership.status == MEMBERSHIP_STATUS_ACTIVE
+            gateway_context.schedule_run = None
+            gateway_context.delivery_ref = None
+            delivery_ref = self._delivery_ref_for(getattr(gateway_context, "session_key", None))
+        self.store.add(
+            schedule,
+            remaining_count_override=entry.remaining_count,
+            owner_vouched=entry.owner_vouched,
+            delivery_ref=delivery_ref,
         )
 
     # -- heartbeat list -----------------------------------------------------------------

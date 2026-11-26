@@ -157,6 +157,7 @@ ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
 ADAPTER_HOST_FILES_WITHOUT_RECORDS_FILENAME = "adapter-host-files.without-records.txt"
 PROTOCOL1_IDS_CHECK_FILENAME = "protocol1-ids.json"
 AUTHORITY_TOKENS_UPGRADE_FILENAME = "authority-tokens.json"
+AUTHORITY_TOKENS_PENDING_REPORT_FILENAME = "authority-tokens-pending-report.json"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
 EXPORTS_DIRNAME = "exports"
@@ -811,6 +812,15 @@ class InstanceLayout:
         Under ``state/``, so no agent tool or sandboxed code can reach it."""
 
         return self.state_dir / UPGRADES_DIRNAME / AUTHORITY_TOKENS_UPGRADE_FILENAME
+
+    @property
+    def authority_tokens_pending_report_path(self) -> Path:
+        """Durable list of unverifiable or expired 0.9 records cleared during conversion,
+        written atomically before committing any database transaction so a crash or notice
+        store failure cannot lose the administrator report (removed once the Access Inbox
+        notice is stored)."""
+
+        return self.state_dir / UPGRADES_DIRNAME / AUTHORITY_TOKENS_PENDING_REPORT_FILENAME
 
     @property
     def storage_levels_path(self) -> Path:

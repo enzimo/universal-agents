@@ -816,17 +816,210 @@ def test_missing_legacy_keys_stops_conversion_without_writing_marker(tmp_path: P
     with pytest.raises(MissingLegacyVerifyKeysError) as exc_info:
         upgrade_authority_tokens(config, env={}, identities=_signing_identities(TEAM), now=now)
     assert "ACCESS_CONTEXT_VERIFY_KEYS" in str(exc_info.value)
+    assert "--allow-unverifiable-authority-tokens" in str(exc_info.value)
     assert "--allow-unverifiable" in str(exc_info.value)
     assert not config.layout.authority_tokens_upgrade_path.exists()
     assert has_legacy_authority_records(config) is True
 
-    # Explicit --allow-unverifiable clears the unverifiable context, reports it, and writes the marker.
+    # Explicit --allow-unverifiable with empty keyring needs NO live signing identities / NATS:
+    # it clears the unverifiable context, reports it, and writes the marker.
+    def _must_not_connect(_cfg: Any) -> SigningIdentities:
+        raise AssertionError("acquire_identities must not be called when keyring is empty")
+
     res = upgrade_authority_tokens(
-        config, env={}, allow_unverifiable=True, identities=_signing_identities(TEAM), now=now
+        config,
+        env={},
+        allow_unverifiable=True,
+        acquire_identities=_must_not_connect,
+        now=now,
     )
     assert res.counts.unverifiable == 1
     assert res.notice_stored is True
     assert authority_tokens_upgrade_done(config) is True
+
+
+def test_crash_after_commit_or_notice_failure_preserves_pending_report_for_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C37: cleared-record issues are persisted atomically before DB commit, and the upgrade
+    marker is written only after the Access Inbox notice is stored. If storing the notice fails
+    (or the process crashes between DB commits), the next start still delivers the full notice."""
+
+    from instance_upgrades.authority_tokens import has_pending_authority_token_report
+
+    config = _make_config(tmp_path)
+    manager_db = Path(config.manager_storage_settings.sqlite_path or "")
+    gateway_db = Path(config.state_storage_settings.sqlite_path or "")
+    _init_09_sqlite(manager_db)
+    _init_09_sqlite(gateway_db)
+
+    gw_signer = _Legacy09Signer("gateway", "gateway-c37")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    forged_sched_ctx = dict(
+        gw_signer.sign_context(
+            context_id="task_context_c37_sched",
+            team_id=TEAM,
+            person_id="ada",
+            issued_at=now - timedelta(hours=1),
+            expires_at=now + timedelta(days=2),
+        ),
+        signature=_b64(b"q" * 64),
+    )
+    forged_deliv_ctx = dict(
+        gw_signer.sign_context(
+            context_id="task_context_c37_deliv",
+            team_id=TEAM,
+            person_id="ada",
+            root_task_id="task_c37",
+            issued_at=now - timedelta(hours=1),
+            expires_at=now + timedelta(days=2),
+        ),
+        signature=_b64(b"r" * 64),
+    )
+    with sqlite3.connect(str(manager_db)) as conn:
+        conn.execute(
+            "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "sched_c37",
+                "{}",
+                json.dumps(_schedule_dict(schedule_id="sched_c37", name="C37 Sched", owner_id="ada", task_context=forged_sched_ctx)),
+                "C37 Sched",
+                now.isoformat(),
+                now.isoformat(),
+                1,
+                TEAM,
+                "ada",
+            ),
+        )
+        conn.commit()
+    deliv_env = {
+        "msg_header": {"message_id": "msg_c37", "from_agent_id": "lead_1", "agent_signature": ""},
+        "msg_meta": {"gateway_context": {"canonical_user_id": "ada", "task_context": forged_deliv_ctx}},
+        "msg_content": {"message_class": "Task", "task_id": "task_c37", "task_type": "response", "problem_statement": "Hi."},
+    }
+    with sqlite3.connect(str(gateway_db)) as conn:
+        conn.execute(
+            "INSERT INTO gateway_deliveries (delivery_id, correlation_id, session_key, origin_kind, payload_json, rendered_text, available_after, owner_canonical_user_id, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("deliv_c37", "corr_c37", "website:ada:chat", "response", json.dumps(deliv_env), "Hi.", now.isoformat(), "ada", "pending", now.isoformat()),
+        )
+        conn.commit()
+
+    old_env = {"ACCESS_CONTEXT_VERIFY_KEYS": json.dumps([gw_signer.verify_entry])}
+
+    # 1. Fail create_notice_if_absent after both DBs committed (simulating notice failure or crash after commit).
+    def _failing_notice(self: Any, notice: Any) -> bool:
+        raise OSError("simulated disk full writing access_notices")
+
+    monkeypatch.setattr(AccessRepository, "create_notice_if_absent", _failing_notice)
+    with pytest.raises(RuntimeError, match="pending report was kept"):
+        upgrade_authority_tokens(config, env=old_env, identities=_signing_identities(TEAM), now=now)
+
+    # DB rows were already cleared (no longer look legacy), marker was NOT written, pending report IS on disk.
+    assert has_legacy_authority_records(config, env=old_env) is False
+    assert authority_tokens_upgrade_done(config) is False
+    assert has_pending_authority_token_report(config) is True
+    assert config.layout.authority_tokens_pending_report_path.is_file()
+
+    # 2. Next start through prepare_authority_tokens_for_launch (even with old keys still in env)
+    #    delivers the pending report, clears the pending file, writes the marker, and strips old keys.
+    monkeypatch.undo()
+    retry_env = {"SECURE_TOOL_BROKER_TOKEN": "stb_1", **old_env}
+    hook = prepare_authority_tokens_for_launch(config, config.config_path, retry_env)
+    assert hook is None
+    assert "ACCESS_CONTEXT_VERIFY_KEYS" not in retry_env
+    assert authority_tokens_upgrade_done(config) is True
+    assert has_pending_authority_token_report(config) is False
+    assert not config.layout.authority_tokens_pending_report_path.exists()
+
+    notices = [
+        n
+        for n, _read in AccessRepository(config.manager_storage_settings).notices_for(
+            TEAM, person_id="ada", roles=("owner", PERSON_ROLE_ADMIN)
+        )
+        if n.kind is AccessNoticeKind.AUTHORITY_TOKEN_UPGRADE
+    ]
+    assert len(notices) == 1
+    assert "sched_c37" in notices[0].summary
+    assert "deliv_c37" in notices[0].summary
+
+
+def test_launcher_converter_hook_command_env_error_and_offline_allow_unverifiable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C38 + C39: verifies the converter hook's subprocess command and isolated env, that a
+    non-zero exit raises RuntimeError, and that running the real CLI hook with
+    --allow-unverifiable succeeds on a stopped instance without NATS."""
+
+    import subprocess
+
+    config = _make_config(tmp_path)
+    manager_db = Path(config.manager_storage_settings.sqlite_path or "")
+    _init_09_sqlite(manager_db)
+    gw_signer = _Legacy09Signer("gateway", "gateway-hook")
+    now = datetime.now(timezone.utc)
+    ctx = gw_signer.sign_context(
+        context_id="task_context_hook",
+        team_id=TEAM,
+        person_id="ada",
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(days=2),
+    )
+    with sqlite3.connect(str(manager_db)) as conn:
+        conn.execute(
+            "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("sched_hook", "{}", json.dumps(_schedule_dict(schedule_id="sched_hook", name="Hook", owner_id="ada", task_context=ctx)), "Hook", now.isoformat(), now.isoformat(), 1, TEAM, "ada"),
+        )
+        conn.commit()
+
+    # 1. Inspect the hook's command & isolated environment, and check non-zero exit raises RuntimeError.
+    recorded: dict[str, Any] = {}
+
+    def fake_run(command: list[str], *, cwd: Path, env: dict[str, str], check: bool) -> subprocess.CompletedProcess[bytes]:
+        recorded["command"] = list(command)
+        recorded["env"] = dict(env)
+        return subprocess.CompletedProcess(command, 1)
+
+    inherited = {
+        "SECURE_TOOL_BROKER_TOKEN": "stb_1",
+        "ACCESS_GATEWAY_SIGNING_KEY": gw_signer.env_private_value,
+    }
+    hook = prepare_authority_tokens_for_launch(config, config.config_path, inherited, allow_unverifiable=True)
+    assert hook is not None
+    assert "ACCESS_GATEWAY_SIGNING_KEY" not in inherited
+    with monkeypatch.context() as mp:
+        mp.setattr("docker.launch_headless.subprocess.run", fake_run)
+        with pytest.raises(RuntimeError, match="exited with status 1"):
+            hook()
+    assert recorded["command"][-5:] == [
+        "upgrade",
+        "authority-tokens",
+        "--config",
+        str(config.config_path),
+        "--allow-unverifiable",
+    ]
+    assert recorded["env"]["ACCESS_GATEWAY_SIGNING_KEY"] == gw_signer.env_private_value
+
+    # 2. Run the REAL subprocess hook with NO keys and allow_unverifiable=True (no NATS running).
+    env_no_keys = {k: v for k, v in os.environ.items() if k not in REMOVED_SIGNING_KEY_ENV_VARS}
+    env_no_keys["SECURE_TOOL_BROKER_TOKEN"] = "stb_1"
+    real_hook = prepare_authority_tokens_for_launch(
+        config, config.config_path, env_no_keys, allow_unverifiable=True
+    )
+    assert real_hook is not None
+    real_hook()
+    assert authority_tokens_upgrade_done(config) is True
+    assert has_legacy_authority_records(config) is False
+    notices = [
+        n
+        for n, _read in AccessRepository(config.manager_storage_settings).notices_for(
+            TEAM, person_id="ada", roles=("owner", PERSON_ROLE_ADMIN)
+        )
+        if n.kind is AccessNoticeKind.AUTHORITY_TOKEN_UPGRADE
+    ]
+    assert len(notices) == 1 and "sched_hook" in notices[0].summary
 
 
 # ---------------------------------------------------------------------------
@@ -1160,3 +1353,273 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
         assert second.already_done is True
     finally:
         forget_task_context_keys()
+
+
+# ---------------------------------------------------------------------------
+# C36 + C39: Live bundle first-start converter hook against real host certificates
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.live
+@pytest.mark.nats
+def test_live_bundle_first_start_converter_hook_and_real_host_certificates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C36 + C39: drives the bundle entry point env path + launcher converter hook on a real
+    nats-server 2.15.1 against a real installation-authority and real team-services, proving:
+    1. An upgraded 0.9 bundle instance with legacy keys in team.env converts at its first start.
+    2. The converter subprocess joins installation-authority as gateway and team-services and
+       re-signs a waiting task and a schedule permit with real host certificates.
+    3. Real team-services (started right after the hook) and a real gateway host reuse those
+       certificates, and their AuthorityTokenVerifier resolves both converted tokens.
+    4. A second bundle start with the old keys still set refuses cleanly with exit code 2."""
+
+    import asyncio
+
+    import docker.run_bundle as run_bundle_module
+    from assistant_gateway.message_host import GATEWAY_RUNTIME, gateway_profile
+    from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
+    from custom_transport.protocol1.host_runtime import MessageHost
+    from custom_transport.subjects import NatsSubjectMapper
+    from docker import message_hosts
+    from docker.launch_headless import terminate_process
+    from env_secrets import PROCESS_INSTALLATION_AUTHORITY, PROCESS_TEAM_SERVICES, environment_for
+    from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
+    from team_services.serving import serving_process
+    from tests.own_nats_server import own_nats_server
+    from tests.test_live_message_contract import nats_server
+
+    config = _make_config(tmp_path)
+    manager_db = Path(config.manager_storage_settings.sqlite_path or "")
+    _init_09_sqlite(manager_db)
+
+    gw_signer = _Legacy09Signer("gateway", "gateway-live01")
+    sched_signer = _Legacy09Signer("scheduler", "scheduler-live01")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    past = now - timedelta(minutes=30)
+    end_3d = now + timedelta(days=3)
+
+    wait_ctx = gw_signer.sign_context(
+        context_id="task_context_live_wait",
+        team_id=TEAM,
+        person_id="ada",
+        person_roles=("owner",),
+        root_task_id="task_live_wait",
+        conversation_id="conv_live",
+        issued_at=past,
+        expires_at=end_3d,
+    )
+    sched_ctx = gw_signer.sign_context(
+        context_id="task_context_live_sched",
+        team_id=TEAM,
+        person_id="ada",
+        issued_at=past,
+        expires_at=end_3d,
+    )
+    sched_permit = sched_signer.sign_permit(
+        permit_id="schedule_permit_live1",
+        team_id=TEAM,
+        schedule_id="sched_live_ada",
+        person_id="ada",
+        issued_at=past,
+        expires_at=end_3d,
+    )
+
+    with sqlite3.connect(str(manager_db)) as conn:
+        conn.execute(
+            "INSERT INTO access_people (team_id, person_id, payload_json, changed_at) VALUES (?, ?, ?, ?)",
+            (TEAM, "ada", _legacy_person_row(TEAM, "ada", ["owner"], "active", past.isoformat()), past.isoformat()),
+        )
+        header = canonical_json(
+            {
+                "layout_version": 1,
+                "task_order": ["task_live_wait"],
+                "header": {"schema_version": 3, "task_queue": [], "waiting_top_level_task_ids": ["task_live_wait"]},
+            }
+        )
+        conn.execute(
+            "INSERT INTO active_task_runtime (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, runtime_state_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("lead_1", "Lead", TEAM, "TeamArchitect", header, past.isoformat()),
+        )
+        pjson = canonical_json(
+            _task_record_dict(task_id="task_live_wait", owner_person_id="ada", task_context=wait_ctx, conversation_id="conv_live")
+        )
+        conn.execute(
+            "INSERT INTO active_task_runtime_records (owner_agent_id, section, record_id, payload_json, payload_digest) VALUES (?, ?, ?, ?, ?)",
+            ("lead_1", "tasks", "task_live_wait", pjson, payload_digest(pjson)),
+        )
+        conn.execute(
+            "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id, run_permit_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "sched_live_ada",
+                json.dumps({"task_type": "request", "problem_statement": "Live schedule"}),
+                json.dumps(_schedule_dict(schedule_id="sched_live_ada", name="Live schedule", owner_id="ada", task_context=sched_ctx)),
+                "Live schedule",
+                end_3d.isoformat(),
+                past.isoformat(),
+                1,
+                TEAM,
+                "ada",
+                json.dumps(sched_permit),
+            ),
+        )
+        conn.commit()
+
+    # 0.9 team.env still holds the old signing keys.
+    env_file = config.layout.team_env_path
+    env_file.write_text(
+        f"ACCESS_GATEWAY_SIGNING_KEY={gw_signer.env_private_value}\n"
+        f"ACCESS_SCHEDULER_SIGNING_KEY={sched_signer.env_private_value}\n"
+        "SECURE_TOOL_BROKER_TOKEN=stb_live_upgrade\n",
+        encoding="utf-8",
+    )
+
+    with own_nats_server(nats_server(), tmp_path) as broker_url:
+        config.transport.nats_url = broker_url
+        config.transport.nats_servers = [broker_url]
+        config.save(config.config_path)
+
+        base_ambient = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("NATS_") and k not in REMOVED_SIGNING_KEY_ENV_VARS
+        }
+        base_ambient["NATS_URL"] = broker_url
+        base_ambient["NATS_SERVERS"] = broker_url
+
+        # Step 1 (C36): Bundle entry point prepares env without refusing pre-marker legacy keys.
+        bundle_effective = build_process_env(
+            config,
+            env_path=env_file,
+            base_env=base_ambient,
+            allow_legacy_signing_keys=not authority_tokens_upgrade_done(config),
+        )
+        bundle_runtime_env = run_bundle_module.build_bundle_runtime_env(
+            config,
+            base_env=bundle_effective,
+            ambient_env=base_ambient,
+            bundled_nats_enabled=False,
+        )
+
+        # Step 2 (launch_headless): builds inherited_env, strips legacy keys into converter hook only.
+        inherited_env = build_process_env(
+            config,
+            env_path=env_file,
+            base_env=bundle_runtime_env,
+            allow_legacy_signing_keys=not authority_tokens_upgrade_done(config),
+        )
+        hook = prepare_authority_tokens_for_launch(config, config.config_path, inherited_env)
+        assert hook is not None
+        for removed in REMOVED_SIGNING_KEY_ENV_VARS:
+            assert removed not in inherited_env
+
+        # Step 3 (C39): Real installation-authority -> REAL converter hook -> REAL team-services.
+        services = message_hosts.MessageServices(
+            config.layout,
+            lambda: {
+                TEAM_SERVICES_RUNTIME: message_hosts.expected_host(config.layout, team_services_profile(TEAM)),
+                GATEWAY_RUNTIME: message_hosts.expected_host(config.layout, gateway_profile(TEAM)),
+            },
+            lambda: GatewayInstanceConfig.load_for_process(config.config_path).transport,
+            message_hosts.build_installation_authority_command(config.config_path, repo_root=REPO_ROOT),
+            environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env),
+            message_hosts.build_team_services_command(config.config_path, repo_root=REPO_ROOT),
+            environment_for(PROCESS_TEAM_SERVICES, inherited_env),
+            cwd=REPO_ROOT,
+            after_authority_ready=hook,
+        )
+        try:
+            assert services.start() is True
+            assert authority_tokens_upgrade_done(config) is True
+            assert has_legacy_authority_records(config, env=inherited_env) is False
+            assert services.team_services is not None
+            assert serving_process(config.layout) == services.team_services.pid
+
+            # Step 4: Join a real gateway host and a real team-services check to the same authority,
+            # confirming certificate reuse and live AuthorityTokenVerifier verification of both tokens.
+            async def _verify_with_live_hosts() -> tuple[str, str]:
+                async def _join(runtime_name: str, profile: Any):
+                    cfg = NatsTransportConfig(
+                        servers=[broker_url],
+                        name=f"live-check-{runtime_name}",
+                        subject_prefix=config.transport.subject_prefix,
+                        jetstream_enabled=False,
+                        reply_inbox_runtime=runtime_name,
+                    )
+                    adapter = NatsTransportAdapter(config=cfg, mapper=NatsSubjectMapper(team_id=TEAM))
+                    await adapter.connect()
+                    host = MessageHost(config.layout, profile, adapter.nats_connection)
+                    live = await host.start(report=False)
+                    return adapter, host, live
+
+                gw_adapter, gw_host, gw_live = await _join(GATEWAY_RUNTIME, gateway_profile(TEAM))
+                ts_adapter, ts_host, ts_live = await _join(TEAM_SERVICES_RUNTIME, team_services_profile(TEAM))
+                try:
+                    access_repo = AccessRepository(config.manager_storage_settings)
+                    gw_verifier = AuthorityTokenVerifier(
+                        gw_host, people=access_repo, installation=gw_live.identity.installation
+                    )
+                    ts_verifier = AuthorityTokenVerifier(
+                        ts_host, people=access_repo, installation=ts_live.identity.installation
+                    )
+
+                    # Verify converted waiting task token with team-services' live verifier
+                    # (fetching gateway's certificate from UA1_CERTS on demand, as in production).
+                    with sqlite3.connect(str(manager_db)) as conn:
+                        wait_raw = conn.execute(
+                            "SELECT payload_json FROM active_task_runtime_records WHERE owner_agent_id = 'lead_1' AND record_id = 'task_live_wait'"
+                        ).fetchone()[0]
+                        sched_row = conn.execute(
+                            "SELECT owner_vouched, run_permit_json FROM scheduled_messages WHERE schedule_id = 'sched_live_ada'"
+                        ).fetchone()
+
+                    rec = TaskSnapshotRecord.model_validate_json(wait_raw)
+                    assert rec.meta.gateway_context is not None
+                    wait_tok = rec.meta.gateway_context.task_context
+                    assert wait_tok is not None
+                    assert wait_tok.issuer.key_id == gw_live.identity.certificate.key_id
+                    assert wait_tok.issuer.membership_epoch == gw_live.identity.certificate.membership_epoch
+                    assert gw_live.identity.certificate.replaces is None
+                    check_now = datetime.now(timezone.utc)
+                    assert await ts_verifier.ensure_issuer_known(wait_tok, now=check_now) is True
+                    resolved_wait = resolve_task_identity(
+                        verifier=ts_verifier,
+                        team_id=TEAM,
+                        task_context=wait_tok,
+                        schedule_run=None,
+                        schedule_runs=None,
+                        now=check_now,
+                    )
+                    assert resolved_wait.person_id == "ada"
+                    assert resolved_wait.context_id == "task_context_live_wait"
+
+                    # Verify converted schedule permit with gateway's live verifier.
+                    assert sched_row[0] == 1 and sched_row[1] is not None
+                    permit_tok = AuthorityToken.model_validate_json(sched_row[1])
+                    assert permit_tok.issuer.key_id == ts_live.identity.certificate.key_id
+                    assert permit_tok.issuer.membership_epoch == ts_live.identity.certificate.membership_epoch
+                    assert ts_live.identity.certificate.replaces is None
+                    assert await gw_verifier.ensure_issuer_known(permit_tok, now=check_now) is True
+                    verified_permit = gw_verifier.verify_schedule_permit(permit_tok, team_id=TEAM, now=check_now)
+                    assert verified_permit.person_id == "ada"
+                    assert verified_permit.schedule_id == "sched_live_ada"
+                    assert "scheduler" in verified_permit.issuer_roles
+                    return gw_live.identity.certificate.certificate_id, ts_live.identity.certificate.certificate_id
+                finally:
+                    await gw_adapter.close()
+                    await ts_adapter.close()
+
+            gw_cert_id, ts_cert_id = asyncio.run(_verify_with_live_hosts())
+            assert gw_cert_id and ts_cert_id
+        finally:
+            services.stop(terminate_process)
+
+        # Step 5 (C36): Post-marker bundle start refuses the still-present old keys in team.env.
+        import sys as _sys
+
+        monkeypatch.setattr(_sys, "argv", ["run_bundle.py", "--config", str(config.config_path)])
+        monkeypatch.setenv("TEAM_BUNDLE_SERVICE_ROOT", str(tmp_path / "services"))
+        assert run_bundle_module.main() == 2

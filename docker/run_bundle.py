@@ -147,6 +147,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--allow-unverifiable-authority-tokens",
+        action="store_true",
+        help=(
+            "One-shot recovery option when 0.9 signing/verify keys were lost: proceed with the "
+            "authority-token upgrade, clearing unverifiable legacy contexts/permits and reporting "
+            "them to administrators."
+        ),
+    )
+    parser.add_argument(
         "gateway_args",
         nargs=argparse.REMAINDER,
         help="Additional arguments forwarded to assistant_cli.py run-gateway",
@@ -357,10 +366,17 @@ def _postgres_environment() -> dict[str, str]:
 
     This launcher's own environment holds every secret (it starts the
     headless supervisor with them); docker/secret_env_vars.yaml names no
-    secret for the ``postgres`` process.
+    secret for the ``postgres`` process. Also strip obsolete 0.9 signing-key
+    variables during a first-start upgrade so Postgres never sees them.
     """
 
-    return environment_for(PROCESS_POSTGRES, os.environ)
+    from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
+
+    scoped = environment_for(PROCESS_POSTGRES, os.environ)
+    for name in REMOVED_SIGNING_KEY_ENV_VARS:
+        scoped.pop(name, None)
+        scoped.pop(f"{name}_FILE", None)
+    return scoped
 
 
 def _run_as_user(
@@ -674,6 +690,7 @@ def build_launch_headless_command(
     python_executable: str | None = None,
     refresh_external_skills: bool = False,
     skills_repositories: Sequence[str] = (),
+    allow_unverifiable_authority_tokens: bool = False,
 ) -> list[str]:
     command = [
         python_executable or sys.executable,
@@ -688,6 +705,8 @@ def build_launch_headless_command(
         command.append("--refresh-external-skills")
     for repository in skills_repositories:
         command.extend(["--skills-repository", repository])
+    if allow_unverifiable_authority_tokens:
+        command.append("--allow-unverifiable-authority-tokens")
     if gateway_args:
         command.extend(["--", *gateway_args])
     return command
@@ -702,6 +721,7 @@ def run_supervised_bundle(
     bundled_nats_enabled: bool = True,
     refresh_external_skills: bool = False,
     skills_repositories: Sequence[str] = (),
+    allow_unverifiable_authority_tokens: bool = False,
 ) -> int:
     postgres_targets = collect_bundle_postgres_targets(config, env=runtime_env)
     postgres = start_postgres() if postgres_targets else None
@@ -738,6 +758,7 @@ def run_supervised_bundle(
             env_path=env_path,
             refresh_external_skills=refresh_external_skills,
             skills_repositories=skills_repositories,
+            allow_unverifiable_authority_tokens=allow_unverifiable_authority_tokens,
         )
         LOGGER.info("Starting bundled headless launcher: %s", " ".join(launch_command))
         launcher = subprocess.Popen(
@@ -815,8 +836,24 @@ def main() -> int:
     if gateway_args and gateway_args[0] == "--":
         gateway_args = gateway_args[1:]
 
+    from instance_upgrades.authority_tokens import (
+        authority_tokens_upgrade_done,
+        has_pending_authority_token_report,
+    )
+
     ambient_env = dict(os.environ)
-    effective_env = build_process_env(config, env_path=env_path)
+    try:
+        effective_env = build_process_env(
+            config,
+            env_path=env_path,
+            allow_legacy_signing_keys=(
+                not authority_tokens_upgrade_done(config)
+                or has_pending_authority_token_report(config)
+            ),
+        )
+    except ValueError as exc:
+        LOGGER.error("Bundle launch refused. %s", exc)
+        return 2
     use_process_timezone(effective_env)
     bundled_nats_enabled = local_nats_enabled_from_env(effective_env, default=True)
     if bundled_nats_enabled:
@@ -838,6 +875,7 @@ def main() -> int:
         bundled_nats_enabled=bundled_nats_enabled,
         refresh_external_skills=bool(args.refresh_external_skills),
         skills_repositories=tuple(args.skills_repository or ()),
+        allow_unverifiable_authority_tokens=bool(args.allow_unverifiable_authority_tokens),
     )
 
 

@@ -839,6 +839,7 @@ class ScheduleStore:
         deferred_message: DeferredMessageClaim | None = None,
         create_only: bool = False,
         owner_vouched: Optional[bool] = None,
+        delivery_ref: Optional[str] = None,
     ) -> str:
         """Install a schedule: create it, or replace the stored definition of one with its id.
 
@@ -872,6 +873,8 @@ class ScheduleStore:
                 columns = _definition_columns(msg, remaining_count=remaining)
                 if owner_vouched is not None:
                     columns["owner_vouched"] = 1 if owner_vouched else 0
+                if delivery_ref is not None:
+                    columns["delivery_ref"] = delivery_ref
                 return RowWrite(columns=columns, insert=True, result=SCHEDULE_INSTALLED)
             if create_only:
                 return RowWrite(result=SCHEDULE_KEPT)
@@ -897,6 +900,8 @@ class ScheduleStore:
             elif (row.get("owner_canonical_user_id") or None) != columns.get("owner_canonical_user_id"):
                 # Owner changed without an explicit vouching decision: never inherit the previous owner's vouch.
                 columns["owner_vouched"] = 0
+            if delivery_ref is not None:
+                columns["delivery_ref"] = delivery_ref
             return RowWrite(columns=columns, result=SCHEDULE_REPLACED)
 
         try:
@@ -2170,6 +2175,25 @@ class ScheduleStore:
         row = self._row(schedule_id)
         value = row.get("delivery_ref") if row else None
         return str(value) if value else None
+
+    def set_delivery_ref(self, schedule_id: str, delivery_ref: Optional[str]) -> bool:
+        """Update the schedule row's opaque ``delivery_ref`` (and ``gateway_context.delivery_ref``
+        when no ``session_key`` is stored on the schedule). Used during team transfer import to
+        bind imported schedules to the destination instance's delivery-ref key."""
+
+        def decide(row: Optional[dict[str, Any]]) -> RowWrite:
+            if row is None:
+                return RowWrite(result=False)
+            columns: dict[str, Any] = {"delivery_ref": delivery_ref}
+            if row.get("schedule_json"):
+                msg = _stored_message(row)
+                gc = getattr(getattr(msg, "payload_meta", None), "gateway_context", None)
+                if gc is not None and not getattr(gc, "session_key", None):
+                    gc.delivery_ref = delivery_ref
+                    columns["schedule_json"] = msg.model_dump_json()
+            return RowWrite(columns=columns, result=True)
+
+        return bool(self._repository.write_locked(schedule_id, decide).result)
 
     def _parse_permit_column(self, schedule_id: str, column: str) -> Optional[Any]:
         from custom_messages.wire.authority_bindings import AuthorityTokenRecord

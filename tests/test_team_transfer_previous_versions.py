@@ -54,7 +54,7 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
         # (v0.9.6, and v0.9.7 to v0.9.8).
         allowed = {fixtures[name]["schema_version"]}
         if name == "schedules":
-            allowed.update({4, 5})
+            allowed.update({4, 5, 6})
         # Settings versions 6 to 13 have real export/import cases in
         # test_team_transfer_settings, including keep-forever output retention, the
         # retired presence setting (8 and main's 9), version 8 keeping the skill
@@ -150,6 +150,57 @@ def test_supported_schedule_sections_start_without_an_explicit_timing_revision(s
         for record in converted if record["kind"] == "schedule"
     ]
     assert schedule.document["timing_revision"] == 0
+
+
+@pytest.mark.parametrize("source_version", [3, 4, 5, 6])
+def test_v3_to_v6_schedules_with_legacy_signed_context_upgrade_to_v7_keeping_owner_vouched(
+    source_version: int,
+) -> None:
+    """A 0.9 export (schedules v3-v6) carrying a SignedTaskContextV1 strips the legacy wrapper
+    during the v7 upgrade while keeping owner_vouched so the schedule validates and imports."""
+
+    import yaml
+    from team_transfer.schedule_markdown import _BLOCK
+    from team_transfer.schedules import SchedulesSection
+
+    raw = json.loads(FIXTURES.read_text())["schedules"]
+    raw["schema_version"] = source_version
+    sched_record = next(rec for rec in raw["records"] if rec["kind"] == "schedule")
+    sched_record["schedule"]["owner_vouched"] = True
+    md = sched_record["schedule"]["markdown"]
+    match = _BLOCK.search(md)
+    assert match is not None
+    doc = yaml.safe_load(match.group(1))
+    doc["payload_meta"]["gateway_context"]["task_context"] = {
+        "context": {
+            "schema_version": 1,
+            "context_id": "task_context_legacy_v6",
+            "issuer": "gateway",
+            "team_id": "team_a",
+            "person_id": "usr_ana",
+            "person_roles": ["owner"],
+            "issued_at_utc": "2026-10-12T15:55:19Z",
+            "expires_at_utc": "2026-10-19T15:55:19Z",
+        },
+        "key_id": "gateway-old",
+        "signature": "AAAA",
+    }
+    sched_record["schedule"]["markdown"] = (
+        md[: match.start()]
+        + "```yaml\n"
+        + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+        + "```"
+        + md[match.end() :]
+    )
+
+    converted = upgrade_records(SectionDocumentV1.model_validate(raw), SchedulesSection.schema_version)
+    [schedule] = [
+        SchedulesSection.record_model.model_validate(record).schedule
+        for record in converted
+        if record["kind"] == "schedule"
+    ]
+    assert schedule.owner_vouched is True
+    assert schedule.document["payload_meta"]["gateway_context"]["task_context"] is None
 
 
 def _run_cli(*argv: str) -> None:

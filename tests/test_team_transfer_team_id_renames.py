@@ -283,7 +283,6 @@ def _scheduled(raw: dict[str, Any]) -> Any:
 
 
 def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_teams_keep_theirs() -> None:
-    from access_control.identity import ISSUER_GATEWAY, ContextSigner, generate_signing_key
     from custom_agents.internal_improvement_runtime import (
         internal_improvement_schedule_id,
         internal_improvement_schedule_name,
@@ -294,9 +293,8 @@ def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_t
     from custom_messages.contracts.routing_v1 import MessageHeader
     from tests.test_team_transfer_schedules import _schedule
 
-    signer = ContextSigner.from_value(ISSUER_GATEWAY, generate_signing_key(ISSUER_GATEWAY)[0])
     route = f"{OLD}_alpha_user_gateway"
-    daily = _schedule("sched_daily", "usr_ana", signer=signer, claim_team_id=OLD, payload_header=MessageHeader(
+    daily = _schedule("sched_daily", "usr_ana", claim_team_id=OLD, delivery_ref="dr_old_instance_ref", payload_header=MessageHeader(
         from_agent_id=route, to_routing_path=f"{OLD}_TeamArchitect", response_routing_key=route))
     changed = _schedule("sched_changed", "usr_ana", claim_team_id=OLD)
     third = _schedule("sched_third", "usr_ana", claim_team_id=OTHER, payload_header=MessageHeader(
@@ -341,7 +339,7 @@ def test_schedules_follow_the_new_id_with_the_maintenance_schedule_and_another_t
     assert (header.from_agent_id, header.to_routing_path, header.response_routing_key) == (
         f"{NEW}_alpha_user_gateway", f"{NEW}_TeamArchitect", f"{NEW}_alpha_user_gateway")
     context = new_daily.payload_meta.gateway_context
-    assert context.task_context is None, "signed for the old team; the writer signs it again"
+    assert context.task_context is None and context.delivery_ref is None, "old credentials and delivery_ref are cleared"
     assert (context.canonical_user_id, context.session_key) == ("usr_ana", "sess_ana"), "the rest of the context stays"
     assert renamed[("schedule", "sched_third")] == third_record, "another team's schedule keeps its values"
 
@@ -788,13 +786,11 @@ def _stored_naming(root: Path, needles: tuple[str, ...]) -> list[str]:
 
 
 def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_finds_them(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     from types import SimpleNamespace
 
-    from access_control.identity import ISSUER_GATEWAY, ContextSigner, public_entry, verify_keys_value
     from assistant_gateway.config import GatewayInstanceConfig
-    from custom_agents import task_context_runtime
     from custom_agents.internal_improvement_runtime import (
         internal_improvement_schedule_id,
         internal_improvement_schedule_name,
@@ -807,7 +803,6 @@ def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_fin
     from custom_messages.contracts.schedule_v1 import ScheduledMessage
     from custom_messages.contracts.task_v1 import Task
     from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
-    from internal_credentials import parse_env_file
     from storage.gateway_state_repository import create_gateway_state_repository
     from storage.worker_pool_repository import WorkerPoolRepository
     from team_transfer.crypto import new_key_derivation
@@ -817,16 +812,12 @@ def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_fin
     old_id, new_id = internal_improvement_schedule_id(OLD), internal_improvement_schedule_id(NEW)
     carried_interval = 7 * 3600
 
-    # The old instance, with the team's maintenance schedule as its manager stored it and its gateway signed it.
+    # The old instance, with the team's maintenance schedule as its manager stored it and vouched.
     config_path, old_store = _old_instance(tmp_path / "old")
     old_config = GatewayInstanceConfig.load(config_path)
-    old_key = parse_env_file(old_config.layout.team_env_path)["ACCESS_GATEWAY_SIGNING_KEY"]
     maintenance = _maintenance_schedule(OLD, interval_seconds=carried_interval)
     maintenance.payload_meta.gateway_context.session_key = "sess_ana"
-    maintenance.payload_meta.gateway_context.task_context = ContextSigner.from_value(ISSUER_GATEWAY, old_key).issue(
-        team_id=OLD, person_id="usr_ana", person_roles=("owner",), schedule_id=old_id
-    )
-    old_store.add(maintenance)
+    old_store.add(maintenance, owner_vouched=True)
     create_gateway_state_repository(old_config.state_storage_settings).upsert_scheduled_target(
         scheduled_job_id=old_id, session_key="sess_ana", conversation_id="conv_maintenance",
         owner_canonical_user_id="usr_ana",
@@ -850,64 +841,55 @@ def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_fin
 
     config = GatewayInstanceConfig.load(tmp_path / "new" / "instance_config.yaml")
     store = ScheduleStore(storage_settings=config.manager_storage_settings, default_cron_timezone="UTC")
-    new_key = parse_env_file(config.layout.team_env_path)["ACCESS_GATEWAY_SIGNING_KEY"]
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", verify_keys_value([public_entry(ISSUER_GATEWAY, new_key)]))
-    task_context_runtime._verifier.cache_clear()
-    try:
-        # A person's schedule: the new team's, signed again by the new gateway for the new team.
-        daily = store.get_scheduled_message("sched_daily")
-        assert daily.claim_team_id == NEW
-        assert task_context_runtime.gateway_vouches(daily.payload_meta.gateway_context, "usr_ana")
-        signed = daily.payload_meta.gateway_context.task_context.context
-        assert (signed.team_id, signed.person_roles) == (NEW, ("admin", "owner")), "roles from the new team's people"
 
-        # Its worker setup and the pool sizes are the new team's; the binding still matches its schedule.
-        binding = store.worker_records.get_binding("sched_worker", team_id=NEW)
-        assert binding is not None and store.worker_records.get_binding("sched_worker", team_id=OLD) is None
-        assert binding.actor_principal_id == local_schedule_service_id(NEW), "set up by the new team's runtime"
-        assert execution_digest(store.get_scheduled_message("sched_worker"), binding.definition_digest) == binding.execution_digest
-        pools = WorkerPoolRepository(config.manager_storage_settings)
-        assert {limit.scope for limit in pools.list_limits(NEW)} == {"*", WORKER} and not pools.list_limits(OLD)
+    # A person's schedule: the new team's, carrying owner_vouched=True without legacy signing keys.
+    daily = store.get_scheduled_message("sched_daily")
+    assert daily.claim_team_id == NEW
+    assert store.is_owner_vouched("sched_daily") is True
+    assert daily.payload_meta.gateway_context.task_context is None
 
-        # The maintenance schedule arrives under the id the new team's runtime builds, with its carried cadence.
-        assert store.get_scheduled_message(old_id) is None
-        imported = store.get_scheduled_message(new_id)
-        assert (imported.schedule_name, imported.claim_team_id, imported.interval_ms) == (
-            internal_improvement_schedule_name(NEW), NEW, carried_interval * 1000)
-        assert imported.payload_meta.gateway_context.task_context is None, "the gateway signs it at its first start"
-        gateway = create_gateway_state_repository(config.state_storage_settings)
-        assert gateway.get_scheduled_target(new_id).conversation_id == "conv_maintenance"
-        assert gateway.get_scheduled_target(old_id) is None
+    # Its worker setup and the pool sizes are the new team's; the binding still matches its schedule.
+    binding = store.worker_records.get_binding("sched_worker", team_id=NEW)
+    assert binding is not None and store.worker_records.get_binding("sched_worker", team_id=OLD) is None
+    assert binding.actor_principal_id == local_schedule_service_id(NEW), "set up by the new team's runtime"
+    assert execution_digest(store.get_scheduled_message("sched_worker"), binding.definition_digest) == binding.execution_digest
+    pools = WorkerPoolRepository(config.manager_storage_settings)
+    assert {limit.scope for limit in pools.list_limits(NEW)} == {"*", WORKER} and not pools.list_limits(OLD)
 
-        # The manager's ensure-only install at its first start finds it and adds no second one.
-        assert store.add_if_absent(_maintenance_schedule(NEW)) is False
-        maintenance_schedules = [
-            (found.schedule_id, found.interval_ms)
-            for found in (store.get_scheduled_message(row["schedule_id"]) for row in store.all_rows())
-            if found is not None and found.effective_system_schedule_kind is SystemScheduleKind.INTERNAL_IMPROVEMENT
-        ]
-        assert maintenance_schedules == [(new_id, carried_interval * 1000)]
+    # The maintenance schedule arrives under the id the new team's runtime builds, with its carried cadence.
+    assert store.get_scheduled_message(old_id) is None
+    imported = store.get_scheduled_message(new_id)
+    assert (imported.schedule_name, imported.claim_team_id, imported.interval_ms) == (
+        internal_improvement_schedule_name(NEW), NEW, carried_interval * 1000)
+    assert imported.payload_meta.gateway_context.task_context is None
+    gateway = create_gateway_state_repository(config.state_storage_settings)
+    assert gateway.get_scheduled_target(new_id).conversation_id == "conv_maintenance"
+    assert gateway.get_scheduled_target(old_id) is None
 
-        # The gateway's refresh at its first start (ids from the new team, as assistant_gateway.gateway builds
-        # them) applies to the imported schedule and leaves it signed for the new team.
-        incoming = ScheduledMessage(
-            schedule_id=new_id, schedule_name=internal_improvement_schedule_name(NEW),
-            management_class=ScheduleManagementClass.SYSTEM, system_schedule_kind=SystemScheduleKind.INTERNAL_IMPROVEMENT,
-            install_mode="refresh", payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Refresh."),
-            payload_meta=MessageMeta(gateway_context=GatewayContext(
-                canonical_user_id="usr_ana", session_key="sess_ana",
-                task_context=ContextSigner.from_value(ISSUER_GATEWAY, new_key).issue(
-                    team_id=NEW, person_id="usr_ana", person_roles=("owner",), schedule_id=new_id),
-            )),
-            interval_ms=86_400_000, repeat_count=None,
-        )
-        assert refresh_schedule_gateway_context(SimpleNamespace(_schedule_store=store, team_id=NEW, id="agent_lead"), incoming)
-        refreshed = store.get_scheduled_message(new_id)
-        assert task_context_runtime.gateway_vouches(refreshed.payload_meta.gateway_context, "usr_ana")
-        assert refreshed.payload_meta.gateway_context.task_context.context.team_id == NEW
-        assert refreshed.interval_ms == carried_interval * 1000, "the refresh keeps the carried cadence"
-    finally:
-        task_context_runtime._verifier.cache_clear()
+    # The manager's ensure-only install at its first start finds it and adds no second one.
+    assert store.add_if_absent(_maintenance_schedule(NEW)) is False
+    maintenance_schedules = [
+        (found.schedule_id, found.interval_ms)
+        for found in (store.get_scheduled_message(row["schedule_id"]) for row in store.all_rows())
+        if found is not None and found.effective_system_schedule_kind is SystemScheduleKind.INTERNAL_IMPROVEMENT
+    ]
+    assert maintenance_schedules == [(new_id, carried_interval * 1000)]
+
+    # The gateway's refresh at its first start (ids from the new team) applies to the imported
+    # schedule and keeps the carried cadence.
+    incoming = ScheduledMessage(
+        schedule_id=new_id, schedule_name=internal_improvement_schedule_name(NEW),
+        management_class=ScheduleManagementClass.SYSTEM, system_schedule_kind=SystemScheduleKind.INTERNAL_IMPROVEMENT,
+        install_mode="refresh", payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Refresh."),
+        payload_meta=MessageMeta(gateway_context=GatewayContext(
+            canonical_user_id="usr_ana", session_key="sess_ana",
+        )),
+        interval_ms=86_400_000, repeat_count=None,
+    )
+    assert refresh_schedule_gateway_context(SimpleNamespace(_schedule_store=store, team_id=NEW, id="agent_lead"), incoming)
+    refreshed = store.get_scheduled_message(new_id)
+    assert store.is_owner_vouched(new_id) is True
+    assert refreshed.interval_ms == carried_interval * 1000, "the refresh keeps the carried cadence"
 
     assert _stored_naming(tmp_path / "new", (OLD, old_id)) == []
     assert _stored_naming(tmp_path / "kept", (OLD, old_id)), "the search finds the ids where they are kept"
