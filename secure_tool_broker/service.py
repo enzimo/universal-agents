@@ -713,7 +713,7 @@ class SecureToolBrokerService:
             self._handle_account_link_session_status,
         )
         app.router.add_post(PERSON_CREDENTIAL_DELETION_ROUTE, self._handle_delete_person_credentials)
-        add_transfer_routes(app, team_id=self._access_gate.team_id)
+        add_transfer_routes(app, team_id=self._access_gate.team_id, access_gate=self._access_gate)
         add_team_export_routes(app, team_id=self._access_gate.team_id)
         app.router.add_post(ONBOARDING_ACCOUNT_KEYS_ROUTE, onboarding_keys_handler(self._access_gate))
         model_keys = team_model_key_store(self._access_gate.team_id)

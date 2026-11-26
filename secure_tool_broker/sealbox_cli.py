@@ -13,6 +13,8 @@ from secure_tool_broker.redaction import redact_json, redact_text
 from secure_tools.providers import ToolResult
 
 
+SEALBOX_TIMEOUT_ERROR_CODE = "sealbox_command_timeout"
+
 SEALBOX_AUTH_REQUIRED_PATTERNS = (
     "authentication token not configured",
     "unauthorized",
@@ -56,7 +58,14 @@ def run_sealbox(
             **stdin_kwargs,
         )
     except subprocess.TimeoutExpired:
-        return ToolResult(status="error", error=f"sealbox-cli command timed out after {timeout_seconds}s")
+        return ToolResult(
+            status="error",
+            error=f"sealbox-cli command timed out after {timeout_seconds}s",
+            content={
+                "error_code": SEALBOX_TIMEOUT_ERROR_CODE,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
     except Exception as exc:
         return ToolResult(status="error", error=f"sealbox-cli command failed to start: {exc}")
 

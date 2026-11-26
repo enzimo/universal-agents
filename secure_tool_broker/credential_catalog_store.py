@@ -82,6 +82,16 @@ class CatalogEntryRow:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class UnreadableCatalogEntryRow:
+    """Metadata for a catalog row whose JSON or owner scope could not be decoded."""
+
+    scope_kind: str
+    owner_id: str
+    credential_key: str
+    error: str
+
+
 def resolve_catalog_db_path() -> Path:
     """The catalog database: the launcher passes security_layer.credential_catalog.database_path."""
 
@@ -210,8 +220,8 @@ class CredentialCatalogStore:
             updated_at=str(row["updated_at"]),
         )
 
-    def list_all_credentials(self) -> list[CatalogEntryRow]:
-        """List every catalog entry across all owner scopes."""
+    def scan_all_credentials(self) -> tuple[list[CatalogEntryRow], list[UnreadableCatalogEntryRow]]:
+        """Decode every catalog entry row-by-row so one corrupt row does not block other owners."""
 
         with self._connect() as conn:
             rows = conn.execute(
@@ -221,16 +231,48 @@ class CredentialCatalogStore:
                 ORDER BY scope_kind, owner_id, credential_key
                 """
             ).fetchall()
-        return [
-            CatalogEntryRow(
-                scope=CredentialOwnerScope(str(row["scope_kind"]), str(row["owner_id"])),
-                credential_key=str(row["credential_key"]),
-                credential=dict(json.loads(str(row["credential_json"]))),
-                created_at=str(row["created_at"]),
-                updated_at=str(row["updated_at"]),
+        decoded: list[CatalogEntryRow] = []
+        unreadable: list[UnreadableCatalogEntryRow] = []
+        for row in rows:
+            scope_kind = str(row["scope_kind"])
+            owner_id = str(row["owner_id"])
+            credential_key = str(row["credential_key"])
+            try:
+                scope = CredentialOwnerScope(scope_kind, owner_id)
+                payload = json.loads(str(row["credential_json"]))
+                if not isinstance(payload, dict):
+                    raise TypeError("credential_json must decode to a JSON object")
+                decoded.append(
+                    CatalogEntryRow(
+                        scope=scope,
+                        credential_key=credential_key,
+                        credential=dict(payload),
+                        created_at=str(row["created_at"]),
+                        updated_at=str(row["updated_at"]),
+                    )
+                )
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                unreadable.append(
+                    UnreadableCatalogEntryRow(
+                        scope_kind=scope_kind,
+                        owner_id=owner_id,
+                        credential_key=credential_key,
+                        error=type(exc).__name__,
+                    )
+                )
+        return decoded, unreadable
+
+    def list_all_credentials(self) -> list[CatalogEntryRow]:
+        """List every catalog entry across all owner scopes."""
+
+        decoded, unreadable = self.scan_all_credentials()
+        if unreadable:
+            first = unreadable[0]
+            raise ValueError(
+                f"Unreadable credential catalog row ({first.scope_kind}/{first.owner_id}/{first.credential_key}): "
+                f"{first.error}"
             )
-            for row in rows
-        ]
+        return decoded
 
     def delete_credential(self, scope: CredentialOwnerScope, credential_key: str) -> bool:
         """Atomically delete one credential without touching sibling keys."""
@@ -568,6 +610,7 @@ __all__ = [
     "CredentialCatalogStore",
     "CredentialOwnerScope",
     "SealboxTenantMapping",
+    "UnreadableCatalogEntryRow",
     "load_credential_readonly",
     "load_scope_readonly",
     "resolve_catalog_db_path",

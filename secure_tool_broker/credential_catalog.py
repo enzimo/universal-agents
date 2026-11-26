@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -1126,7 +1126,7 @@ def collect_credential(
                         )
                     normalized_expires_at = existing_credential.expires_at
                     ttl_seconds = remaining_ttl_seconds(existing_credential.expires_at, now=lock_now)
-                if normalized_expires_at is not None and write_source == "sealbox":
+                if write_source == "sealbox":
                     planned_keys = _planned_sealbox_record_keys(
                         credential_key=credential_key,
                         request_payload=request_payload,
@@ -1139,16 +1139,20 @@ def collect_credential(
                         catalog_snapshot,
                         exclude_key=credential_key,
                         target_keys=planned_keys,
-                        temporary_only=False,
+                        temporary_only=normalized_expires_at is None,
                     )
                     if shared is not None:
                         other_key, record_key = shared
+                        error_message = (
+                            f"Cannot store an expiry on {credential_key} because another catalog entry "
+                            f"({other_key}) also references the same Sealbox record."
+                            if normalized_expires_at is not None
+                            else f"Cannot store {credential_key} onto a Sealbox record owned by temporary "
+                            f"credential {other_key}."
+                        )
                         return ToolResult(
                             status="error",
-                            error=(
-                                f"Cannot store an expiry on {credential_key} because another catalog entry "
-                                f"({other_key}) also references the same Sealbox record."
-                            ),
+                            error=error_message,
                             content={
                                 "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
                                 "credential_key": credential_key,
@@ -1183,22 +1187,26 @@ def collect_credential(
                 expires_at=normalized_expires_at,
             )
             with _scope_catalog_lock(resolved_scope):
-                if normalized_expires_at is not None and write_source == "sealbox":
+                if write_source == "sealbox":
                     latest_catalog = load_catalog(scope=resolved_scope)
                     shared = _find_shared_sealbox_record(
                         latest_catalog,
                         exclude_key=credential_key,
                         target_keys=_credential_sealbox_record_keys(credential),
-                        temporary_only=False,
+                        temporary_only=normalized_expires_at is None,
                     )
                     if shared is not None:
                         other_key, record_key = shared
+                        error_message = (
+                            f"Cannot store an expiry on {credential_key} because another catalog entry "
+                            f"({other_key}) also references the same Sealbox record."
+                            if normalized_expires_at is not None
+                            else f"Cannot store {credential_key} onto a Sealbox record owned by temporary "
+                            f"credential {other_key}."
+                        )
                         return ToolResult(
                             status="error",
-                            error=(
-                                f"Cannot store an expiry on {credential_key} because another catalog entry "
-                                f"({other_key}) also references the same Sealbox record."
-                            ),
+                            error=error_message,
                             content={
                                 "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
                                 "credential_key": credential_key,
@@ -2319,6 +2327,7 @@ def delete_credential(
     scope: CredentialOwnerScope | None = None,
     expected_updated_at: str | None = None,
     expected_expires_at: str | None = None,
+    before_delete: Callable[[], ToolResult | None] | None = None,
 ) -> ToolResult:
     try:
         resolved_scope = _owner_scope(context=context, scope=scope)
@@ -2395,6 +2404,14 @@ def delete_credential(
                         "credential_key": credential_key,
                     },
                 )
+
+            if before_delete is not None:
+                # Runs under credential_key_lock after compare-and-delete verification
+                # and before deleting Sealbox records or the catalog row so a hook
+                # failure (e.g. link revocation or notice delivery) leaves the row for retry.
+                hook_result = before_delete()
+                if isinstance(hook_result, ToolResult):
+                    return hook_result
 
             deleted_refs: list[dict[str, Any]] = []
             if refs:

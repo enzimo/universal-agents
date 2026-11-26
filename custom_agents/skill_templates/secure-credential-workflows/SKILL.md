@@ -137,10 +137,10 @@ TeamLead (TeamArchitect) makes setup effortless, in one call, without asking
 the person whether to start (owner's decision 2026-09-28): the approval cards
 and setup pages are where the person agrees, so asking first is a wasted round
 trip. A question about what TeamLead can access ("What repos can you see in
-GitHub?") counts as a request to set up and answer. For a tool listed as
-needing setup or unknown, or not listed, and whenever a call is refused for a
-missing sign-in or account (`auth_required`, `account_link_missing`,
-`x_account_missing`, `google_oauth_client_missing`):
+GitHub?") counts as a request to set up and answer. - For a tool listed as needing setup or unknown, or not listed, and whenever a
+  call is refused for a missing or expired sign-in or account (`auth_required`,
+  `account_link_missing`, `account_link_credential_expired`,
+  `x_account_missing`, `google_oauth_client_missing`):
 
 1. A specialist does not ask the person itself. It escalates to TeamLead with
    `manager_escalation`, quoting the tool id from the error. Keep the existing
@@ -300,6 +300,25 @@ When a workflow needs a new named credential:
   service as GitHub, use the built-in `github_pat` template directly. Do not
   ask whether they want a GitHub username/password credential unless they
   explicitly change the credential kind away from API/token.
+
+## Temporary Credentials
+
+- When the person asks to store a temporary password, token, or auth file,
+  offer automatic deletion directly on the secure broker form by setting
+  `expires_at` (timezone-aware UTC ISO-8601 timestamp) on
+  `secure_credential_collection_request`. Convert relative or local wording
+  such as "in 2 hours" or "Friday 5 PM" from the person's time zone to UTC.
+- The person always decides on the form: the form pre-fills your proposed
+  expiry in their local time, and they can choose a preset (15 minutes to 3
+  months), pick another date and time, or untick automatic deletion.
+- Never offer a reminder or scheduled message as a workaround for deleting a
+  temporary credential. Temporary credentials stop working everywhere in the
+  broker at their expiry time and are deleted automatically by the broker
+  janitor, which also revokes any account links that used them and sends the
+  link owner an Inbox notice with the `/link` command.
+- Saving a new value without automatic deletion over a temporary credential
+  through the secure form clears its expiry; direct agent `credential.collect`
+  or `credential.register_existing_source` calls cannot set or clear an expiry.
 
 ## Updating Or Repairing Credentials
 

@@ -39,10 +39,12 @@ class _FakeSealboxCli:
 
     def __init__(self) -> None:
         self.secrets: dict[str, str] = {}
+        self.set_calls: list[list[str]] = []
 
     def __call__(self, args, *, input_text=None, env=None, timeout_seconds=30):
         action, key = list(args[:2]), args[2]
         if action == ["secret", "set"]:
+            self.set_calls.append(list(args))
             self.secrets[key] = input_text or ""
             return subprocess.CompletedProcess(args, 0, stdout='{"version": 1}\n', stderr="")
         if action == ["secret", "get"] and key in self.secrets:
@@ -709,3 +711,221 @@ def test_retry_refuses_an_item_adopted_by_a_destination_credential(
     assert destination.secrets == before_retry
     assert "search_api" not in credential_catalog.load_catalog(scope=scope).credentials
     assert credential_catalog.resolve_secret_field("destination_alias", "api_key", scope=scope).value == existing_value
+
+
+def test_temporary_credential_transfer_carries_expiry_reapplies_ttl_and_upgrades_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A5: temporary credentials carry expires_at, re-apply remaining Sealbox TTL on import, and v2 imports still pass."""
+
+    from datetime import timedelta
+    from secure_tool_broker import credential_transfer_api as api
+    from secure_tool_broker.credential_catalog import collect_credential, load_catalog, resolve_secret_field
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_transfer import export_credentials, import_credentials
+    from team_transfer.crypto import canonical_json, encrypt_with_key
+    from team_transfer.format import SectionDocumentV1
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    future_expiry = (now + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "old", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "temp_api",
+            "display_name": "Temporary API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "temp-secret-token"},
+        scope=scope,
+        expires_at=future_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success", saved.error
+
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+    assert len(records) == 1
+    assert records[0]["credential"]["expires_at"] == future_expiry
+
+    # Import 30 minutes later: Sealbox write must receive remaining TTL (~5400s).
+    import_time = now + timedelta(minutes=30)
+    _use_store(tmp_path / "new", monkeypatch)
+    destination = _FakeSealboxCli()
+    _use_sealbox(destination, monkeypatch)
+    [outcome] = import_credentials(records, team_id=TEST_TEAM, now=import_time)
+    assert outcome.imported, outcome.reason
+    assert len(destination.set_calls) == 1
+    ttl_flag_index = destination.set_calls[0].index("--ttl")
+    ttl_value = int(destination.set_calls[0][ttl_flag_index + 1])
+    assert 5395 <= ttl_value <= 5405
+    imported_cred = load_catalog(scope=scope).credentials["temp_api"]
+    assert imported_cred.expires_at == future_expiry
+    assert resolve_secret_field("temp_api", "api_key", scope=scope, now=import_time).value == "temp-secret-token"
+
+    # Previous schema version 2 document converts cleanly to version 3 inside decrypt_records.
+    v2_doc = SectionDocumentV1(
+        section="broker_credentials",
+        schema_version=2,
+        records=[
+            {
+                "kind": "catalog_entry",
+                "owner": {"kind": "person", "owner_id": "usr_ana"},
+                "credential_key": "legacy_v2_cred",
+                "credential": {
+                    "display_name": "Legacy V2",
+                    "purpose": "Pre-expiry credential",
+                    "fields": {},
+                },
+                "secret_values": {},
+            }
+        ],
+    )
+    v2_ciphertext = base64.b64encode(
+        encrypt_with_key(canonical_json(v2_doc.model_dump(mode="json")), KEY)
+    ).decode("ascii")
+    upgraded = api.decrypt_records(
+        api.CredentialImportRequestV1(
+            team_id=TEST_TEAM,
+            encryption_key_b64=KEY_B64,
+            ciphertext_b64=v2_ciphertext,
+        )
+    )
+    assert len(upgraded) == 1
+    assert upgraded[0]["credential_key"] == "legacy_v2_cred"
+
+
+def test_transfer_import_skips_expired_credential_revokes_destination_link_and_notifies_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A5 + C20 lead ruling: expired imported credential is skipped, destination link revoked with system actor, 1 notice, idempotent rerun."""
+
+    from dataclasses import replace
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from access_catalog.catalog import CatalogSource
+    from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessNoticeKind,
+        AccountLinkStatus,
+        AccountLinkV1,
+        AccountMode,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog import collect_credential, load_catalog
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_transfer import (
+        EXPIRED_BEFORE_IMPORT_REASON,
+        export_credentials,
+        import_credentials,
+    )
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    short_expiry = (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "old", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "expiring_in_transit",
+            "display_name": "Expiring API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "soon-expired-secret"},
+        scope=scope,
+        expires_at=short_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success", saved.error
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+    assert len(records) == 1
+
+    # Destination already imported the access section (active link exists for usr_ana -> expiring_in_transit).
+    _use_store(tmp_path / "new", monkeypatch)
+    destination = _FakeSealboxCli()
+    _use_sealbox(destination, monkeypatch)
+    access_store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "new" / "access.db")}})
+    )
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:transfer_demo",
+        kind=ToolKind.HTTP,
+        display_name="Transfer Demo",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("transfer.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization",
+                field="api_key",
+                template="Bearer {value}",
+            ),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    custom_catalog = replace(base_catalog, tools={**base_catalog.tools, demo_tool.tool_id: demo_tool})
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=access_store,
+    )
+    access_store.create_link(
+        AccountLinkV1(
+            link_id="link-transfer-expired",
+            team_id=TEST_TEAM,
+            tool_id="http:transfer_demo",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="usr_ana",
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="expiring_in_transit",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="usr_ana"),
+            created_at_utc=now - timedelta(hours=1),
+        )
+    )
+
+    after_expiry = now + timedelta(minutes=20)
+    [outcome] = import_credentials(records, team_id=TEST_TEAM, access_gate=gate, now=after_expiry)
+    assert outcome.imported is False
+    assert outcome.reason == EXPIRED_BEFORE_IMPORT_REASON
+    assert outcome.retryable is False
+    assert destination.secrets == {}
+    assert "expiring_in_transit" not in load_catalog(scope=scope).credentials
+
+    # Destination link revoked by system role actor and exactly one notice sent.
+    expected_actor = SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEST_TEAM, AGENT_ROLE_SYSTEM))
+    revoked = access_store.get_link("link-transfer-expired")
+    assert revoked is not None
+    assert revoked.status is AccountLinkStatus.REVOKED
+    assert revoked.revoked_by == expected_actor
+
+    notices = [n for n, _read in access_store.notices_for(TEST_TEAM, person_id="usr_ana", roles=())]
+    assert len(notices) == 1
+    assert notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert "/link http:transfer_demo" in notices[0].summary
+
+    # Re-running the same import adds no second revocation and no second notice.
+    [rerun] = import_credentials(records, team_id=TEST_TEAM, access_gate=gate, now=after_expiry)
+    assert rerun.imported is False
+    assert rerun.reason == EXPIRED_BEFORE_IMPORT_REASON
+    assert len(access_store.notices_for(TEST_TEAM, person_id="usr_ana", roles=())) == 1

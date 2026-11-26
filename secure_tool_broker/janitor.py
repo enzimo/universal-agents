@@ -52,7 +52,6 @@ from custom_messages.contracts.access_v2 import (
 )
 from secure_tool_broker.credential_catalog import delete_credential
 from secure_tool_broker.credential_catalog_store import (
-    CatalogEntryRow,
     CredentialCatalogStore,
     CredentialOwnerScope,
     SealboxTenantMapping,
@@ -60,7 +59,11 @@ from secure_tool_broker.credential_catalog_store import (
 )
 from secure_tool_broker.credential_expiry import is_expired
 from secure_tool_broker.redaction import redact_text
-from secure_tool_broker.sealbox_cli import first_json_value, run_sealbox
+from secure_tool_broker.sealbox_cli import (
+    SEALBOX_TIMEOUT_ERROR_CODE,
+    first_json_value,
+    run_sealbox,
+)
 from secure_tool_broker.sealbox_tenants import tenant_environment_for_mapping
 from secure_tool_broker.tool_setup_recheck import RecheckReport, recheck_due
 from secure_tool_broker.tool_setup_tracking import note_link_missing
@@ -72,18 +75,14 @@ LOGGER = logging.getLogger(__name__)
 # Both timings are module constants (no new configuration settings).
 INITIAL_DELAY_SECONDS: Final[float] = 600.0
 JANITOR_INTERVAL_SECONDS: Final[float] = 6 * 3600.0
+# `sealbox-cli secret cleanup-expired` uses a 10s connect timeout + 60s request
+# timeout (~70s total); allow headroom so the broker does not kill a live call early.
+SEALBOX_CLEANUP_TIMEOUT_SECONDS: Final[int] = 90
 
 _NOTICE_ID_PREFIX: Final = "credential_expired_"
 _UNSUPPORTED_SUBCOMMAND_MARKERS: Final = (
     "unrecognized subcommand",
     "unknown subcommand",
-)
-_CLEANUP_COUNT_KEYS: Final = (
-    "deleted_count",
-    "deleted",
-    "expired_deleted",
-    "removed_count",
-    "cleaned",
 )
 
 
@@ -105,6 +104,7 @@ class SealboxCleanupReport:
     tenants_cleaned: int = 0
     tenants_skipped: int = 0
     tenants_failed: int = 0
+    tenants_timed_out: int = 0
     secrets_deleted: int = 0
     unsupported_cli: bool = False
 
@@ -209,23 +209,47 @@ def _build_revoked_link_notice(
     )
 
 
-def _revoke_links_for_deleted_credential(
+def revoke_links_for_expired_credential(
     gate: Any,
-    row: CatalogEntryRow,
+    scope: CredentialOwnerScope,
+    credential_key: str,
     *,
-    now: datetime,
+    now: datetime | None = None,
 ) -> tuple[int, int, int]:
-    """Revoke active account/gate links referencing ``row`` and notify each owner.
+    """Notify each active link's owner and revoke active links referencing ``credential_key``.
+
+    Shared by the broker janitor (before deleting the Sealbox records and catalog
+    row, so any failure leaves the catalog row as a retry marker) and by team
+    transfer import (when an imported temporary credential expired before import).
+
+    Order per link: create the deterministic Inbox notice first (fixed id from
+    ``team_id``, ``link_id``, ``credential_key``), then revoke the link with the
+    system role actor, then update tool setup state. A notice failure leaves the
+    link active for retry; a revoke failure leaves the link active and retries
+    without sending a duplicate notice.
 
     Returns ``(links_revoked, notices_sent, link_failures)``.
     """
 
     if gate is None or getattr(gate, "links", None) is None:
         return 0, 0, 0
-    if row.scope.scope_kind not in {"user", "team"}:
+    if scope.scope_kind not in {"user", "team"}:
         return 0, 0, 0
-    active_links = gate.links.list_links(gate.team_id, purpose=None, include_revoked=False)
-    matching = [link for link in active_links if _link_matches_scope(link, row.scope, row.credential_key)]
+    moment = _utc_now(now)
+    try:
+        active_links = gate.links.list_links(gate.team_id, purpose=None, include_revoked=False)
+    except Exception as exc:  # noqa: BLE001 - caller keeps catalog row for retry
+        LOGGER.warning(
+            "Broker janitor failed to list active links for an expired credential. "
+            "event=broker_janitor_link_revoke_failed scope_kind=%s owner_id=%s "
+            "credential_key=%s error=%s",
+            scope.scope_kind,
+            scope.owner_id,
+            credential_key,
+            type(exc).__name__,
+        )
+        return 0, 0, 1
+    matching = [link for link in active_links if _link_matches_scope(link, scope, credential_key)]
     if not matching:
         return 0, 0, 0
 
@@ -235,11 +259,23 @@ def _revoke_links_for_deleted_credential(
     failures = 0
     for link in matching:
         try:
-            gate.links.revoke_link(link.link_id, actor=actor, at=now)
-            revoked_count += 1
             fallback_team_link: AccountLinkV1 | None = None
             if link.owner_kind is LinkOwnerKind.PERSON and link.purpose is LinkPurpose.ACCOUNT:
-                fallback_team_link, _ = gate.resolve_account_link(link.tool_id, link.owner_id, now=now)
+                # Pass person_id=None to inspect only the team's shared fallback link,
+                # so this gives the exact post-revocation answer even before revoke_link
+                # runs or when the catalog row is absent (team transfer import).
+                fallback_team_link, _ = gate.resolve_account_link(link.tool_id, None, now=moment)
+            notice = _build_revoked_link_notice(
+                gate,
+                link,
+                fallback_team_link=fallback_team_link,
+                now=moment,
+            )
+            if gate.links.create_notice_if_absent(notice):
+                notices_count += 1
+            gate.links.revoke_link(link.link_id, actor=actor, at=moment)
+            revoked_count += 1
+            if link.owner_kind is LinkOwnerKind.PERSON and link.purpose is LinkPurpose.ACCOUNT:
                 if fallback_team_link is not None:
                     tool_id = link.tool_id
                     person_id = link.owner_id
@@ -261,14 +297,6 @@ def _revoke_links_for_deleted_credential(
                     )
                 else:
                     note_link_missing(gate.links, gate.team_id, link.owner_id, link.tool_id)
-            notice = _build_revoked_link_notice(
-                gate,
-                link,
-                fallback_team_link=fallback_team_link,
-                now=now,
-            )
-            if gate.links.create_notice_if_absent(notice):
-                notices_count += 1
         except Exception as exc:  # noqa: BLE001 - isolate each link failure
             failures += 1
             LOGGER.warning(
@@ -290,13 +318,13 @@ def clean_expired_credentials(
     *,
     now: datetime | None = None,
 ) -> ExpiredCredentialsReport:
-    """Delete expired temporary credentials via compare-and-delete and revoke their links."""
+    """Revoke links/notify, delete Sealbox records, and compare-and-delete expired catalog rows."""
 
     db_path = resolve_catalog_db_path()
     if not db_path.is_file():
         return ExpiredCredentialsReport()
     moment = _utc_now(now)
-    rows = CredentialCatalogStore(db_path).list_all_credentials()
+    rows, unreadable_rows = CredentialCatalogStore(db_path).scan_all_credentials()
     expired = 0
     deleted = 0
     skipped_changed = 0
@@ -304,6 +332,18 @@ def clean_expired_credentials(
     links_revoked = 0
     notices_sent = 0
     link_failures = 0
+
+    for bad in unreadable_rows:
+        failed += 1
+        LOGGER.warning(
+            "Broker janitor skipped an unreadable credential catalog row. "
+            "event=broker_janitor_credential_row_unreadable scope_kind=%s owner_id=%s "
+            "credential_key=%s error=%s",
+            bad.scope_kind,
+            bad.owner_id,
+            bad.credential_key,
+            bad.error,
+        )
 
     for row in rows:
         raw_expires = row.credential.get("expires_at")
@@ -326,12 +366,38 @@ def clean_expired_credentials(
             continue
 
         expired += 1
+        current_scope = row.scope
+        current_key = row.credential_key
+
+        def _revoke_before_delete(
+            _scope: CredentialOwnerScope = current_scope,
+            _key: str = current_key,
+        ) -> ToolResult | None:
+            nonlocal links_revoked, notices_sent, link_failures
+            revoked, noticed, failures = revoke_links_for_expired_credential(
+                gate, _scope, _key, now=moment
+            )
+            links_revoked += revoked
+            notices_sent += noticed
+            link_failures += failures
+            if failures > 0:
+                return ToolResult(
+                    status="error",
+                    error="Failed to revoke links or send notices for expired credential; keeping row for retry.",
+                    content={
+                        "error_code": "janitor_link_revocation_failed",
+                        "credential_key": _key,
+                    },
+                )
+            return None
+
         try:
             result = delete_credential(
                 {"credential_key": row.credential_key},
                 scope=row.scope,
                 expected_updated_at=row.updated_at,
                 expected_expires_at=str(raw_expires),
+                before_delete=_revoke_before_delete,
             )
         except Exception as exc:  # noqa: BLE001 - isolate each credential failure
             failed += 1
@@ -372,13 +438,9 @@ def clean_expired_credentials(
             continue
 
         deleted += 1
-        revoked, noticed, failures = _revoke_links_for_deleted_credential(gate, row, now=moment)
-        links_revoked += revoked
-        notices_sent += noticed
-        link_failures += failures
 
     report = ExpiredCredentialsReport(
-        scanned=len(rows),
+        scanned=len(rows) + len(unreadable_rows),
         expired=expired,
         deleted=deleted,
         skipped_changed=skipped_changed,
@@ -410,14 +472,20 @@ def _is_unsupported_cleanup_subcommand(returncode: int, stderr: str) -> bool:
     return any(marker in lowered for marker in _UNSUPPORTED_SUBCOMMAND_MARKERS)
 
 
-def _extract_deleted_count(parsed: Mapping[str, Any] | None) -> int:
+def _extract_deleted_count(parsed: Mapping[str, Any] | None) -> int | None:
     if not isinstance(parsed, Mapping):
-        return 0
-    for key in _CLEANUP_COUNT_KEYS:
-        value = parsed.get(key)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-            return value
-    return 0
+        return None
+    value = parsed.get("deleted_count")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _is_sealbox_timeout(result: ToolResult) -> bool:
+    content = result.content or {}
+    if isinstance(content, Mapping) and content.get("error_code") == SEALBOX_TIMEOUT_ERROR_CODE:
+        return True
+    return "timed out" in (result.error or "").lower()
 
 
 def _validated_tenant_env(mapping: SealboxTenantMapping) -> dict[str, str] | None:
@@ -480,6 +548,7 @@ def cleanup_expired_sealbox_tenants() -> SealboxCleanupReport:
     tenants_cleaned = 0
     tenants_skipped = 0
     tenants_failed = 0
+    tenants_timed_out = 0
     secrets_deleted = 0
     unsupported_cli = False
 
@@ -491,20 +560,34 @@ def cleanup_expired_sealbox_tenants() -> SealboxCleanupReport:
         completed = run_sealbox(
             ["secret", "cleanup-expired", "--output", "json"],
             env=tenant_env,
-            timeout_seconds=30,
+            timeout_seconds=SEALBOX_CLEANUP_TIMEOUT_SECONDS,
         )
         if isinstance(completed, ToolResult):
-            tenants_failed += 1
-            LOGGER.warning(
-                "Sealbox expired-secret cleanup failed to run for tenant. "
-                "event=broker_janitor_sealbox_tenant_failed tenant_id=%s material_id=%s "
-                "scope_kind=%s owner_id=%s error=%s",
-                mapping.tenant_id,
-                mapping.material_id,
-                mapping.scope_kind,
-                mapping.owner_id,
-                completed.error,
-            )
+            if _is_sealbox_timeout(completed):
+                tenants_timed_out += 1
+                LOGGER.warning(
+                    "Sealbox expired-secret cleanup timed out for tenant; the outcome on the "
+                    "Sealbox server is unknown and the next janitor run will repeat it. "
+                    "event=broker_janitor_sealbox_tenant_timeout outcome=unknown tenant_id=%s "
+                    "material_id=%s scope_kind=%s owner_id=%s timeout_seconds=%s",
+                    mapping.tenant_id,
+                    mapping.material_id,
+                    mapping.scope_kind,
+                    mapping.owner_id,
+                    SEALBOX_CLEANUP_TIMEOUT_SECONDS,
+                )
+            else:
+                tenants_failed += 1
+                LOGGER.warning(
+                    "Sealbox expired-secret cleanup failed to run for tenant. "
+                    "event=broker_janitor_sealbox_tenant_failed tenant_id=%s material_id=%s "
+                    "scope_kind=%s owner_id=%s error=%s",
+                    mapping.tenant_id,
+                    mapping.material_id,
+                    mapping.scope_kind,
+                    mapping.owner_id,
+                    completed.error,
+                )
             continue
         if completed.returncode != 0:
             if _is_unsupported_cleanup_subcommand(completed.returncode, completed.stderr or ""):
@@ -532,7 +615,20 @@ def cleanup_expired_sealbox_tenants() -> SealboxCleanupReport:
             continue
 
         parsed = first_json_value(completed.stdout or "", lambda value: isinstance(value, Mapping))
-        deleted_count = _extract_deleted_count(parsed)
+        extracted_count = _extract_deleted_count(parsed)
+        if extracted_count is None:
+            LOGGER.warning(
+                "Sealbox expired-secret cleanup succeeded without a deleted_count field in JSON output. "
+                "event=broker_janitor_sealbox_cleanup_count_missing tenant_id=%s material_id=%s "
+                "scope_kind=%s owner_id=%s",
+                mapping.tenant_id,
+                mapping.material_id,
+                mapping.scope_kind,
+                mapping.owner_id,
+            )
+            deleted_count = 0
+        else:
+            deleted_count = extracted_count
         tenants_cleaned += 1
         secrets_deleted += deleted_count
         LOGGER.info(
@@ -551,17 +647,19 @@ def cleanup_expired_sealbox_tenants() -> SealboxCleanupReport:
         tenants_cleaned=tenants_cleaned,
         tenants_skipped=tenants_skipped,
         tenants_failed=tenants_failed,
+        tenants_timed_out=tenants_timed_out,
         secrets_deleted=secrets_deleted,
         unsupported_cli=unsupported_cli,
     )
     LOGGER.info(
         "Broker janitor finished per-tenant Sealbox cleanup. "
         "event=broker_janitor_sealbox_cleanup_finished tenants_scanned=%s tenants_cleaned=%s "
-        "tenants_skipped=%s tenants_failed=%s secrets_deleted=%s unsupported_cli=%s",
+        "tenants_skipped=%s tenants_failed=%s tenants_timed_out=%s secrets_deleted=%s unsupported_cli=%s",
         report.tenants_scanned,
         report.tenants_cleaned,
         report.tenants_skipped,
         report.tenants_failed,
+        report.tenants_timed_out,
         report.secrets_deleted,
         report.unsupported_cli,
     )
@@ -651,7 +749,14 @@ async def run_broker_janitor(
         )
     await asyncio.sleep(initial_delay_seconds)
     while True:
-        await asyncio.to_thread(run_janitor_once, gate, tool_setup_recheck_days=tool_setup_recheck_days)
+        try:
+            await asyncio.to_thread(run_janitor_once, gate, tool_setup_recheck_days=tool_setup_recheck_days)
+        except Exception as exc:  # noqa: BLE001 - never stop the broker on a janitor failure
+            LOGGER.warning(
+                "Broker janitor run failed unexpectedly; continuing on schedule. "
+                "event=broker_janitor_run_failed error=%s",
+                type(exc).__name__,
+            )
         await asyncio.sleep(interval_seconds)
 
 
@@ -660,9 +765,11 @@ __all__ = [
     "INITIAL_DELAY_SECONDS",
     "JANITOR_INTERVAL_SECONDS",
     "JanitorReport",
+    "SEALBOX_CLEANUP_TIMEOUT_SECONDS",
     "SealboxCleanupReport",
     "clean_expired_credentials",
     "cleanup_expired_sealbox_tenants",
+    "revoke_links_for_expired_credential",
     "run_broker_janitor",
     "run_janitor_once",
 ]

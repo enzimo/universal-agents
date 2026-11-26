@@ -55,8 +55,10 @@ from secure_tool_broker.credential_catalog_store import (
     CredentialOwnerScope,
     resolve_catalog_db_path,
 )
+from secure_tool_broker.sealbox_cli import SEALBOX_TIMEOUT_ERROR_CODE
 from secure_tool_broker.sealbox_runtime import ensure_sealbox_key_pair_files
 from secure_tool_broker.tool_setup_recheck import RecheckReport
+from secure_tools.providers import ToolResult
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import context_verify_keys
@@ -260,6 +262,43 @@ async def test_janitor_constants_and_background_loop_schedule(
 
     assert sleeps == [600.0, 21600.0, 21600.0]
     assert runs == [14, 14]
+
+
+@pytest.mark.asyncio
+async def test_janitor_loop_catches_unexpected_run_exception_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    gate, _store = _make_gate(tmp_path)
+    sleeps: list[float] = []
+    calls = 0
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= 3:
+            raise asyncio.CancelledError()
+
+    def flaky_run_once(_gate: Any, *, tool_setup_recheck_days: int) -> janitor.JanitorReport:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("unexpected thread crash")
+        return janitor.JanitorReport()
+
+    monkeypatch.setattr(janitor.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(janitor, "run_janitor_once", flaky_run_once)
+
+    with caplog.at_level("WARNING", logger="secure_tool_broker.janitor"):
+        with pytest.raises(asyncio.CancelledError):
+            await janitor.run_broker_janitor(
+                gate,
+                tool_setup_recheck_days=14,
+                initial_delay_seconds=1.0,
+                interval_seconds=2.0,
+            )
+
+    assert calls == 2
+    assert sleeps == [1.0, 2.0, 2.0]
+    assert "event=broker_janitor_run_failed" in caplog.text
 
 
 # --- 2. Store helpers and compare-and-delete concurrency ---------------------
@@ -526,6 +565,169 @@ def test_janitor_personal_link_notice_reports_shared_team_fallback_when_applicab
     assert setup_state.how == HOW_TEAM_LINK
 
 
+@pytest.mark.parametrize("fail_step", ["revoke_link", "create_notice_if_absent"])
+def test_janitor_retains_row_and_retries_when_link_revocation_or_notice_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_step: str
+) -> None:
+    """C02/C22: a link revocation or notice failure leaves the catalog row so the next run finishes with 1 revoke & 1 notice."""
+
+    gate, access_store = _make_gate(tmp_path)
+    _save_catalog_entry("retry_temp", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(
+            link_id="link-retry-temp",
+            tool_id="http:demo_api",
+            credential_key="retry_temp",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=PERSON_ID,
+        )
+    )
+    sealbox_deletes: list[str] = []
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: (
+            sealbox_deletes.append(item_key)
+            or {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+        ),
+    )
+
+    real_method = getattr(access_store, fail_step)
+    attempts = 0
+
+    def fail_once(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError(f"transient {fail_step} outage")
+        return real_method(*args, **kwargs)
+
+    monkeypatch.setattr(access_store, fail_step, fail_once)
+
+    first = janitor.clean_expired_credentials(gate, now=NOW)
+    assert first.deleted == 0
+    assert first.failed == 1
+    assert first.link_failures == 1
+    assert sealbox_deletes == []
+    # Catalog row and active link remain for the retry.
+    assert "retry_temp" in load_catalog(scope=USER_SCOPE).credentials
+    assert access_store.get_link("link-retry-temp").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+
+    second = janitor.clean_expired_credentials(gate, now=NOW)
+    assert second.deleted == 1
+    assert second.failed == 0
+    assert second.link_failures == 0
+    assert second.links_revoked == 1
+    assert sealbox_deletes == ["item-retry_temp:api_token"]
+    assert "retry_temp" not in load_catalog(scope=USER_SCOPE).credentials
+    assert access_store.get_link("link-retry-temp").status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
+    # Exactly one notice total across both runs (deterministic notice id).
+    alice_notices = [n for n, _read in access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=())]
+    assert len(alice_notices) == 1
+    assert "/link http:demo_api" in alice_notices[0].summary
+
+
+def test_janitor_retries_sealbox_delete_without_sending_second_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C22/C25(5): a Sealbox delete error keeps the catalog row; the retry deletes it and sends no second notice."""
+
+    gate, access_store = _make_gate(tmp_path)
+    _save_catalog_entry("sealbox_retry_temp", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(
+            link_id="link-sealbox-retry",
+            tool_id="http:demo_api",
+            credential_key="sealbox_retry_temp",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=PERSON_ID,
+        )
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    delete_attempts = 0
+
+    def fail_sealbox_once(*, item_key: str, item_kind: str, env: Any = None) -> Any:
+        nonlocal delete_attempts
+        delete_attempts += 1
+        if delete_attempts == 1:
+            return ToolResult(status="error", error="sealbox temporarily unreachable")
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fail_sealbox_once)
+
+    first = janitor.clean_expired_credentials(gate, now=NOW)
+    assert first.deleted == 0
+    assert first.failed == 1
+    assert first.links_revoked == 1
+    assert first.notices_sent == 1
+    assert "sealbox_retry_temp" in load_catalog(scope=USER_SCOPE).credentials
+
+    second = janitor.clean_expired_credentials(gate, now=NOW)
+    assert second.deleted == 1
+    assert second.failed == 0
+    assert second.links_revoked == 0
+    assert second.notices_sent == 0
+    assert "sealbox_retry_temp" not in load_catalog(scope=USER_SCOPE).credentials
+    alice_notices = [n for n, _read in access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=())]
+    assert len(alice_notices) == 1
+
+
+def test_janitor_unreadable_catalog_row_does_not_stop_sweep_for_other_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C25(2): one corrupt JSON row is counted as failed and logged without stopping other owners' cleanup."""
+
+    import sqlite3
+
+    gate, _access_store = _make_gate(tmp_path)
+    _save_catalog_entry("bob_expired_temp", scope=CredentialOwnerScope.user(OTHER_PERSON_ID), expires_at=PAST_EXPIRY)
+    # Inject a corrupt JSON row for another owner directly into SQLite.
+    with sqlite3.connect(resolve_catalog_db_path()) as conn:
+        conn.execute(
+            """
+            INSERT INTO credential_catalog_entries
+                (scope_kind, owner_id, credential_key, credential_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("user", PERSON_ID, "corrupt_row", "{not valid json", "2026-11-26T00:00:00Z", "2026-11-26T00:00:00Z"),
+        )
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: {
+            "source": "sealbox",
+            "item_key": item_key,
+            "item_kind": item_kind,
+            "already_absent": False,
+        },
+    )
+
+    with caplog.at_level("WARNING", logger="secure_tool_broker.janitor"):
+        report = janitor.clean_expired_credentials(gate, now=NOW)
+
+    assert report.scanned == 2
+    assert report.expired == 1
+    assert report.deleted == 1
+    assert report.failed == 1
+    assert "bob_expired_temp" not in load_catalog(scope=CredentialOwnerScope.user(OTHER_PERSON_ID)).credentials
+    assert "event=broker_janitor_credential_row_unreadable" in caplog.text
+    assert "corrupt_row" in caplog.text
+
+
 # --- 4. Per-tenant Sealbox cleanup & Lead Intervention 0011 env isolation ----
 
 
@@ -629,6 +831,89 @@ def test_sealbox_cleanup_warns_once_on_older_cli_without_subcommand(
     warnings = [rec.getMessage() for rec in caplog.records if rec.levelname == "WARNING"]
     assert len(warnings) == 1
     assert "sealbox-cli secret cleanup-expired" in warnings[0]
+
+
+def test_sealbox_cleanup_timeout_uses_90s_and_logs_unknown_outcome(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C23 / Lead Intervention 0006: cleanup timeout > 70s and timeouts log as unknown outcome."""
+
+    assert janitor.SEALBOX_CLEANUP_TIMEOUT_SECONDS > 70
+    _provision_tenant_material(USER_SCOPE, tenant_id="tenant-slow", material_id="owner-slow")
+    _provision_tenant_material(TEAM_SCOPE, tenant_id="tenant-fast", material_id="owner-fast")
+
+    seen_timeouts: list[int] = []
+    call_index = 0
+
+    def fake_run_sealbox(args: list[str], *, env: Any = None, timeout_seconds: int = 30) -> Any:
+        nonlocal call_index
+        seen_timeouts.append(timeout_seconds)
+        call_index += 1
+        if call_index == 1:
+            return ToolResult(
+                status="error",
+                error=f"sealbox-cli command timed out after {timeout_seconds}s",
+                content={"error_code": SEALBOX_TIMEOUT_ERROR_CODE, "timeout_seconds": timeout_seconds},
+            )
+        return subprocess.CompletedProcess(
+            args=["sealbox-cli", *args],
+            returncode=0,
+            stdout='{"deleted_count": 1, "cleaned_at": "2026-11-26T12:00:00Z"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(janitor, "run_sealbox", fake_run_sealbox)
+
+    with caplog.at_level("WARNING", logger="secure_tool_broker.janitor"):
+        report = janitor.cleanup_expired_sealbox_tenants()
+
+    assert seen_timeouts == [janitor.SEALBOX_CLEANUP_TIMEOUT_SECONDS, janitor.SEALBOX_CLEANUP_TIMEOUT_SECONDS]
+    assert report.tenants_scanned == 2
+    assert report.tenants_timed_out == 1
+    assert report.tenants_cleaned == 1
+    assert report.tenants_failed == 0
+    assert report.secrets_deleted == 1
+    assert "event=broker_janitor_sealbox_tenant_timeout" in caplog.text
+    assert "outcome=unknown" in caplog.text
+
+
+def test_sealbox_cleanup_handles_exit_error_missing_count_and_continues_next_tenant(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C25(4)+(5): non-zero exit does not stop later tenants, and missing deleted_count logs a warning."""
+
+    _provision_tenant_material(TEAM_SCOPE, tenant_id="tenant-1-err", material_id="owner-1-err")
+    _provision_tenant_material(USER_SCOPE, tenant_id="tenant-2-nocount", material_id="owner-2-nocount")
+    _provision_tenant_material(
+        CredentialOwnerScope.user(OTHER_PERSON_ID),
+        tenant_id="tenant-3-ok",
+        material_id="owner-3-ok",
+    )
+
+    responses = [
+        subprocess.CompletedProcess(args=["sealbox-cli"], returncode=1, stdout="", stderr="connection refused"),
+        subprocess.CompletedProcess(args=["sealbox-cli"], returncode=0, stdout='{"cleaned_at": "2026-11-26T12:00:00Z"}', stderr=""),
+        subprocess.CompletedProcess(args=["sealbox-cli"], returncode=0, stdout='{"deleted_count": 3, "cleaned_at": "2026-11-26T12:00:00Z"}', stderr=""),
+    ]
+    index = 0
+
+    def fake_run_sealbox(args: list[str], *, env: Any = None, timeout_seconds: int = 30) -> subprocess.CompletedProcess[str]:
+        nonlocal index
+        result = responses[index]
+        index += 1
+        return result
+
+    monkeypatch.setattr(janitor, "run_sealbox", fake_run_sealbox)
+
+    with caplog.at_level("WARNING", logger="secure_tool_broker.janitor"):
+        report = janitor.cleanup_expired_sealbox_tenants()
+
+    assert report.tenants_scanned == 3
+    assert report.tenants_failed == 1
+    assert report.tenants_cleaned == 2
+    assert report.secrets_deleted == 3
+    assert "event=broker_janitor_sealbox_tenant_failed" in caplog.text
+    assert "event=broker_janitor_sealbox_cleanup_count_missing" in caplog.text
 
 
 # --- 5. Job isolation & tool_setup_recheck integration -----------------------

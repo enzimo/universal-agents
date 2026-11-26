@@ -440,6 +440,9 @@ class StructuredLLMResponse(BaseModel):
         description=(
             "Set this only when `selected_message_type` is `SecureCredentialCollectionRequest`. "
             "Use this when a task needs named credentials or approved signup/manual fallback. "
+            "When the person wants a temporary credential, set `expires_at` (timezone-aware UTC) "
+            "to pre-fill automatic deletion on the form instead of offering a reminder; the person "
+            "decides the final expiry on the form. "
             "The gateway creates and sends the broker form URL only for this structured request; "
             "do not return a normal Task response claiming a form is ready. Never include raw "
             "passwords, tokens, generated secrets, TOTP seeds, or credential files."
@@ -813,7 +816,8 @@ class ModelSecureCredentialCollectionAction(BaseModel):
     secure_credential_collection_request: SecureCredentialCollectionRequest = Field(
         description=(
             "Secure credential request to send to the gateway. Use flow='credential_deletion' "
-            "for user-confirmed broker deletion forms."
+            "for user-confirmed broker deletion forms. For temporary credentials, set `expires_at` "
+            "(UTC) to pre-fill automatic deletion on the form; never offer a reminder instead."
         )
     )
 
@@ -1044,7 +1048,10 @@ class FireworksModelTurnAction(BaseModel):
     scheduled_message: Optional[Dict[str, Any]] = Field(default=None, description="ScheduledMessage payload.")
     secure_credential_collection_request: Optional[SecureCredentialCollectionRequest] = Field(
         default=None,
-        description="Secure credential collection or deletion request payload.",
+        description=(
+            "Secure credential collection or deletion request payload. Set `expires_at` (UTC) to "
+            "propose automatic deletion on the form for temporary credentials; never offer a reminder instead."
+        ),
     )
     signup_automation_request: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -1288,7 +1295,8 @@ class SecureCredentialCollectionAction(BaseModel):
     secure_credential_collection_request: SecureCredentialCollectionRequest = Field(
         description=(
             "Secure credential request to send to the gateway. The gateway creates the broker form URL; "
-            "do not wrap this in send_message. Use flow='credential_deletion' for deletion confirmation."
+            "do not wrap this in send_message. Use flow='credential_deletion' for deletion confirmation. "
+            "Set `expires_at` (UTC) to pre-fill automatic deletion for temporary credentials."
         )
     )
 

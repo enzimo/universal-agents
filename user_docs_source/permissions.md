@@ -1375,6 +1375,8 @@ you do one of two things and confirm:
 
 - **Use a stored credential** lists the stored credentials that have every
   field the tool needs: yours for your own link, the team's for a team link.
+  Temporary credentials show their UTC deletion time next to their name, and
+  credentials whose expiry has passed are hidden.
 - **Add a new credential** has one masked field for each value the tool needs.
   The broker saves the values in your own credentials, or in the team's for a
   team link, and links them in the same step. The new credential gets a name
@@ -1399,6 +1401,17 @@ people who already signed in to X keep working, while a person without their
 own X sign-in gets X's usual no-account result. A web API tool with
 `gate_injections` and no active gate link is refused before sending with
 `gate_link_missing` and `/link <tool_id> gate`.
+
+When a linked temporary credential reaches its expiry time, the broker stops
+using it immediately before any background cleanup runs. For a shared service,
+your expired personal link is treated as absent so your work falls back to the
+team's shared account; otherwise requests are refused with
+`account_link_credential_expired` and the `/link` command. The broker's 6-hour
+maintenance janitor then deletes the expired credential, revokes every active
+link that used it, and sends one Inbox notice per revoked link (to the link's
+owner for a personal link, or to team administrators for a team or gate link)
+stating whether the team's shared account now applies or no linked account
+remains, along with the exact `/link` command.
 
 Operators can list links (including each link's `[account]` or `[gate]`
 purpose) and remove them (including gate links):

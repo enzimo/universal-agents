@@ -781,6 +781,39 @@ def test_c18_sealbox_alias_refused_in_both_orders(monkeypatch: pytest.MonkeyPatc
     assert write_called is False
 
 
+def test_c24_lasting_collect_onto_temporary_sealbox_record_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C24: collecting a lasting credential targeting a temporary credential's Sealbox record is refused."""
+
+    from secure_tool_broker.credential_expiry import CREDENTIAL_EXPIRY_SHARED_RECORD
+
+    _save_temp_credential("temp_a", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
+    write_called = False
+
+    def fail_if_written(*_a: Any, **_k: Any) -> Any:
+        nonlocal write_called
+        write_called = True
+        raise AssertionError("Sealbox write must not happen onto a temporary credential's record")
+
+    monkeypatch.setattr(credential_catalog, "write_credential_to_source", fail_if_written)
+    lasting_over_temp = credential_catalog.collect_credential(
+        {
+            "credential_key": "lasting_b",
+            "write_source": "sealbox",
+            "item_id": "team-nats-agents:default:temp_a",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "required": True}],
+        },
+        {"api_token": "lasting-val"},
+        scope=USER_SCOPE,
+    )
+    assert lasting_over_temp.status == "error"
+    assert lasting_over_temp.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert lasting_over_temp.content["conflicting_credential_key"] == "temp_a"
+    assert write_called is False
+    assert "lasting_b" not in credential_catalog.load_catalog(scope=USER_SCOPE).credentials
+
+
 def test_c18_secret_cache_never_serves_or_extends_past_hard_expiry_even_without_caller_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

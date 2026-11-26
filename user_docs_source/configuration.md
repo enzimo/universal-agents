@@ -1681,8 +1681,11 @@ security_layer:
 ```
 
 Every `tool_setup_recheck_days` days (default 30) since a person last used or
-checked a tool, the broker re-checks it with the same read-only checks as
-TeamLead's setup check. For GitHub (`gh auth status`) and Google (a token check
+checked a tool, the broker's 6-hour maintenance janitor re-checks it with the
+same read-only checks as TeamLead's setup check. Setting
+`tool_setup_recheck_days: 0` turns off only this tool setup re-check; temporary
+credential deletion and per-tenant Sealbox cleanup continue on the 6-hour
+schedule. For GitHub (`gh auth status`) and Google (a token check
 with Google) this asks the service itself; for X it checks that the sign-in is
 stored (X checks it when an agent posts), and for other tools that an account
 is linked (the credential is checked when it is used). When a tool that

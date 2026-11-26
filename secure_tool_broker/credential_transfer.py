@@ -37,6 +37,7 @@ import base64
 import hashlib
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, ContextManager, Literal
 
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 TEAM_OWNER = "team"
 PERSON_OWNER = "person"
+EXPIRED_BEFORE_IMPORT_REASON = "expired before import"
 # Sources whose values live inside this instance; others are external stores.
 _INTERNAL_SOURCES = frozenset({"sealbox"})
 # Password-manager sessions in an owner's private folder (credential_state.credential_owner_environment).
@@ -347,19 +349,34 @@ def _export_owner_files(owner: CredentialOwnerV1) -> list[OwnerFileV1]:
 # -- import ----------------------------------------------------------------------------
 
 
+class _ExpiredBeforeImport(Exception):
+    """Internal signal when an imported temporary credential expired before or during import."""
+
+
 def import_credentials(
-    records: list[dict[str, Any]], *, team_id: str, source_team_id: str | None = None
+    records: list[dict[str, Any]],
+    *,
+    team_id: str,
+    source_team_id: str | None = None,
+    access_gate: Any = None,
+    now: datetime | None = None,
 ) -> list[CredentialOutcomeV1]:
     """Store every record for its owner; one outcome per record, values never included.
 
     ``source_team_id`` is the export's team id, only logged: ``decrypt_records`` already filed
     that team's records under ``team_id`` (``renamed_credential_owners``).
+
+    Temporary catalog entries that expired before import are skipped without storing and,
+    when ``access_gate`` is available, any active destination account or gate links naming
+    those keys for that owner are revoked with the system actor and notified through the
+    janitor's shared revocation-and-notice helper.
     """
 
+    moment = datetime.now(timezone.utc) if now is None else now.astimezone(timezone.utc)
     outcomes = []
     for raw in records:
         record = _RECORD_MODELS[str(raw.get("kind"))].model_validate(raw)
-        outcomes.append(_import_record(record, team_id))
+        outcomes.append(_import_record(record, team_id, access_gate=access_gate, now=moment))
     logger.warning(
         "Stored credentials imported from a team transfer. event=credentials_transfer_imported team_id=%s "
         "source_team_id=%r imported=%s refused=%s",
@@ -371,16 +388,66 @@ def import_credentials(
     return outcomes
 
 
-def _import_record(record: Any, team_id: str) -> CredentialOutcomeV1:
+def _revoke_expired_import_links(
+    access_gate: Any,
+    owner: CredentialOwnerV1,
+    credential_key: str,
+    *,
+    now: datetime,
+) -> None:
+    if access_gate is None:
+        return
+    from secure_tool_broker.janitor import revoke_links_for_expired_credential
+
+    revoke_links_for_expired_credential(
+        access_gate,
+        _catalog_scope(owner),
+        credential_key,
+        now=now,
+    )
+
+
+def _import_record(
+    record: Any,
+    team_id: str,
+    *,
+    access_gate: Any = None,
+    now: datetime | None = None,
+) -> CredentialOutcomeV1:
     owner: CredentialOwnerV1 = record.owner
     key = f"{owner.label}/{record.kind}/{_record_name(record)}"
+    moment = datetime.now(timezone.utc) if now is None else now.astimezone(timezone.utc)
     if owner.kind == TEAM_OWNER and owner.owner_id != team_id:
         return CredentialOutcomeV1(key=key, owner=owner, imported=False, reason="it belongs to another team")
     try:
         if _already_stored(record):
             return CredentialOutcomeV1(key=key, owner=owner, imported=False,
                                        reason="already stored in this instance; kept the current credential")
-        _IMPORTERS[record.kind](record)
+        if isinstance(record, CatalogEntryV1):
+            from secure_tool_broker.credential_expiry import is_expired
+
+            raw_expires = record.credential.get("expires_at")
+            if raw_expires is not None and is_expired(raw_expires, now=moment):
+                _revoke_expired_import_links(access_gate, owner, record.credential_key, now=moment)
+                return CredentialOutcomeV1(
+                    key=key,
+                    owner=owner,
+                    imported=False,
+                    reason=EXPIRED_BEFORE_IMPORT_REASON,
+                    retryable=False,
+                )
+            _import_catalog_entry(record, now=moment)
+        else:
+            _IMPORTERS[record.kind](record)
+    except _ExpiredBeforeImport:
+        _revoke_expired_import_links(access_gate, owner, record.credential_key, now=moment)
+        return CredentialOutcomeV1(
+            key=key,
+            owner=owner,
+            imported=False,
+            reason=EXPIRED_BEFORE_IMPORT_REASON,
+            retryable=False,
+        )
     except Exception as exc:  # each store reports in its own way; no value is in these messages
         logger.error(
             "A transferred credential could not be stored. event=credentials_transfer_record_failed key=%s error=%s",
@@ -476,7 +543,7 @@ def _import_model_key(record: ModelKeyV1) -> None:
     _model_key_store(record.owner).save(StoredModelKey.model_validate(record.entry))
 
 
-def _import_catalog_entry(record: CatalogEntryV1) -> None:
+def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None) -> None:
     from secure_tool_broker.credential_catalog import (
         CatalogCredential,
         _SECRET_CACHE,
@@ -484,10 +551,16 @@ def _import_catalog_entry(record: CatalogEntryV1) -> None:
         _save_catalog_credential,
         write_credential_to_source,
     )
+    from secure_tool_broker.credential_expiry import remaining_ttl_seconds
     from secure_tools.providers import ToolResult
 
     original = CatalogCredential.model_validate(record.credential)
     scope = _catalog_scope(record.owner)
+    ttl_seconds: int | None = None
+    if original.expires_at is not None:
+        ttl_seconds = remaining_ttl_seconds(original.expires_at, now=now)
+        if ttl_seconds <= 0:
+            raise _ExpiredBeforeImport()
     if not record.secret_values:
         # Only external references and public fields: store the entry as it was.
         _save_catalog_credential(record.credential_key, original, scope=scope)
@@ -505,6 +578,7 @@ def _import_catalog_entry(record: CatalogEntryV1) -> None:
             values=values,
             field_specs=_normalize_field_specs(request["fields"]),
             scope=scope,
+            ttl_seconds=ttl_seconds,
         )
         if isinstance(written, ToolResult):
             raise RuntimeError(written.error or "write failed")
@@ -656,6 +730,7 @@ __all__ = [
     "CatalogEntryV1",
     "CredentialOutcomeV1",
     "CredentialOwnerV1",
+    "EXPIRED_BEFORE_IMPORT_REASON",
     "ModelKeyV1",
     "OwnerFileV1",
     "STATE_TRANSFER_NAMES",
