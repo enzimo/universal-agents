@@ -23,6 +23,7 @@ from urllib import request as urllib_request
 from pydantic import BaseModel, Field, field_validator
 
 from custom_messages.contracts.access_v2 import (
+    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
     REASON_ACCOUNT_LINK_MISSING,
     AccountLinkV1,
     InjectionPlacement,
@@ -46,6 +47,7 @@ from secure_tool_broker.credential_expiry import (
     CredentialExpiryError,
     format_utc_timestamp,
     is_expired,
+    parse_utc_timestamp,
     remaining_ttl_seconds,
     validate_storage_expiry,
 )
@@ -334,13 +336,15 @@ def read_credential_metadata_readonly(
     *,
     scope: CredentialOwnerScope,
     fallback_db_path: Path | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Read sanitized non-secret metadata for one credential without creating or modifying the DB.
 
     Resolves the catalog path through ``resolve_catalog_db_path()`` whenever
     ``SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH`` is set (matching the
     broker process), falling back to ``fallback_db_path`` only when the env
-    override is absent. Never returns secret values or secret source locations.
+    override is absent. Never returns secret values or secret source locations,
+    and treats temporary credentials past ``expires_at`` as absent.
     """
 
     key = _credential_key(credential_key)
@@ -354,6 +358,8 @@ def read_credential_metadata_readonly(
     if raw is None:
         return None
     credential = CatalogCredential.model_validate(raw)
+    if is_expired(credential.expires_at, now=now):
+        return None
     return _metadata_for_agent(key, credential)
 
 
@@ -456,6 +462,17 @@ def _metadata_for_agent(credential_key: str, credential: CatalogCredential) -> d
     return metadata
 
 
+def _evict_credential_secret_cache(
+    credential: CatalogCredential,
+    scope: CredentialOwnerScope,
+) -> None:
+    """Remove any cached secret entries referenced by ``credential`` in ``scope``."""
+
+    for field in credential.fields.values():
+        for source_ref in field.resolution_order:
+            _SECRET_CACHE.pop(_secret_cache_key(source_ref, scope), None)
+
+
 def resolve_secret_field(
     credential_key: str,
     field_name: str,
@@ -464,6 +481,7 @@ def resolve_secret_field(
     env: Mapping[str, str] | None = None,
     context: ToolContext | None = None,
     scope: CredentialOwnerScope | None = None,
+    now: datetime | None = None,
 ) -> ResolvedCredentialField | ToolResult:
     key = _credential_key(credential_key)
     resolved_scope = _owner_scope(context=context, scope=scope)
@@ -474,6 +492,18 @@ def resolve_secret_field(
             status="error",
             error=f"Credential key is not registered: {key}",
             content={"error_code": CREDENTIAL_NOT_FOUND, "credential_key": key},
+        )
+    if is_expired(credential.expires_at, now=now):
+        _evict_credential_secret_cache(credential, resolved_scope)
+        return ToolResult(
+            status="error",
+            error=f"Temporary credential has expired: {key}",
+            content={
+                "error_code": CREDENTIAL_EXPIRED,
+                "credential_key": key,
+                "field_ref": field_name,
+                "expires_at": credential.expires_at,
+            },
         )
     field = credential.fields.get(field_name)
     if field is None:
@@ -493,7 +523,13 @@ def resolve_secret_field(
     source_failed = False
     for source_index, source_ref in enumerate(field.resolution_order):
         try:
-            resolved = _resolve_source_ref(source_ref, env=env, scope=resolved_scope)
+            resolved = _resolve_source_ref(
+                source_ref,
+                env=env,
+                scope=resolved_scope,
+                expires_at=credential.expires_at,
+                now=now,
+            )
         except Exception:
             # Secret adapters may include credential material in exceptions.
             # Preserve configured failover without reflecting their messages.
@@ -504,6 +540,8 @@ def resolve_secret_field(
             )
             continue
         if isinstance(resolved, ToolResult):
+            if str((resolved.content or {}).get("error_code") or "") == CREDENTIAL_EXPIRED:
+                return resolved
             source_failed = True
             continue
         if resolved:
@@ -531,6 +569,8 @@ def _resolve_source_ref(
     *,
     env: Mapping[str, str] | None = None,
     scope: CredentialOwnerScope,
+    expires_at: str | None = None,
+    now: datetime | None = None,
 ) -> str | ToolResult | None:
     if source_ref.source == "env":
         if not source_ref.env_var:
@@ -544,12 +584,28 @@ def _resolve_source_ref(
     if source is None:
         return ToolResult(status="error", error=f"Credential source is not registered: {source_ref.source}")
     cache_key = _secret_cache_key(source_ref, scope)
+    remaining_seconds: float | None = None
+    if expires_at is not None:
+        current_utc = now if now is not None else datetime.now(timezone.utc)
+        remaining_seconds = (parse_utc_timestamp(expires_at) - current_utc).total_seconds()
+        if remaining_seconds <= 0:
+            _SECRET_CACHE.pop(cache_key, None)
+            return ToolResult(
+                status="error",
+                error="Temporary credential has expired.",
+                content={"error_code": CREDENTIAL_EXPIRED, "expires_at": expires_at},
+            )
     ttl_seconds = _default_secret_cache_ttl_seconds()
-    if ttl_seconds > 0:
-        now = time.monotonic()
+    effective_ttl = (
+        min(float(ttl_seconds), remaining_seconds)
+        if remaining_seconds is not None
+        else float(ttl_seconds)
+    )
+    if effective_ttl > 0:
+        mono_now = time.monotonic()
         cached = _SECRET_CACHE.get(cache_key)
-        if cached and cached[1] > now:
-            _SECRET_CACHE[cache_key] = (cached[0], now + ttl_seconds)
+        if cached and cached[1] > mono_now:
+            _SECRET_CACHE[cache_key] = (cached[0], mono_now + effective_ttl)
             return cached[0]
         if cached:
             _SECRET_CACHE.pop(cache_key, None)
@@ -578,7 +634,12 @@ def _resolve_source_ref(
         return result
     resolved = _string(result) or None
     if resolved and ttl_seconds > 0:
-        _SECRET_CACHE[cache_key] = (resolved, time.monotonic() + ttl_seconds)
+        store_ttl = effective_ttl
+        if expires_at is not None and now is None:
+            post_remaining = (parse_utc_timestamp(expires_at) - datetime.now(timezone.utc)).total_seconds()
+            store_ttl = min(float(ttl_seconds), post_remaining)
+        if store_ttl > 0:
+            _SECRET_CACHE[cache_key] = (resolved, time.monotonic() + store_ttl)
     return resolved
 
 
@@ -816,14 +877,7 @@ def collect_credential(
         # anything to the credential store so refusals leave no partial records.
         for field_name, field_spec in field_specs.items():
             source = _string(field_spec.get("value_source")) or "user_input"
-            kind = _string(field_spec.get("kind")) or "custom"
-            secret = bool(
-                field_spec.get(
-                    "secret",
-                    kind.lower() in SECRET_FIELD_KINDS
-                    or _string(field_spec.get("visibility")).lower() == "secret",
-                )
-            )
+            secret = is_secret_credential_field(field_spec)
             if secret and _string(field_spec.get("value")):
                 return ToolResult(
                     status="error",
@@ -1636,9 +1690,16 @@ def _bitwarden_login_payload(
     return payload
 
 
-def _field_is_secret(spec: Mapping[str, Any]) -> bool:
+def is_secret_credential_field(spec: Mapping[str, Any]) -> bool:
+    """Return True when a credential field spec holds secret material (shared by form and storage)."""
+
     kind = _string(spec.get("kind")).lower()
-    return bool(spec.get("secret", False)) or kind in SECRET_FIELD_KINDS or _string(spec.get("visibility")) == "secret"
+    visibility = _string(spec.get("visibility")).lower()
+    return bool(spec.get("secret", False)) or kind in SECRET_FIELD_KINDS or visibility == "secret"
+
+
+def _field_is_secret(spec: Mapping[str, Any]) -> bool:
+    return is_secret_credential_field(spec)
 
 
 def _field_is_metadata(spec: Mapping[str, Any]) -> bool:
@@ -1720,6 +1781,7 @@ def get_credential_metadata(
     *,
     context: ToolContext | None = None,
     scope: CredentialOwnerScope | None = None,
+    now: datetime | None = None,
 ) -> ToolResult:
     key = _credential_key(credential_key)
     catalog = load_catalog(scope=_owner_scope(context=context, scope=scope))
@@ -1729,6 +1791,16 @@ def get_credential_metadata(
             status="error",
             error=f"Credential key is not registered: {key}",
             content={"error_code": "credential_unavailable", "credential_key": key},
+        )
+    if is_expired(credential.expires_at, now=now):
+        return ToolResult(
+            status="error",
+            error=f"Temporary credential has expired: {key}",
+            content={
+                "error_code": CREDENTIAL_EXPIRED,
+                "credential_key": key,
+                "expires_at": credential.expires_at,
+            },
         )
     return ToolResult(status="success", content={"credential": _metadata_for_agent(key, credential)})
 
@@ -2331,8 +2403,32 @@ def _linked_account_scope(link: AccountLinkV1) -> CredentialOwnerScope:
     return CredentialOwnerScope.user(link.owner_id)
 
 
+def linked_credential_expired(
+    link: AccountLinkV1,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return True when ``link`` points at a temporary credential whose ``expires_at`` has passed.
+
+    Uses read-only catalog access so checking an account link never creates a
+    catalog file when none exists yet.
+    """
+
+    rows = load_scope_readonly(resolve_catalog_db_path(), _linked_account_scope(link))
+    raw = rows.get(link.credential_key)
+    if not isinstance(raw, Mapping):
+        return False
+    raw_expires = raw.get("expires_at")
+    if raw_expires is None or (isinstance(raw_expires, str) and not raw_expires.strip()):
+        return False
+    return is_expired(raw_expires, now=now)
+
+
 def _resolve_injections(
-    link: AccountLinkV1, placements: frozenset[InjectionPlacement]
+    link: AccountLinkV1,
+    placements: frozenset[InjectionPlacement],
+    *,
+    now: datetime | None = None,
 ) -> tuple[dict[tuple[InjectionPlacement, str], str], list[str]] | ToolResult:
     """Rendered values for the link's injections at ``placements``, and the
     secret values to redact from anything returned."""
@@ -2344,8 +2440,31 @@ def _resolve_injections(
     for injection in link.injections:
         if injection.placement not in placements:
             continue
-        resolved = resolve_secret_field(link.credential_key, injection.field, catalog=catalog, scope=scope)
+        resolved = resolve_secret_field(
+            link.credential_key,
+            injection.field,
+            catalog=catalog,
+            scope=scope,
+            now=now,
+        )
         if isinstance(resolved, ToolResult):
+            if str((resolved.content or {}).get("error_code") or "") == CREDENTIAL_EXPIRED:
+                content: dict[str, Any] = {
+                    "error_code": REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+                    "credential_key": link.credential_key,
+                    "account_link_id": link.link_id,
+                    "tool_id": link.tool_id,
+                }
+                if resolved.content and resolved.content.get("expires_at"):
+                    content["expires_at"] = resolved.content["expires_at"]
+                return ToolResult(
+                    status="error",
+                    error=(
+                        f"The temporary credential linked to {link.tool_id} has expired "
+                        "and can no longer be used."
+                    ),
+                    content=content,
+                )
             return resolved
         rendered = injection.render(resolved.value)
         values[(injection.placement, injection.name)] = rendered

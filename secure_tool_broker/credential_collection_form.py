@@ -24,14 +24,17 @@ from secure_tool_broker.auth_pages import (
     render_session_countdown,
 )
 from secure_tool_broker.credential_catalog import (
+    is_secret_credential_field,
     load_catalog,
     resolve_credential_write_source,
 )
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from secure_tool_broker.credential_expiry import (
+    CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
     CUSTOM_EXPIRY_OPTION,
     EXPIRY_PRESET_OPTIONS,
     CredentialExpiryError,
+    format_expiry_label,
     format_utc_timestamp,
     is_expired,
     parse_utc_timestamp,
@@ -74,21 +77,19 @@ class ParsedCredentialSubmission:
     expiry_error_code: str | None = None
 
 
+@dataclass(frozen=True)
+class ExistingCredentialInfo:
+    """Whether ``credential_key`` currently exists (unexpired) and its active deletion time."""
+
+    exists: bool = False
+    expires_at: str | None = None
+
+
 CREDENTIAL_EXPIRY_FORM_SCRIPT = f"""
 <script>
 (() => {{
   const root = document.querySelector("[data-credential-expiry-control]");
   if (!root) {{
-    return;
-  }}
-  const checkbox = root.querySelector("[data-expiry-checkbox]");
-  const whenWrap = root.querySelector("[data-expiry-when-wrap]");
-  const whenSelect = root.querySelector("[data-expiry-when]");
-  const customWrap = root.querySelector("[data-expiry-custom-wrap]");
-  const customInput = root.querySelector("[data-expiry-custom]");
-  const tzInput = root.querySelector("[data-expiry-timezone]");
-  const offsetInput = root.querySelector("[data-expiry-utc-offset]");
-  if (!checkbox || !whenWrap || !whenSelect || !customWrap || !customInput) {{
     return;
   }}
   function pad2(n) {{
@@ -100,20 +101,46 @@ CREDENTIAL_EXPIRY_FORM_SCRIPT = f"""
       "T" + pad2(date.getHours()) + ":" + pad2(date.getMinutes())
     );
   }}
-  function parseLocalDate(text) {{
+  function formatLocalDisplay(date) {{
+    return (
+      date.getFullYear() + "-" + pad2(date.getMonth() + 1) + "-" + pad2(date.getDate()) +
+      " " + pad2(date.getHours()) + ":" + pad2(date.getMinutes())
+    );
+  }}
+  const existingNote = root.querySelector("[data-existing-expires-at]");
+  if (existingNote) {{
+    const existingIso = existingNote.getAttribute("data-existing-expires-at") || "";
+    const existingText = existingNote.querySelector("[data-existing-expires-at-text]");
+    if (existingIso && existingText) {{
+      const parsedExisting = new Date(existingIso);
+      if (!Number.isNaN(parsedExisting.getTime())) {{
+        existingText.textContent = formatLocalDisplay(parsedExisting);
+      }}
+    }}
+  }}
+  const checkbox = root.querySelector("[data-expiry-checkbox]");
+  const whenWrap = root.querySelector("[data-expiry-when-wrap]");
+  const whenSelect = root.querySelector("[data-expiry-when]");
+  const customWrap = root.querySelector("[data-expiry-custom-wrap]");
+  const customInput = root.querySelector("[data-expiry-custom]");
+  const tzInput = root.querySelector("[data-expiry-timezone]");
+  const offsetInput = root.querySelector("[data-expiry-utc-offset]");
+  if (!checkbox || !whenWrap || !whenSelect || !customWrap || !customInput) {{
+    return;
+  }}
+  function parseLocalParts(text) {{
     const match = /^(\\d{{4}})-(\\d{{2}})-(\\d{{2}})T(\\d{{2}}):(\\d{{2}})(?::(\\d{{2}}))?$/.exec(String(text || "").trim());
     if (!match) {{
       return null;
     }}
-    return new Date(
-      Number(match[1]),
-      Number(match[2]) - 1,
-      Number(match[3]),
-      Number(match[4]),
-      Number(match[5]),
-      match[6] ? Number(match[6]) : 0,
-      0
-    );
+    return {{
+      year: Number(match[1]),
+      month: Number(match[2]),
+      day: Number(match[3]),
+      hour: Number(match[4]),
+      minute: Number(match[5]),
+      second: match[6] ? Number(match[6]) : 0,
+    }};
   }}
   function detectTimezone() {{
     try {{
@@ -129,9 +156,34 @@ CREDENTIAL_EXPIRY_FORM_SCRIPT = f"""
     if (!offsetInput) {{
       return;
     }}
-    const selected = parseLocalDate(customInput.value);
-    const reference = selected && !Number.isNaN(selected.getTime()) ? selected : new Date();
-    offsetInput.value = String(reference.getTimezoneOffset());
+    const parts = parseLocalParts(customInput.value);
+    if (parts) {{
+      const selected = new Date(
+        parts.year,
+        parts.month - 1,
+        parts.day,
+        parts.hour,
+        parts.minute,
+        parts.second,
+        0
+      );
+      if (!Number.isNaN(selected.getTime())) {{
+        // Computing (selected - wallUTC) equals getTimezoneOffset() for normal times
+        // and stays aligned with Date's shifted instant across spring-forward DST gaps.
+        const wallUtcMs = Date.UTC(
+          parts.year,
+          parts.month - 1,
+          parts.day,
+          parts.hour,
+          parts.minute,
+          parts.second,
+          0
+        );
+        offsetInput.value = String(Math.round((selected.getTime() - wallUtcMs) / 60000));
+        return;
+      }}
+    }}
+    offsetInput.value = String(new Date().getTimezoneOffset());
   }}
   function syncControls() {{
     const enabled = Boolean(checkbox.checked);
@@ -178,15 +230,15 @@ def credential_collection_owner_scope(
     return CredentialOwnerScope.user(canonical_user_id or "")
 
 
-def credential_key_exists(
+def existing_credential_info(
     credential_key: str,
     *,
     scope: CredentialOwnerScope,
-) -> bool:
-    """Return True when ``credential_key`` currently exists (and is not expired) in ``scope``."""
+) -> ExistingCredentialInfo:
+    """Inspect whether ``credential_key`` currently exists (unexpired) and whether it expires."""
 
     if not credential_key:
-        return False
+        return ExistingCredentialInfo()
     try:
         existing = load_catalog(scope=scope).credentials.get(credential_key)
     except Exception as exc:
@@ -196,8 +248,20 @@ def credential_key_exists(
             credential_key,
             type(exc).__name__,
         )
-        return False
-    return existing is not None and not is_expired(existing.expires_at)
+        return ExistingCredentialInfo()
+    if existing is None or is_expired(existing.expires_at):
+        return ExistingCredentialInfo()
+    return ExistingCredentialInfo(exists=True, expires_at=existing.expires_at)
+
+
+def credential_key_exists(
+    credential_key: str,
+    *,
+    scope: CredentialOwnerScope,
+) -> bool:
+    """Return True when ``credential_key`` currently exists (and is not expired) in ``scope``."""
+
+    return existing_credential_info(credential_key, scope=scope).exists
 
 
 def normalize_proposed_expiry(raw: Any) -> str | None:
@@ -230,7 +294,18 @@ def _render_expiry_control(
     state: ExpiryFormState,
     *,
     key_exists: bool,
+    existing_expires_at: str | None = None,
+    write_source: str = "sealbox",
 ) -> str:
+    if write_source != "sealbox":
+        return (
+            '<div class="expiry-control expiry-control-unsupported" data-credential-expiry-unsupported>'
+            '<p class="muted expiry-unsupported-note">'
+            "Automatic deletion is only available for Sealbox credentials; "
+            "this store keeps credentials until you delete them."
+            "</p>"
+            "</div>"
+        )
     checked_attr = " checked" if state.enabled else ""
     when_hidden_attr = "" if state.enabled else " hidden"
     when_disabled_attr = "" if state.enabled else " disabled"
@@ -247,6 +322,15 @@ def _render_expiry_control(
     proposed_attr = (
         f' data-proposed-expires-at="{html.escape(state.proposed_expires_at, quote=True)}"'
         if state.proposed_expires_at
+        else ""
+    )
+    existing_active_html = (
+        f'<p class="expiry-existing-active" data-existing-expires-at="{html.escape(existing_expires_at, quote=True)}">'
+        "Currently set to delete on "
+        f'<span data-existing-expires-at-text>{html.escape(format_expiry_label(existing_expires_at))}</span>. '
+        'Saving with "Delete automatically" unticked keeps this credential until you delete it by hand.'
+        "</p>"
+        if key_exists and existing_expires_at
         else ""
     )
     existing_warning_html = (
@@ -282,9 +366,24 @@ def _render_expiry_control(
         f'value="{html.escape(state.timezone_name, quote=True)}" data-expiry-timezone>'
         f'<input type="hidden" name="{EXPIRY_UTC_OFFSET_FIELD}" '
         f'value="{html.escape(state.tz_offset_minutes, quote=True)}" data-expiry-utc-offset>'
+        f"{existing_active_html}"
         f"{existing_warning_html}"
         "</div>"
     )
+
+
+def render_credential_collection_failed_page(details: str) -> str:
+    """Render the terminal failure page after a claimed store submission fails."""
+
+    body = (
+        '<section class="content-panel">'
+        '<p class="eyebrow">Secure Credential Collection</p>'
+        "<h1>Credential submission failed.</h1>"
+        f'<div class="status status-error" role="alert"><strong>Nothing was saved.</strong> {html.escape(details)}</div>'
+        '<p class="lede">This form can no longer be submitted. Ask the agent for a new form to try again.</p>'
+        "</section>"
+    )
+    return render_broker_auth_page("Credential Submission Failed", body)
 
 
 def render_credential_collection_form(
@@ -292,9 +391,10 @@ def render_credential_collection_form(
     request_payload: Mapping[str, Any],
     session_expires_at: datetime,
     field_specs: list[dict[str, Any]],
-    is_secret_field: Callable[[dict[str, Any]], bool],
+    is_secret_field: Callable[[dict[str, Any]], bool] = is_secret_credential_field,
     signup_html: str = "",
     key_exists: bool = False,
+    existing_expires_at: str | None = None,
     error_message: str | None = None,
     preserved_fields: Mapping[str, str] | None = None,
     expiry_state: ExpiryFormState | None = None,
@@ -402,7 +502,13 @@ def render_credential_collection_form(
             + f"{help_html}</div>"
         )
 
-    expiry_html = _render_expiry_control(resolved_expiry_state, key_exists=key_exists)
+    write_source = resolve_credential_write_source(request_payload)
+    expiry_html = _render_expiry_control(
+        resolved_expiry_state,
+        key_exists=key_exists,
+        existing_expires_at=existing_expires_at,
+        write_source=write_source,
+    )
     error_html = (
         f'<div class="status status-error" role="alert"><strong>Nothing was saved.</strong> '
         f"{html.escape(error_message)}</div>"
@@ -504,7 +610,7 @@ def parse_credential_collection_submission(
                     f"Automatic deletion is only supported for Sealbox credentials, not {write_source or 'this store'}. "
                     "Untick 'Delete automatically' to save without an expiry."
                 ),
-                expiry_error_code="credential_expiry_unsupported_source",
+                expiry_error_code=CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
             )
 
     return ParsedCredentialSubmission(
@@ -523,12 +629,15 @@ __all__ = [
     "EXPIRY_TIMEZONE_FIELD",
     "EXPIRY_UTC_OFFSET_FIELD",
     "EXPIRY_WHEN_FIELD",
+    "ExistingCredentialInfo",
     "ExpiryFormState",
     "ParsedCredentialSubmission",
     "credential_collection_owner_scope",
     "credential_key_exists",
+    "existing_credential_info",
     "initial_expiry_form_state",
     "normalize_proposed_expiry",
     "parse_credential_collection_submission",
+    "render_credential_collection_failed_page",
     "render_credential_collection_form",
 ]

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +22,7 @@ from secure_tool_broker.credential_catalog import (
     load_catalog,
 )
 from secure_tool_broker.credential_collection_form import (
+    CREDENTIAL_EXPIRY_FORM_SCRIPT,
     CREDENTIAL_FORM_ID,
     DELETE_AUTOMATICALLY_FIELD,
     EXPIRY_CUSTOM_LOCAL_FIELD,
@@ -28,7 +33,9 @@ from secure_tool_broker.credential_collection_form import (
 from secure_tool_broker.credential_expiry import (
     CUSTOM_EXPIRY_OPTION,
     EXPIRY_PRESET_OPTIONS,
+    format_expiry_label,
     format_utc_timestamp,
+    resolve_form_expiry,
 )
 from secure_tool_broker.service import SecureToolBrokerService
 from secure_tools.broker_pages import card_view_url
@@ -361,3 +368,342 @@ async def test_session_creation_rejects_expires_at_on_deletion_flow() -> None:
             },
         )
         assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_c14_failed_store_after_claim_ends_page_without_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failing_sealbox(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="sealbox unavailable")
+
+    monkeypatch.setattr(credential_catalog, "run_sealbox", failing_sealbox)
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=open_gate(),
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    async with TestClient(TestServer(service.build_app())) as client:
+        created = await _create_session(client, _collection_request())
+        path = _form_path(created)
+        resp = await client.post(
+            path,
+            data={
+                "field__username": "alice",
+                "field__api_token": "DO-NOT-ECHO-SECRET",
+            },
+        )
+        assert resp.status == 400
+        page = await resp.text()
+        assert 'class="status status-error" role="alert"' in page
+        assert "Nothing was saved." in page
+        assert "Ask the agent for a new form" in page
+        # The session is terminal after the claim, so no form or resubmit button may appear.
+        assert "<form" not in page
+        assert "<input" not in page
+        assert "Store Credential" not in page
+        assert "DO-NOT-ECHO-SECRET" not in page
+
+        status_resp = await client.get(
+            f"/v1/credential-collection/sessions/{created['session_id']}",
+            headers=gateway_headers(),
+        )
+        status_data = await status_resp.json()
+        assert status_data["status"] == "credential_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_c15_existing_active_expiry_notice_and_non_sealbox_hides_expiry_controls(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # (a) Existing active temporary credential with no proposed expiry on the new request:
+    # box starts unticked, and the expiry area names the current deletion time and explains
+    # that saving unticked makes it lasting.
+    active_expiry = (datetime.now(timezone.utc) + timedelta(hours=4)).replace(microsecond=0)
+    active_iso = format_utc_timestamp(active_expiry)
+    collect_credential(
+        _collection_request(),
+        {"username": "old-user", "api_token": "old-secret"},
+        scope=OWNER_SCOPE,
+        expires_at=active_expiry,
+        allow_expiry_change=True,
+    )
+
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=open_gate(),
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    async with TestClient(TestServer(service.build_app())) as client:
+        created = await _create_session(client, _collection_request())
+        page = await (await client.get(_form_path(created))).text()
+        assert "data-expiry-checkbox>" in page  # unticked when request proposes no expiry
+        assert f'data-existing-expires-at="{active_iso}"' in page
+        assert format_expiry_label(active_iso) in page
+        assert 'Saving with "Delete automatically" unticked keeps this credential' in page
+        assert "This credential already exists." in page
+
+        # (b) Non-Sealbox write source omits the checkbox and selects, showing a muted note,
+        # while hand-made POSTs with an expiry are still refused and logged (C17).
+        bw_created = await _create_session(
+            client,
+            _collection_request(credential_key="bw_only_key", store_target="bitwarden"),
+        )
+        bw_path = _form_path(bw_created)
+        bw_get = await client.get(bw_path)
+        assert bw_get.status == 200
+        bw_page = await bw_get.text()
+        assert "data-credential-expiry-unsupported" in bw_page
+        assert "Automatic deletion is only available for Sealbox credentials" in bw_page
+        assert f'name="{DELETE_AUTOMATICALLY_FIELD}"' not in bw_page
+        assert f'name="{EXPIRY_WHEN_FIELD}"' not in bw_page
+
+        with caplog.at_level(logging.WARNING, logger="secure_tool_broker"):
+            bw_post = await client.post(
+                bw_path,
+                data={
+                    "field__username": "bw-user",
+                    "field__api_token": "BW-SECRET",
+                    DELETE_AUTOMATICALLY_FIELD: "yes",
+                    EXPIRY_WHEN_FIELD: "1h",
+                },
+            )
+        assert bw_post.status == 400
+        assert any(
+            "event=credential_collection_expiry_refused" in rec.message
+            and "error_code=credential_expiry_unsupported_source" in rec.message
+            for rec in caplog.records
+        )
+
+
+@pytest.mark.asyncio
+async def test_c17_secret_true_field_never_echoed_on_validation_error() -> None:
+    raw_request = {
+        "credential_key": "raw_secret_flag_key",
+        "service_name": "Raw Service",
+        "purpose": "Secret flag parity",
+        "store_target": "sealbox",
+        "fields": [
+            {
+                "name": "account_name",
+                "kind": "custom",
+                "visibility": "metadata_visible",
+                "value_source": "user_input",
+                "required": True,
+            },
+            {
+                "name": "opaque_key",
+                "kind": "custom",
+                "visibility": "metadata_visible",
+                "secret": True,
+                "value_source": "user_input",
+                "required": True,
+            },
+        ],
+    }
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=open_gate(),
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    async with TestClient(TestServer(service.build_app())) as client:
+        created = await _create_session(client, raw_request)
+        bad = await client.post(
+            _form_path(created),
+            data={
+                "field__account_name": "visible-account",
+                "field__opaque_key": "NEVER-ECHO-SECRET-TRUE-VALUE",
+                DELETE_AUTOMATICALLY_FIELD: "yes",
+                EXPIRY_WHEN_FIELD: CUSTOM_EXPIRY_OPTION,
+                EXPIRY_CUSTOM_LOCAL_FIELD: "2020-01-01T00:00",
+                EXPIRY_UTC_OFFSET_FIELD: "0",
+            },
+        )
+        assert bad.status == 400
+        body = await bad.text()
+        assert 'value="visible-account"' in body
+        assert "NEVER-ECHO-SECRET-TRUE-VALUE" not in body
+
+
+def test_c16_expiry_form_script_prefill_offsets_existing_label_and_dst_gap_in_node() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute the credential expiry form script")
+
+    match = re.search(r"<script>(.*)</script>", CREDENTIAL_EXPIRY_FORM_SCRIPT, re.DOTALL)
+    assert match is not None
+    script_source = match.group(1)
+
+    harness = r"""
+const vm = require("vm");
+const scriptSource = process.argv[1];
+
+function makeEl(initial = {}) {
+  const listeners = {};
+  return {
+    value: "",
+    checked: false,
+    hidden: false,
+    disabled: false,
+    required: false,
+    textContent: "",
+    attrs: {},
+    ...initial,
+    getAttribute(name) { return this.attrs[name] ?? null; },
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    dispatch(type) { for (const fn of (listeners[type] || [])) fn({}); },
+  };
+}
+
+function runScenario({ proposed = "", existing = "", checked = false, when = "1h" }) {
+  const checkbox = makeEl({ checked });
+  const whenWrap = makeEl();
+  const whenSelect = makeEl({ value: when });
+  const customWrap = makeEl();
+  const customInput = makeEl();
+  const tzInput = makeEl();
+  const offsetInput = makeEl();
+  const existingText = makeEl({ textContent: "fallback" });
+  const existingNote = existing ? makeEl({ attrs: { "data-existing-expires-at": existing } }) : null;
+  if (existingNote) {
+    existingNote.querySelector = (sel) => sel === "[data-existing-expires-at-text]" ? existingText : null;
+  }
+  const form = makeEl();
+  const root = {
+    attrs: proposed ? { "data-proposed-expires-at": proposed } : {},
+    getAttribute(name) { return this.attrs[name] ?? null; },
+    closest(sel) { return sel === "form" ? form : null; },
+    querySelector(sel) {
+      return {
+        "[data-expiry-checkbox]": checkbox,
+        "[data-expiry-when-wrap]": whenWrap,
+        "[data-expiry-when]": whenSelect,
+        "[data-expiry-custom-wrap]": customWrap,
+        "[data-expiry-custom]": customInput,
+        "[data-expiry-timezone]": tzInput,
+        "[data-expiry-utc-offset]": offsetInput,
+        "[data-existing-expires-at]": existingNote,
+      }[sel] || null;
+    },
+  };
+  const sandbox = {
+    document: { querySelector: (sel) => sel === "[data-credential-expiry-control]" ? root : null },
+    Date,
+    Intl,
+    Math,
+    Number,
+    String,
+    Boolean,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(scriptSource, sandbox);
+  return { checkbox, whenWrap, whenSelect, customWrap, customInput, tzInput, offsetInput, existingText, form };
+}
+
+// 1. Unticked initial state + existing active expiry formatted in local time.
+const unticked = runScenario({ existing: "2026-07-15T18:30:00Z", checked: false, when: "1h" });
+// 2. Proposed UTC timestamp pre-filled in local time, then probe winter, summer, and spring-forward gap.
+const prefilled = runScenario({ proposed: "2026-07-15T18:30:00Z", checked: true, when: "custom" });
+const prefilledLocal = prefilled.customInput.value;
+const prefilledOffset = prefilled.offsetInput.value;
+
+prefilled.customInput.value = "2026-01-15T10:00";
+prefilled.customInput.dispatch("change");
+const winterOffset = prefilled.offsetInput.value;
+
+prefilled.customInput.value = "2026-07-15T10:00";
+prefilled.customInput.dispatch("change");
+const summerOffset = prefilled.offsetInput.value;
+
+// Spring-forward nonexistent hour in America/New_York: 2026-03-08T02:30.
+prefilled.customInput.value = "2026-03-08T02:30";
+prefilled.customInput.dispatch("change");
+const gapOffset = prefilled.offsetInput.value;
+const gapJsIso = new Date(2026, 2, 8, 2, 30, 0, 0).toISOString();
+
+process.stdout.write(JSON.stringify({
+  tz: prefilled.tzInput.value,
+  unticked: {
+    whenHidden: unticked.whenWrap.hidden,
+    whenDisabled: unticked.whenSelect.disabled,
+    customHidden: unticked.customWrap.hidden,
+    customDisabled: unticked.customInput.disabled,
+    customRequired: unticked.customInput.required,
+    existingText: unticked.existingText.textContent,
+  },
+  prefilled: {
+    local: prefilledLocal,
+    offset: prefilledOffset,
+    customHidden: prefilled.customWrap.hidden,
+    customDisabled: prefilled.customInput.disabled,
+    customRequired: prefilled.customInput.required,
+  },
+  winterOffset,
+  summerOffset,
+  gapOffset,
+  gapJsIso,
+}));
+"""
+    ny_env = {**os.environ, "TZ": "America/New_York"}
+    ny_run = subprocess.run(
+        [node, "-e", harness, script_source],
+        env=ny_env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    ny = json.loads(ny_run.stdout)
+    assert ny["tz"] == "America/New_York"
+    assert ny["unticked"] == {
+        "whenHidden": True,
+        "whenDisabled": True,
+        "customHidden": True,
+        "customDisabled": True,
+        "customRequired": False,
+        "existingText": "2026-07-15 14:30",
+    }
+    assert ny["prefilled"] == {
+        "local": "2026-07-15T14:30",
+        "offset": "240",
+        "customHidden": False,
+        "customDisabled": False,
+        "customRequired": True,
+    }
+    assert ny["winterOffset"] == "300"
+    assert ny["summerOffset"] == "240"
+    # Nonexistent spring-forward hour (2026-03-08T02:30 NY) resolves to the exact JS Date instant (07:30Z).
+    assert ny["gapOffset"] == "300"
+    assert ny["gapJsIso"] == "2026-03-08T07:30:00.000Z"
+    resolved_gap = resolve_form_expiry(
+        enabled=True,
+        when=CUSTOM_EXPIRY_OPTION,
+        custom_local="2026-03-08T02:30",
+        tz_offset_minutes_behind_utc=ny["gapOffset"],
+        timezone_name=ny["tz"],
+        now=datetime(2026, 3, 7, 12, 0, tzinfo=timezone.utc),
+    )
+    assert resolved_gap == datetime(2026, 3, 8, 7, 30, tzinfo=timezone.utc)
+
+    # Also verify a positive half-hour offset zone (Asia/Kolkata, UTC+5:30 -> offset -330).
+    kolkata_run = subprocess.run(
+        [node, "-e", harness, script_source],
+        env={**os.environ, "TZ": "Asia/Kolkata"},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    kolkata = json.loads(kolkata_run.stdout)
+    assert kolkata["tz"] in {"Asia/Kolkata", "Asia/Calcutta"}
+    assert kolkata["prefilled"]["local"] == "2026-07-16T00:00"
+    assert kolkata["prefilled"]["offset"] == "-330"
+    assert kolkata["winterOffset"] == "-330"
+    assert kolkata["summerOffset"] == "-330"
+    resolved_kolkata = resolve_form_expiry(
+        enabled=True,
+        when=CUSTOM_EXPIRY_OPTION,
+        custom_local=kolkata["prefilled"]["local"],
+        tz_offset_minutes_behind_utc=kolkata["prefilled"]["offset"],
+        timezone_name=kolkata["tz"],
+        now=datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
+    )
+    assert resolved_kolkata == datetime(2026, 7, 15, 18, 30, tzinfo=timezone.utc)

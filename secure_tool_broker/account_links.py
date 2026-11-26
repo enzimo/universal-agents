@@ -58,6 +58,7 @@ from id_generation import new_id
 from secure_tool_broker.auth_pages import render_credential_input, render_session_countdown
 from secure_tool_broker.credential_catalog import collect_credential, load_catalog
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+from secure_tool_broker.credential_expiry import format_expiry_label, is_expired
 from secure_tool_broker.redaction import redact_text
 from secure_tools.auth_methods import sign_in_instead_text, tool_sign_in
 from secure_tools.chat_commands import link_command
@@ -240,16 +241,27 @@ def credential_choices(
     tool: ToolDefinitionV1,
     *,
     purpose: LinkPurpose = LinkPurpose.ACCOUNT,
+    now: datetime | None = None,
 ) -> list[dict[str, str]]:
-    """Stored credentials of the owner that have every field the tool uses."""
+    """Unexpired stored credentials of the owner that have every field the tool uses."""
 
     needed = required_fields(tool, purpose=purpose)
     catalog = load_catalog(scope=scope)
-    return [
-        {"credential_key": key, "display_name": credential.display_name, "purpose": credential.purpose}
-        for key, credential in sorted(catalog.credentials.items())
-        if needed <= set(credential.fields)
-    ]
+    choices: list[dict[str, str]] = []
+    for key, credential in sorted(catalog.credentials.items()):
+        if not (needed <= set(credential.fields)):
+            continue
+        if is_expired(credential.expires_at, now=now):
+            continue
+        entry: dict[str, str] = {
+            "credential_key": key,
+            "display_name": credential.display_name,
+            "purpose": credential.purpose,
+        }
+        if credential.expires_at is not None:
+            entry["expires_at"] = credential.expires_at
+        choices.append(entry)
+    return choices
 
 
 # -- "Used by": which agents use the linked account -------------------------------------
@@ -401,6 +413,14 @@ def _confirmation(text: str) -> str:
     )
 
 
+def _choice_option_label(item: Mapping[str, str]) -> str:
+    label = f"{item['display_name']} — {item['purpose']}"
+    expires_at = item.get("expires_at")
+    if expires_at:
+        return f"{label} (deletes {format_expiry_label(expires_at)})"
+    return label
+
+
 def _stored_credential_form(
     tool: ToolDefinitionV1,
     choices: list[dict[str, str]],
@@ -414,7 +434,7 @@ def _stored_credential_form(
         return ""
     options = "".join(
         f'<option value="{html.escape(item["credential_key"], quote=True)}">'
-        f"{html.escape(item['display_name'])} — {html.escape(item['purpose'])}</option>"
+        f"{html.escape(_choice_option_label(item))}</option>"
         for item in choices
     )
     gate = purpose is LinkPurpose.GATE

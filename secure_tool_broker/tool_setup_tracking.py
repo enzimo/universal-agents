@@ -102,6 +102,8 @@ def note_broker_result(gate: Any, validated: Any, context: ToolContext, result: 
             states.note_ready(gate.team_id, person_id, tool.tool_id, how=how, source=SOURCE_TOOL_CALL)
             return
         step = step_for_failure(tool.tool_id, code or "") if outcome == "needs_setup" else None
+        if gate_only and step == STEP_ACCOUNT_LINK:
+            step = STEP_GATE_LINK
         if step is not None:
             states.note_needs_setup(gate.team_id, person_id, tool.tool_id, step=step, source=SOURCE_TOOL_CALL)
 

@@ -40,6 +40,7 @@ from typing import Any
 
 from access_control.cli_binaries import ProgramRefused, checked_copy, workspaces_root
 from custom_messages.contracts.access_v2 import (
+    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
     REASON_ACCOUNT_LINK_MISSING,
     InjectionPlacement,
     LinkOwnerKind,
@@ -54,7 +55,9 @@ from custom_tools.code_sandbox import (
 from secure_tool_broker.cli_passthrough import CommandRefused, check_installed_command_line
 from secure_tool_broker.credential_catalog import resolve_secret_field
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+from secure_tool_broker.credential_diagnostics import CREDENTIAL_EXPIRED
 from secure_tool_broker.redaction import redact_text
+from secure_tools.chat_commands import link_command
 from secure_tools.providers import ToolContext, ToolResult, ValidatedAction
 
 logger = logging.getLogger(__name__)
@@ -99,7 +102,20 @@ def _credential_values(tool: Any, context: ToolContext) -> dict[str, str] | Tool
     values: dict[str, str] = {}
     for injection in injections:
         resolved = resolve_secret_field(link.credential_key, injection.field, scope=scope)
-        if isinstance(resolved, ToolResult) or not getattr(resolved, "value", ""):
+        if isinstance(resolved, ToolResult):
+            if str((resolved.content or {}).get("error_code") or "") == CREDENTIAL_EXPIRED:
+                return _refused(
+                    tool,
+                    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+                    f"The temporary credential linked to {tool.display_name} has expired. "
+                    f"Link a new credential with {link_command(tool.tool_id, link.owner_kind)}.",
+                )
+            return _refused(
+                tool,
+                REASON_CREDENTIAL_UNAVAILABLE,
+                f"The linked account for {tool.display_name} has no usable {injection.field}. Link it again.",
+            )
+        if not getattr(resolved, "value", ""):
             return _refused(
                 tool,
                 REASON_CREDENTIAL_UNAVAILABLE,

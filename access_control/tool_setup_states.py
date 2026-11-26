@@ -34,7 +34,11 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
-from custom_messages.contracts.access_v2 import ToolSetupState, ToolSetupStateV1
+from custom_messages.contracts.access_v2 import (
+    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+    ToolSetupState,
+    ToolSetupStateV1,
+)
 from secure_tools.auth_methods import tool_sign_in
 
 logger = logging.getLogger(__name__)
@@ -72,6 +76,7 @@ SETUP_FAILURE_CODES: Final[Mapping[str, str]] = {
     "google_token_rejected": STEP_SIGN_IN,
     "account_link_missing": STEP_ACCOUNT_LINK,
     "account_link_outdated": STEP_ACCOUNT_LINK,
+    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED: STEP_ACCOUNT_LINK,
     "gate_link_missing": STEP_GATE_LINK,
     "google_oauth_client_missing": STEP_TEAM_SIGN_IN_APP,
     "x_client_missing": STEP_TEAM_SIGN_IN_APP,

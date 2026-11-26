@@ -297,12 +297,22 @@ onboarding's server, titled **Choose what to import**, with these differences:
     authoritative.
   - When the credential key already exists in the owner's catalog, the expiry
     area states that setting a deletion time deletes the whole credential,
-    including earlier versions, at that time.
-  - The form posts to `#credential-form`; past times, times less than 5 minutes
-    away, invalid local times, and unsupported non-Sealbox write sources
-    re-render the form with a red `.status-error` (`role="alert"`) at the top
-    of the form (per **Errors and Results**), preserving non-secret inputs and
-    the expiry selection while clearing secret fields.
+    including earlier versions, at that time. When that existing entry already
+    has an active deletion time, the expiry area also names it (in the
+    browser's local time) and notes that saving with **Delete automatically**
+    unticked keeps the credential until it is deleted by hand.
+  - When the write source is not Sealbox, the checkbox and time controls are
+    omitted and replaced by one muted line explaining that automatic deletion
+    is only available for Sealbox credentials (hand-made submissions with an
+    expiry are still refused at the handler).
+  - The form posts to `#credential-form`; pre-claim validation errors (past
+    times, times less than 5 minutes away, invalid local times, and unsupported
+    non-Sealbox write sources) keep the form open and re-render it with a red
+    `.status-error` (`role="alert"`) at the top of the form (per **Errors and
+    Results**), preserving non-secret inputs and the expiry selection while
+    clearing secret fields. Once the form is claimed for storage, a storage
+    failure ends the page with a red `.status-error` and no form, telling the
+    person to ask the agent for a new form.
 - The broker's account link form states whose account it is, a **Used by**
   line naming the agents that may use the tool, where the credential goes and
   how it is sent. It then offers two parts, each a small form with its own

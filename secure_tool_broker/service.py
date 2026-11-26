@@ -76,9 +76,10 @@ from custom_messages.contracts.credentials_v1 import CREDENTIAL_DECLINED, CREDEN
 from secure_tool_broker.credential_collection_form import (
     ExpiryFormState,
     credential_collection_owner_scope,
-    credential_key_exists,
+    existing_credential_info,
     normalize_proposed_expiry,
     parse_credential_collection_submission,
+    render_credential_collection_failed_page,
     render_credential_collection_form,
 )
 from secure_tool_broker.credential_expiry import CredentialExpiryError
@@ -130,8 +131,11 @@ from secure_tool_broker.bitwarden_cli import (
     ensure_bitwarden_server_configured_from_env,
     set_bitwarden_server_url,
 )
-from secure_tool_broker.credential_catalog import collect_credential, delete_credential
-from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+from secure_tool_broker.credential_catalog import (
+    collect_credential,
+    delete_credential,
+    is_secret_credential_field,
+)
 from secure_tool_broker.credential_state import credential_owner_context
 from secure_tool_broker.credential_templates import save_approved_template_variant
 from secure_tool_broker.defaults import DEFAULT_BIND_HOST, DEFAULT_BIND_PORT
@@ -1565,7 +1569,7 @@ class SecureToolBrokerService:
         )
         for field_spec in request_payload["fields"]:
             if (
-                SecureToolBrokerService._credential_form_field_is_secret(field_spec)
+                is_secret_credential_field(field_spec)
                 and str(field_spec.get("value") or "").strip()
             ):
                 raise web.HTTPBadRequest(
@@ -1750,19 +1754,6 @@ class SecureToolBrokerService:
         )
 
     @staticmethod
-    def _credential_form_field_is_secret(spec: dict[str, Any]) -> bool:
-        kind = str(spec.get("kind") or "").strip().lower()
-        visibility = str(spec.get("visibility") or "").strip().lower()
-        return visibility == "secret" or kind in {
-            "password",
-            "token",
-            "api_key",
-            "secret",
-            "totp",
-            "credential_file",
-        }
-
-    @staticmethod
     def _render_credential_deletion_form(session: CredentialCollectionSession) -> str:
         request_payload = session.request_payload
         service_name = str(
@@ -1856,16 +1847,17 @@ class SecureToolBrokerService:
             team_id=session.tool_context.team_id,
             canonical_user_id=session.tool_context.canonical_user_id,
         )
+        existing = existing_credential_info(
+            str(request_payload.get("credential_key") or ""),
+            scope=scope,
+        )
         return render_credential_collection_form(
             request_payload=request_payload,
             session_expires_at=session.expires_at,
             field_specs=SecureToolBrokerService._credential_field_specs(request_payload),
-            is_secret_field=SecureToolBrokerService._credential_form_field_is_secret,
             signup_html=_render_manual_signup_action(request_payload, service_name=service_name),
-            key_exists=credential_key_exists(
-                str(request_payload.get("credential_key") or ""),
-                scope=scope,
-            ),
+            key_exists=existing.exists,
+            existing_expires_at=existing.expires_at,
             error_message=error_message,
             preserved_fields=preserved_fields,
             expiry_state=expiry_state,
@@ -1974,12 +1966,10 @@ class SecureToolBrokerService:
                 delete_credential,
                 session.request_payload,
                 context=session.tool_context,
-                scope=(
-                    CredentialOwnerScope.team(session.tool_context.team_id or "")
-                    if session.request_payload.get("owner_scope_kind") == "team"
-                    else CredentialOwnerScope.user(
-                        session.tool_context.canonical_user_id or ""
-                    )
+                scope=credential_collection_owner_scope(
+                    session.request_payload,
+                    team_id=session.tool_context.team_id,
+                    canonical_user_id=session.tool_context.canonical_user_id,
                 ),
                 on_result=lambda done: record_credential_form_result(session, done, stored_status="credential_deleted"),
                 log_ref=f"credential_deletion {session_id[:12]}",
@@ -2025,6 +2015,13 @@ class SecureToolBrokerService:
             max_file_bytes=self._credential_collection_max_file_bytes(),
         )
         if parsed.expiry_error is not None:
+            self._logger.warning(
+                "Credential collection form expiry refused. event=credential_collection_expiry_refused "
+                "error_code=%s credential_key=%s session_id_prefix=%s",
+                parsed.expiry_error_code,
+                session.request_payload.get("credential_key"),
+                session_id[:12],
+            )
             return web.Response(
                 text=self._render_credential_collection_form(
                     session,
@@ -2065,12 +2062,7 @@ class SecureToolBrokerService:
         if result.status != "success":
             details = redact_text(result.error or "Credential collection failed.")
             return web.Response(
-                text=self._render_credential_collection_form(
-                    session,
-                    error_message=details,
-                    preserved_fields=parsed.submitted_fields,
-                    expiry_state=parsed.expiry_state,
-                ),
+                text=render_credential_collection_failed_page(details),
                 content_type="text/html",
                 status=400,
             )

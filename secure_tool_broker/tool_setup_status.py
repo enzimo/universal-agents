@@ -38,6 +38,7 @@ from custom_messages.contracts.access_v2 import (
     ToolDefinitionV1,
     injections_match,
 )
+from secure_tool_broker.credential_catalog import linked_credential_expired
 from secure_tool_broker.credential_state import credential_owner_context
 from secure_tools.auth_methods import X_SIGN_IN_PROVIDER, ToolSignIn, tool_sign_in
 from secure_tools.providers import ToolContext
@@ -137,12 +138,14 @@ def _link_state(gate: Any, tool: ToolDefinitionV1, person_id: str) -> dict[str, 
         if LinkOwnerKind.TEAM in owners
         else None
     )
-    own_matches = own_link is not None and injections_match(own_link.injections, tool.credential_injections)
-    team_matches = team_link is not None and injections_match(team_link.injections, tool.credential_injections)
+    own_expired = own_link is not None and linked_credential_expired(own_link)
+    team_expired = team_link is not None and linked_credential_expired(team_link)
+    own_matches = own_link is not None and not own_expired and injections_match(own_link.injections, tool.credential_injections)
+    team_matches = team_link is not None and not team_expired and injections_match(team_link.injections, tool.credential_injections)
     state: dict[str, bool] = {"own": own_matches, "team": team_matches}
-    if own_link is not None and not own_matches:
+    if own_link is not None and not own_expired and not own_matches:
         state["own_outdated"] = True
-    if team_link is not None and not team_matches:
+    if team_link is not None and not team_expired and not team_matches:
         state["team_outdated"] = True
     return state
 
@@ -152,7 +155,7 @@ def _gate_link_state(gate: Any, tool: ToolDefinitionV1) -> dict[str, str]:
     if links is None:
         return {"state": MISSING}
     active = links.active_link(gate.team_id, tool.tool_id, LinkOwnerKind.TEAM, gate.team_id, purpose=LinkPurpose.GATE)
-    if active is None:
+    if active is None or linked_credential_expired(active):
         return {"state": MISSING}
     if not injections_match(active.injections, tool.gate_injections):
         return {"state": OUTDATED}

@@ -247,11 +247,14 @@ def _export_stored_values(owner: CredentialOwnerV1) -> list[StoredValueV1]:
 
 def _export_catalog(owner: CredentialOwnerV1) -> list[CatalogEntryV1]:
     from secure_tool_broker.credential_catalog import load_catalog
+    from secure_tool_broker.credential_expiry import is_expired
 
     scope = _catalog_scope(owner)
     catalog = load_catalog(scope=scope)
     entries = []
     for key, credential in sorted(catalog.credentials.items()):
+        if is_expired(credential.expires_at):
+            continue
         secret_values: dict[str, str] = {}
         for field_name, spec in credential.fields.items():
             if spec.is_secret() and _internal(spec):

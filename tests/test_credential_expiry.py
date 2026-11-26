@@ -13,14 +13,12 @@ from pydantic import ValidationError
 
 from assistant_gateway.application.credential_workflow import GatewayCredentialWorkflow
 from assistant_gateway.application.secure_results import SendOutcome
-from custom_messages.contracts.access_v2 import REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
 from custom_messages.contracts.credentials_v1 import (
-    CREDENTIAL_DELETION_FLOWS,
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
 )
 from custom_messages.wire import models as wire_models
-from secure_tool_broker import credential_catalog, credential_diagnostics
+from secure_tool_broker import credential_catalog
 from secure_tool_broker.credential_catalog import (
     CatalogCredential,
     CredentialOwnerScope,
@@ -30,7 +28,6 @@ from secure_tool_broker.credential_catalog import (
     register_existing_source,
 )
 from secure_tool_broker.credential_expiry import (
-    ACCOUNT_LINK_CREDENTIAL_EXPIRED,
     CREDENTIAL_EXPIRED,
     CREDENTIAL_EXPIRY_FORM_ONLY,
     CREDENTIAL_EXPIRY_INVALID,
@@ -763,17 +760,7 @@ def test_c10_register_existing_source_refuses_temporary_key_active_or_expired(
     assert load_catalog(scope=OWNER_SCOPE).credentials["expired_temp"].expires_at == format_utc_timestamp(past_expiry)
 
 
-# --- C12 & C13: single-definition constants, OverflowError, whole seconds -----
-
-
-def test_c12_shared_codes_and_deletion_flows_have_single_definitions() -> None:
-    from secure_tool_broker import service as broker_service
-
-    assert ACCOUNT_LINK_CREDENTIAL_EXPIRED == REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
-    assert credential_diagnostics.ACCOUNT_LINK_CREDENTIAL_EXPIRED == REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
-    assert CREDENTIAL_EXPIRED == credential_diagnostics.CREDENTIAL_EXPIRED
-    assert broker_service.CREDENTIAL_DELETION_FLOWS is CREDENTIAL_DELETION_FLOWS
-    assert "delete" not in CREDENTIAL_DELETION_FLOWS
+# --- C13: OverflowError handling and whole-second timestamps ------------------
 
 
 def test_c13_overflow_dates_raise_expiry_error_and_stored_times_drop_microseconds() -> None:

@@ -343,12 +343,18 @@ BROKER_AUTH_THEME = """
     margin: 0;
     font-size: 0.875rem;
   }
+  .expiry-existing-active,
   .expiry-existing-warning {
     margin: 0;
     padding: 0.55rem 0.7rem;
     border-left: 0.25rem solid var(--accent-high);
     background: var(--accent-low);
     color: var(--text-strong);
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+  .expiry-unsupported-note {
+    margin: 0;
     font-size: 0.85rem;
     line-height: 1.4;
   }
