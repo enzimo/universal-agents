@@ -6247,13 +6247,14 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   timezone rules. Editable YAML errors show their location without repeating
   private input. The `skills` section (`team_transfer.skills`) restricts unit
   names to a single folder name and file paths to relative paths inside their
-  skill, verifies reviewed installs in memory against their attested tree digest
-  without writing or deleting on disk
+  skill, and verifies reviewed installs in memory against their attested tree
+  digest without writing or deleting on disk
   (`custom_agents.skill_repository.build_skill_tree_manifest_from_files`,
-  `custom_agents.skill_installation.verify_managed_skill_attestation_digest`),
-  and stages and checks each skill in a sibling temporary entry before swapping
-  it into place during apply. These checks run before the unfinished-import
-  marker is written.
+  `custom_agents.skill_installation.verify_managed_skill_attestation_digest`).
+  These checks run before the unfinished-import marker is written. During apply,
+  after the marker is written, each skill is staged and checked in a sibling
+  temporary entry beside its destination and swapped in only when complete; a
+  failure restores the previous folder and attestation.
 - **Credentials stay with their owners.** A passphrase-derived key
   authenticates the manifest and encrypts secrets. Operator secrets from
   `team.env` travel encrypted in the file. The other sections are plain,
