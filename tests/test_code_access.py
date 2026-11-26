@@ -10,8 +10,10 @@ the next command.
 from __future__ import annotations
 
 import contextvars
-
 import json
+import logging
+import os
+import shutil
 import socket
 import threading
 from pathlib import Path
@@ -20,7 +22,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from access_control.folders import DataFolder
+from access_control.folders import DataFolder, FolderIdError, FolderRoots
 from access_control.standard_grants import INTERNET_SET, INTERNET_TOOL_ID
 from custom_agents import access_request_runtime, access_runtime, folder_access
 from custom_agents.code_access import (
@@ -411,3 +413,204 @@ def test_what_another_person_shared_reaches_the_agent_through_file_tools_and_the
     assert file_read(path=str(world.layout.person_dir("alice") / "diary.md"))["reason_code"] == "access_denied"
     planned = code_access(world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID)
     assert reports in planned.read_only and reports not in planned.read_write
+
+
+def test_folder_roots_root_and_parts_anchors_workspaces_and_data_folders(tmp_path: Path) -> None:
+    workspaces = tmp_path / "workspaces"
+    workspaces.mkdir()
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    roots = FolderRoots(workspaces, (DataFolder("reports", reports),))
+
+    assert roots.root_and_parts("team") == (workspaces.resolve(), ("team",))
+    assert roots.root_and_parts("team/project/sub") == (workspaces.resolve(), ("team", "project", "sub"))
+    assert roots.root_and_parts("users/alice/shared") == (workspaces.resolve(), ("users", "alice", "shared"))
+    assert roots.root_and_parts("data/reports") == (reports.resolve(), ())
+    assert roots.root_and_parts("data/reports/2026/q1") == (reports.resolve(), ("2026", "q1"))
+    with pytest.raises(FolderIdError):
+        roots.root_and_parts("data/missing/sub")
+
+
+def test_symlinked_granted_folder_is_not_mounted_and_cannot_escape_sandbox(world, tmp_path: Path, caplog) -> None:
+    """A1: a worker with a write grant on team/project swaps it for a link to / from inside the sandbox."""
+
+    project = world.layout.team_dir / "project"
+    project.mkdir(parents=True)
+    _give_worker(world, TargetRefV1(kind=TargetKind.FOLDER, id="team/project"), AccessLevel.WRITE)
+    scope = current_workspace_scope(world.agent)
+
+    if landlock_abi() >= 1:
+        # Build "/" at run time so command-text path checks do not intercept the probe.
+        swapped = _run(
+            world,
+            f'python3 -c "import os; p = {str(project)!r}; os.rmdir(p); os.symlink(chr(47), p)"',
+        )
+        assert swapped["status"] == "success", swapped
+    else:
+        project.rmdir()
+        os.symlink("/", project)
+
+    with caplog.at_level(logging.WARNING, logger="custom_agents.code_access"):
+        planned = code_access(world.agent, scope, tool_id=CODE_SHELL_TOOL_ID)
+
+    mounted = planned.read_write + planned.read_only
+    assert Path("/") not in mounted
+    assert project not in mounted
+    assert all(Path(os.path.realpath(path)) != Path("/") for path in mounted)
+    assert any("team/project" in note and "symbolic link" in note for note in planned.notes)
+    assert "event=code_access_folder_link_skipped" in caplog.text
+    assert "folder_id=team/project" in caplog.text
+
+    if landlock_abi() >= 1:
+        secret = world.layout.root / "team.env"
+        outside_write = tmp_path / "escaped.txt"
+        secret_expr = f"'{str(secret)[:8]}' + '{str(secret)[8:]}'"
+        outside_expr = f"'{str(outside_write)[:8]}' + '{str(outside_write)[8:]}'"
+        read_res = _run(world, f'python3 -c "print(open({secret_expr}).read())"')
+        write_res = _run(world, f'python3 -c "open({outside_expr}, \'w\').write(\'pwn\')"')
+
+        assert read_res["status"] == "error"
+        assert "runtime-secret" not in read_res["output"]
+        assert "team/project" in read_res.get("sandbox_note", "")
+        assert "symbolic link" in read_res.get("sandbox_note", "")
+        assert write_res["status"] == "error"
+        assert not outside_write.exists()
+
+
+@pytest.mark.parametrize("target_kind", ["control", "instance_root"])
+def test_person_share_swapped_for_link_to_control_or_instance_root_is_not_mounted(
+    world, target_kind: str, caplog
+) -> None:
+    """A2: a person-to-person share swapped for a link to control/ or instance root is not mounted."""
+
+    from access_control.entities import PersonPrincipal
+    from custom_messages.contracts.access_v2 import GrantV1, SubjectKind, SubjectRefV1
+    from runtime_settings.instance_layout import person_folder_name
+
+    world.layout.soul_path.write_text("soul-secret\n", encoding="utf-8")
+    alice = PersonPrincipal("alice", TEAM, ("member",))
+    alice_dir = world.layout.person_dir("alice")
+    alice_dir.mkdir(parents=True, exist_ok=True)
+    shared = alice_dir / "shared"
+    shared_id = f"users/{person_folder_name('alice')}/shared"
+    target_path = world.layout.control_dir if target_kind == "control" else world.layout.root
+    os.symlink(target_path, shared)
+
+    world.service.grant_by_person(
+        alice,
+        GrantV1(
+            grant_id="new",
+            team_id=TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id=shared_id),
+            level=AccessLevel.READ,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id="alice"),
+            created_at_utc=world.service.clock(),
+        ),
+    )
+    folder_access.forget_kept_answers()
+
+    with caplog.at_level(logging.WARNING, logger="custom_agents.code_access"):
+        planned = code_access(world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID)
+
+    mounted = planned.read_write + planned.read_only
+    assert shared not in mounted
+    assert target_path not in mounted
+    assert any(shared_id in note and "symbolic link" in note for note in planned.notes)
+    assert "event=code_access_folder_link_skipped" in caplog.text
+    assert f"folder_id={shared_id}" in caplog.text
+
+    if landlock_abi() >= 1:
+        secret = world.layout.soul_path if target_kind == "control" else world.layout.root / "team.env"
+        secret_expr = f"'{str(secret)[:8]}' + '{str(secret)[8:]}'"
+        res = _run(world, f'python3 -c "print(open({secret_expr}).read())"')
+        assert res["status"] == "error"
+        assert "soul-secret" not in res["output"]
+        assert "runtime-secret" not in res["output"]
+
+
+def test_file_block_inside_folder_keeps_folder_out_of_the_sandbox(world) -> None:
+    """A4 (Finding 12): a FILE-kind block inside team/ keeps team/ out of the sandbox."""
+
+    secret_file = world.layout.team_dir / "secret.txt"
+    secret_file.write_text("top-secret-file\n", encoding="utf-8")
+    scope = current_workspace_scope(world.agent)
+    assert world.layout.team_dir in code_access(world.agent, scope, tool_id=CODE_SHELL_TOOL_ID).read_write
+
+    _give_worker(world, TargetRefV1(kind=TargetKind.FILE, id="team/secret.txt"), AccessLevel.FULL, kind=GrantKind.BLOCK)
+    planned = code_access(world.agent, scope, tool_id=CODE_SHELL_TOOL_ID)
+
+    assert world.layout.team_dir not in planned.read_write + planned.read_only
+    assert world.layout.agents_dir in planned.read_write
+    assert any("team/secret.txt" in note for note in planned.notes)
+    if landlock_abi() >= 1:
+        result = _run(world, f"cat {secret_file}")
+        assert result["status"] == "error" and "top-secret-file" not in result["output"]
+        assert "team/secret.txt" in result.get("sandbox_note", "")
+
+
+def test_folder_grant_naming_a_regular_file_is_skipped_with_clear_note(world, tmp_path: Path) -> None:
+    """C02(a): a FOLDER grant on a regular file is skipped with a plain non-folder note."""
+
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    summary = reports / "summary.txt"
+    summary.write_text("summary\n", encoding="utf-8")
+    folders = (DataFolder("reports", reports),)
+    _give_worker(world, TargetRefV1(kind=TargetKind.FOLDER, id="data/reports/summary.txt"), AccessLevel.READ)
+
+    planned = code_access(world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID, data_folders=folders)
+
+    assert summary not in planned.read_write + planned.read_only
+    assert any(
+        "data/reports/summary.txt" in note and "not a folder" in note and "file tools still reach it" in note
+        for note in planned.notes
+    )
+    assert all("symbolic link" not in note for note in planned.notes)
+
+
+def test_file_block_with_same_id_as_candidate_folder_keeps_folder_out(world, tmp_path: Path) -> None:
+    """C02(b): a FILE block whose id equals a candidate folder id still keeps that folder out."""
+
+    reports = tmp_path / "reports"
+    archive = reports / "archive"
+    archive.mkdir(parents=True)
+    folders = (DataFolder("reports", reports),)
+    _give_worker(world, TargetRefV1(kind=TargetKind.FOLDER, id="data/reports/archive"), AccessLevel.READ)
+    _give_worker(
+        world, TargetRefV1(kind=TargetKind.FILE, id="data/reports/archive"), AccessLevel.FULL, kind=GrantKind.BLOCK
+    )
+
+    planned = code_access(world.agent, current_workspace_scope(world.agent), tool_id=CODE_SHELL_TOOL_ID, data_folders=folders)
+
+    assert archive not in planned.read_write + planned.read_only
+    assert any("data/reports/archive" in note and "blocked" in note for note in planned.notes)
+
+
+def test_without_authorization_skips_symlinked_workspace_root_and_canonicalizes_data_folders(
+    world, tmp_path: Path, caplog
+) -> None:
+    """C01 / Unit 2: authorization-off mode still rejects symlinked workspace roots and returns canonical paths."""
+
+    world.agent.authorization_config = {"enabled": False}
+    team_dir = world.layout.team_dir
+    shutil.rmtree(team_dir)
+    os.symlink("/", team_dir)
+    real_reports = tmp_path / "real_reports"
+    real_reports.mkdir()
+    alias_reports = tmp_path / "alias_reports"
+    os.symlink(real_reports, alias_reports)
+
+    with caplog.at_level(logging.WARNING, logger="custom_agents.code_access"):
+        planned = code_access(
+            world.agent,
+            current_workspace_scope(world.agent),
+            tool_id=CODE_SHELL_TOOL_ID,
+            data_folders=(DataFolder("reports", alias_reports, writable=False),),
+        )
+
+    assert team_dir not in planned.read_write
+    assert Path("/") not in planned.read_write
+    assert planned.read_only == (real_reports.resolve(),)
+    assert any("team/" in note and "symbolic link" in note for note in planned.notes)
+    assert "event=code_access_folder_link_skipped" in caplog.text
