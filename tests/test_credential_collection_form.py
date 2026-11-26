@@ -1072,3 +1072,93 @@ async def test_f17_form_shows_whole_credential_warning_when_catalog_read_fails(
         page = await resp.text()
         assert 'class="expiry-existing-warning"' in page
         assert "including earlier versions, is deleted at that time." in page
+
+
+@pytest.mark.asyncio
+async def test_c29_failed_dropped_sealbox_delete_shows_red_warning_and_queues_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C29: when deleting a dropped Sealbox record fails after commit, report it, show a red alert, and queue janitor retry."""
+
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        resolve_catalog_db_path,
+    )
+
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_kwargs: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "run_sealbox",
+        lambda args, **_kwargs: subprocess.CompletedProcess(
+            args=["sealbox-cli", *args], returncode=0, stdout='{"key":"k","version":1}', stderr=""
+        ),
+    )
+
+    # Seed lasting credential on item_id "old-item".
+    seeded = collect_credential(
+        {
+            **_collection_request(credential_key="drop_fail_key"),
+            "item_id": "old-item",
+        },
+        {"username": "alice", "api_token": "OLD-SECRET"},
+        scope=OWNER_SCOPE,
+        allow_expiry_change=True,
+    )
+    assert seeded.status == "success"
+
+    # Fail deletion of the dropped Sealbox record when saving onto "new-item".
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda **_kwargs: credential_catalog.ToolResult(status="error", error="sealbox timeout"),
+    )
+
+    service = SecureToolBrokerService(
+        token=BROKER_ROOT,
+        access_gate=open_gate(),
+        web_chat_origin=WEB_CHAT_ORIGIN,
+    )
+    async with TestClient(TestServer(service.build_app())) as client:
+        created = await _create_session(
+            client,
+            {
+                **_collection_request(credential_key="drop_fail_key"),
+                "item_id": "new-item",
+            },
+        )
+        resp = await client.post(
+            _form_path(created),
+            data={
+                "field__username": "alice",
+                "field__api_token": "NEW-TEMP-SECRET",
+                "delete_automatically": "1",
+                "expiry_when": "1h",
+            },
+        )
+        assert resp.status == 200
+        page = await resp.text()
+        assert 'class="status status-error"' in page
+        assert "old-item:api_token" in page
+        assert "automatic cleanup" in page
+        # Do not auto-collapse inline Web Chat cards while the red warning must be read.
+        assert _card_outcome(page) is None
+
+        # The session result exposes dropped_records_not_deleted to callers.
+        status_resp = await client.get(
+            f"/v1/credential-collection/sessions/{created['session_id']}",
+            headers=gateway_headers(),
+        )
+        assert status_resp.status == 200
+        status_payload = await status_resp.json()
+        result_content = status_payload["result"]["content"]
+        assert result_content["dropped_records_not_deleted"] == ["old-item:api_token"]
+        assert result_content["dropped_cleanup_retry_scheduled"] is True
+
+    pending = CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(
+        scope=OWNER_SCOPE
+    )
+    assert [entry.item_key for entry in pending] == ["old-item:api_token"]

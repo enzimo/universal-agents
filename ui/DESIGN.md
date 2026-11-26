@@ -312,7 +312,11 @@ onboarding's server, titled **Choose what to import**, with these differences:
     Results**), preserving non-secret inputs and the expiry selection while
     clearing secret fields. Once the form is claimed for storage, a storage
     failure ends the page with a red `.status-error` and no form, telling the
-    person to ask the agent for a new form.
+    person to ask the agent for a new form. If the new credential is stored
+    over an existing key whose replaced Sealbox records fail to delete, the
+    result page shows a red `.status-error` naming those record keys and notes
+    that automatic cleanup is queued on the maintenance janitor (omitting the
+    auto-collapse card outcome so inline cards stay readable).
 - The broker's account link form states whose account it is, a **Used by**
   line naming the agents that may use the tool, where the credential goes and
   how it is sent. It then offers two parts, each a small form with its own

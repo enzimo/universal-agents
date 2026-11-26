@@ -1456,3 +1456,104 @@ def test_f15_retry_reason_states_next_start_retries_automatically() -> None:
     assert "import it again" not in EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON.lower()
     assert "next start" in EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON.lower()
     assert "retries automatically" in EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON.lower()
+
+
+def test_c29_import_failed_dropped_sealbox_delete_is_retryable_and_cleans_up_on_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C29: when replacing an expired destination row fails to delete its dropped Sealbox record, import is retryable and cleans up on retry."""
+
+    from datetime import timedelta
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        collect_credential,
+        load_catalog,
+    )
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+    from secure_tool_broker.credential_transfer import (
+        DROPPED_CLEANUP_RETRY_REASON,
+        export_credentials,
+        import_credentials,
+    )
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    past_expiry = (now - timedelta(minutes=20)).isoformat().replace("+00:00", "Z")
+    future_expiry = (now + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "src", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "retry_drop_key",
+            "display_name": "Retry Drop",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "fresh-imported-secret"},
+        scope=scope,
+        expires_at=future_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success"
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+
+    # Destination has an expired row referencing old_item.
+    _use_store(tmp_path / "dst", monkeypatch)
+    dst_sealbox = _FakeSealboxCli()
+    _use_sealbox(dst_sealbox, monkeypatch)
+    old_item = "old-dropped-import:api_key"
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        "retry_drop_key",
+        CatalogCredential(
+            display_name="Old Expired",
+            purpose="test",
+            expires_at=past_expiry,
+            fields={
+                "api_key": CatalogCredentialField(
+                    kind="api_key",
+                    visibility="secret",
+                    value_source="user_input",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id=old_item, item_name=old_item, field_ref="value")
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+
+    deleted_items: list[str] = []
+    should_fail = True
+
+    def fake_delete(*, item_key: str, item_kind: str, env: object = None) -> object:
+        if should_fail:
+            return credential_catalog.ToolResult(status="error", error="sealbox timeout")
+        deleted_items.append(item_key)
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    # Attempt 1: catalog saves new entry, dropped delete fails -> retryable outcome + queue row.
+    [first] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert first.imported is False
+    assert first.retryable is True
+    assert first.reason == DROPPED_CLEANUP_RETRY_REASON
+    assert load_catalog(scope=scope).credentials["retry_drop_key"].expires_at == future_expiry
+    pending = CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=scope)
+    assert [entry.item_key for entry in pending] == [old_item]
+
+    # Attempt 2: Sealbox recovers -> retry finishes pending dropped deletion and reports imported=True.
+    should_fail = False
+    [second] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert second.imported is True
+    assert deleted_items == [old_item]
+    assert CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=scope) == []

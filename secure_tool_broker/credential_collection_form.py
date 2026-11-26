@@ -12,13 +12,15 @@ import html
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from aiohttp import web
 
 from secure_tool_broker.auth_pages import (
+    CARD_OUTCOME_FINISHED,
     SECRET_INPUT_TOGGLE_SCRIPT,
     render_broker_auth_page,
+    render_close_page_button,
     render_credential_input,
     render_markdown_text,
     render_session_countdown,
@@ -401,6 +403,70 @@ def render_credential_collection_failed_page(details: str, *, partial_write: boo
     return render_broker_auth_page("Credential Submission Failed", body)
 
 
+def render_credential_collection_success_page(
+    *,
+    status: str,
+    deletion: bool,
+    dropped_records_not_deleted: Sequence[str] = (),
+) -> str:
+    """Render the completion page after a credential form stores or deletes a credential.
+
+    When older Sealbox records dropped by an overwrite could not be deleted yet,
+    show a red ``.status-error`` warning and omit ``CARD_OUTCOME_FINISHED`` so
+    Web Chat cards stay open and readable instead of collapsing to a quiet pill.
+    """
+
+    if deletion:
+        body = (
+            '<section class="content-panel">'
+            '<p class="eyebrow">Secure Credential Deletion</p>'
+            "<h1>Credential deletion complete.</h1>"
+            f'<p class="lede">Status: <code>{html.escape(status)}</code>. '
+            "You can close this browser tab.</p>"
+            f"{render_close_page_button()}"
+            "</section>"
+        )
+        return render_broker_auth_page(
+            "Credential Deletion Complete", body, card_outcome=CARD_OUTCOME_FINISHED
+        )
+
+    undeleted = [str(key).strip() for key in dropped_records_not_deleted if str(key).strip()]
+    if undeleted:
+        rendered_keys = ", ".join(f"<code>{html.escape(key)}</code>" for key in undeleted)
+        warning_html = (
+            '<div class="status status-error" role="alert">'
+            "<strong>Older credential records could not be deleted yet.</strong> "
+            "Your new credential was stored, and the broker queued the replaced Sealbox record(s) "
+            f"for automatic cleanup on the next maintenance run: {rendered_keys}."
+            "</div>"
+        )
+        body = (
+            '<section class="content-panel">'
+            '<p class="eyebrow">Secure Credential Collection</p>'
+            "<h1>Credential stored with cleanup pending.</h1>"
+            f"{warning_html}"
+            f'<p class="lede">Status: <code>{html.escape(status)}</code>.</p>'
+            f"{render_close_page_button()}"
+            "</section>"
+        )
+        return render_broker_auth_page(
+            "Credential Stored With Cleanup Pending", body, card_outcome=None
+        )
+
+    body = (
+        '<section class="content-panel">'
+        '<p class="eyebrow">Secure Credential Collection</p>'
+        "<h1>Credential submission complete.</h1>"
+        f'<p class="lede">Status: <code>{html.escape(status)}</code>. '
+        "You can close this browser tab.</p>"
+        f"{render_close_page_button()}"
+        "</section>"
+    )
+    return render_broker_auth_page(
+        "Credential Submission Complete", body, card_outcome=CARD_OUTCOME_FINISHED
+    )
+
+
 def render_credential_collection_form(
     *,
     request_payload: Mapping[str, Any],
@@ -657,4 +723,5 @@ __all__ = [
     "parse_credential_collection_submission",
     "render_credential_collection_failed_page",
     "render_credential_collection_form",
+    "render_credential_collection_success_page",
 ]

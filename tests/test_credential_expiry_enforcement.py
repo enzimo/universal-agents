@@ -1257,3 +1257,116 @@ def test_f5_f6_missing_catalog_row_counts_as_missing_link_and_allows_team_fallba
     assert refused.allowed is False
     assert refused.reason_code == REASON_ACCOUNT_LINK_MISSING
     assert f"/link {demo_tool.tool_id}" in refused.next_step
+
+
+def test_c28_register_existing_source_deletes_dropped_sealbox_records_and_refuses_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C28 + C29: register_existing_source deletes dropped Sealbox records, refuses shared drops, and blocks pending-delete reuse."""
+
+    from secure_tool_broker.credential_catalog import register_existing_source
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        resolve_catalog_db_path,
+    )
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_DROPPED_CLEANUP_PENDING,
+        CREDENTIAL_EXPIRY_SHARED_RECORD,
+    )
+
+    monkeypatch.setenv("C28_ENV_SECRET", "env-token-value")
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    deleted_items: list[tuple[str, str]] = []
+    fail_delete_for: set[str] = set()
+
+    def fake_delete(*, item_key: str, item_kind: str, env: Any = None) -> Any:
+        if item_key in fail_delete_for:
+            return credential_catalog.ToolResult(status="error", error="sealbox timeout")
+        deleted_items.append((item_key, item_kind))
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    # 1. Overwriting a lasting Sealbox key with an env-var source deletes the dropped Sealbox record R1.
+    _save_temp_credential("svc", scope=USER_SCOPE, expires_at=None)
+    r1_key = "team-nats-agents:default:svc:api_token"
+    res = register_existing_source(
+        {
+            "credential_key": "svc",
+            "field_name": "api_token",
+            "env_var": "C28_ENV_SECRET",
+        },
+        scope=USER_SCOPE,
+    )
+    assert res.status == "success"
+    assert "dropped_records_not_deleted" not in (res.content or {})
+    assert deleted_items == [(r1_key, "secret")]
+    assert CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=USER_SCOPE) == []
+
+    # 2. If another catalog entry still references the dropped record, register_existing_source refuses before saving.
+    deleted_items.clear()
+    _save_temp_credential("shared_a", scope=USER_SCOPE, expires_at=None)
+    shared_r2 = "team-nats-agents:default:shared_a:api_token"
+    cred_b = CatalogCredential(
+        display_name="shared_b",
+        purpose="test",
+        fields={
+            "api_token": CatalogCredentialField(
+                kind="token",
+                visibility="secret",
+                value_source="existing_source",
+                resolution_order=[
+                    CatalogSourceRef(source="sealbox", item_id=shared_r2, item_name=shared_r2, field_ref="value")
+                ],
+            )
+        },
+    )
+    credential_catalog._save_catalog_credential("shared_b", cred_b, scope=USER_SCOPE)
+    refused = register_existing_source(
+        {
+            "credential_key": "shared_a",
+            "field_name": "api_token",
+            "env_var": "C28_ENV_SECRET",
+        },
+        scope=USER_SCOPE,
+    )
+    assert refused.status == "error"
+    assert (refused.content or {}).get("error_code") == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert (refused.content or {}).get("conflicting_credential_key") == "shared_b"
+    assert deleted_items == []
+
+    # 3. If deleting the dropped record fails, the failure is reported, queued for janitor retry,
+    #    and another key cannot adopt the pending-delete Sealbox record.
+    _save_temp_credential("fail_drop_svc", scope=USER_SCOPE, expires_at=None)
+    r3_key = "team-nats-agents:default:fail_drop_svc:api_token"
+    fail_delete_for.add(r3_key)
+    partial = register_existing_source(
+        {
+            "credential_key": "fail_drop_svc",
+            "field_name": "api_token",
+            "env_var": "C28_ENV_SECRET",
+        },
+        scope=USER_SCOPE,
+    )
+    assert partial.status == "success"
+    assert (partial.content or {}).get("dropped_records_not_deleted") == [r3_key]
+    assert (partial.content or {}).get("dropped_cleanup_retry_scheduled") is True
+    pending = CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=USER_SCOPE)
+    assert [entry.item_key for entry in pending] == [r3_key]
+
+    adopt_refused = register_existing_source(
+        {
+            "credential_key": "svc_alias",
+            "field_name": "api_token",
+            "source": "sealbox",
+            "item_id": r3_key,
+            "field_ref": "value",
+        },
+        scope=USER_SCOPE,
+    )
+    assert adopt_refused.status == "error"
+    assert (adopt_refused.content or {}).get("error_code") == CREDENTIAL_DROPPED_CLEANUP_PENDING

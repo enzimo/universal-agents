@@ -54,6 +54,10 @@ EXPIRED_BEFORE_IMPORT_REASON = "expired before import"
 EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON = (
     "expired before import; its account link could not be removed yet (the next start retries automatically)"
 )
+DROPPED_CLEANUP_RETRY_REASON = (
+    "stored credential, but older Sealbox record(s) could not be deleted yet "
+    "(retry import or wait for janitor cleanup)"
+)
 # Sources whose values live inside this instance; others are external stores.
 _INTERNAL_SOURCES = frozenset({"sealbox"})
 # Password-manager sessions in an owner's private folder (credential_state.credential_owner_environment).
@@ -404,6 +408,18 @@ def _export_owner_files(owner: CredentialOwnerV1) -> list[OwnerFileV1]:
 class _ExpiredBeforeImport(Exception):
     """Internal signal when an imported temporary credential expired before or during import."""
 
+    def __init__(self, expires_at: str) -> None:
+        super().__init__("expired before import")
+        self.expires_at = expires_at
+
+
+class _DroppedSealboxDeleteFailed(RuntimeError):
+    """Raised when a catalog import saved the new row but could not delete replaced Sealbox record(s)."""
+
+    def __init__(self, failed_keys: list[str]) -> None:
+        super().__init__(f"failed to delete dropped Sealbox record(s): {', '.join(failed_keys)}")
+        self.failed_keys = tuple(failed_keys)
+
 
 def import_credentials(
     records: list[dict[str, Any]],
@@ -444,7 +460,7 @@ def _revoke_expired_import_links(
     owner: CredentialOwnerV1,
     credential_key: str,
     *,
-    expires_at: str | None = None,
+    expires_at: str,
     now: datetime,
 ) -> int:
     if access_gate is None:
@@ -468,7 +484,7 @@ def _expired_import_outcome(
     *,
     access_gate: Any,
     now: datetime,
-    expires_at: str | None = None,
+    expires_at: str,
 ) -> CredentialOutcomeV1:
     link_failures = _revoke_expired_import_links(
         access_gate,
@@ -508,11 +524,39 @@ def _import_record(
         return CredentialOutcomeV1(key=key, owner=owner, imported=False, reason="it belongs to another team")
     try:
         if isinstance(record, (CatalogEntryV1, ExpiredCatalogEntryV1)):
-            from secure_tool_broker.credential_catalog import credential_key_lock
+            from secure_tool_broker.credential_catalog import (
+                credential_key_lock,
+                retry_pending_dropped_sealbox_deletes,
+            )
+            from secure_tool_broker.credential_catalog_store import (
+                CredentialCatalogStore,
+                resolve_catalog_db_path,
+            )
 
             scope = _catalog_scope(owner)
             with credential_key_lock(scope, record.credential_key):
                 if _already_stored(record, now=moment):
+                    if isinstance(record, CatalogEntryV1):
+                        db_path = resolve_catalog_db_path()
+                        if db_path.is_file() and CredentialCatalogStore(
+                            db_path
+                        ).list_pending_dropped_sealbox_deletes(
+                            scope=scope,
+                            credential_key=record.credential_key,
+                        ):
+                            retry_report = retry_pending_dropped_sealbox_deletes(
+                                scope=scope,
+                                credential_key=record.credential_key,
+                            )
+                            if retry_report.failed > 0:
+                                return CredentialOutcomeV1(
+                                    key=key,
+                                    owner=owner,
+                                    imported=False,
+                                    reason=DROPPED_CLEANUP_RETRY_REASON,
+                                    retryable=True,
+                                )
+                            return CredentialOutcomeV1(key=key, owner=owner, imported=True)
                     return CredentialOutcomeV1(
                         key=key,
                         owner=owner,
@@ -540,7 +584,25 @@ def _import_record(
                         now=moment,
                         expires_at=str(raw_expires),
                     )
-                _import_catalog_entry(record, now=now)
+                try:
+                    _import_catalog_entry(record, now=now)
+                except _ExpiredBeforeImport as exc:
+                    return _expired_import_outcome(
+                        key,
+                        owner,
+                        record.credential_key,
+                        access_gate=access_gate,
+                        now=datetime.now(timezone.utc) if now is None else moment,
+                        expires_at=exc.expires_at,
+                    )
+                except _DroppedSealboxDeleteFailed:
+                    return CredentialOutcomeV1(
+                        key=key,
+                        owner=owner,
+                        imported=False,
+                        reason=DROPPED_CLEANUP_RETRY_REASON,
+                        retryable=True,
+                    )
         else:
             if _already_stored(record, now=moment):
                 return CredentialOutcomeV1(
@@ -550,16 +612,6 @@ def _import_record(
                     reason="already stored in this instance; kept the current credential",
                 )
             _IMPORTERS[record.kind](record)
-    except _ExpiredBeforeImport:
-        raw_expires = record.credential.get("expires_at") if isinstance(record, CatalogEntryV1) else None
-        return _expired_import_outcome(
-            key,
-            owner,
-            record.credential_key,
-            access_gate=access_gate,
-            now=datetime.now(timezone.utc) if now is None else moment,
-            expires_at=str(raw_expires) if raw_expires is not None else None,
-        )
     except Exception as exc:  # each store reports in its own way; no value is in these messages
         logger.error(
             "A transferred credential could not be stored. event=credentials_transfer_record_failed key=%s error=%s",
@@ -660,12 +712,11 @@ def _import_model_key(record: ModelKeyV1) -> None:
 def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None) -> None:
     from secure_tool_broker.credential_catalog import (
         CatalogCredential,
-        _SECRET_CACHE,
         _credential_sealbox_record_keys,
-        _delete_dropped_sealbox_records,
         _find_shared_sealbox_record,
         _normalize_field_specs,
-        _save_catalog_credential,
+        _pending_dropped_sealbox_conflict,
+        _save_credential_and_cleanup_dropped,
         _scope_catalog_lock,
         load_catalog,
         write_credential_to_source,
@@ -679,13 +730,18 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
     if original.expires_at is not None:
         ttl_seconds = remaining_ttl_seconds(original.expires_at, now=now)
         if ttl_seconds <= 0:
-            raise _ExpiredBeforeImport()
+            raise _ExpiredBeforeImport(original.expires_at)
     if not record.secret_values:
         # Only external references and public fields: store the entry as it was,
         # checking and cleaning any Sealbox records dropped from an expired destination row.
         new_keys = _credential_sealbox_record_keys(original)
-        existing_row: CatalogCredential | None = None
         with _scope_catalog_lock(scope):
+            pending_conflict = _pending_dropped_sealbox_conflict(scope, new_keys)
+            if pending_conflict is not None:
+                raise CredentialImportRefused(
+                    f"Cannot import {record.credential_key} onto Sealbox record {pending_conflict} "
+                    "because an earlier value is still waiting to be deleted."
+                )
             catalog = load_catalog(scope=scope)
             existing_row = catalog.credentials.get(record.credential_key)
             if existing_row is not None:
@@ -702,10 +758,14 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
                         f"Cannot replace {record.credential_key} because credential {other_key} "
                         f"for {record.owner.label} still references one of its Sealbox records."
                     )
-            _save_catalog_credential(record.credential_key, original, scope=scope)
-            _SECRET_CACHE.clear()
-        if existing_row is not None:
-            _delete_dropped_sealbox_records(existing_row, original, scope=scope, credential_key=record.credential_key)
+            failed_dropped = _save_credential_and_cleanup_dropped(
+                record.credential_key,
+                original,
+                existing_credential=existing_row,
+                scope=scope,
+            )
+        if failed_dropped:
+            raise _DroppedSealboxDeleteFailed(failed_dropped)
         return
     values = {name: value.strip() for name, value in record.secret_values.items()}
     if any(not value for value in values.values()):
@@ -713,6 +773,12 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
     request = _collection_request(record, original)
     planned_targets = {f"{request['item_id']}:{field['field_ref']}" for field in request["fields"]}
     with _scope_catalog_lock(scope):
+        pending_conflict = _pending_dropped_sealbox_conflict(scope, planned_targets)
+        if pending_conflict is not None:
+            raise CredentialImportRefused(
+                f"Cannot import {record.credential_key} onto Sealbox record {pending_conflict} "
+                "because an earlier value is still waiting to be deleted."
+            )
         catalog = load_catalog(scope=scope)
         _require_unreferenced_import_items(
             record.owner, request, scope=scope, catalog=catalog, exclude_key=record.credential_key
@@ -752,17 +818,21 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
                 update={"resolution_order": [written.source_ref_by_field[name]]}
             )
         saved_credential = original.model_copy(update={"fields": fields})
-        latest_existing: CatalogCredential | None = None
         with _scope_catalog_lock(scope):
+            actual_new_keys = _credential_sealbox_record_keys(saved_credential)
+            pending_conflict = _pending_dropped_sealbox_conflict(scope, actual_new_keys)
+            if pending_conflict is not None:
+                raise CredentialImportRefused(
+                    f"Cannot import {record.credential_key} onto Sealbox record {pending_conflict} "
+                    "because an earlier value is still waiting to be deleted."
+                )
             latest_catalog = load_catalog(scope=scope)
             _require_unreferenced_import_items(
                 record.owner, request, scope=scope, catalog=latest_catalog, exclude_key=record.credential_key
             )
             latest_existing = latest_catalog.credentials.get(record.credential_key)
             if latest_existing is not None:
-                actual_dropped = _credential_sealbox_record_keys(latest_existing) - _credential_sealbox_record_keys(
-                    saved_credential
-                )
+                actual_dropped = _credential_sealbox_record_keys(latest_existing) - actual_new_keys
                 shared_dropped = _find_shared_sealbox_record(
                     latest_catalog,
                     exclude_key=record.credential_key,
@@ -775,12 +845,14 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
                         f"Cannot replace {record.credential_key} because credential {other_key} "
                         f"for {record.owner.label} still references one of its Sealbox records."
                     )
-            _save_catalog_credential(record.credential_key, saved_credential, scope=scope)
-            _SECRET_CACHE.clear()
-        if latest_existing is not None:
-            _delete_dropped_sealbox_records(
-                latest_existing, saved_credential, scope=scope, credential_key=record.credential_key
+            failed_dropped = _save_credential_and_cleanup_dropped(
+                record.credential_key,
+                saved_credential,
+                existing_credential=latest_existing,
+                scope=scope,
             )
+        if failed_dropped:
+            raise _DroppedSealboxDeleteFailed(failed_dropped)
     except Exception as exc:
         logger.warning(
             "A catalog credential import failed; retry the same backup to reuse its stored secret items. "

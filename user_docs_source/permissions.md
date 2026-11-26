@@ -1404,14 +1404,16 @@ own X sign-in gets X's usual no-account result. A web API tool with
 
 When a linked temporary credential reaches its expiry time, the broker stops
 using it immediately before any background cleanup runs. For a shared service,
-your expired personal link is treated as absent so your work falls back to the
-team's shared account; otherwise requests are refused with
-`account_link_credential_expired` and the `/link` command. The broker's 6-hour
-maintenance janitor then deletes the expired credential, revokes every active
-link that used it, and sends one Inbox notice per revoked link (to the link's
-owner for a personal link, or to team administrators for a team or gate link)
-stating whether the team's shared account now applies or no linked account
-remains, along with the exact `/link` command.
+your expired personal link (and any personal link whose stored credential was
+deleted) is treated as absent so your work falls back to the team's shared
+account; otherwise requests are refused with
+`account_link_credential_expired` (or `account_link_credential_missing`) and
+the `/link` command. The broker's 6-hour maintenance janitor — and deleting an
+already-expired credential by hand — deletes the expired credential, revokes
+every active link that used it, and sends one Inbox notice per revoked link (to
+the link's owner for a personal link, or to team administrators for a team or
+gate link) stating whether the team's shared account now applies or no linked
+account remains, along with the exact `/link` command.
 
 Operators can list links (including each link's `[account]` or `[gate]`
 purpose) and remove them (including gate links):

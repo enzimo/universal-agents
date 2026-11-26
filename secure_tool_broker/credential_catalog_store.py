@@ -10,7 +10,7 @@ import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
 from storage import sqlite_connection
@@ -93,6 +93,17 @@ class UnreadableCatalogEntryRow:
     error: str
 
 
+@dataclass(frozen=True)
+class PendingDroppedSealboxDelete:
+    """Broker-local retry queue entry for a Sealbox record dropped by a catalog overwrite."""
+
+    scope: CredentialOwnerScope
+    item_key: str
+    item_kind: str
+    credential_key: str
+    created_at: str
+
+
 def resolve_catalog_db_path() -> Path:
     """The catalog database: the launcher passes security_layer.credential_catalog.database_path."""
 
@@ -146,6 +157,17 @@ class CredentialCatalogStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (scope_kind, owner_id)
                 );
+                CREATE TABLE IF NOT EXISTS pending_dropped_sealbox_deletes (
+                    scope_kind TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    item_kind TEXT NOT NULL,
+                    credential_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (scope_kind, owner_id, item_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_pending_dropped_sealbox_owner_cred
+                    ON pending_dropped_sealbox_deletes(scope_kind, owner_id, credential_key);
                 """
             )
 
@@ -170,8 +192,16 @@ class CredentialCatalogStore:
         scope: CredentialOwnerScope,
         credential_key: str,
         credential: Mapping[str, Any],
+        *,
+        dropped_sealbox_targets: Sequence[tuple[str, str]] = (),
     ) -> None:
-        """Atomically insert or replace one credential without touching sibling keys."""
+        """Atomically insert or replace one credential without touching sibling keys.
+
+        When ``dropped_sealbox_targets`` is provided, those Sealbox record keys
+        are queued in ``pending_dropped_sealbox_deletes`` inside the same
+        transaction so a crash or Sealbox deletion failure never orphans an
+        older secret version.
+        """
         now = datetime.now(timezone.utc).isoformat()
         rendered = json.dumps(dict(credential), sort_keys=True, separators=(",", ":"))
         with self._connect() as conn:
@@ -194,6 +224,35 @@ class CredentialCatalogStore:
                     now,
                 ),
             )
+            for item_key, item_kind in dropped_sealbox_targets:
+                normalized_key = str(item_key).strip()
+                normalized_kind = str(item_kind or "secret").strip() or "secret"
+                if not normalized_key:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO pending_dropped_sealbox_deletes (
+                        scope_kind, owner_id, item_key, item_kind, credential_key, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scope_kind, owner_id, item_key) DO UPDATE SET
+                        item_kind = CASE
+                            WHEN pending_dropped_sealbox_deletes.item_kind = 'credential'
+                                OR excluded.item_kind = 'credential'
+                            THEN 'credential'
+                            ELSE excluded.item_kind
+                        END,
+                        credential_key = excluded.credential_key,
+                        created_at = excluded.created_at
+                    """,
+                    (
+                        scope.scope_kind,
+                        scope.owner_id,
+                        normalized_key,
+                        normalized_kind,
+                        str(credential_key),
+                        now,
+                    ),
+                )
 
     def load_credential(
         self,
@@ -444,6 +503,82 @@ class CredentialCatalogStore:
             raise RuntimeError("Sealbox tenant mapping was not persisted")
         return mapping
 
+    def list_pending_dropped_sealbox_deletes(
+        self,
+        *,
+        scope: CredentialOwnerScope | None = None,
+        credential_key: str | None = None,
+    ) -> list[PendingDroppedSealboxDelete]:
+        """List queued Sealbox record deletions awaiting retry."""
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if scope is not None:
+            clauses.append("scope_kind = ? AND owner_id = ?")
+            params.extend([scope.scope_kind, scope.owner_id])
+        if credential_key is not None:
+            clauses.append("credential_key = ?")
+            params.append(str(credential_key))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT scope_kind, owner_id, item_key, item_kind, credential_key, created_at
+                FROM pending_dropped_sealbox_deletes
+                {where}
+                ORDER BY scope_kind, owner_id, item_key
+                """,
+                tuple(params),
+            ).fetchall()
+        return [
+            PendingDroppedSealboxDelete(
+                scope=CredentialOwnerScope(str(row["scope_kind"]), str(row["owner_id"])),
+                item_key=str(row["item_key"]),
+                item_kind=str(row["item_kind"]),
+                credential_key=str(row["credential_key"]),
+                created_at=str(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    def pending_dropped_sealbox_keys(self, scope: CredentialOwnerScope) -> set[str]:
+        """Return Sealbox item keys currently queued for deletion in ``scope``."""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT item_key
+                FROM pending_dropped_sealbox_deletes
+                WHERE scope_kind = ? AND owner_id = ?
+                """,
+                (scope.scope_kind, scope.owner_id),
+            ).fetchall()
+        return {str(row["item_key"]) for row in rows}
+
+    def remove_pending_dropped_sealbox_deletes(
+        self,
+        scope: CredentialOwnerScope,
+        item_keys: Iterable[str],
+    ) -> int:
+        """Delete completed or superseded entries from ``pending_dropped_sealbox_deletes``."""
+
+        keys = [str(key).strip() for key in item_keys if str(key).strip()]
+        if not keys:
+            return 0
+        removed = 0
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for item_key in keys:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM pending_dropped_sealbox_deletes
+                    WHERE scope_kind = ? AND owner_id = ? AND item_key = ?
+                    """,
+                    (scope.scope_kind, scope.owner_id, item_key),
+                )
+                removed += int(cursor.rowcount or 0)
+        return removed
+
 
 def _open_readonly_connection(
     path: str | os.PathLike[str],
@@ -650,6 +785,7 @@ __all__ = [
     "CredentialCatalogReadError",
     "CredentialCatalogStore",
     "CredentialOwnerScope",
+    "PendingDroppedSealboxDelete",
     "SealboxTenantMapping",
     "UnreadableCatalogEntryRow",
     "expired_sealbox_record_keys",

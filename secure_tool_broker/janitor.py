@@ -61,7 +61,12 @@ from custom_messages.contracts.access_v2 import (
     SubjectKind,
     SubjectRefV1,
 )
-from secure_tool_broker.credential_catalog import CatalogCredential, delete_credential
+from secure_tool_broker.credential_catalog import (
+    CatalogCredential,
+    DroppedSealboxCleanupReport,
+    delete_credential,
+    retry_pending_dropped_sealbox_deletes,
+)
 from secure_tool_broker.credential_catalog_store import (
     CredentialCatalogStore,
     CredentialOwnerScope,
@@ -91,6 +96,7 @@ JANITOR_INTERVAL_SECONDS: Final[float] = 6 * 3600.0
 SEALBOX_CLEANUP_TIMEOUT_SECONDS: Final[int] = 90
 
 _NOTICE_ID_PREFIX: Final = "credential_expired_"
+JANITOR_LINK_REVOCATION_FAILED: Final[str] = "janitor_link_revocation_failed"
 _UNSUPPORTED_SUBCOMMAND_MARKERS: Final = (
     "unrecognized subcommand",
     "unknown subcommand",
@@ -107,6 +113,9 @@ class ExpiredCredentialsReport:
     links_revoked: int = 0
     notices_sent: int = 0
     link_failures: int = 0
+    dropped_records_deleted: int = 0
+    dropped_records_skipped: int = 0
+    dropped_records_failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -159,12 +168,9 @@ def _expired_link_notice_id(
     team_id: str,
     link: AccountLinkV1,
     *,
-    expires_at: str | None = None,
+    expires_at: str,
 ) -> str:
-    parts = [team_id, link.link_id, link.credential_key]
-    if expires_at:
-        parts.append(str(expires_at))
-    raw = "|".join(parts)
+    raw = "|".join([team_id, link.link_id, link.credential_key, str(expires_at)])
     return _NOTICE_ID_PREFIX + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
 
 
@@ -174,7 +180,7 @@ def _build_revoked_link_notice(
     *,
     fallback_team_link: AccountLinkV1 | None,
     now: datetime,
-    expires_at: str | None = None,
+    expires_at: str,
 ) -> AccessNoticeV1:
     tool_name = _tool_display_name(gate, link.tool_id)
     command = link_command(link.tool_id, link.owner_kind, purpose=link.purpose)
@@ -233,14 +239,12 @@ def _needs_retry_notice_for_system_revoked_link(
     link: AccountLinkV1,
     *,
     actor: SubjectRefV1,
-    expires_at: str | None,
+    expires_at: str,
 ) -> bool:
     """Return True when ``link`` was already revoked by the broker system actor for this expiry."""
 
     if link.status is not AccountLinkStatus.REVOKED or link.revoked_by != actor:
         return False
-    if expires_at is None:
-        return True
     if link.revoked_at_utc is None:
         return False
     try:
@@ -291,7 +295,7 @@ def revoke_links_for_expired_credential(
     scope: CredentialOwnerScope,
     credential_key: str,
     *,
-    expires_at: str | None = None,
+    expires_at: str,
     now: datetime | None = None,
 ) -> tuple[int, int, int]:
     """Revoke active links referencing ``credential_key`` and notify each revoked link's owner.
@@ -417,6 +421,17 @@ def revoke_links_for_expired_credential(
     return revoked_count, notices_count, failures
 
 
+def _link_revocation_failed_result(credential_key: str) -> ToolResult:
+    return ToolResult(
+        status="error",
+        error="Failed to revoke links or send notices for expired credential; keeping row for retry.",
+        content={
+            "error_code": JANITOR_LINK_REVOCATION_FAILED,
+            "credential_key": credential_key,
+        },
+    )
+
+
 def revoke_expired_credential_links_before_delete(
     gate: Any,
     scope: CredentialOwnerScope,
@@ -443,14 +458,7 @@ def revoke_expired_credential_links_before_delete(
         now=moment,
     )
     if failures > 0:
-        return ToolResult(
-            status="error",
-            error="Failed to revoke links or send notices for expired credential; keeping row for retry.",
-            content={
-                "error_code": "janitor_link_revocation_failed",
-                "credential_key": credential_key,
-            },
-        )
+        return _link_revocation_failed_result(credential_key)
     return None
 
 
@@ -536,14 +544,7 @@ def clean_expired_credentials(
                 notices_sent += noticed
                 link_failures += failures
                 if failures > 0:
-                    return ToolResult(
-                        status="error",
-                        error="Failed to revoke links or send notices for expired credential; keeping row for retry.",
-                        content={
-                            "error_code": "janitor_link_revocation_failed",
-                            "credential_key": _key,
-                        },
-                    )
+                    return _link_revocation_failed_result(_key)
                 return None
 
             try:
@@ -621,6 +622,17 @@ def clean_expired_credentials(
             )
             break
 
+    dropped_report = DroppedSealboxCleanupReport()
+    try:
+        dropped_report = retry_pending_dropped_sealbox_deletes()
+    except Exception as exc:  # noqa: BLE001 - isolate pending dropped cleanup from credential counts
+        failed += 1
+        LOGGER.warning(
+            "Broker janitor failed while retrying pending dropped Sealbox record deletions. "
+            "event=broker_janitor_dropped_sealbox_cleanup_failed error=%s",
+            type(exc).__name__,
+        )
+
     report = ExpiredCredentialsReport(
         scanned=len(rows) + len(unreadable_rows),
         expired=expired,
@@ -630,11 +642,15 @@ def clean_expired_credentials(
         links_revoked=links_revoked,
         notices_sent=notices_sent,
         link_failures=link_failures,
+        dropped_records_deleted=dropped_report.deleted,
+        dropped_records_skipped=dropped_report.skipped_referenced,
+        dropped_records_failed=dropped_report.failed,
     )
     LOGGER.info(
         "Broker janitor finished expired credential sweep. "
         "event=broker_janitor_credentials_finished scanned=%s expired=%s deleted=%s "
-        "skipped_changed=%s failed=%s links_revoked=%s notices_sent=%s link_failures=%s",
+        "skipped_changed=%s failed=%s links_revoked=%s notices_sent=%s link_failures=%s "
+        "dropped_records_deleted=%s dropped_records_skipped=%s dropped_records_failed=%s",
         report.scanned,
         report.expired,
         report.deleted,
@@ -643,6 +659,9 @@ def clean_expired_credentials(
         report.links_revoked,
         report.notices_sent,
         report.link_failures,
+        report.dropped_records_deleted,
+        report.dropped_records_skipped,
+        report.dropped_records_failed,
     )
     return report
 
@@ -946,6 +965,7 @@ __all__ = [
     "ExpiredCredentialsReport",
     "INITIAL_DELAY_SECONDS",
     "JANITOR_INTERVAL_SECONDS",
+    "JANITOR_LINK_REVOCATION_FAILED",
     "JanitorReport",
     "SEALBOX_CLEANUP_TIMEOUT_SECONDS",
     "SealboxCleanupReport",

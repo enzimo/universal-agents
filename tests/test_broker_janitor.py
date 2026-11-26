@@ -1338,3 +1338,77 @@ def test_f19_renewal_while_key_lock_held_survives_concurrent_janitor(
     assert sealbox_deleted == []
     assert load_catalog(scope=USER_SCOPE).credentials["lock_race_key"].expires_at == FUTURE_EXPIRY
     assert access_store.get_link("link-lock-race").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+
+
+def test_c29_janitor_retries_pending_dropped_sealbox_deletes_and_skips_rereferenced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C29: janitor job 1 retries queued dropped-Sealbox deletions and skips any record referenced again."""
+
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        resolve_catalog_db_path,
+    )
+
+    gate, _store = _make_gate(tmp_path)
+    # Seed a catalog entry that references "reused-item:api_token", and queue both an orphan
+    # record and the re-referenced record in pending_dropped_sealbox_deletes.
+    saved_cred = _save_catalog_entry("active_holder", scope=USER_SCOPE, expires_at=None)
+    [reused_item] = sorted(credential_catalog._credential_sealbox_record_keys(saved_cred))
+    orphan_item = "orphan-dropped:api_token"
+    store = CredentialCatalogStore(resolve_catalog_db_path())
+    existing_raw = store.load_credential(USER_SCOPE, "active_holder")
+    assert existing_raw is not None
+    store.put_credential(
+        USER_SCOPE,
+        "active_holder",
+        existing_raw.credential,
+        dropped_sealbox_targets=[(orphan_item, "secret"), (reused_item, "secret")],
+    )
+
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    deleted_items: list[str] = []
+    should_fail = True
+
+    def fake_delete(*, item_key: str, item_kind: str, env: Any = None) -> Any:
+        if should_fail:
+            return credential_catalog.ToolResult(status="error", error="sealbox unavailable")
+        deleted_items.append(item_key)
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    # First run: reused_item is skipped (and cleared from queue); orphan_item fails and stays queued.
+    first = janitor.clean_expired_credentials(gate, now=NOW)
+    assert first.dropped_records_skipped == 1
+    assert first.dropped_records_failed == 1
+    assert first.dropped_records_deleted == 0
+    assert deleted_items == []
+    assert [e.item_key for e in store.list_pending_dropped_sealbox_deletes(scope=USER_SCOPE)] == [orphan_item]
+
+    # Second run: Sealbox recovers; orphan_item is deleted and cleared from queue.
+    should_fail = False
+    second = janitor.clean_expired_credentials(gate, now=NOW)
+    assert second.dropped_records_deleted == 1
+    assert second.dropped_records_failed == 0
+    assert second.dropped_records_skipped == 0
+    assert deleted_items == [orphan_item]
+    assert store.list_pending_dropped_sealbox_deletes(scope=USER_SCOPE) == []
+
+
+def test_c31_expires_at_required_for_expired_link_revocation_helpers(tmp_path: Path) -> None:
+    """C31(a): expires_at is required on expired-link notice/revocation helpers so old links cannot get a new notice."""
+
+    gate, _store = _make_gate(tmp_path)
+    link = _make_link(link_id="link-req", tool_id="http:demo_api", credential_key="req_key")
+    actor = janitor._system_actor(TEAM_ID)
+    with pytest.raises(TypeError):
+        janitor._expired_link_notice_id(TEAM_ID, link)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        janitor._needs_retry_notice_for_system_revoked_link(link, actor=actor)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        janitor.revoke_links_for_expired_credential(gate, USER_SCOPE, "req_key")  # type: ignore[call-arg]

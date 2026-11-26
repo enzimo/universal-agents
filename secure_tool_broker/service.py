@@ -81,6 +81,7 @@ from secure_tool_broker.credential_collection_form import (
     parse_credential_collection_submission,
     render_credential_collection_failed_page,
     render_credential_collection_form,
+    render_credential_collection_success_page,
 )
 from secure_tool_broker.credential_expiry import CredentialExpiryError
 from secure_tool_broker.credential_transfer_api import add_transfer_routes
@@ -1888,34 +1889,18 @@ class SecureToolBrokerService:
         result = (
             SecureToolBrokerService._credential_collection_public_result(session) or {}
         )
-        status = str(
-            result.get("content", {}).get("status")
-            if isinstance(result.get("content"), dict)
-            else session.status
+        raw_content = result.get("content")
+        content: dict[str, Any] = raw_content if isinstance(raw_content, dict) else {}
+        status = str(content.get("status") or session.status)
+        raw_undeleted = content.get("dropped_records_not_deleted")
+        dropped_not_deleted = raw_undeleted if isinstance(raw_undeleted, list) else ()
+        return render_credential_collection_success_page(
+            status=status,
+            deletion=SecureToolBrokerService._is_credential_deletion_request(
+                session.request_payload
+            ),
+            dropped_records_not_deleted=dropped_not_deleted,
         )
-        if SecureToolBrokerService._is_credential_deletion_request(
-            session.request_payload
-        ):
-            body = (
-                '<section class="content-panel">'
-                '<p class="eyebrow">Secure Credential Deletion</p>'
-                "<h1>Credential deletion complete.</h1>"
-                f'<p class="lede">Status: <code>{html.escape(status or session.status)}</code>. '
-                "You can close this browser tab.</p>"
-                f"{render_close_page_button()}"
-                "</section>"
-            )
-            return render_broker_auth_page("Credential Deletion Complete", body, card_outcome=CARD_OUTCOME_FINISHED)
-        body = (
-            '<section class="content-panel">'
-            '<p class="eyebrow">Secure Credential Collection</p>'
-            "<h1>Credential submission complete.</h1>"
-            f'<p class="lede">Status: <code>{html.escape(status or session.status)}</code>. '
-            "You can close this browser tab.</p>"
-            f"{render_close_page_button()}"
-            "</section>"
-        )
-        return render_broker_auth_page("Credential Submission Complete", body, card_outcome=CARD_OUTCOME_FINISHED)
 
     async def _handle_submit_credential_collection_form(
         self, request: web.Request
