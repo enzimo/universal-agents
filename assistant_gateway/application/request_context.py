@@ -40,6 +40,12 @@ class GatewayTokenSigner(Protocol):
     ) -> AuthorityTokenRecord: ...
 
 
+class GatewaySessionDeliveryRefs(Protocol):
+    """Opaque delivery references of gateway sessions (``custom_transport.protocol1.delivery_refs``)."""
+
+    def ref(self, session_key: str) -> str: ...
+
+
 @dataclass(frozen=True)
 class GatewayRequestContextSettings:
     """Stable identity and routing settings shared by request applications."""
@@ -105,11 +111,13 @@ class GatewayRequestContextService:
         identity: GatewayIdentityService,
         token_signer: GatewayTokenSigner | None = None,
         person_ref_resolver: Callable[[str], str | None] | None = None,
+        delivery_refs: GatewaySessionDeliveryRefs | None = None,
     ) -> None:
         self.settings = settings
         self._identity = identity
         self._token_signer = token_signer
         self._person_ref_resolver = person_ref_resolver
+        self._delivery_refs = delivery_refs
 
     async def ensure_signer_ready(self, *, timeout: float = 5.0) -> None:
         """Wait briefly for a joining gateway host so startup requests receive signed authority tokens."""
@@ -420,9 +428,15 @@ class GatewayRequestContextService:
                     exc,
                 )
                 raise GatewayAuthorityTokenUnavailable(SIGNER_UNAVAILABLE_USER_MESSAGE) from exc
+        delivery_ref = (
+            self._delivery_refs.ref(session_key)
+            if self._delivery_refs is not None and session_key
+            else None
+        )
         return GatewayContext(
             gateway_instance_name=self.settings.instance_name,
             session_key=session_key,
+            delivery_ref=delivery_ref,
             channel_name=route.channel_name,
             user_id=route.user_id,
             canonical_user_id=canonical_user_id,

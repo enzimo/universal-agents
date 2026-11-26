@@ -603,6 +603,19 @@
           "description": "Gateway delivery mode such as interactive, cron, heartbeat, or deferred.",
           "title": "Delivery Mode"
         },
+        "delivery_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque keyed delivery reference (dr_<hmac>) for the gateway session. Safe to travel on protocol 1 frames such as schedules.install and resolved back to the session only by the gateway.",
+          "title": "Delivery Ref"
+        },
         "gateway_instance_name": {
           "anyOf": [
             {

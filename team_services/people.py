@@ -62,14 +62,22 @@ class PersonCheck:
 
 @dataclass(frozen=True)
 class InstallActorCheck:
-    """Who a ``schedules.install`` request acts for (gateway command or agent root task)."""
+    """Who a ``schedules.install`` request acts for (gateway command or agent root task).
+
+    ``owner_vouched`` is True only when the gateway signed the token for that person
+    (a gateway command token or a gateway-signed root-task token from the person's own
+    request, plan 13C.5). Scheduler-signed tokens (scheduled run tokens, schedule permits,
+    and administrator owner permits) never vouch.
+    """
 
     person: Optional[CommandPerson]
     reason: str
     person_id: Optional[str]
     from_gateway: bool = False
     from_agent: bool = False
+    owner_vouched: bool = False
     permit_schedule_id: Optional[str] = None
+    source_schedule_id: Optional[str] = None
     agent_id: Optional[str] = None
 
 
@@ -136,6 +144,7 @@ def schedule_install_actor(
             person_id=check.person_id,
             from_gateway=True,
             from_agent=False,
+            owner_vouched=check.person is not None,
         )
     if bound.type != ROOT_TASK_BINDING:
         return InstallActorCheck(None, "Schedule installation requires a command or root-task authority token.", None)
@@ -145,16 +154,34 @@ def schedule_install_actor(
         return InstallActorCheck(
             None, "A schedule installation requires an active person in the authority token.", None, from_agent=True
         )
+    issuer_roles = authority.certificate.roles
+    has_schedule_id = isinstance(authority.token.schedule_id, str)
+    is_permit = is_schedule_permit_binding(bound.id)
     permit_schedule_id: Optional[str] = None
-    if is_schedule_permit_binding(bound.id):
-        if SCHEDULER_ISSUER_ROLE not in authority.certificate.roles or not isinstance(authority.token.schedule_id, str):
-            return InstallActorCheck(
-                None,
-                "A schedule permit token must be signed by the scheduler and name its schedule.",
-                None,
-                from_agent=True,
-            )
-        permit_schedule_id = authority.token.schedule_id
+    source_schedule_id: Optional[str] = None
+    owner_vouched = False
+    if GATEWAY_ROLE in issuer_roles and not is_permit and not has_schedule_id:
+        owner_vouched = True
+    elif SCHEDULER_ISSUER_ROLE in issuer_roles:
+        owner_vouched = False
+        if is_permit:
+            if not has_schedule_id:
+                return InstallActorCheck(
+                    None,
+                    "A schedule permit token must be signed by the scheduler and name its schedule.",
+                    None,
+                    from_agent=True,
+                )
+            permit_schedule_id = str(authority.token.schedule_id)
+        elif has_schedule_id:
+            source_schedule_id = str(authority.token.schedule_id)
+    else:
+        return InstallActorCheck(
+            None,
+            "A root-task authority token must be signed by a gateway or scheduler certificate.",
+            None,
+            from_agent=True,
+        )
     now = people.person_by_ref(authority.token.person)
     if now is None:
         reason = "The task token names a person this team does not know."
@@ -164,7 +191,15 @@ def schedule_install_actor(
             verified.frame.issuer.runtime,
             reason,
         )
-        return InstallActorCheck(None, reason, None, from_agent=True, permit_schedule_id=permit_schedule_id)
+        return InstallActorCheck(
+            None,
+            reason,
+            None,
+            from_agent=True,
+            owner_vouched=False,
+            permit_schedule_id=permit_schedule_id,
+            source_schedule_id=source_schedule_id,
+        )
     if not now.active or not now.roles:
         reason = f"The person is {now.describe()} in this team."
         logger.warning(
@@ -174,14 +209,24 @@ def schedule_install_actor(
             now.person_id,
             reason,
         )
-        return InstallActorCheck(None, reason, now.person_id, from_agent=True, permit_schedule_id=permit_schedule_id)
+        return InstallActorCheck(
+            None,
+            reason,
+            now.person_id,
+            from_agent=True,
+            owner_vouched=False,
+            permit_schedule_id=permit_schedule_id,
+            source_schedule_id=source_schedule_id,
+        )
     return InstallActorCheck(
         person=CommandPerson(now.person_id, people.team_id, now.roles),
         reason="",
         person_id=now.person_id,
         from_gateway=False,
         from_agent=True,
+        owner_vouched=owner_vouched,
         permit_schedule_id=permit_schedule_id,
+        source_schedule_id=source_schedule_id,
         agent_id=verified.frame.issuer.agent,
     )
 

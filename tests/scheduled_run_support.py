@@ -263,6 +263,8 @@ class FakeSchedulerHost:
         if storage is not None:
             people_store = _FallbackPeopleStore(AccessRepository(storage), people_store)
         people = PeopleDirectory(people_store, team_id)
+        task_info = getattr(getattr(agent, "task_manager", None), "_task_info", None)
+        response_route = getattr(getattr(task_info, "header", None), "response_routing_key", None)
         ops = ScheduleOperations(
             store,
             people,
@@ -274,6 +276,7 @@ class FakeSchedulerHost:
             conversations=getattr(agent, "_conversation_store", None),
             install_defaults=ScheduleInstallDefaults(
                 lead_agent_type=str(getattr(agent, "named_agent_type", None) or "TeamArchitect"),
+                response_route=response_route,
                 default_timezone=getattr(agent, "instance_timezone", None),
             ),
         )

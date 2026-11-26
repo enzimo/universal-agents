@@ -627,8 +627,16 @@ def create_scheduled_job(
             target_agent_type=target_agent_type,
             worker_policy_json=worker_policy_json,
             requirements_json=requirements_json,
+            source_meta=task_info.meta,
         )
+        owner_vouched = _schedule_store(agent).is_owner_vouched(schedule_id)
         if worker_result and worker_result.get("status") in {"draft", "saved"}:
+            if not owner_vouched:
+                worker_result["owner_vouched"] = False
+                worker_result["notice"] = (
+                    "This schedule was created from a scheduled run and is not vouched for by the owner. "
+                    "Its runs will not execute until the owner confirms or recreates it directly."
+                )
             _add_saved_version(_schedule_store(agent), worker_result, schedule_id)
             with after_saved_change(
                 worker_result,
@@ -657,6 +665,12 @@ def create_scheduled_job(
             if scheduled_message.payload_meta
             else None,
         }
+        if not owner_vouched:
+            payload["owner_vouched"] = False
+            payload["notice"] = (
+                "This schedule was created from a scheduled run and is not vouched for by the owner. "
+                "Its runs will not execute until the owner confirms or recreates it directly."
+            )
         if schedule_conversation and hasattr(
             agent.task_manager, "append_history_entry"
         ):

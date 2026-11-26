@@ -1044,6 +1044,9 @@ class ScheduleStore:
                 columns = _definition_columns(written, remaining_count=remaining)
                 columns["owner_vouched"] = 1 if owner_vouched else 0
                 columns["run_permit_refusal"] = None
+                if not owner_vouched:
+                    columns["run_permit_json"] = None
+                    columns["owner_permit_json"] = None
                 if delivery_ref is not None:
                     columns["delivery_ref"] = delivery_ref
                 if existing_owner != owner_id:
@@ -1124,6 +1127,8 @@ class ScheduleStore:
                     for name in PERSON_GATEWAY_FIELDS:
                         setattr(stored_gc, name, getattr(incoming_gc, name, None) if incoming_gc is not None else None)
                 stored_gc.canonical_user_id = owner_id
+                if delivery_ref is not None:
+                    stored_gc.delivery_ref = delivery_ref
                 if incoming_gc is not None and getattr(incoming_gc, "heartbeat_source_id", None):
                     stored_gc.heartbeat_source_id = incoming_gc.heartbeat_source_id
                 incoming_conv = getattr(msg.payload_meta, "conversation_id", None)

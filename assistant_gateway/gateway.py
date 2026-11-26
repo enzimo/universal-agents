@@ -881,6 +881,7 @@ class UserGateway:
             HEARTBEAT_SCHEDULE_ID_PREFIX,
             config.instance_name,
         )
+        schedule_delivery_refs = gateway_delivery_refs(config)
         self._request_context_service = GatewayRequestContextService(
             settings=GatewayRequestContextSettings(
                 instance_name=config.instance_name,
@@ -898,6 +899,7 @@ class UserGateway:
                 else getattr(resolved_manager_runtime, "message_host", None)
             ),
             person_ref_resolver=ownership_bootstrap.people_directory.person_ref,
+            delivery_refs=schedule_delivery_refs,
         )
         self._request_service = GatewayRequestService(
             repository=self.request_repository,
@@ -977,6 +979,7 @@ class UserGateway:
             delivery=self._delivery_service,
             presentation=self._delivery_presentation,
             attachments=self._delivery_attachments,
+            delivery_refs=schedule_delivery_refs,
             logger=logger,
         )
         self._manager_client = GatewayManagerClient(
@@ -1069,7 +1072,7 @@ class UserGateway:
                     resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
                 )
             ),
-            delivery_refs=(schedule_delivery_refs := gateway_delivery_refs(config)),
+            delivery_refs=schedule_delivery_refs,
             logger=logger,
         )
         self._manager_commands = GatewayManagerCommandService(
@@ -1623,6 +1626,10 @@ class UserGateway:
         if start_services:
             await self._maintenance_schedules.ensure_all()
             self._background_tasks += [
+                asyncio.create_task(
+                    self._maintenance_schedules.run(self._stop_event),
+                    name="gateway_maintenance_schedule_retry_loop",
+                ),
                 asyncio.create_task(
                     self._deferred_delivery_application.run(self._stop_event),
                     name="gateway_delivery_loop",

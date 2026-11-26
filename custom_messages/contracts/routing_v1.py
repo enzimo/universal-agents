@@ -235,6 +235,7 @@ PERSON_GATEWAY_FIELDS = (
     "user_id",
     "gateway_instance_name",
     "session_key",
+    "delivery_ref",
     "channel_name",
     "chat_id",
     "thread_id",
@@ -258,6 +259,14 @@ class GatewayContext(BaseModel):
     )
     session_key: Optional[str] = Field(
         default=None, description="Gateway session key used to group user interactions."
+    )
+    delivery_ref: Optional[str] = Field(
+        default=None,
+        description=(
+            "Opaque keyed delivery reference (dr_<hmac>) for the gateway session. "
+            "Safe to travel on protocol 1 frames such as schedules.install and resolved "
+            "back to the session only by the gateway."
+        ),
     )
     channel_name: Optional[str] = Field(
         default=None, description="Logical channel name such as telegram or local."

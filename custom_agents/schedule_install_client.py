@@ -3,9 +3,11 @@
 Agents never write new schedule definitions directly to ``ScheduleStore``: every user
 schedule, turn-action schedule, Objective work schedule, and recovery checkpoint goes
 through ``schedules.install`` carrying the active task's verified protocol 1
-``AuthorityToken``. ``team_services.schedules`` verifies the token, enforces 13C.5
-vouching (``owner_vouched = 1``), persists the row and its reply in one transaction,
-and synchronously issues the schedule's initial run permit.
+``AuthorityToken`` (and opaque ``delivery_ref`` when the task originated in a chat).
+``team_services.schedules`` verifies the token, enforces 13C.5 vouching (``owner_vouched = 1``
+only for gateway-signed tokens; scheduler-signed runs and permits install unvouched),
+persists the row and its reply in one transaction, and synchronously runs initial permit
+evaluation.
 """
 
 from __future__ import annotations
@@ -27,6 +29,28 @@ logger = logging.getLogger(__name__)
 
 INLINE_INSTRUCTION_MAX_CHARS = 32_768
 INSTALL_TIMEOUT_SECONDS = 30.0
+
+
+class ScheduleInstallError(ValueError):
+    """A typed client-side refusal from ``schedules.install`` carrying the wire outcome."""
+
+    def __init__(self, outcome: str, schedule_id: str, message: str) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+        self.schedule_id = schedule_id
+
+
+def extract_task_delivery_ref(meta: Any) -> Optional[str]:
+    """Return the active task's opaque ``delivery_ref`` (``dr_...``) when present, else None."""
+
+    gateway_context = getattr(meta, "gateway_context", None)
+    if gateway_context is None:
+        return None
+    ref = getattr(gateway_context, "delivery_ref", None)
+    if not isinstance(ref, str):
+        return None
+    cleaned = ref.strip()
+    return cleaned or None
 
 
 def extract_task_authority_token(meta: Any) -> dict[str, Any]:
@@ -202,7 +226,7 @@ def _check_reply(schedule_id: str, reply: dict[str, Any]) -> dict[str, Any]:
     if outcome == "not_allowed":
         raise PermissionError(message)
     if outcome in ("invalid_request", "id_in_use", "not_found", "not_system_managed"):
-        raise ValueError(message)
+        raise ScheduleInstallError(outcome, schedule_id, message)
     raise RuntimeError(message)
 
 
@@ -220,6 +244,7 @@ async def install_schedule_via_team_services(
     """Send ``schedules.install`` to ``svc.team`` carrying ``authority_token`` and verify the reply."""
 
     req_id = request_id or new_id("sched_install")
+    resolved_delivery_ref = delivery_ref or extract_task_delivery_ref(schedule.payload_meta)
     instruction = str(getattr(schedule.payload, "problem_statement", "") or "").strip()
     content = await _instruction_content(
         agent,
@@ -233,7 +258,7 @@ async def install_schedule_via_team_services(
         mode=mode,
         request_id=req_id,
         seen_version=seen_version,
-        delivery_ref=delivery_ref,
+        delivery_ref=resolved_delivery_ref,
         default_timezone=getattr(agent, "instance_timezone", None),
         instruction_content=content,
     )
@@ -285,7 +310,9 @@ def install_schedule_via_team_services_sync(
 __all__ = [
     "INLINE_INSTRUCTION_MAX_CHARS",
     "INSTALL_TIMEOUT_SECONDS",
+    "ScheduleInstallError",
     "extract_task_authority_token",
+    "extract_task_delivery_ref",
     "install_schedule_via_team_services",
     "install_schedule_via_team_services_sync",
     "schedule_install_body",

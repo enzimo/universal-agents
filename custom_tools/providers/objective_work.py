@@ -235,10 +235,12 @@ def _install_objective_work_schedule(
         schedule.schedule_memory = existing_schedule.schedule_memory
     from custom_agents.schedule_install_client import (
         extract_task_authority_token,
+        extract_task_delivery_ref,
         install_schedule_via_team_services_sync,
     )
 
     authority_token = extract_task_authority_token(current.meta)
+    delivery_ref = extract_task_delivery_ref(current.meta)
     schedule_persisted = False
     try:
         if existing_schedule is None:
@@ -247,6 +249,7 @@ def _install_objective_work_schedule(
                 schedule,
                 mode="create",
                 authority_token=authority_token,
+                delivery_ref=delivery_ref,
             )
         else:
             install_schedule_via_team_services_sync(
@@ -255,6 +258,7 @@ def _install_objective_work_schedule(
                 mode="replace",
                 authority_token=authority_token,
                 seen_version=schedule_record_digest(existing_schedule),
+                delivery_ref=delivery_ref,
             )
         saved = store.get_scheduled_message(schedule_id)
         if saved is not None:

@@ -741,7 +741,7 @@ def test_schedule_telemetry_reports_counts_timing_and_scheduler_identity(
     assert schedule["schedule_name"] == "status poll"
     assert schedule["interval_ms"] == 120000
     assert schedule["interval_seconds"] == 120
-    assert schedule["scheduled_by"]["from_agent_id"] == "team_services"
+    assert schedule["scheduled_by"]["from_agent_id"] == "gateway_queue"
     assert schedule["scheduled_by"]["from_agent_name"] == "team_services"
     assert schedule["scheduled_by"]["followup_to_task_id"].startswith(
         "sched_conv_seed_"
@@ -1548,3 +1548,134 @@ def test_a_persons_system_timer_records_notes_with_both_tools(tmp_path: Path):
     assert recorded["recorded"] is True
     memory = agent._schedule_store.get_scheduled_message(timer.schedule_id).schedule_memory
     assert (memory.ledger.total_notifications, memory.ledger.total_runs) == (1, 1)
+
+
+def test_permit_backed_scheduled_run_creates_unvouched_schedule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """C28 + C29: a permit-backed scheduled run can call create_scheduled_job and installs an unvouched schedule."""
+    from custom_messages.contracts.access_v2 import PersonStanding, ScheduleRunIdentityV1, TeamPersonV1
+    from custom_transport.protocol1.authority_tokens import schedule_permit_token
+    from storage.access_repository import AccessRepository
+    from tests.broker_access_support import broker_person_ref, broker_scheduler_identity
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    db_path = str(tmp_path / "permit_create.db")
+    agent = _FakeAgent(db_path)
+    set_agent_ref(agent)
+    now = datetime.now(timezone.utc)
+    AccessRepository(agent.task_manager.storage_settings).replace_people(
+        "team_1",
+        [
+            TeamPersonV1(
+                person_ref=broker_person_ref("usr_sched_a"),
+                team_id="team_1",
+                person_id="usr_sched_a",
+                standing=PersonStanding.ACTIVE,
+                roles=("owner",),
+                changed_at_utc=now,
+            )
+        ],
+        at=now,
+    )
+    bound = bind_test_scheduler(
+        monkeypatch,
+        store=agent._schedule_store,
+        team_id="team_1",
+        storage_settings=agent.task_manager.storage_settings,
+    )
+    src_id = tool_json(create_scheduled_job(instruction="Daily check", interval_seconds=3600))["schedule_id"]
+    assert agent._schedule_store.is_owner_vouched(src_id) is True
+
+    # Simulate a permit-backed run of src_id: task_context=None, schedule_run.permit carries the standing permit.
+    gc = agent.task_manager._task_info.meta.gateway_context
+    permit = schedule_permit_token(
+        broker_scheduler_identity("team_1"),
+        team="team_1",
+        schedule_id=src_id,
+        person_ref=broker_person_ref("usr_sched_a"),
+        issued=now,
+    )
+    gc.task_context = None
+    gc.schedule_run = ScheduleRunIdentityV1(
+        permit=permit,
+        context_id="schedule_run_c28",
+        conversation_id="conversation_id_sched",
+        started_at_utc=now,
+    )
+
+    child = tool_json(create_scheduled_job(instruction="Follow up next week", delay_seconds=600))
+    assert "schedule_id" in child
+    assert child["owner_vouched"] is False
+    assert "not vouched" in child["notice"]
+    child_id = child["schedule_id"]
+    assert agent._schedule_store.is_owner_vouched(child_id) is False
+    assert agent._schedule_store.run_permit(child_id) is None
+    assert bound.scheduler.issue_permit_for_schedule(child_id) is False
+    assert agent._schedule_store.run_permit(child_id) is None
+
+
+@pytest.mark.asyncio
+async def test_turn_action_install_refusal_logs_actual_outcome(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """C30: non-id_in_use refusals log their outcome instead of 'belongs to someone else'."""
+    from custom_agents.schedule_installation import create_schedule_from_turn_action
+
+    db_path = str(tmp_path / "turn_action_refusal.db")
+    agent = _FakeAgent(db_path)
+    agent._logger = logging.getLogger("test.turn_action_refusal")
+    set_agent_ref(agent)
+    source_meta = agent.task_manager._task_info.meta
+    source_header = agent.task_manager._task_info.header
+
+    bad_cron = ScheduledMessage(
+        schedule_id="sched_bad_cron",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Bad cron reminder."),
+        cron_expression="not a valid cron",
+        cron_timezone="UTC",
+        next_fire_at="2030-01-01T00:00:00+00:00",
+    )
+    with caplog.at_level(logging.WARNING, logger="test.turn_action_refusal"):
+        await create_schedule_from_turn_action(
+            agent,
+            bad_cron,
+            msg_header=source_header,
+            msg_meta=source_meta,
+        )
+    assert agent._schedule_store.get_scheduled_message("sched_bad_cron") is None
+    assert "event=schedule_action_install_refused" in caplog.text
+    assert "outcome=invalid_request" in caplog.text
+    assert "belongs to someone else" not in caplog.text
+
+    # Contrast: an id_in_use collision with another person's schedule still logs event=schedule_action_id_in_use.
+    other_agent = _FakeAgent(db_path, canonical_user_id="usr_sched_b")
+    set_agent_ref(other_agent)
+    other_sched = ScheduledMessage(
+        schedule_id="sched_taken_by_b",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Owner B's reminder."),
+        interval_ms=60_000,
+    )
+    await create_schedule_from_turn_action(
+        other_agent,
+        other_sched,
+        msg_header=other_agent.task_manager._task_info.header,
+        msg_meta=other_agent.task_manager._task_info.meta,
+    )
+    assert other_agent._schedule_store.get_scheduled_message("sched_taken_by_b") is not None
+
+    caplog.clear()
+    set_agent_ref(agent)
+    collision = ScheduledMessage(
+        schedule_id="sched_taken_by_b",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Owner A colliding."),
+        interval_ms=60_000,
+    )
+    with caplog.at_level(logging.WARNING, logger="test.turn_action_refusal"):
+        await create_schedule_from_turn_action(
+            agent,
+            collision,
+            msg_header=source_header,
+            msg_meta=source_meta,
+        )
+    assert "event=schedule_action_id_in_use" in caplog.text
+    assert "belongs to someone else" in caplog.text

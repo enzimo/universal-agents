@@ -327,20 +327,33 @@ class ScheduleOperations:
         return reply
 
     def _check_permit_source(self, actor: InstallActorCheck, now: datetime) -> None:
-        if actor.permit_schedule_id is None or actor.person is None:
+        if actor.person is None:
             return
-        source = self._store.read_scheduled_message(actor.permit_schedule_id)
-        if (
-            source is None
-            or source.claim_team_id != actor.person.team_id
-            or owner_canonical_user_id_for_schedule(source) != actor.person.person_id
-            or schedule_stopped_reason(source, now) is not None
-            or not (self._store.is_owner_vouched(actor.permit_schedule_id) or is_system_managed_schedule(source))
-        ):
-            raise ScheduleInstallRefused(
-                "not_allowed",
-                "The schedule permit backing this task is no longer active or vouched.",
-            )
+        if actor.permit_schedule_id is not None:
+            source = self._store.read_scheduled_message(actor.permit_schedule_id)
+            if (
+                source is None
+                or source.claim_team_id != actor.person.team_id
+                or owner_canonical_user_id_for_schedule(source) != actor.person.person_id
+                or schedule_stopped_reason(source, now) is not None
+                or not (self._store.is_owner_vouched(actor.permit_schedule_id) or is_system_managed_schedule(source))
+            ):
+                raise ScheduleInstallRefused(
+                    "not_allowed",
+                    "The schedule permit backing this task is no longer active or vouched.",
+                )
+            return
+        if actor.source_schedule_id is not None:
+            source = self._store.read_scheduled_message(actor.source_schedule_id)
+            if source is not None and (
+                source.claim_team_id != actor.person.team_id
+                or owner_canonical_user_id_for_schedule(source) != actor.person.person_id
+                or schedule_stopped_reason(source, now) is not None
+            ):
+                raise ScheduleInstallRefused(
+                    "not_allowed",
+                    "The schedule backing this task is paused, turned off, or no longer belongs to this person.",
+                )
 
     def _authorize_install(
         self,
@@ -355,6 +368,11 @@ class ScheduleOperations:
         person = actor.person
         if management_class != ScheduleManagementClass.SYSTEM:
             return False
+        if not actor.owner_vouched:
+            raise ScheduleInstallRefused(
+                "not_allowed",
+                "System-managed schedules require a gateway-signed person request or command.",
+            )
         mode = str(body["mode"])
         spec = system_schedule_spec(system_kind) if system_kind is not None else None
         if actor.from_gateway:
@@ -461,12 +479,14 @@ class ScheduleOperations:
         delivery_ref = str(deliver_to["delivery_ref"]) if isinstance(deliver_to, dict) and deliver_to.get("delivery_ref") else None
         conversation_id = str(deliver_to["conversation_id"]) if isinstance(deliver_to, dict) and deliver_to.get("conversation_id") else None
         followup_to_task_id: Optional[str] = None
-        if conversation_id is None and self._conversations is not None:
+        if self._conversations is not None:
             seed_task_id = schedule_conversation_seed_task_id(schedule_id)
             existing_seed = self._conversations.get_turn_by_task_id(seed_task_id)
             if existing_seed and existing_seed.get("conversation_id"):
-                conversation_id = str(existing_seed["conversation_id"])
-                followup_to_task_id = seed_task_id
+                seed_conv_id = str(existing_seed["conversation_id"])
+                if conversation_id is None or conversation_id == seed_conv_id:
+                    conversation_id = seed_conv_id
+                    followup_to_task_id = seed_task_id
         schedule_name = str(body["name"]) if "name" in body and body["name"] != "" else None
         if system_kind == SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT and schedule_name:
             parts = schedule_name.split(":", 2)
@@ -496,12 +516,18 @@ class ScheduleOperations:
             response_routing_key=response_route,
             agent_signature="",
         )
+        correlation_id = (
+            f"checkpoint_corr_{schedule_id}"
+            if system_kind == SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT
+            else f"schedule_corr_{schedule_id}"
+        )
         payload_meta = MessageMeta(
             from_agent_name=(
                 f"{self._install_defaults.instance_name}_gateway"
                 if actor.from_gateway and self._install_defaults.instance_name
                 else "team_services"
             ),
+            msg_correlation_id=correlation_id,
             conversation_id=conversation_id,
             followup_to_task_id=followup_to_task_id,
             objective_id=body.get("objective_id"),
@@ -511,6 +537,7 @@ class ScheduleOperations:
             to_named_agent_type=agent_type if agent_type and agent_type != self._install_defaults.lead_agent_type else None,
             gateway_context=GatewayContext(
                 gateway_instance_name=self._install_defaults.instance_name or None,
+                delivery_ref=delivery_ref,
                 canonical_user_id=person.person_id,
                 delivery_mode=delivery_mode,
                 scheduled_job_id=schedule_id,
@@ -625,7 +652,7 @@ class ScheduleOperations:
             mode=str(body["mode"]),
             team_id=person.team_id,
             owner_id=person.person_id,
-            owner_vouched=True,
+            owner_vouched=actor.owner_vouched,
             delivery_ref=delivery_ref,
             expected_record_digest=body.get("seen_version"),
             require_seen_version_on_update=actor.from_agent,
@@ -637,12 +664,13 @@ class ScheduleOperations:
         captured.append(result)
         self._logger.info(
             "Installed schedule via schedules.install. event=team_schedule_installed schedule_id=%s "
-            "mode=%s state=%s person=%s from_gateway=%s",
+            "mode=%s state=%s person=%s from_gateway=%s owner_vouched=%s",
             result.schedule_id,
             body["mode"],
             result.state,
             person.person_id,
             actor.from_gateway,
+            actor.owner_vouched,
         )
         return replies[-1]
 

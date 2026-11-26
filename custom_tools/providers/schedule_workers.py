@@ -54,15 +54,18 @@ def install_scheduled_worker_draft(
     target_agent_type: str,
     worker_policy_json: str,
     requirements_json: str,
+    source_meta: Any = None,
 ) -> dict[str, Any] | None:
     """Persist a schedule through ``schedules.install`` on ``svc.team``, then configure any worker draft."""
     from custom_agents.schedule_changes import WorkerConfigurationRequestV1
     from custom_agents.schedule_install_client import (
         extract_task_authority_token,
+        extract_task_delivery_ref,
         install_schedule_via_team_services_sync,
     )
     from custom_agents.schedule_store import schedule_claim_scope_for_agent
     from custom_agents.system_schedule_changes import configure_worker
+    from custom_tools.providers._runtime import _get_current_task_info
 
     claim_scope = schedule_claim_scope_for_agent(agent)
     if target_agent_type:
@@ -75,12 +78,24 @@ def install_scheduled_worker_draft(
     automation = bool(worker_policy_json or requirements_json)
     if automation:
         schedule.enabled = False
-    authority_token = extract_task_authority_token(schedule.payload_meta)
+    # Read the authority token and delivery_ref from the active task's meta (not the
+    # saved-schedule copy, which deliberately clears schedule_run so a saved schedule
+    # never keeps a run's identity).
+    meta_source = source_meta
+    if meta_source is None:
+        try:
+            current_task = _get_current_task_info(agent)
+        except Exception:
+            current_task = None
+        meta_source = getattr(current_task, "meta", None) if current_task is not None else None
+    authority_token = extract_task_authority_token(meta_source or schedule.payload_meta)
+    delivery_ref = extract_task_delivery_ref(meta_source) or extract_task_delivery_ref(schedule.payload_meta)
     reply = install_schedule_via_team_services_sync(
         agent,
         schedule,
         mode="create",
         authority_token=authority_token,
+        delivery_ref=delivery_ref,
     )
     if reply.get("next_fire_at") and not schedule.next_fire_at:
         schedule.next_fire_at = str(reply["next_fire_at"])

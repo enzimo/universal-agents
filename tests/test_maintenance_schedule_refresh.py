@@ -544,3 +544,51 @@ def test_a_paused_memory_review_schedule_stays_paused_across_gateway_restarts(wo
     permit_token = store.run_permit(MEMORY_REVIEW_ID)
     assert permit_token is not None
     assert world.verifier.verify_schedule_permit(permit_token, team_id=TEAM).person_roles == ("admin",)
+
+
+def test_maintenance_schedules_retry_after_transient_team_services_outage(world) -> None:
+    """C30: maintenance installs skipped while svc.team is down are queued and retried on the background loop."""
+    from assistant_gateway.application.team_commands import TeamServicesUnavailable
+
+    gateway = _gateway(
+        world.identity,
+        world.route,
+        memory_review=True,
+        schedule_ops=world.schedule_ops,
+        delivery_refs=world.delivery_refs,
+    )
+    real_request = gateway._team_commands.request
+    outage = {"down": True}
+
+    async def _flaky_request(kind: str, body: dict[str, Any], *, person_id: str) -> dict[str, Any]:
+        if outage["down"]:
+            raise TeamServicesUnavailable("team services are starting")
+        return await real_request(kind, body, person_id=person_id)
+
+    gateway._team_commands.request = _flaky_request  # type: ignore[method-assign]
+
+    asyncio.run(gateway.ensure_all())
+    assert world.manager._schedule_store.get_scheduled_message(MEMORY_REVIEW_ID) is None
+    assert (MEMORY_REVIEW_ID, "ensure") in gateway._pending_retries
+    assert (MEMORY_REVIEW_ID, "refresh") in gateway._pending_retries
+
+    # Team services come back; the background retry loop installs and refreshes the queued schedules.
+    outage["down"] = False
+
+    async def _run_until_drained() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(gateway.run(stop, retry_interval_seconds=0.01))
+        try:
+            for _ in range(50):
+                if not gateway._pending_retries:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            stop.set()
+            await task
+
+    asyncio.run(_run_until_drained())
+    assert not gateway._pending_retries
+    stored = world.manager._schedule_store.get_scheduled_message(MEMORY_REVIEW_ID)
+    assert stored is not None
+    assert world.manager._schedule_store.is_owner_vouched(MEMORY_REVIEW_ID) is True

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 from dataclasses import dataclass
+from typing import Protocol
 
 from assistant_gateway.application.delivery_presentation import (
     GatewayDeliveryAttachmentResolver,
@@ -16,6 +18,12 @@ from assistant_gateway.domain.sessions import SessionRecord
 from assistant_gateway.ports.repositories import SessionRepository
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext
+
+
+class GatewayDeliveryRefResolver(Protocol):
+    """Opaque delivery references of gateway sessions (``custom_transport.protocol1.delivery_refs``)."""
+
+    def ref(self, session_key: str) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -32,6 +40,7 @@ class _DeliveryMetadata:
     scheduled_job_id: str | None
     correlation_id: str | None
     session_key: str | None
+    delivery_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,7 @@ class GatewayDeliveryProjection:
         delivery: GatewayDeliveryService,
         presentation: GatewayDeliveryPresentation,
         attachments: GatewayDeliveryAttachmentResolver,
+        delivery_refs: GatewayDeliveryRefResolver | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
@@ -64,6 +74,7 @@ class GatewayDeliveryProjection:
         self._delivery = delivery
         self._presentation = presentation
         self._attachments = attachments
+        self._delivery_refs = delivery_refs
         self._logger = logger or logging.getLogger(__name__)
 
     def project(
@@ -126,6 +137,7 @@ class GatewayDeliveryProjection:
         self._log_missing_route_context(
             gateway_context=metadata.gateway_context,
             session_key=session_key,
+            delivery_ref=metadata.delivery_ref,
             correlation_id=metadata.correlation_id,
             conversation_id=metadata.conversation_id,
             scheduled_job_id=metadata.scheduled_job_id,
@@ -150,6 +162,10 @@ class GatewayDeliveryProjection:
                 if not person or not target.owner_canonical_user_id or person == target.owner_canonical_user_id:
                     session_key = target.session_key
         session = self._sessions.get_session(session_key) if session_key else None
+        if session is None and metadata.delivery_ref and self._delivery_refs is not None:
+            session = self._session_by_delivery_ref(metadata)
+            if session is not None:
+                session_key = session.session_key
         if session is None and metadata.conversation_id:
             session = self._sessions.get_session_by_conversation_id(
                 metadata.conversation_id
@@ -175,6 +191,39 @@ class GatewayDeliveryProjection:
                 session_key,
             )
         return session_key, session
+
+    def _session_by_delivery_ref(self, metadata: _DeliveryMetadata) -> SessionRecord | None:
+        """Resolve an opaque ``delivery_ref`` against the person's own gateway sessions."""
+
+        if not metadata.delivery_ref or self._delivery_refs is None:
+            return None
+        person_id = (
+            getattr(metadata.gateway_context, "canonical_user_id", None)
+            if metadata.gateway_context is not None
+            else None
+        )
+        candidates = self._sessions.list_sessions(
+            limit=10_000,
+            owner_canonical_user_id=person_id,
+        )
+        for candidate in candidates:
+            if hmac.compare_digest(
+                self._delivery_refs.ref(candidate.session_key),
+                metadata.delivery_ref,
+            ):
+                return candidate
+        if person_id is not None:
+            # Legacy single-user sessions may have owner_canonical_user_id=None;
+            # never match a session owned by another person.
+            for candidate in self._sessions.list_sessions(limit=10_000):
+                if candidate.owner_canonical_user_id is not None:
+                    continue
+                if hmac.compare_digest(
+                    self._delivery_refs.ref(candidate.session_key),
+                    metadata.delivery_ref,
+                ):
+                    return candidate
+        return None
 
     def _refuse_other_persons_session(self, metadata: _DeliveryMetadata, session: SessionRecord | None) -> None:
         """The default session belongs to its owner: never deliver another person's message there."""
@@ -235,6 +284,7 @@ class GatewayDeliveryProjection:
             ),
             correlation_id=msg_meta.msg_correlation_id,
             session_key=gateway_context.session_key if gateway_context else None,
+            delivery_ref=gateway_context.delivery_ref if gateway_context else None,
         )
 
     @staticmethod
@@ -268,6 +318,7 @@ class GatewayDeliveryProjection:
         *,
         gateway_context: object | None,
         session_key: str | None,
+        delivery_ref: str | None,
         correlation_id: str | None,
         conversation_id: str | None,
         scheduled_job_id: str | None,
@@ -279,7 +330,7 @@ class GatewayDeliveryProjection:
                 correlation_id,
                 conversation_id,
             )
-        elif session_key is None:
+        elif session_key is None and not delivery_ref:
             self._logger.warning(
                 "Gateway reply gateway_context missing session_key; attempting fallback routing via persisted state "
                 "(correlation_id=%s, conversation_id=%s, scheduled_job_id=%s).",

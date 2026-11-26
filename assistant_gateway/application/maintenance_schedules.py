@@ -38,6 +38,8 @@ what is configured: ids, cadence, instructions and whether a set is on.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -235,6 +237,39 @@ class GatewayMaintenanceScheduleApplication:
         self._team_commands = team_commands
         self._delivery_refs = delivery_refs
         self._logger = logger or logging.getLogger(__name__)
+        # Maintenance installs that failed transiently (e.g. svc.team unavailable at gateway start)
+        # are retried on the background loop rather than waiting for the next lead change.
+        self._pending_retries: dict[tuple[str, str], tuple[_MaintenanceScheduleDefinition, SessionRecord, str]] = {}
+
+    async def run(self, stop_event: asyncio.Event, *, retry_interval_seconds: float = 15.0) -> None:
+        """Retry transiently skipped maintenance schedule installs until they succeed or ``stop_event`` fires."""
+
+        while not stop_event.is_set():
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=retry_interval_seconds)
+            if stop_event.is_set():
+                return
+            if self._pending_retries:
+                await self.retry_pending()
+
+    async def retry_pending(self) -> int:
+        """Retry any maintenance installs that were skipped while team services or signing were unavailable."""
+
+        if not self._pending_retries:
+            return 0
+        await self._request_context.ensure_signer_ready()
+        mode_order = {"ensure": 0, "replace": 1, "refresh": 2}
+        pending = sorted(
+            self._pending_retries.items(),
+            key=lambda item: (mode_order.get(item[0][1], 9), item[0][0]),
+        )
+        succeeded = 0
+        for key, (definition, session, owner_canonical_user_id) in pending:
+            if key not in self._pending_retries:
+                continue
+            if await self._publish(definition, session, owner_canonical_user_id):
+                succeeded += 1
+        return succeeded
 
     async def ensure_all(self) -> None:
         """Ensure every enabled manager-owned maintenance schedule."""
@@ -465,9 +500,10 @@ class GatewayMaintenanceScheduleApplication:
         definition: _MaintenanceScheduleDefinition,
         session: SessionRecord,
         owner_canonical_user_id: str,
-    ) -> None:
+    ) -> bool:
         """Install or refresh one maintenance schedule via ``schedules.install`` on team services."""
 
+        retry_key = (definition.schedule_id, definition.install_mode)
         body: dict[str, object] = {
             "schedule_id": definition.schedule_id,
             "mode": definition.install_mode,
@@ -496,16 +532,18 @@ class GatewayMaintenanceScheduleApplication:
                 person_id=owner_canonical_user_id,
             )
         except (GatewayAuthorityTokenUnavailable, TeamServicesUnavailable, TeamCommandRefused) as exc:
+            self._pending_retries[retry_key] = (definition, session, owner_canonical_user_id)
             self._logger.warning(
                 "Gateway skipped installing maintenance schedule because team services or signing "
-                "was unavailable. event=gateway_maintenance_schedule_signer_unavailable "
+                "was unavailable; queued for retry. event=gateway_maintenance_schedule_signer_unavailable "
                 "schedule_id=%s install_mode=%s person_id=%s error=%s",
                 definition.schedule_id,
                 definition.install_mode,
                 owner_canonical_user_id,
                 exc,
             )
-            return
+            return False
+        self._pending_retries.pop(retry_key, None)
         outcome = str(reply.get("outcome") or "")
         if outcome != "ok":
             log = (
@@ -523,13 +561,14 @@ class GatewayMaintenanceScheduleApplication:
                 outcome,
                 reply.get("message") or "",
             )
-            return
+            return False
         self._delivery.upsert_scheduled_target(
             scheduled_job_id=definition.schedule_id,
             session_key=session.session_key,
             conversation_id=session.conversation_id,
             owner_canonical_user_id=owner_canonical_user_id,
         )
+        return True
 
     def _message_meta(
         self,

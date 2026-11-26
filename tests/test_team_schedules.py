@@ -687,3 +687,508 @@ async def test_gateway_schedule_add_and_delivery_projection_resolve_session_via_
     )
     assert resolved_key == "session_ada_a"
     assert resolved_session is not None and resolved_session.session_key == "session_ada_a"
+
+
+@pytest.mark.asyncio
+async def test_schedules_install_13c5_vouching_rules_for_gateway_run_and_owner_permits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C29: only gateway-signed tokens vouch; scheduler run tokens, schedule permits, and admin
+    owner permits install user schedules unvouched, drop vouching on replace, and cannot install
+    system-managed schedules or use stopped source schedules."""
+
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
+    from custom_transport.protocol1.authority_tokens import root_task_token, schedule_permit_token
+    from tests.broker_access_support import (
+        broker_gateway_identity,
+        broker_people_store,
+        broker_person_ref,
+        broker_scheduler_identity,
+        forget_task_context_keys,
+    )
+    from tests.scheduled_run_support import _verified_team_frame, bind_test_scheduler
+
+    forget_task_context_keys()
+    try:
+        people_store = broker_people_store()
+        people_store.register(TEAM, "ada", roles=("owner",))
+        people_store.register(TEAM, "bo", roles=("member",))
+        store = ScheduleStore(db_path=str(tmp_path / "vouching_13c5.db"))
+        bound = bind_test_scheduler(monkeypatch, store=store, team_id=TEAM, people_store=people_store)
+
+        now = datetime.now(timezone.utc)
+        gw_id = broker_gateway_identity(TEAM)
+        sched_id = broker_scheduler_identity(TEAM)
+        ada_gw_token = root_task_token(
+            gw_id, team=TEAM, root_task_id="task_ada_gw", request_id="req_ada_gw", person_ref=broker_person_ref("ada"), issued=now
+        )
+        bo_gw_token = root_task_token(
+            gw_id, team=TEAM, root_task_id="task_bo_gw", request_id="req_bo_gw", person_ref=broker_person_ref("bo"), issued=now
+        )
+
+        async def _send(body: dict[str, Any], token: dict[str, Any]) -> dict[str, Any]:
+            frame = _verified_team_frame("schedules.install", body, sender_agent="lead_1", authority=token, team=TEAM)
+            return checked_reply("schedules.install", await bound.schedule_ops.handle(frame))
+
+        def _user_body(req_id: str, sid: str, *, mode: str = "create", seen_version: str | None = None) -> dict[str, Any]:
+            body: dict[str, Any] = {
+                "request_id": req_id,
+                "schedule_id": sid,
+                "mode": mode,
+                "management_class": "user",
+                "timing": {"kind": "interval", "interval_ms": 600_000},
+                "repeat_count": 0,
+                "enabled": True,
+                "action": {"type": "task", "instruction": {"type": "inline", "text": "Check updates."}},
+            }
+            if seen_version is not None:
+                body["seen_version"] = seen_version
+            return body
+
+        # 1. Gateway-signed root-task token vouches for the schedule and issues a permit.
+        gw_created = await _send(_user_body("req-gw-1", "sched_gw_vouched"), bo_gw_token)
+        assert gw_created["outcome"] == "ok"
+        assert store.is_owner_vouched("sched_gw_vouched") is True
+        bo_permit = store.run_permit("sched_gw_vouched")
+        assert bo_permit is not None
+
+        # 2. Permit-backed scheduled run creates an UNVOUCHED schedule with no permit.
+        from_permit = await _send(
+            _user_body("req-permit-1", "sched_from_permit"),
+            bo_permit.model_dump(mode="json", exclude_none=True),
+        )
+        assert from_permit["outcome"] == "ok"
+        assert store.is_owner_vouched("sched_from_permit") is False
+        assert store.run_permit("sched_from_permit") is None
+
+        # 3. Scheduler-signed per-run token (run_context.sign) creates an UNVOUCHED schedule with no permit.
+        bo_run_token = root_task_token(
+            sched_id,
+            team=TEAM,
+            root_task_id="run_bo_1",
+            request_id="schedule_run_bo_1",
+            person_ref=broker_person_ref("bo"),
+            schedule_id="sched_gw_vouched",
+            issued=now,
+        )
+        from_run = await _send(_user_body("req-run-1", "sched_from_run"), bo_run_token)
+        assert from_run["outcome"] == "ok"
+        assert store.is_owner_vouched("sched_from_run") is False
+        assert store.run_permit("sched_from_run") is None
+
+        # 4. Administrator's internal_improvement owner permit creates user schedules UNVOUCHED and
+        #    is refused for system-managed schedules (cannot bypass vouching via is_system_managed_schedule).
+        maint = ScheduledMessage(
+            schedule_id="sched_internal_imp",
+            schedule_name="internal_improvement:team",
+            management_class=ScheduleManagementClass.SYSTEM,
+            system_schedule_kind=SystemScheduleKind.INTERNAL_IMPROVEMENT,
+            payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Maintain team."),
+            payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="ada")),
+            interval_ms=3_600_000,
+            repeat_count=None,
+        )
+        store.add(maint, claim_team_id=TEAM)
+        owner_permit = schedule_permit_token(
+            sched_id,
+            team=TEAM,
+            schedule_id="sched_internal_imp",
+            person_ref=broker_person_ref("ada"),
+            owner_permit=True,
+            issued=now,
+        )
+        from_owner_permit = await _send(_user_body("req-op-user", "sched_from_owner_permit"), owner_permit)
+        assert from_owner_permit["outcome"] == "ok"
+        assert store.is_owner_vouched("sched_from_owner_permit") is False
+        assert store.run_permit("sched_from_owner_permit") is None
+
+        sys_body = {
+            "request_id": "req-op-sys",
+            "schedule_id": "sched_sys_from_owner_permit",
+            "mode": "create",
+            "management_class": "system",
+            "system_schedule_kind": "heartbeat_launcher",
+            "timing": {"kind": "interval", "interval_ms": 600_000},
+            "repeat_count": 0,
+            "enabled": True,
+            "action": {"type": "task", "instruction": {"type": "inline", "text": "Sneaky system schedule."}},
+        }
+        sys_refused = await _send(sys_body, owner_permit)
+        assert sys_refused["outcome"] == "not_allowed"
+        assert store.get_scheduled_message("sched_sys_from_owner_permit") is None
+
+        # 5. Scheduler-signed replace on an existing vouched schedule drops vouching and clears its permit.
+        vouched_ada = await _send(_user_body("req-ada-1", "sched_ada_target"), ada_gw_token)
+        assert store.is_owner_vouched("sched_ada_target") is True
+        assert store.run_permit("sched_ada_target") is not None
+        replaced = await _send(
+            _user_body(
+                "req-ada-rep",
+                "sched_ada_target",
+                mode="replace",
+                seen_version=vouched_ada["version"]["seen_version"],
+            ),
+            owner_permit,
+        )
+        assert replaced["outcome"] == "ok"
+        assert store.is_owner_vouched("sched_ada_target") is False
+        assert store.run_permit("sched_ada_target") is None
+
+        # 6. Once the source schedule of a per-run token is disabled, further installs are refused.
+        store.set_enabled("sched_gw_vouched", False)
+        stopped_run = await _send(_user_body("req-run-stopped", "sched_after_stop"), bo_run_token)
+        assert stopped_run["outcome"] == "not_allowed"
+        assert store.get_scheduled_message("sched_after_stop") is None
+    finally:
+        forget_task_context_keys()
+
+
+def test_agent_created_schedules_from_member_chat_route_replies_and_chat_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C27: create_scheduled_job (one-shot & recurring) and turn-action schedule_message in a
+    member's chat carry delivery_ref + conversation_id through schedules.install, appear in that
+    chat's schedules.list, and project fired run replies to the member's exact chat session."""
+
+    import asyncio
+    from assistant_gateway.application.delivery_presentation import GatewayDeliveryPresentation
+    from assistant_gateway.application.delivery_projection import (
+        DeliveryPersonMismatch,
+        GatewayDeliveryProjection,
+        GatewayDeliveryProjectionSettings,
+    )
+    from assistant_gateway.application.delivery_service import GatewayDeliveryService
+    from assistant_gateway.application.request_context import (
+        GatewayRequestContextService,
+        GatewayRequestContextSettings,
+        GatewayRequestRoute,
+    )
+    from assistant_gateway.store import GatewayStateStore
+    from custom_agents.conversation_store import ConversationStore
+    from custom_agents.schedule_installation import create_schedule_from_turn_action
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+    from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, RequesterType, ScheduleManagementClass
+    from custom_tools.providers.schedules import create_scheduled_job
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from team_services.schedules import ScheduleInstallDefaults
+    from tests.broker_access_support import (
+        BrokerGatewayTokenSigner,
+        broker_people_store,
+        broker_person_ref,
+        forget_task_context_keys,
+    )
+    from tests.scheduled_run_support import bind_test_scheduler
+    from tests.task_work_support import set_agent_ref
+    from tests.test_schedule_tools import _FakeTaskManager, _FakeWake
+    from tests.tool_result_support import tool_json
+
+    forget_task_context_keys()
+    try:
+        refs = DeliveryRefs(TEAM, b"c27-delivery-ref-secret-key")
+        gw_store = GatewayStateStore(str(tmp_path / "gateway.db"))
+        gw_store.create_session(
+            session_key="session_ada_default",
+            conversation_id="conv_ada_default",
+            manager_agent_id="manager_1",
+            channel_name="web",
+            user_id="ada_web",
+            chat_id="web_1",
+            owner_canonical_user_id="ada",
+        )
+        gw_store.create_session(
+            session_key="session_ada_work",
+            conversation_id="conv_ada_work",
+            manager_agent_id="manager_1",
+            channel_name="telegram",
+            user_id="ada_tg",
+            chat_id="tg_ada_work",
+            owner_canonical_user_id="ada",
+        )
+        gw_store.create_session(
+            session_key="session_bo_telegram",
+            conversation_id="conv_bo_1",
+            manager_agent_id="manager_1",
+            channel_name="telegram",
+            user_id="bo_tg",
+            chat_id="tg_bo_99",
+            owner_canonical_user_id="bo",
+        )
+        delivery = GatewayDeliveryService(repository=gw_store.delivery_repository, unit_of_work_factory=gw_store)
+
+        people_store = broker_people_store()
+        people_store.register(TEAM, "ada", roles=("owner",))
+        people_store.register(TEAM, "bo", roles=("member",))
+        db_path = str(tmp_path / "team_schedules.db")
+        storage_settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": db_path}})
+        now = datetime.now(timezone.utc)
+        AccessRepository(storage_settings).replace_people(
+            TEAM,
+            [
+                TeamPersonV1(
+                    person_ref=broker_person_ref("ada"),
+                    team_id=TEAM,
+                    person_id="ada",
+                    standing=PersonStanding.ACTIVE,
+                    roles=("owner",),
+                    changed_at_utc=now,
+                ),
+                TeamPersonV1(
+                    person_ref=broker_person_ref("bo"),
+                    team_id=TEAM,
+                    person_id="bo",
+                    standing=PersonStanding.ACTIVE,
+                    roles=("member",),
+                    changed_at_utc=now,
+                ),
+            ],
+            at=now,
+        )
+        store = ScheduleStore(db_path=db_path, storage_settings=storage_settings)
+        conversations = ConversationStore(
+            db_path=db_path,
+            storage_settings=storage_settings,
+            artifacts_dir=str(tmp_path / "artifacts"),
+        )
+        bound = bind_test_scheduler(
+            monkeypatch,
+            store=store,
+            team_id=TEAM,
+            storage_settings=storage_settings,
+        )
+        bound.schedule_ops._delivery_refs = refs
+        bound.schedule_ops._conversations = conversations
+        bound.schedule_ops._install_defaults = ScheduleInstallDefaults(
+            lead_agent_type="TeamArchitect",
+            response_route="gateway_queue",
+            instance_name="team_c27",
+            default_timezone="UTC",
+        )
+
+        # Gateway admits a chat task for member "bo" in session_bo_telegram and owner "ada" in session_ada_work.
+        def _build_chat_ctx(person_id: str, session_key: str, chat_id: str, user_id: str, conv_id: str) -> GatewayContext:
+            req_ctx = GatewayRequestContextService(
+                settings=GatewayRequestContextSettings(
+                    instance_name="team_c27",
+                    team_id=TEAM,
+                    default_canonical_user_id="ada",
+                    default_display_name="Ada",
+                    default_timezone="UTC",
+                    heartbeat_source_id=None,
+                    users_enabled=False,
+                ),
+                identity=SimpleNamespace(),  # type: ignore[arg-type]
+                token_signer=BrokerGatewayTokenSigner(team_id=TEAM),
+                person_ref_resolver=broker_person_ref,
+                delivery_refs=refs,
+            )
+            return req_ctx.build_gateway_context(
+                session_key=session_key,
+                delivery_mode="interactive",
+                route=GatewayRequestRoute(
+                    channel_name="telegram",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    canonical_user_id=person_id,
+                ),
+                manager_agent_id="manager_1",
+                root_task_id=f"task_{person_id}_chat",
+                conversation_id=conv_id,
+            )
+
+        bo_gc = _build_chat_ctx("bo", "session_bo_telegram", "tg_bo_99", "bo_tg", "conv_bo_1")
+        assert bo_gc.delivery_ref == refs.ref("session_bo_telegram")
+
+        bo_header = MessageHeader(
+            from_agent_id="gateway_queue",
+            to_routing_path="manager_1",
+            response_routing_key="gateway_queue",
+            agent_signature="",
+        )
+        bo_meta = MessageMeta(
+            from_agent_name="Bo",
+            conversation_id="conv_bo_1",
+            request_timezone="Europe/Berlin",
+            requester_type=RequesterType.USER_REQUESTER,
+            gateway_context=bo_gc,
+        )
+        bo_task_info = SimpleNamespace(
+            task=Task(task_id="task_bo_chat", task_type=MessageMetaType.REQUEST, problem_statement="Remind me"),
+            header=bo_header,
+            meta=bo_meta,
+        )
+        bo_tm = _FakeTaskManager(db_path, bo_task_info)
+        bo_tm.get_task_objective_id = lambda _tid: None  # type: ignore[attr-defined]
+        bo_agent = SimpleNamespace(
+            id="manager_1",
+            name="TeamArchitect",
+            named_agent_type="TeamArchitect",
+            team_id=TEAM,
+            is_team_lead=True,
+            instance_timezone="UTC",
+            _schedule_store=store,
+            _conversation_store=conversations,
+            _scheduler_wake=_FakeWake(),
+            task_manager=bo_tm,
+            test_task_id="task_current",
+            _logger=logging.getLogger("test.c27_bo"),
+        )
+        set_agent_ref(bo_agent)
+
+        # 1. One-shot create_scheduled_job from member's chat.
+        one_shot = tool_json(create_scheduled_job(instruction="Remind me to stretch", delay_seconds=600))
+        assert "schedule_id" in one_shot, one_shot
+        one_shot_id = one_shot["schedule_id"]
+        saved_one_shot = store.get_scheduled_message(one_shot_id)
+        assert saved_one_shot is not None
+        assert store.delivery_ref_of(one_shot_id) == refs.ref("session_bo_telegram")
+        assert saved_one_shot.payload_meta.gateway_context.delivery_ref == refs.ref("session_bo_telegram")
+        assert saved_one_shot.payload_meta.conversation_id == "conv_bo_1"
+        assert saved_one_shot.payload_header.response_routing_key == "gateway_queue"
+
+        # 2. Recurring create_scheduled_job (forked into a dedicated conversation unknown to gateway).
+        recurring = tool_json(create_scheduled_job(instruction="Daily standup", interval_seconds=86400))
+        recurring_id = recurring["schedule_id"]
+        saved_recurring = store.get_scheduled_message(recurring_id)
+        assert saved_recurring is not None
+        assert store.delivery_ref_of(recurring_id) == refs.ref("session_bo_telegram")
+        assert saved_recurring.payload_meta.gateway_context.delivery_ref == refs.ref("session_bo_telegram")
+        assert saved_recurring.payload_meta.conversation_id is not None
+        assert saved_recurring.payload_meta.conversation_id != "conv_bo_1"
+        assert saved_recurring.payload_meta.followup_to_task_id is not None
+        assert saved_recurring.payload_meta.followup_to_task_id.startswith("sched_conv_seed_")
+
+        # 3. Turn-action schedule_message from member's chat.
+        turn_action_sched = ScheduledMessage(
+            schedule_id="sched_bo_turn_action",
+            management_class=ScheduleManagementClass.USER,
+            payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Follow up from turn action."),
+            interval_ms=3_600_000,
+        )
+        asyncio.run(
+            create_schedule_from_turn_action(
+                bo_agent,
+                turn_action_sched,
+                msg_header=bo_header,
+                msg_meta=bo_meta,
+            )
+        )
+        saved_turn_action = store.get_scheduled_message("sched_bo_turn_action")
+        assert saved_turn_action is not None
+        assert store.delivery_ref_of("sched_bo_turn_action") == refs.ref("session_bo_telegram")
+        assert saved_turn_action.payload_meta.gateway_context.delivery_ref == refs.ref("session_bo_telegram")
+
+        # 4. Chat's /schedules list (schedules.list with delivery_ref) shows all three for bo's chat only.
+        list_bo_chat = stand_in_frame(
+            TEAM,
+            "schedules.list",
+            {"request_id": "list-bo-chat", "delivery_ref": refs.ref("session_bo_telegram"), "offset": 0, "limit": 50},
+            person_ref=broker_person_ref("bo"),
+            request_id="list-bo-chat",
+        )
+        listed = checked_reply("schedules.list", asyncio.run(bound.schedule_ops.handle(list_bo_chat)))
+        assert {row["schedule_id"] for row in listed["schedules"]} == {
+            one_shot_id,
+            recurring_id,
+            "sched_bo_turn_action",
+        }
+        list_other_chat = stand_in_frame(
+            TEAM,
+            "schedules.list",
+            {"request_id": "list-bo-other", "delivery_ref": refs.ref("session_bo_other"), "offset": 0, "limit": 50},
+            person_ref=broker_person_ref("bo"),
+            request_id="list-bo-other",
+        )
+        assert checked_reply("schedules.list", asyncio.run(bound.schedule_ops.handle(list_other_chat)))["schedules"] == []
+
+        # 5. Fired run replies project to bo's exact Telegram session (not default session / no DeliveryPersonMismatch).
+        projection = GatewayDeliveryProjection(
+            settings=GatewayDeliveryProjectionSettings(default_session_key="session_ada_default"),
+            sessions=gw_store.session_repository,
+            delivery=delivery,
+            presentation=GatewayDeliveryPresentation(),
+            attachments=SimpleNamespace(resolve=lambda *_a, **_kw: ()),  # type: ignore[arg-type]
+            delivery_refs=refs,
+        )
+        for saved in (saved_one_shot, saved_recurring, saved_turn_action):
+            reply_env = MessageEnvelope(
+                msg_content=Task(task_type=MessageMetaType.RESPONSE, problem_statement="run", answer="Time to stretch!"),
+                msg_header=MessageHeader(from_agent_id="manager_1", to_routing_path="gateway_queue"),
+                msg_meta=saved.payload_meta.model_copy(deep=True),
+            )
+            event = projection.project(envelope=reply_env, rendered_text="Time to stretch!", request_record=None)
+            assert event.session_key == "session_bo_telegram"
+            assert event.channel_name == "telegram"
+            assert event.chat_id == "tg_bo_99"
+            assert event.user_id == "bo_tg"
+            assert event.scheduled_job_id == saved.schedule_id
+
+        # 6. Owner "ada" creating a reminder in her non-default chat routes back to session_ada_work.
+        ada_gc = _build_chat_ctx("ada", "session_ada_work", "tg_ada_work", "ada_tg", "conv_ada_work")
+        ada_meta = MessageMeta(
+            from_agent_name="Ada",
+            conversation_id="conv_ada_work",
+            requester_type=RequesterType.USER_REQUESTER,
+            gateway_context=ada_gc,
+        )
+        ada_tm = _FakeTaskManager(
+            db_path,
+            SimpleNamespace(
+                task=Task(task_id="task_ada_work", task_type=MessageMetaType.REQUEST, problem_statement="Remind"),
+                header=bo_header,
+                meta=ada_meta,
+            ),
+        )
+        ada_tm.get_task_objective_id = lambda _tid: None  # type: ignore[attr-defined]
+        ada_agent = SimpleNamespace(
+            id="manager_1",
+            name="TeamArchitect",
+            named_agent_type="TeamArchitect",
+            team_id=TEAM,
+            is_team_lead=True,
+            instance_timezone="UTC",
+            _schedule_store=store,
+            _conversation_store=conversations,
+            _scheduler_wake=_FakeWake(),
+            task_manager=ada_tm,
+            test_task_id="task_current",
+            _logger=logging.getLogger("test.c27_ada"),
+        )
+        set_agent_ref(ada_agent)
+        ada_sched_id = tool_json(create_scheduled_job(instruction="Check deploy", delay_seconds=300))["schedule_id"]
+        ada_saved = store.get_scheduled_message(ada_sched_id)
+        assert ada_saved is not None
+        ada_event = projection.project(
+            envelope=MessageEnvelope(
+                msg_content=Task(task_type=MessageMetaType.RESPONSE, problem_statement="run", answer="Deploy check"),
+                msg_header=MessageHeader(from_agent_id="manager_1", to_routing_path="gateway_queue"),
+                msg_meta=ada_saved.payload_meta.model_copy(deep=True),
+            ),
+            rendered_text="Deploy check",
+            request_record=None,
+        )
+        assert ada_event.session_key == "session_ada_work"
+        assert ada_event.chat_id == "tg_ada_work"
+
+        # 7. Cross-person guard: bo's reply carrying ada's delivery_ref never resolves to ada's session.
+        spoofed_meta = saved_one_shot.payload_meta.model_copy(deep=True)
+        spoofed_meta.conversation_id = "conv_unknown"
+        spoofed_meta.gateway_context.delivery_ref = refs.ref("session_ada_work")
+        with pytest.raises(DeliveryPersonMismatch):
+            projection.project(
+                envelope=MessageEnvelope(
+                    msg_content=Task(task_type=MessageMetaType.RESPONSE, problem_statement="run", answer="Nope"),
+                    msg_header=MessageHeader(from_agent_id="manager_1", to_routing_path="gateway_queue"),
+                    msg_meta=spoofed_meta,
+                ),
+                rendered_text="Nope",
+                request_record=None,
+            )
+    finally:
+        forget_task_context_keys()

@@ -152,20 +152,35 @@ async def create_schedule_from_turn_action(
     schedule_msg.claim_agent_id = claim_scope.get("claim_agent_id")
     store = agent._schedule_store
     from custom_agents.schedule_install_client import (
+        ScheduleInstallError,
         extract_task_authority_token,
+        extract_task_delivery_ref,
         install_schedule_via_team_services,
     )
 
-    authority_token = extract_task_authority_token(msg_meta or schedule_msg.payload_meta)
+    source_meta = msg_meta or schedule_msg.payload_meta
+    authority_token = extract_task_authority_token(source_meta)
+    delivery_ref = extract_task_delivery_ref(source_meta) or extract_task_delivery_ref(schedule_msg.payload_meta)
     try:
         reply = await install_schedule_via_team_services(
             agent,
             schedule_msg,
             mode="ensure",
             authority_token=authority_token,
+            delivery_ref=delivery_ref,
         )
-    except ValueError:
-        await _log_kept_schedule(agent, store, schedule_msg)
+    except ScheduleInstallError as exc:
+        if exc.outcome == "id_in_use":
+            await _log_kept_schedule(agent, store, schedule_msg)
+            return
+        agent._logger.warning(
+            "[%s] Schedule turn action was refused by team services; nothing was created. "
+            "event=schedule_action_install_refused schedule_id=%s outcome=%s message=%s",
+            agent.id,
+            schedule_msg.schedule_id,
+            exc.outcome,
+            str(exc),
+        )
         return
     if reply.get("state") == SCHEDULE_KEPT:
         await _log_kept_schedule(agent, store, schedule_msg)
