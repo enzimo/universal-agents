@@ -116,9 +116,6 @@
         "agent_status_reply": {
           "$ref": "#/components/messages/agent_status_reply"
         },
-        "blobs_delete_person_reply": {
-          "$ref": "#/components/messages/blobs_delete_person_reply"
-        },
         "blobs_register_reply": {
           "$ref": "#/components/messages/blobs_register_reply"
         },
@@ -404,6 +401,9 @@
         "tasks_steer_reply": {
           "$ref": "#/components/messages/tasks_steer_reply"
         },
+        "team_delete_person_data_reply": {
+          "$ref": "#/components/messages/team_delete_person_data_reply"
+        },
         "topics_find_threads_reply": {
           "$ref": "#/components/messages/topics_find_threads_reply"
         },
@@ -444,9 +444,6 @@
       "messages": {
         "access_withdraw": {
           "$ref": "#/components/messages/access_withdraw"
-        },
-        "blobs_delete_person": {
-          "$ref": "#/components/messages/blobs_delete_person"
         },
         "blobs_register": {
           "$ref": "#/components/messages/blobs_register"
@@ -720,6 +717,9 @@
         },
         "tasks_steer": {
           "$ref": "#/components/messages/tasks_steer"
+        },
+        "team_delete_person_data": {
+          "$ref": "#/components/messages/team_delete_person_data"
         },
         "topics_find_threads": {
           "$ref": "#/components/messages/topics_find_threads"
@@ -1251,49 +1251,6 @@
                 },
                 "kind": {
                   "const": "agent.status.reply"
-                }
-              },
-              "type": "object"
-            }
-          ]
-        }
-      },
-      "blobs_delete_person": {
-        "name": "blobs.delete_person",
-        "payload": {
-          "allOf": [
-            {
-              "$ref": "../schemas/frame.schema.json"
-            },
-            {
-              "properties": {
-                "body": {
-                  "$ref": "../schemas/bodies/blobs.delete_person.schema.json"
-                },
-                "kind": {
-                  "const": "blobs.delete_person"
-                }
-              },
-              "type": "object"
-            }
-          ]
-        },
-        "summary": "Remove a departed person's blob ownership records and immediately delete every blob left with no remaining owner."
-      },
-      "blobs_delete_person_reply": {
-        "name": "blobs.delete_person.reply",
-        "payload": {
-          "allOf": [
-            {
-              "$ref": "../schemas/frame.schema.json"
-            },
-            {
-              "properties": {
-                "body": {
-                  "$ref": "../schemas/bodies/blobs.delete_person.reply.schema.json"
-                },
-                "kind": {
-                  "const": "blobs.delete_person.reply"
                 }
               },
               "type": "object"
@@ -5870,6 +5827,49 @@
           ]
         }
       },
+      "team_delete_person_data": {
+        "name": "team.delete_person_data",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/team.delete_person_data.schema.json"
+                },
+                "kind": {
+                  "const": "team.delete_person_data"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "summary": "Delete a departed person's team-held data: remove their blob ownership records, delete every blob left with no remaining owner, and delete every raw dead-letter copy naming them."
+      },
+      "team_delete_person_data_reply": {
+        "name": "team.delete_person_data.reply",
+        "payload": {
+          "allOf": [
+            {
+              "$ref": "../schemas/frame.schema.json"
+            },
+            {
+              "properties": {
+                "body": {
+                  "$ref": "../schemas/bodies/team.delete_person_data.reply.schema.json"
+                },
+                "kind": {
+                  "const": "team.delete_person_data.reply"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
       "tool_setup_request": {
         "name": "tool.setup.request",
         "payload": {
@@ -6218,27 +6218,6 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/agent_status_reply"
-          }
-        ]
-      }
-    },
-    "receive_blobs_delete_person_team_services": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/svc_team"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/svc_team/messages/blobs_delete_person"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/reply_inbox"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/reply_inbox/messages/blobs_delete_person_reply"
           }
         ]
       }
@@ -8795,6 +8774,27 @@
         ]
       }
     },
+    "receive_team_delete_person_data_team_services": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/team_delete_person_data"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/team_delete_person_data_reply"
+          }
+        ]
+      }
+    },
     "receive_tool_setup_request_edge": {
       "action": "receive",
       "channel": {
@@ -9036,27 +9036,6 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/agent_status_reply"
-          }
-        ]
-      }
-    },
-    "send_blobs_delete_person_team_services": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/svc_team"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/svc_team/messages/blobs_delete_person"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/reply_inbox"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/reply_inbox/messages/blobs_delete_person_reply"
           }
         ]
       }
@@ -11609,6 +11588,27 @@
         "messages": [
           {
             "$ref": "#/channels/reply_inbox/messages/tasks_steer_reply"
+          }
+        ]
+      }
+    },
+    "send_team_delete_person_data_team_services": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/svc_team"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/svc_team/messages/team_delete_person_data"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply_inbox"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply_inbox/messages/team_delete_person_data_reply"
           }
         ]
       }

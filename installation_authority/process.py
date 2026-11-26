@@ -104,8 +104,9 @@ async def run_installation_authority(config: GatewayInstanceConfig) -> None:
             raise SystemExit(1) from None
         upkeep = asyncio.create_task(authority.keep_current())
         placements = asyncio.create_task(authority.follow_placements(stop))
+        advisories = asyncio.create_task(authority.watch_delivery_advisories(stop))
         stopping = asyncio.create_task(stop.wait())
-        tasks = [upkeep, placements, stopping]
+        tasks = [upkeep, placements, advisories, stopping]
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         if upkeep.done():
             _LOGGER.error("The installation authority stopped keeping its records current and exits. "
@@ -116,6 +117,11 @@ async def run_installation_authority(config: GatewayInstanceConfig) -> None:
             _LOGGER.error("The installation authority stopped following placements and exits. "
                           "event=installation_authority_placements_stopped error=%s",
                           placements.exception() if not placements.cancelled() else "cancelled")
+            raise SystemExit(1)
+        if advisories.done() and not stop.is_set():
+            _LOGGER.error("The installation authority stopped watching delivery advisories and exits. "
+                          "event=installation_authority_advisories_stopped error=%s",
+                          advisories.exception() if not advisories.cancelled() else "cancelled")
             raise SystemExit(1)
         _LOGGER.info("The installation authority is stopping. event=installation_authority_stopping")
     finally:

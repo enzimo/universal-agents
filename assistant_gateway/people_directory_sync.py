@@ -111,11 +111,16 @@ class PeopleDirectorySync:
         current = self._current(canonical_user_id)
         if current is None:
             return None
-        standing, role = current
+        standing, role, display_name = current
         store = self._access_store()
         stored = store.team_person(self._team_id, canonical_user_id)
         roles = effective_roles((role,)) if standing is PersonStanding.ACTIVE else ()
-        if stored is not None and stored.standing is standing and tuple(stored.roles) == roles:
+        if (
+            stored is not None
+            and stored.standing is standing
+            and tuple(stored.roles) == roles
+            and stored.display_name == display_name
+        ):
             return stored.person_ref
         self._logger.warning(
             "The access store's copy of a person was out of date; writing it before their command. "
@@ -146,8 +151,8 @@ class PeopleDirectorySync:
         )
         return counts
 
-    def _current(self, canonical_user_id: str) -> tuple[PersonStanding, str] | None:
-        """The person's standing and role in this team from the gateway's records, or None."""
+    def _current(self, canonical_user_id: str) -> tuple[PersonStanding, str, str | None] | None:
+        """The person's standing, role, and display name in this team from the gateway's records, or None."""
 
         person = self._identity.get_gateway_user(canonical_user_id)
         membership = next(
@@ -162,16 +167,19 @@ class PeopleDirectorySync:
             # Nothing to copy: only people with a membership in this team are recorded.
             return None
         standing = person_standing(membership_status=membership.status, person_status=person.status)
-        return None if standing is None else (standing, membership.role)
+        if standing is None:
+            return None
+        display_name = (person.display_name or "").strip()[:120] or None
+        return standing, membership.role, display_name
 
     def _record(self, canonical_user_id: str) -> None:
         current = self._current(canonical_user_id)
         if current is None:
             return
-        standing, role = current
+        standing, role, display_name = current
         store = self._access_store()
         previous = store.team_person(self._team_id, canonical_user_id)
-        store.record_person(self._copy(canonical_user_id, standing, role, previous))
+        store.record_person(self._copy(canonical_user_id, standing, role, previous, display_name=display_name))
 
     def _sync_all(self) -> Counter[PersonStanding]:
         store = self._access_store()
@@ -181,7 +189,16 @@ class PeopleDirectorySync:
             standing = person_standing(membership_status=row.membership_status, person_status=row.person_status)
             if standing is None:
                 continue
-            people.append(self._copy(row.canonical_user_id, standing, row.role, previous.get(row.canonical_user_id)))
+            display_name = (row.display_name or "").strip()[:120] or None
+            people.append(
+                self._copy(
+                    row.canonical_user_id,
+                    standing,
+                    row.role,
+                    previous.get(row.canonical_user_id),
+                    display_name=display_name,
+                )
+            )
         # Read the store before the gateway's records: whoever another writer stores after
         # this read and the records lack is someone just added, not someone gone.
         store.replace_people(self._team_id, people, at=self._clock.now_utc(), read_before=previous.keys())
@@ -193,12 +210,19 @@ class PeopleDirectorySync:
         standing: PersonStanding,
         role: str,
         previous: TeamPersonV1 | None,
+        *,
+        display_name: str | None = None,
     ) -> TeamPersonV1:
         """The record to store, keeping the earlier change time when nothing changed."""
 
         roles = effective_roles((role,)) if standing is PersonStanding.ACTIVE else ()
         changed_at = self._clock.now_utc()
-        if previous is not None and previous.standing is standing and tuple(previous.roles) == roles:
+        if (
+            previous is not None
+            and previous.standing is standing
+            and tuple(previous.roles) == roles
+            and previous.display_name == display_name
+        ):
             changed_at = previous.changed_at_utc
         return TeamPersonV1(
             team_id=self._team_id,
@@ -207,6 +231,7 @@ class PeopleDirectorySync:
             person_ref=previous.person_ref if previous is not None else new_person_ref(),
             standing=standing,
             roles=roles,
+            display_name=display_name,
             changed_at_utc=changed_at,
         )
 

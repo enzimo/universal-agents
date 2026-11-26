@@ -22,7 +22,7 @@ from assistant_gateway.application.person_lifecycle import (
     HeldPersonData,
 )
 from assistant_gateway.application.team_commands import GatewayTeamCommandService, TeamServicesUnavailable
-from assistant_gateway.person_departure import GatewayTeamBlobs
+from assistant_gateway.person_departure import GatewayTeamData
 from custom_agents.agent_host import AgentProcessHost
 from custom_agents.agent_requests import AgentUnreachable, configure_process_host
 from custom_agents.person_departure_runtime import settle_person
@@ -43,6 +43,7 @@ from storage.access_repository import AccessRepository
 from storage.blob_index_repository import BlobIndexRepository, BlobOwnerConflict, BlobSizeMismatch
 from storage.config import resolve_storage_settings
 from team_services.blobs import BlobOperations, BlobService
+from team_services.dead_letters import DeadLetterService, TeamPersonDataOperations, TeamPersonDepartureService
 from tests.test_protocol1_blobs import FakeJetStream
 
 TEAM = "team_example"
@@ -490,7 +491,16 @@ async def test_delete_person_authorization_shared_blobs_and_idempotent_retry(tmp
     js = FakeJetStream(now=clock.now)
     repo = BlobIndexRepository(storage)
     service = BlobService(repository=repo, people=people, js=js, team_id=TEAM, clock=clock)
-    ops = BlobOperations(service, people)
+    async def _async_json_reply(body: dict[str, Any]) -> SimpleNamespace:
+        return SimpleNamespace(data=json.dumps(body).encode("utf-8"))
+
+    empty_nc = SimpleNamespace(
+        request=lambda *_args, **_kwargs: _async_json_reply({"error": {"code": 404, "err_code": 10059}}),
+    )
+    fake_live = SimpleNamespace(nc=empty_nc)
+    dlq_service = DeadLetterService(team_id=TEAM, live_fn=lambda: fake_live, access_repository=access, people=people)  # type: ignore[arg-type,return-value]
+    departure = TeamPersonDepartureService(team_id=TEAM, live_fn=lambda: fake_live, people=people, blobs=service)  # type: ignore[arg-type,return-value]
+    ops = TeamPersonDataOperations(dead_letters=dlq_service, departure=departure, people=people)
 
     solo = b"alice-private-blob"
     shared = b"alice-and-bob-shared"
@@ -502,9 +512,9 @@ async def test_delete_person_authorization_shared_blobs_and_idempotent_retry(tmp
     await service.put_and_register(shared, BlobOwner(request_id="req_b_shared", person_ref=BOB_REF), media_type="text/plain")
 
     # 1. Refused while Alice is still active.
-    active_refusal = await ops.handle_delete_person(
+    active_refusal = await ops.handle_delete_person_data(
         _verified_frame(
-            "blobs.delete_person",
+            "team.delete_person_data",
             {"request_id": "del_1", "person": ALICE_REF},
             roles=("gateway",),
             actor_person_ref=ADMIN_REF,
@@ -516,9 +526,9 @@ async def test_delete_person_authorization_shared_blobs_and_idempotent_retry(tmp
     access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
 
     # 2. Refused from a non-admin member via gateway.
-    member_refusal = await ops.handle_delete_person(
+    member_refusal = await ops.handle_delete_person_data(
         _verified_frame(
-            "blobs.delete_person",
+            "team.delete_person_data",
             {"request_id": "del_2", "person": ALICE_REF},
             roles=("gateway",),
             actor_person_ref=BOB_REF,
@@ -527,9 +537,9 @@ async def test_delete_person_authorization_shared_blobs_and_idempotent_retry(tmp
     assert member_refusal["outcome"] == "not_allowed"
 
     # 3. Refused from worker_host.
-    worker_refusal = await ops.handle_delete_person(
+    worker_refusal = await ops.handle_delete_person_data(
         _verified_frame(
-            "blobs.delete_person",
+            "team.delete_person_data",
             {"request_id": "del_3", "person": ALICE_REF},
             roles=("worker_host",),
             runtime="worker-1",
@@ -537,7 +547,7 @@ async def test_delete_person_authorization_shared_blobs_and_idempotent_retry(tmp
     )
     assert worker_refusal["outcome"] == "not_allowed"
 
-    # 4. Simulate NATS failure during first delete_person call -> owner rows removed & pending_delete queued,
+    # 4. Simulate NATS failure during first delete_person_data call -> owner rows removed & pending_delete queued,
     #    reply is runtime_error; retry from lead_host finishes deletion cleanly!
     real_purge = js.purge_stream
     fail_once = {"fail": True}
@@ -549,9 +559,9 @@ async def test_delete_person_authorization_shared_blobs_and_idempotent_retry(tmp
         return await real_purge(*args, **kwargs)
 
     js.purge_stream = flaky_purge  # type: ignore[method-assign]
-    first_try = await ops.handle_delete_person(
+    first_try = await ops.handle_delete_person_data(
         _verified_frame(
-            "blobs.delete_person",
+            "team.delete_person_data",
             {"request_id": "del_4", "person": ALICE_REF},
             roles=("gateway",),
             actor_person_ref=ADMIN_REF,
@@ -563,9 +573,9 @@ async def test_delete_person_authorization_shared_blobs_and_idempotent_retry(tmp
     assert repo.get_pending_delete(TEAM, sha_solo) is not None
 
     # Retry from lead_host (no command token required): finishes pending delete for Alice!
-    second_try = await ops.handle_delete_person(
+    second_try = await ops.handle_delete_person_data(
         _verified_frame(
-            "blobs.delete_person",
+            "team.delete_person_data",
             {"request_id": "del_5", "person": ALICE_REF},
             roles=("lead_host",),
             runtime="lead",
@@ -576,6 +586,8 @@ async def test_delete_person_authorization_shared_blobs_and_idempotent_retry(tmp
         "owners_removed": 0,
         "blobs_deleted": 1,
         "blobs_kept": 0,
+        "dlq_copies_deleted": 0,
+        "dlq_copies_kept": 0,
     }
     with pytest.raises(BlobDeleted):
         await get_blob(js, TEAM, sha_solo)
@@ -675,9 +687,20 @@ async def test_gateway_person_lifecycle_deletes_blobs_on_disable_and_remove() ->
     sent_commands: list[tuple[str, dict[str, Any], str, str]] = []
 
     class _FakeTeamServices:
+        def __init__(self) -> None:
+            self.outcomes = ["ok", "retry_later"]
+
         async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
             sent_commands.append((kind, dict(body), person_ref, request_id))
-            return {"outcome": "ok", "owners_removed": 2, "blobs_deleted": 1, "blobs_kept": 1}
+            outcome = self.outcomes.pop(0) if self.outcomes else "ok"
+            return {
+                "outcome": outcome,
+                "owners_removed": 2,
+                "blobs_deleted": 1,
+                "blobs_kept": 1,
+                "dlq_copies_deleted": 3,
+                "dlq_copies_kept": 4,
+            }
 
     class _FakeRefs:
         def person_ref(self, person_id: str) -> str | None:
@@ -688,7 +711,7 @@ async def test_gateway_person_lifecycle_deletes_blobs_on_disable_and_remove() ->
         references=_FakeRefs(),
         request_ids=lambda: "01950000-0000-7000-8000-000000000099",
     )
-    blobs_port = GatewayTeamBlobs(team_commands=team_commands, references=_FakeRefs())
+    team_data_port = GatewayTeamData(team_commands=team_commands, references=_FakeRefs())
 
     @dataclass
     class _FakeUser:
@@ -742,20 +765,21 @@ async def test_gateway_person_lifecycle_deletes_blobs_on_disable_and_remove() ->
         broker=None,
         person_schedules=None,
         clock=_Clock(),
-        blobs=blobs_port,
+        team_data=team_data_port,
     )
 
     disable_reply = await lifecycle.set_enabled(
         actor=actor, target=ALICE_ID, enabled=False, channel_name="web", chat_scope="dm"
     )
     assert "Not done" not in disable_reply
+    # Second call receives retry_later (continuing in background) and is accepted with no problem!
     remove_reply = await lifecycle.remove(
         actor=actor, target=ALICE_ID, channel_name="web", chat_scope="dm"
     )
     assert "Not done" not in remove_reply
     assert len(sent_commands) == 2
     for kind, body, actor_ref, req_id in sent_commands:
-        assert kind == "blobs.delete_person"
+        assert kind == "team.delete_person_data"
         assert body == {"request_id": req_id, "person": ALICE_REF}
         assert actor_ref == ADMIN_REF
 
@@ -764,7 +788,7 @@ async def test_gateway_person_lifecycle_deletes_blobs_on_disable_and_remove() ->
         async def command(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
             raise TeamServicesUnavailable("team services down")
 
-    broken_blobs = GatewayTeamBlobs(
+    broken_team_data = GatewayTeamData(
         team_commands=GatewayTeamCommandService(
             team_services=_BrokenTeamServices(),
             references=_FakeRefs(),
@@ -780,39 +804,46 @@ async def test_gateway_person_lifecycle_deletes_blobs_on_disable_and_remove() ->
         broker=None,
         person_schedules=None,
         clock=_Clock(),
-        blobs=broken_blobs,
+        team_data=broken_team_data,
     )
     degraded_reply = await broken_lifecycle.set_enabled(
         actor=actor, target=ALICE_ID, enabled=False, channel_name="web", chat_scope="dm"
     )
     assert "Not done" in degraded_reply
-    assert "temporary blob storage" in degraded_reply
+    assert "temporary blob storage and set-aside message copies" in degraded_reply
 
 
 @pytest.mark.asyncio
-async def test_c06_agent_host_delete_person_blobs_and_manager_settle_person(tmp_path: Path) -> None:
-    """C06: AgentProcessHost.delete_person_blobs checks readiness via _on_host_loop, and settle_person
-    resolves person_ref via people_directory(agent).person_ref(person_id)."""
+async def test_c06_agent_host_delete_person_data_and_manager_settle_person(tmp_path: Path) -> None:
+    """C06 & A6: AgentProcessHost.delete_person_data sends team.delete_person_data via _on_host_loop,
+    and settle_person accepts both ok and retry_later without reporting problems."""
 
     # 1. AgentProcessHost readiness checks and request shape.
     profile = SimpleNamespace(runtime="lead", teams=(TEAM,), roles=("lead_host", "worker_host"))
     host = AgentProcessHost(layout=SimpleNamespace(), profile=profile, team=TEAM, logger=logging.getLogger("test"))  # type: ignore[arg-type]
     with pytest.raises(AgentUnreachable) as not_running:
-        await host.delete_person_blobs(ALICE_REF)
+        await host.delete_person_data(ALICE_REF)
     assert not_running.value.clears is False
 
     loop = asyncio.get_running_loop()
     host.loop = loop
     host._joined = asyncio.Event()
     with pytest.raises(AgentUnreachable) as not_joined:
-        await host.delete_person_blobs(ALICE_REF)
+        await host.delete_person_data(ALICE_REF)
     assert not_joined.value.clears is True
 
     requests: list[tuple[str, dict[str, Any], dict[str, str], str]] = []
 
     async def fake_request(kind: str, body: dict[str, Any], audience: dict[str, str], *, team: str, timeout: Any = None) -> Any:
         requests.append((kind, dict(body), dict(audience), team))
-        return SimpleNamespace(raw={"body": {"outcome": "ok", "owners_removed": 1, "blobs_deleted": 1, "blobs_kept": 0}})
+        return SimpleNamespace(raw={"body": {
+            "outcome": "ok",
+            "owners_removed": 1,
+            "blobs_deleted": 1,
+            "blobs_kept": 0,
+            "dlq_copies_deleted": 2,
+            "dlq_copies_kept": 1,
+        }})
 
     host._joined.set()
     host.host = SimpleNamespace(
@@ -820,18 +851,19 @@ async def test_c06_agent_host_delete_person_blobs_and_manager_settle_person(tmp_
         installation_contract=None,
         live=SimpleNamespace(request=fake_request),
     )  # type: ignore[assignment]
-    reply = await host.delete_person_blobs(ALICE_REF, request_id="01950000-0000-7000-8000-000000000077")
+    reply = await host.delete_person_data(ALICE_REF, request_id="01950000-0000-7000-8000-000000000077")
     assert reply["outcome"] == "ok"
     assert requests == [
         (
-            "blobs.delete_person",
+            "team.delete_person_data",
             {"request_id": "01950000-0000-7000-8000-000000000077", "person": ALICE_REF},
             {"installation": "install_test", "team": TEAM, "target": "team_services", "id": TEAM},
             TEAM,
         )
     ]
 
-    # 2. settle_person resolves person_ref via people_directory(agent).person_ref(person_id).
+    # 2. settle_person resolves person_ref via people_directory(agent).person_ref(person_id)
+    #    and treats both ok and retry_later as accepted.
     storage = _storage(tmp_path, "manager_departure.db")
     access = AccessRepository(storage)
     access.record_person(_person(ALICE_ID, ALICE_REF, PersonStanding.DISABLED))
@@ -866,9 +898,16 @@ async def test_c06_agent_host_delete_person_blobs_and_manager_settle_person(tmp_
     class _FakeHost:
         team = TEAM
 
-        async def delete_person_blobs(self, person_ref: str) -> dict[str, Any]:
+        async def delete_person_data(self, person_ref: str) -> dict[str, Any]:
             called_refs.append(person_ref)
-            return {"outcome": "ok", "owners_removed": 1, "blobs_deleted": 1, "blobs_kept": 0}
+            return {
+                "outcome": "retry_later",
+                "owners_removed": 1,
+                "blobs_deleted": 1,
+                "blobs_kept": 0,
+                "dlq_copies_deleted": 2,
+                "dlq_copies_kept": 3,
+            }
 
     configure_process_host(_FakeHost())
     try:
@@ -884,7 +923,7 @@ async def test_c06_agent_host_delete_person_blobs_and_manager_settle_person(tmp_
     class _UnjoinedHost:
         team = TEAM
 
-        async def delete_person_blobs(self, _person_ref: str) -> dict[str, Any]:
+        async def delete_person_data(self, _person_ref: str) -> dict[str, Any]:
             raise AgentUnreachable("not joined yet", clears=True)
 
     configure_process_host(_UnjoinedHost())

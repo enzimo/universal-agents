@@ -158,6 +158,42 @@
       "UA1_DLQ_{team}"
     ]
   },
+  "delivery_advisories": {
+    "consumers": {
+      "installation_authority": {
+        "ack": "explicit",
+        "ack_wait_seconds": 60,
+        "max_deliveries": -1,
+        "mode": "pull",
+        "name": "adv_auth~{team}",
+        "role": "installation_authority",
+        "streams": [
+          "UA1_TEAM_WORK_{team}"
+        ]
+      },
+      "team_services": {
+        "ack": "explicit",
+        "ack_wait_seconds": 60,
+        "max_deliveries": -1,
+        "mode": "pull",
+        "name": "adv_team~{team}",
+        "role": "team_services",
+        "streams": [
+          "UA1_PART_{team}~{partition}",
+          "UA1_POOL_WORK_{team}",
+          "UA1_EDGE_WORK_{team}"
+        ]
+      }
+    },
+    "discard": "new",
+    "max_age_seconds": 604860,
+    "max_bytes": 1048576,
+    "max_consumers": 16,
+    "retention": "workqueue",
+    "storage": "file",
+    "stream": "UA1_DLQ_ADVISORY_{team}",
+    "subject_prefix": "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES"
+  },
   "installation_scope": "_install",
   "key_value": {
     "UA1_AGENTS": {

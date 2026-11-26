@@ -530,6 +530,9 @@ def test_the_process_exits_when_its_upkeep_stops(tmp_path: Path, monkeypatch, ca
         async def follow_placements(self, stop: asyncio.Event) -> None:
             await stop.wait()
 
+        async def watch_delivery_advisories(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
     with pytest.raises(SystemExit) as exited:
         _run_with(monkeypatch, tmp_path, Disconnecting())
     assert exited.value.code == 1
@@ -549,10 +552,81 @@ def test_the_process_exits_when_it_stops_following_placements(tmp_path: Path, mo
         async def follow_placements(self, stop: asyncio.Event) -> None:
             raise RuntimeError("the consumers could not be listed")
 
+        async def watch_delivery_advisories(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
     with pytest.raises(SystemExit) as exited:
         _run_with(monkeypatch, tmp_path, LosingPlacements())
     assert exited.value.code == 1
     assert "event=installation_authority_placements_stopped error=the consumers could not be listed" in caplog.text
+
+
+def test_c26_run_installation_authority_starts_on_postgres_without_postgres_dsn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C26: run_installation_authority works with a real GatewayInstanceConfig on PostgreSQL without POSTGRES_DSN."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    monkeypatch.delenv("POSTGRES_DSN", raising=False)
+    config = GatewayInstanceConfig.create(
+        instance_name="pg_auth_test",
+        instance_root=str(tmp_path / "instance"),
+        team_id="team_pg",
+        timezone="UTC",
+        manager_agent_id=None,
+    )
+    config = config.model_copy(
+        update={
+            "state": config.state.model_copy(
+                update={
+                    "storage": config.state.storage.model_copy(
+                        update={"backend": "postgres", "postgres": config.state.storage.postgres.model_copy(update={"dsn": None})}
+                    )
+                }
+            )
+        }
+    )
+    # Prove this real config raises ValueError if anything touches manager_storage_settings without POSTGRES_DSN.
+    with pytest.raises(ValueError, match="postgres\\.dsn is required"):
+        _ = config.manager_storage_settings
+
+    started: list[str] = []
+
+    class _Adapter:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.nats_connection = SimpleNamespace()
+
+        async def connect(self) -> None:
+            started.append("connected")
+
+        async def close(self) -> None:
+            started.append("closed")
+
+    class _Authority:
+        def __init__(self, *_args: Any, **kwargs: Any) -> None:
+            assert "on_near_expiry" not in kwargs
+
+        async def start(self, _nc: Any, *, teams: Any) -> None:
+            started.append(f"started:{','.join(teams)}")
+
+        async def keep_current(self) -> None:
+            await asyncio.Event().wait()
+
+        async def follow_placements(self, stop: asyncio.Event) -> None:
+            stop.set()
+
+        async def watch_delivery_advisories(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
+    monkeypatch.setattr(authority_process, "NatsTransportAdapter", _Adapter)
+    monkeypatch.setattr(authority_process, "InstallationAuthority", _Authority)
+    monkeypatch.setattr(authority_process, "load_authority_keys", lambda _layout: SimpleNamespace())
+    monkeypatch.setattr(authority_process, "load_host_keys", lambda _layout, _rt: SimpleNamespace())
+
+    asyncio.run(authority_process.run_installation_authority(config))
+    assert started == ["connected", "started:team_pg", "closed"]
 
 
 @pytest.mark.parametrize("changed", ["key_id", "public_key", "expired", "absent"])
@@ -2073,3 +2147,214 @@ def test_f14_validate_requested_partitions_rejection_branches(tmp_path: Path) ->
     assert authority._validate_requested_partitions(
         worker_cert, [2, 0], give_up=False, owned_by_team={"team_a": {0: 10, 2: 11}}, released_by_team={}  # type: ignore[arg-type]
     ) == (0, 2)
+
+
+@pytest.mark.asyncio
+async def test_authority_sweep_delivery_limits_and_install_dead_letter_routing(tmp_path: Path) -> None:
+    """A4 & A5: Authority sweeps each served team's UA1_TEAM_WORK_<team> into that team's UA1_DLQ_<team>,
+    routes _install traffic to its first served team, and isolates sweep failures in upkeep."""
+
+    from custom_transport.protocol1.dead_letters import dlq_notice_subject, dlq_raw_subject
+    from custom_transport.protocol1.identity import HostIdentity
+    from custom_transport.protocol1.live import LiveHost
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from tests import message_contract_support as fixtures
+    from tests.test_protocol1_dead_letters import FakeNatsConnection
+
+    authority = authority_at(tmp_path, partitions=2)
+    nc = FakeNatsConnection()
+    nc.is_closed = False  # type: ignore[attr-defined]
+    bundle = BootstrapBundle(
+        authority.installation,
+        ((authority.authority.key_id, authority.authority.public_key_text),),
+        partitions=2,
+    )
+    trust = authority._trust = PersistentTrustStore.open(
+        bundle, authority.layout.host_trust_dir(AUTHORITY_RUNTIME), fixtures.NOW
+    )
+    own_req = authority._own_request(("team_beta", "team_alpha"))
+    own_rec = authority.certificate_record(own_req, epoch=1, revocation_epoch=1, issued=fixtures.NOW)
+    trust.add(json.dumps(own_rec).encode("utf-8"), now=fixtures.NOW)
+    ident = HostIdentity(authority.host_keys, authority._held_certificate(own_rec))
+    live = LiveHost(nc, ident, trust, clock=lambda: fixtures.NOW)
+    authority.live = live
+    authority._nc = nc
+    authority._teams = ("team_alpha", "team_beta")
+    authority._own = own_rec
+    authority._revocations = {"issued_at": format_timestamp(fixtures.NOW), "body": {"revocation_epoch": 1, "entries": []}}
+    authority._forgotten_at = fixtures.NOW
+
+    # 1. dead_letter_setter routes _install traffic to sorted(certificate.teams)[0] ("team_alpha").
+    setter = authority.dead_letter_setter()
+    assert setter.resolve_notice_team("_install") == "team_alpha"
+    assert setter.resolve_notice_team(None) == "team_alpha"
+
+    # 2. Populate UA1_TEAM_WORK_team_alpha and UA1_TEAM_WORK_team_beta with stranded exhausted messages.
+    for team_name, payload in (("team_alpha", b"alpha-stranded"), ("team_beta", b"beta-stranded")):
+        stream = f"UA1_TEAM_WORK_{team_name}"
+        nc.streams[stream] = {"created": "2026-10-22T04:00:00Z"}
+        nc.messages[stream] = {
+            1: {"subject": f"ua.v1.{team_name}.lead-host-1.work.team", "data": payload, "time": "2026-10-22T04:30:00Z"},
+        }
+        nc.consumers[stream] = [
+            {
+                "name": f"team~{team_name}",
+                "config": {"filter_subject": f"ua.v1.{team_name}.*.work.team", "max_deliver": 20},
+                "delivered": {"stream_seq": 1},
+                "ack_floor": {"stream_seq": 0},
+                "num_ack_pending": 0,
+            }
+        ]
+
+    summary = await authority.sweep_delivery_limits()
+    assert summary.streams_checked == 2
+    assert summary.streams_failed == 0
+    assert summary.messages_swept == 2
+    assert nc.messages["UA1_TEAM_WORK_team_alpha"] == {}
+    assert nc.messages["UA1_TEAM_WORK_team_beta"] == {}
+
+    published_subjects = [subj for subj, _data, _hdrs in nc.jetstream().published]
+    assert any(subj.startswith("ua.v1.team_alpha.authority.dlq.raw.") for subj in published_subjects)
+    assert any(subj.startswith("ua.v1.team_alpha.authority.dlq.notice.") for subj in published_subjects)
+    assert any(subj.startswith("ua.v1.team_beta.authority.dlq.raw.") for subj in published_subjects)
+    assert any(subj.startswith("ua.v1.team_beta.authority.dlq.notice.") for subj in published_subjects)
+    # Silence unused import check when verifying subject prefixes directly.
+    assert dlq_raw_subject("team_alpha", "authority", "0" * 64).startswith("ua.v1.team_alpha.authority.dlq.raw.")
+    assert dlq_notice_subject("team_beta", "authority", "0" * 64).startswith("ua.v1.team_beta.authority.dlq.notice.")
+
+    # 3. upkeep() schedules sweep_delivery_limits when due, isolates failures, and retries on next minute after failure.
+    calls: list[str] = []
+    fail_first = {"flag": True}
+
+    async def fake_sweep() -> Any:
+        calls.append("sweep")
+        if fail_first["flag"]:
+            fail_first["flag"] = False
+            raise RuntimeError("transient nats hiccup")
+        return summary
+
+    authority.sweep_delivery_limits = fake_sweep  # type: ignore[method-assign,assignment]
+    await authority.upkeep(fixtures.NOW)
+    assert calls == ["sweep"]
+    assert authority._dlq_swept_at is None  # failed step does not advance timestamp -> retries next minute!
+    await authority.upkeep(fixtures.NOW + timedelta(minutes=1))
+    assert calls == ["sweep", "sweep"]
+    assert authority._dlq_swept_at == fixtures.NOW + timedelta(minutes=1)
+    # Within DLQ_SWEEP_INTERVAL (5 min), upkeep does not re-sweep; after 5 min, it sweeps again.
+    await authority.upkeep(fixtures.NOW + timedelta(minutes=3))
+    assert len(calls) == 2
+    await authority.upkeep(fixtures.NOW + timedelta(minutes=6))
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_f1_authority_advisory_watch_and_near_expiry_summary(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """F1 & C26: Authority handles MAX_DELIVERIES advisories for UA1_TEAM_WORK_<team> on busy consumers
+    and logs/reports near-expiry in SweepSummary without any database dependency."""
+
+    from custom_transport.protocol1.dead_letters import (
+        MAX_DELIVERIES_ADVISORY_PREFIX,
+        MAX_DELIVERIES_ADVISORY_TYPE,
+        dlq_advisory_authority_consumer_name,
+        dlq_advisory_stream_name,
+    )
+    from custom_transport.protocol1.identity import HostIdentity
+    from custom_transport.protocol1.live import LiveHost
+    from custom_transport.protocol1.trust_state import PersistentTrustStore
+    from tests import message_contract_support as fixtures
+    from tests.test_protocol1_dead_letters import FakeDelivery, FakeNatsConnection
+
+    now = datetime(2026, 10, 29, 0, 0, 0, tzinfo=timezone.utc)
+
+    authority = authority_at(tmp_path, partitions=2)
+    authority.clock = lambda: now
+    nc = FakeNatsConnection()
+    nc.is_closed = False  # type: ignore[attr-defined]
+    bundle = BootstrapBundle(
+        authority.installation,
+        ((authority.authority.key_id, authority.authority.public_key_text),),
+        partitions=2,
+    )
+    trust = authority._trust = PersistentTrustStore.open(
+        bundle, authority.layout.host_trust_dir(AUTHORITY_RUNTIME), fixtures.NOW
+    )
+    own_req = authority._own_request(("team_alpha",))
+    own_rec = authority.certificate_record(own_req, epoch=1, revocation_epoch=1, issued=fixtures.NOW)
+    trust.add(json.dumps(own_rec).encode("utf-8"), now=fixtures.NOW)
+    ident = HostIdentity(authority.host_keys, authority._held_certificate(own_rec))
+    live = LiveHost(nc, ident, trust, clock=lambda: fixtures.NOW)
+    authority.live = live
+    authority._nc = nc
+    authority._teams = ("team_alpha",)
+
+    stream = "UA1_TEAM_WORK_team_alpha"
+    max_age_ns = 604_860 * 1_000_000_000
+    nc.streams[stream] = {"created": "2026-10-20T00:00:00Z"}
+    nc.messages[stream] = {
+        1: {"subject": "ua.v1.team_alpha.lead-host-1.work.team", "data": b"poison-team-work", "time": "2026-10-22T12:00:00Z"},
+        2: {"subject": "ua.v1.team_alpha.lead-host-1.work.team", "data": b"inflight-team-work", "time": "2026-10-28T12:00:00Z"},
+    }
+    nc.consumers[stream] = [
+        {
+            "name": "team~team_alpha",
+            "config": {"filter_subject": "ua.v1.team_alpha.*.work.team", "max_deliver": 20},
+            "delivered": {"stream_seq": 2},
+            "ack_floor": {"stream_seq": 0},
+            "num_ack_pending": 1,
+        }
+    ]
+    orig_req = nc.request
+
+    async def req_with_age(subject: str, payload: bytes = b"", *, timeout: float = 5.0) -> Any:
+        resp = await orig_req(subject, payload, timeout=timeout)
+        if subject == f"$JS.API.STREAM.INFO.{stream}":
+            doc = json.loads(resp.data.decode("utf-8"))
+            msgs = nc.messages.get(stream, {})
+            if msgs:
+                doc["state"]["first_ts"] = msgs[min(msgs)]["time"]
+            doc["config"] = {"max_age": max_age_ns}
+            resp = SimpleNamespace(data=json.dumps(doc).encode("utf-8"))
+        return resp
+
+    nc.request = req_with_age  # type: ignore[method-assign]
+
+    # Sweep sees busy consumer (0 swept), logs near-expiry warning, and returns it in SweepSummary.
+    with caplog.at_level(logging.WARNING):
+        summary = await authority.sweep_delivery_limits()
+    assert summary.messages_swept == 0
+    assert len(summary.near_expiry) == 1
+    assert (summary.near_expiry[0].stream, summary.near_expiry[0].first_seq) == (stream, 1)
+    assert "event=protocol1_dlq_stream_near_expiry" in caplog.text
+
+    # Advisory watch sets aside seq 1 and deletes it while keeping seq 2 intact.
+    adv_payload = json.dumps(
+        {
+            "type": MAX_DELIVERIES_ADVISORY_TYPE,
+            "id": "adv-auth-1",
+            "timestamp": "2026-10-29T00:00:00Z",
+            "stream": stream,
+            "consumer": "team~team_alpha",
+            "stream_seq": 1,
+            "deliveries": 20,
+        }
+    ).encode("utf-8")
+    adv_msg = FakeDelivery(
+        data=adv_payload,
+        subject=f"{MAX_DELIVERIES_ADVISORY_PREFIX}.{stream}.team~team_alpha",
+        stream=dlq_advisory_stream_name("team_alpha"),
+        stream_seq=1,
+    )
+    adv_sub = SimpleNamespace(fetch=AsyncMock(return_value=[adv_msg]))
+
+    async def fake_bind(durable: str, *, stream: str) -> Any:
+        assert stream == dlq_advisory_stream_name("team_alpha")
+        assert durable == dlq_advisory_authority_consumer_name("team_alpha")
+        return adv_sub
+
+    nc.jetstream().pull_subscribe_bind = fake_bind  # type: ignore[attr-defined]
+    assert await authority.poll_delivery_advisories_once() == 1
+    assert adv_msg.ack_calls == 1
+    assert set(nc.messages[stream]) == {2}

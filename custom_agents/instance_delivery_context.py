@@ -31,6 +31,22 @@ def default_notification_gateway_context(config: GatewayInstanceConfig) -> Gatew
     )
 
 
+def owner_route_from_config(
+    config: GatewayInstanceConfig, owner: str
+) -> tuple[str, GatewayContext] | None:
+    """The gateway route and chat of ``config``'s configured user, for ``owner`` only."""
+
+    if config.user.canonical_user_id != owner:
+        return None
+    context = default_notification_gateway_context(config)
+    route = str(config.manager.response_queue_name or "").strip()
+    if not route or (
+        context.channel_name not in {"cli", "local"} and not context.chat_id
+    ):
+        return None
+    return route, context
+
+
 def configured_owner_route(
     path: str | Path | None, owner: str
 ) -> tuple[str, GatewayContext] | None:
@@ -43,15 +59,7 @@ def configured_owner_route(
     if not path:
         return None
     config = GatewayInstanceConfig.load_for_process(path)
-    if config.user.canonical_user_id != owner:
-        return None
-    context = default_notification_gateway_context(config)
-    route = str(config.manager.response_queue_name or "").strip()
-    if not route or (
-        context.channel_name not in {"cli", "local"} and not context.chat_id
-    ):
-        return None
-    return route, context
+    return owner_route_from_config(config, owner)
 
 
 def render_delivery_settings_context(

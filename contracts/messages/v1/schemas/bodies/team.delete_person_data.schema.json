@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://universal-agents.local/contracts/messages/v1/schemas/bodies/team.delete_person_data.schema.json",
+  "title": "team.delete_person_data request",
+  "description": "Delete a departed person's team-held data: remove their blob ownership records, delete every blob left with no remaining owner, and delete every raw dead-letter copy naming them.",
+  "type": "object",
+  "properties": {
+    "request_id": {
+      "description": "The host's id for this departure-cleanup request; a retry keeps it.",
+      "$ref": "../common.schema.json#/$defs/record_id"
+    },
+    "person": {
+      "description": "Opaque reference to the disabled or removed person whose team-held data is deleted.",
+      "$ref": "../common.schema.json#/$defs/person_ref"
+    }
+  },
+  "required": [
+    "request_id",
+    "person"
+  ],
+  "additionalProperties": false
+}

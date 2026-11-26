@@ -385,6 +385,7 @@ def test_outcomes_that_ask_for_a_retry_are_not_stored() -> None:
     assert kinds.RETRY_OUTCOMES == frozenset(REGISTRY["retry_outcomes"])
     assert "not_started" in kinds.KINDS["tasks.steer"].reply_errors and "not_started" in kinds.RETRY_OUTCOMES
     assert "waiting" in kinds.KINDS["staged_changes.apply"].reply_errors and "waiting" in kinds.RETRY_OUTCOMES
+    assert "retry_later" in kinds.KINDS["team.delete_person_data"].reply_errors and "retry_later" in kinds.RETRY_OUTCOMES
     registry = copy.deepcopy(EXPORT.load_yaml("registry.yaml"))
     registry["retry_outcomes"].append("waiting")
     with pytest.raises(EXPORT.ContractError, match="retry_outcomes lists distinct snake_case names"):
@@ -966,10 +967,15 @@ def test_the_team_services_withdraw_from_every_partition_of_each_team_they_serve
                               partitions=every_partition(("team_a", "team_b"), count), installation="install_example")
     publish = set(host_permissions(role_permissions("team_services"), placement)["publish"])
     for team in ("team_a", "team_b"):
-        for action in ("GET", "DELETE"):
-            streams = {subject.rsplit(".", 1)[-1] for subject in publish
-                       if subject.startswith(f"$JS.API.STREAM.MSG.{action}.UA1_PART_{team}~")}
-            assert streams == {f"UA1_PART_{team}~{number}" for number in range(count)}
+        expected = {f"UA1_PART_{team}~{number}" for number in range(count)}
+        for prefix in (
+            f"$JS.API.STREAM.MSG.GET.UA1_PART_{team}~",
+            f"$JS.API.STREAM.MSG.DELETE.UA1_PART_{team}~",
+            f"$JS.API.STREAM.INFO.UA1_PART_{team}~",
+            f"$JS.API.CONSUMER.LIST.UA1_PART_{team}~",
+        ):
+            streams = {subject.rsplit(".", 1)[-1] for subject in publish if subject.startswith(prefix)}
+            assert streams == expected, (team, prefix)
     assert every_partition(("team_a",), 3) == {"team_a": (0, 1, 2)}
     with pytest.raises(ValueError, match="partition count"):
         every_partition(("team_a",), kinds.MAX_PARTITION_COUNT + 1)
@@ -1043,9 +1049,16 @@ def test_only_the_topology_owner_sets_up_streams_and_only_the_team_services_with
             assert not {subject for subject in publish if "{team}" in subject and subject.startswith("$JS.")}
         elif role == "team_services":
             # Their own team's streams only: no grant reaches another team's streams, or their own inbox's stream.
-            streams = ("UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}", "UA1_DLQ_{team}")
+            withdrawal_streams = ("UA1_PART_{team}~{partition}", "UA1_POOL_WORK_{team}", "UA1_EDGE_WORK_{team}")
+            streams = (*withdrawal_streams, "UA1_DLQ_{team}")
             assert deletes == creates == {f"$JS.API.STREAM.MSG.DELETE.{stream}" for stream in streams}
             assert reads == {f"$JS.API.STREAM.MSG.GET.{stream}" for stream in streams}
+            consumer_lists = {subject for subject in publish if subject.startswith("$JS.API.CONSUMER.LIST.")}
+            assert consumer_lists == {f"$JS.API.CONSUMER.LIST.{stream}" for stream in withdrawal_streams}
+            stream_infos = {subject for subject in publish if subject.startswith("$JS.API.STREAM.INFO.")}
+            # Read-only STREAM.INFO on UA1_TEAM_WORK_{team} lets team_services warn administrators of near-expiry
+            # without granting MSG.GET, MSG.DELETE, or CONSUMER.LIST on its own inbox (C26).
+            assert stream_infos == {f"$JS.API.STREAM.INFO.{stream}" for stream in (*streams, "UA1_TEAM_WORK_{team}")}
         else:
             assert not creates and not reads, role
     for change, problem in ((lambda t: t.update(topology_owner="nobody"), "name host roles"),
@@ -1172,10 +1185,18 @@ def test_a_receiver_role_gets_only_the_addresses_it_serves() -> None:
     services = json.loads((CONTRACT / "generated" / "permissions" / "team_services.json").read_text(encoding="utf-8"))
     buckets = EXPORT.key_value_grants(TRANSPORT)["team_services"] | EXPORT.object_store_grants(TRANSPORT)["team_services"]
     consumers = {subject.split(".")[-1] if not subject.startswith("$JS.ACK.") else subject.split(".")[3]
-                 for subject in services["publish"] if subject.startswith(("$JS.API.CONSUMER.", "$JS.ACK."))
+                 for subject in services["publish"]
+                 if subject.startswith(("$JS.API.CONSUMER.INFO.", "$JS.API.CONSUMER.MSG.NEXT.", "$JS.ACK."))
                  and subject not in buckets}
-    # Their inbox's copies and their team's dead-letter notices (README, "Dead letters").
-    assert consumers == {TRANSPORT["consumers"]["team_services"]["name"], TRANSPORT["consumers"]["dead_letters"]["name"]}
+    # Their inbox's copies, dead-letter notices, and delivery-limit advisories (README, "Dead letters").
+    assert consumers == {
+        TRANSPORT["consumers"]["team_services"]["name"],
+        TRANSPORT["consumers"]["dead_letters"]["name"],
+        TRANSPORT["delivery_advisories"]["consumers"]["team_services"]["name"],
+    }
+    listed_streams = {subject.removeprefix("$JS.API.CONSUMER.LIST.")
+                      for subject in services["publish"] if subject.startswith("$JS.API.CONSUMER.LIST.")}
+    assert listed_streams == set(TRANSPORT["withdrawal"]["streams"])
 
 
 def test_asyncapi_describes_both_operations_for_every_kind_and_destination() -> None:
@@ -1965,7 +1986,7 @@ def test_a_kind_that_starts_carrying_a_blob_needs_its_receivers_to_read() -> Non
 
 
 def test_blob_index_operations_match_their_senders_authority_and_models() -> None:
-    """CR-3 and A4: blobs.register and blobs.delete_person live on svc.team with generated wire models."""
+    """CR-3, A4 and C06: blobs.register and unified team.delete_person_data live on svc.team with generated wire models."""
 
     register = REGISTRY["kinds"]["blobs.register"]
     assert register["address"] == "svc.team"
@@ -1975,7 +1996,10 @@ def test_blob_index_operations_match_their_senders_authority_and_models() -> Non
     assert register["idempotency"] == ["/issuer/runtime", "/body/request_id"]
     assert set(register["reply"]["errors"]) == {"not_allowed", "runtime_error"}
 
-    delete_person = REGISTRY["kinds"]["blobs.delete_person"]
+    assert "blobs.delete_person" not in REGISTRY["kinds"]
+    assert "blobs.delete_person" not in kinds.KINDS
+
+    delete_person = REGISTRY["kinds"]["team.delete_person_data"]
     assert delete_person["address"] == "svc.team"
     assert set(delete_person["senders"]) == {"gateway", "lead_host"}
     assert delete_person["receivers"] == ["team_services"]
@@ -1984,12 +2008,21 @@ def test_blob_index_operations_match_their_senders_authority_and_models() -> Non
         "type": "command", "at": "/body/request_id", "senders": ["gateway"],
     }
     assert delete_person["idempotency"] == ["/issuer/runtime", "/body/request_id"]
-    assert set(delete_person["reply"]["errors"]) == {"not_allowed", "runtime_error"}
+    assert set(delete_person["reply"]["errors"]) == {"retry_later", "not_allowed", "runtime_error"}
 
     assert kinds.KINDS["blobs.register"].body_model is models.BlobsRegisterBodyAdapter
     assert kinds.KINDS["blobs.register"].reply_model is models.BlobsRegisterReplyAdapter
-    assert kinds.KINDS["blobs.delete_person"].body_model is models.BlobsDeletePersonBodyAdapter
-    assert kinds.KINDS["blobs.delete_person"].reply_model is models.BlobsDeletePersonReplyAdapter
+    assert kinds.KINDS["team.delete_person_data"].body_model is models.TeamDeletePersonDataBodyAdapter
+    assert kinds.KINDS["team.delete_person_data"].reply_model is models.TeamDeletePersonDataReplyAdapter
+    retry_reply = models.TeamDeletePersonDataReplyAdapter.validate_python({
+        "outcome": "retry_later",
+        "owners_removed": 1,
+        "blobs_deleted": 1,
+        "blobs_kept": 0,
+        "dlq_copies_deleted": 5,
+        "dlq_copies_kept": 20,
+    })
+    assert retry_reply.outcome == "retry_later" and retry_reply.dlq_copies_deleted == 5
 
 
 def test_only_the_team_services_read_their_teams_dead_letters() -> None:
@@ -2002,7 +2035,11 @@ def test_only_the_team_services_read_their_teams_dead_letters() -> None:
         if role == "team_services":
             assert set(reads) == {"$JS.API.CONSUMER.INFO.UA1_DLQ_{team}.dlq~{team}",
                                   "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_{team}.dlq~{team}", "$JS.ACK.UA1_DLQ_{team}.dlq~{team}.>",
-                                  "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}"}
+                                  "$JS.API.STREAM.INFO.UA1_DLQ_{team}",
+                                  "$JS.API.STREAM.MSG.GET.UA1_DLQ_{team}", "$JS.API.STREAM.MSG.DELETE.UA1_DLQ_{team}",
+                                  "$JS.API.CONSUMER.INFO.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
+                                  "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
+                                  "$JS.ACK.UA1_DLQ_ADVISORY_{team}.adv_team~{team}.>"}
         elif role == TRANSPORT["topology_owner"]:
             # Its grants name every stream of the account, this one included, which is how it could read
             # the copies (README, "Dead letters"); none names this stream.
@@ -4107,3 +4144,76 @@ def test_asyncapi_accepts_complete_frames_and_references_reply_channel_messages(
             assert channel_name in document["channels"]
             for message in reply["messages"]:
                 assert message["$ref"].startswith(channel_path + "/messages/")
+
+
+def test_delivery_advisories_contract_rules_and_permissions() -> None:
+    """F1: transport.yaml delivery_advisories rules and generated per-role pull/ack permissions."""
+
+    adv = TRANSPORT["delivery_advisories"]
+    assert adv["stream"] == "UA1_DLQ_ADVISORY_{team}"
+    assert adv["subject_prefix"] == "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES"
+    assert adv["retention"] == "workqueue" and adv["discard"] == "new"
+    assert adv["max_age_seconds"] >= max(
+        TRANSPORT["streams"][s]["max_age_seconds"] for s in TRANSPORT["classes"]["durable"]["streams"]
+    )
+
+    ts_perms = json.loads((CONTRACT / "generated/permissions/team_services.json").read_text())["publish"]
+    auth_perms = json.loads((CONTRACT / "generated/permissions/installation_authority.json").read_text())["publish"]
+    worker_perms = json.loads((CONTRACT / "generated/permissions/worker_host.json").read_text())["publish"]
+    for grant in (
+        "$JS.API.CONSUMER.INFO.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
+        "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_ADVISORY_{team}.adv_team~{team}",
+        "$JS.ACK.UA1_DLQ_ADVISORY_{team}.adv_team~{team}.>",
+        "$JS.API.STREAM.INFO.UA1_TEAM_WORK_{team}",
+    ):
+        assert grant in ts_perms
+        assert grant not in worker_perms
+    # C26: team_services gets read-only STREAM.INFO on UA1_TEAM_WORK_{team} for near-expiry warnings,
+    # never message reads, deletes, or consumer listing on its own inbox stream.
+    for forbidden in (
+        "$JS.API.STREAM.MSG.GET.UA1_TEAM_WORK_{team}",
+        "$JS.API.STREAM.MSG.DELETE.UA1_TEAM_WORK_{team}",
+        "$JS.API.CONSUMER.LIST.UA1_TEAM_WORK_{team}",
+    ):
+        assert forbidden not in ts_perms
+    # C28: advisory consumers use unlimited deliveries (-1) so transient failures retry instead of stranding.
+    for consumer_spec in adv["consumers"].values():
+        assert consumer_spec["max_deliveries"] == -1
+    # Installation authority pulls adv_auth~{team} via account-wide TOPOLOGY_OWNER_GRANTS (no per-team $JS.* lines).
+    for grant in (
+        "$JS.API.CONSUMER.INFO.*.*",
+        "$JS.API.CONSUMER.MSG.NEXT.*.*",
+        "$JS.ACK.*.*.>",
+    ):
+        assert grant in auth_perms
+        assert grant not in ts_perms
+        assert grant not in worker_perms
+    for grant in (
+        "$JS.API.CONSUMER.INFO.UA1_DLQ_ADVISORY_{team}.adv_auth~{team}",
+        "$JS.API.CONSUMER.MSG.NEXT.UA1_DLQ_ADVISORY_{team}.adv_auth~{team}",
+        "$JS.ACK.UA1_DLQ_ADVISORY_{team}.adv_auth~{team}.>",
+    ):
+        assert grant not in ts_perms
+        assert grant not in worker_perms
+
+    registry = EXPORT.load_yaml("registry.yaml")
+    for change, problem in (
+        (lambda t: t["delivery_advisories"].update(retention="limits"), "retention is workqueue"),
+        (lambda t: t["delivery_advisories"].update(discard="old"), "discard is new"),
+        (lambda t: t["delivery_advisories"].update(max_age_seconds=60), "at least the durable work streams"),
+        (lambda t: t["delivery_advisories"]["consumers"]["team_services"].update(max_deliveries=20),
+         "max_deliveries is -1"),
+        (lambda t: t["delivery_advisories"]["consumers"]["installation_authority"]["streams"].append("UA1_POOL_WORK_{team}"),
+         "must be disjoint"),
+        (lambda t: t["delivery_advisories"]["consumers"]["team_services"]["streams"].remove("UA1_EDGE_WORK_{team}"),
+         "must cover every durable work stream"),
+    ):
+        mutated = copy.deepcopy(TRANSPORT)
+        change(mutated)
+        with pytest.raises(EXPORT.ContractError, match=re.escape(problem)):
+            EXPORT.check_delivery_advisories(registry, mutated)
+
+    # F3 / CRIT-2: dlq.notice schema constrains original.subject and release to identifiers (no free text).
+    dlq_schema = json.loads((CONTRACT / "schemas/bodies/dlq.notice.schema.json").read_text())
+    assert "pattern" in dlq_schema["properties"]["original"]["properties"]["subject"]
+    assert "pattern" in dlq_schema["properties"]["release"]

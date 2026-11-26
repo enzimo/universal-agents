@@ -1247,6 +1247,25 @@ def check_consumer_names(transport: dict[str, Any]) -> None:
     for prefix in prefixes:
         if any(other != prefix and other.startswith(prefix) for other in prefixes):
             raise ContractError(f"transport.yaml: consumer name prefix {prefix!r} begins another prefix")
+    advisories = transport.get("delivery_advisories")
+    if isinstance(advisories, dict) and isinstance(advisories.get("consumers"), dict):
+        adv_prefixes: list[str] = []
+        for key, consumer in advisories["consumers"].items():
+            where = f"transport.yaml delivery_advisories.consumers.{key}"
+            name = consumer.get("name", "")
+            parts = re.split(r"(\{[a-z_]+\})", name)
+            literals, placeholders = parts[::2], parts[1::2]
+            if placeholders != ["{team}"]:
+                raise ContractError(f"{where}: the name holds only {{team}}, once")
+            if not literals[0] or ID_CHARACTER.fullmatch(literals[0][-1]):
+                raise ContractError(f"{where}: start the name with a fixed word ending in a character ids cannot contain")
+            if re.search(r"[\s.*>/\\]", name):
+                raise ContractError(f"{where}: NATS consumer names cannot hold whitespace, ., *, >, / or \\")
+            adv_prefixes.append(literals[0])
+        all_prefixes = prefixes + adv_prefixes
+        for prefix in adv_prefixes:
+            if all_prefixes.count(prefix) > 1 or any(other != prefix and other.startswith(prefix) for other in all_prefixes):
+                raise ContractError(f"transport.yaml: consumer name prefix {prefix!r} begins another prefix")
 
 
 def check_transport(transport: dict[str, Any]) -> None:
@@ -1607,7 +1626,87 @@ def check_stream_management(registry: dict[str, Any], transport: dict[str, Any])
             raise ContractError(f"transport.yaml: stream {stream} keeps one message per subject (max_msgs_per_subject: 1)")
     check_pool_controller(registry, transport)
     check_size_check(registry, transport)
+    check_delivery_advisories(registry, transport)
     check_key_value(registry, transport)
+
+
+DELIVERY_ADVISORY_PREFIX = "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES"
+DELIVERY_ADVISORY_FIELDS = {
+    "stream", "subject_prefix", "retention", "storage",
+    "max_age_seconds", "max_bytes", "max_consumers", "discard", "consumers",
+}
+DELIVERY_ADVISORY_CONSUMER_FIELDS = {
+    "role", "name", "streams", "mode", "ack", "ack_wait_seconds", "max_deliveries",
+}
+
+
+def check_delivery_advisories(registry: dict[str, Any], transport: dict[str, Any]) -> None:
+    """Per-team workqueue stream capturing MAX_DELIVERIES advisories for every durable work stream (README, "Dead letters")."""
+
+    where = "transport.yaml delivery_advisories"
+    spec = transport.get("delivery_advisories")
+    if not isinstance(spec, dict) or set(spec) != DELIVERY_ADVISORY_FIELDS:
+        raise ContractError(f"{where}: fields are {sorted(DELIVERY_ADVISORY_FIELDS)}")
+    stream = spec["stream"]
+    if not isinstance(stream, str) or set(re.findall(r"\{([a-z_]+)\}", stream)) != {"team"} \
+            or re.search(r"[\s.*>/\\]", stream.replace("{team}", "")):
+        raise ContractError(f"{where}: stream is a per-team NATS stream name holding only {{team}}")
+    if stream in transport["streams"]:
+        raise ContractError(f"{where}: stream {stream} must not collide with transport.yaml streams")
+    if spec["subject_prefix"] != DELIVERY_ADVISORY_PREFIX:
+        raise ContractError(f"{where}: subject_prefix must be {DELIVERY_ADVISORY_PREFIX}")
+    if spec["retention"] != "workqueue" or spec["discard"] != "new" or spec["storage"] not in {"file", "memory"}:
+        raise ContractError(f"{where}: retention is workqueue, discard is new, and storage is file or memory")
+    durable_streams = set(transport["classes"]["durable"]["streams"])
+    min_age = max(int(transport["streams"][s]["max_age_seconds"]) for s in durable_streams)
+    if type(spec["max_age_seconds"]) is not int or spec["max_age_seconds"] < min_age:
+        raise ContractError(f"{where}: max_age_seconds must be at least the durable work streams' max_age_seconds ({min_age})")
+    if type(spec["max_bytes"]) is not int or spec["max_bytes"] < 1:
+        raise ContractError(f"{where}: max_bytes is a positive whole number")
+    consumers = spec["consumers"]
+    if not isinstance(consumers, dict) or not consumers:
+        raise ContractError(f"{where}: consumers maps consumer names to their settings")
+    if type(spec["max_consumers"]) is not int or spec["max_consumers"] < len(consumers):
+        raise ContractError(f"{where}: max_consumers must fit every advisory consumer")
+
+    roles = set(registry["host_roles"])
+    seen_streams: set[str] = set()
+    by_role: dict[str, set[str]] = {}
+    for key, consumer in consumers.items():
+        cwhere = f"{where}.consumers.{key}"
+        if not isinstance(consumer, dict) or set(consumer) != DELIVERY_ADVISORY_CONSUMER_FIELDS:
+            raise ContractError(f"{cwhere}: fields are {sorted(DELIVERY_ADVISORY_CONSUMER_FIELDS)}")
+        if consumer["role"] not in roles:
+            raise ContractError(f"{cwhere}: role must name a host role")
+        if consumer["mode"] != "pull" or consumer["ack"] != "explicit":
+            raise ContractError(f"{cwhere}: advisory consumers use pull mode and explicit ack")
+        if type(consumer["ack_wait_seconds"]) is not int or consumer["ack_wait_seconds"] < 1:
+            raise ContractError(f"{cwhere}: ack_wait_seconds is a positive whole number")
+        if type(consumer["max_deliveries"]) is not int or consumer["max_deliveries"] != -1:
+            raise ContractError(
+                f"{cwhere}: max_deliveries is -1 (unlimited) so transient failures retry instead of stranding advisories"
+            )
+        listed = consumer["streams"]
+        if not isinstance(listed, list) or not listed or len(set(listed)) != len(listed):
+            raise ContractError(f"{cwhere}: streams lists distinct durable work stream templates")
+        if not set(listed) <= durable_streams:
+            raise ContractError(f"{cwhere}: streams must be durable work streams ({sorted(durable_streams)})")
+        overlap = seen_streams & set(listed)
+        if overlap:
+            raise ContractError(f"{cwhere}: workqueue advisory consumers must be disjoint; overlap on {sorted(overlap)}")
+        seen_streams.update(listed)
+        by_role.setdefault(consumer["role"], set()).update(listed)
+
+    if seen_streams != durable_streams:
+        raise ContractError(f"{where}: advisory consumers must cover every durable work stream; missing {sorted(durable_streams - seen_streams)}")
+    withdrawal_role = transport["withdrawal"]["role"]
+    withdrawal_streams = set(transport["withdrawal"]["streams"])
+    if by_role.get(withdrawal_role) != withdrawal_streams:
+        raise ContractError(f"{where}: {withdrawal_role}'s advisory consumer must cover exactly withdrawal.streams ({sorted(withdrawal_streams)})")
+    owner_role = transport["topology_owner"]
+    owner_expected = durable_streams - withdrawal_streams
+    if by_role.get(owner_role) != owner_expected:
+        raise ContractError(f"{where}: {owner_role}'s advisory consumer must cover {sorted(owner_expected)}")
 
 
 def check_pool_controller(registry: dict[str, Any], transport: dict[str, Any]) -> None:
@@ -2293,12 +2392,14 @@ def consumer_permissions(address: str, transport: dict[str, Any]) -> set[str]:
 # The topology owner's JetStream grants, on every stream of the account (README, "Who sets up
 # the streams"): the account's information (its storage and what the streams set aside, checked
 # before it creates any), streams, their consumers (bucket watches that readers left behind
-# among them) and single messages (a team's removal and the old streams at an upgrade).
+# among them, plus pulling and acknowledging its delivery-limit advisory consumers) and single
+# messages (a team's removal, the old streams at an upgrade, and UA1_TEAM_WORK set-aside).
 TOPOLOGY_OWNER_GRANTS = frozenset({
     "$JS.API.INFO",
     *(f"$JS.API.STREAM.{action}.*" for action in ("CREATE", "UPDATE", "INFO", "DELETE", "MSG.GET", "MSG.DELETE")),
-    *(f"$JS.API.CONSUMER.{action}.*.*" for action in ("CREATE", "DURABLE.CREATE", "INFO", "DELETE")),
+    *(f"$JS.API.CONSUMER.{action}.*.*" for action in ("CREATE", "DURABLE.CREATE", "INFO", "DELETE", "MSG.NEXT")),
     "$JS.API.CONSUMER.CREATE.*.*.>", "$JS.API.CONSUMER.NAMES.*", "$JS.API.CONSUMER.LIST.*",
+    "$JS.ACK.*.*.>",
 })
 # The stream size check's grants (README, "Stream sizes"): the account's information, and every
 # stream's settings and state in one paged list, two lines whatever the number of teams and
@@ -2323,11 +2424,54 @@ def stream_management_grants(transport: dict[str, Any]) -> dict[str, set[str]]:
     grants.setdefault(transport["size_check"]["role"], set()).update(SIZE_CHECK_GRANTS)
     controller = transport["pool_controller"]
     grants.setdefault(controller["role"], set()).add(f"$JS.API.CONSUMER.INFO.{controller['stream']}.*")
-    # Withdrawal and dead-letter custody read a message by its sequence and delete it there.
-    for key in ("withdrawal", "dead_letter_custody"):
-        custody = transport[key]
-        grants.setdefault(custody["role"], set()).update(
-            f"$JS.API.STREAM.MSG.{action}.{stream}" for stream in custody["streams"] for action in ("GET", "DELETE"))
+    # Withdrawal reads and deletes messages by sequence, and sweeps exhausted deliveries by
+    # inspecting stream info (skipping empty streams) and listing consumers.
+    withdrawal = transport["withdrawal"]
+    grants.setdefault(withdrawal["role"], set()).update(
+        subject
+        for stream in withdrawal["streams"]
+        for subject in (
+            f"$JS.API.STREAM.INFO.{stream}",
+            f"$JS.API.STREAM.MSG.GET.{stream}",
+            f"$JS.API.STREAM.MSG.DELETE.{stream}",
+            f"$JS.API.CONSUMER.LIST.{stream}",
+        )
+    )
+    # Dead-letter custody inspects stream info, reads raw copies and notices by sequence,
+    # deletes raw copies on departure or orphan cleanup, and reads metadata-only STREAM.INFO
+    # on every durable work stream of its team (including UA1_TEAM_WORK_{team}) to post
+    # near-expiry Inbox warnings while keeping the installation authority free of the database.
+    dlq_custody = transport["dead_letter_custody"]
+    grants.setdefault(dlq_custody["role"], set()).update(
+        subject
+        for stream in dlq_custody["streams"]
+        for subject in (
+            f"$JS.API.STREAM.INFO.{stream}",
+            f"$JS.API.STREAM.MSG.GET.{stream}",
+            f"$JS.API.STREAM.MSG.DELETE.{stream}",
+        )
+    )
+    grants.setdefault(dlq_custody["role"], set()).update(
+        f"$JS.API.STREAM.INFO.{stream}"
+        for stream in transport["classes"]["durable"]["streams"]
+    )
+    # Delivery-exhaustion advisories: each owning role pulls and acknowledges its own consumer
+    # on its team's UA1_DLQ_ADVISORY_{team} workqueue stream (README, "Dead letters"). The
+    # topology owner already holds account-wide consumer pull/ack grants in TOPOLOGY_OWNER_GRANTS
+    # so its JWT never grows per team.
+    advisories = transport["delivery_advisories"]
+    adv_stream = advisories["stream"]
+    owner_role = transport["topology_owner"]
+    for consumer in advisories["consumers"].values():
+        role = consumer["role"]
+        if role == owner_role:
+            continue
+        name = consumer["name"]
+        grants.setdefault(role, set()).update({
+            f"$JS.API.CONSUMER.INFO.{adv_stream}.{name}",
+            f"$JS.API.CONSUMER.MSG.NEXT.{adv_stream}.{name}",
+            f"$JS.ACK.{adv_stream}.{name}.>",
+        })
     return grants
 
 

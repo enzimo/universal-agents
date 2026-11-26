@@ -55,7 +55,15 @@ from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from default_values import TRANSPORT_DEFAULTS
+from custom_agents.instance_delivery_context import owner_route_from_config
+from custom_agents.stuck_work import ChatRoute
 from team_services.blobs import BlobOperations, BlobService
+from team_services.dead_letters import (
+    DeadLetterService,
+    LegacyNatsChatNoticeSender,
+    TeamPersonDataOperations,
+    TeamPersonDepartureService,
+)
 from team_services.lock import LockLost, SingleInstanceLock
 from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
@@ -155,6 +163,14 @@ async def _prepare(host: MessageHost) -> None:
     await host.refresh_trust()
 
 
+async def _cancel_tasks(tasks: Sequence[Optional[asyncio.Task[None]]]) -> None:
+    active = [task for task in tasks if task is not None]
+    for task in active:
+        task.cancel()
+    if active:
+        await asyncio.gather(*active, return_exceptions=True)
+
+
 async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleInstanceLock,
                               keeper: asyncio.Task[None], team: str, stop: asyncio.Event,
                               families: Sequence[OperationFamily],
@@ -203,6 +219,7 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
     upkeep: Optional[asyncio.Task[None]] = None
     maintenance: Optional[asyncio.Task[None]] = None
     partition_task: Optional[asyncio.Task[None]] = None
+    runner_tasks: list[asyncio.Task[None]] = []
     try:
         await host.publish_liveness("accepting")
         host.logger.info("The team services are serving. event=team_services_ready team=%s operations=%s", team,
@@ -214,19 +231,15 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
             _maintain(sessions, (partitions.maintain, *services.upkeep), team, stop, host.logger)
         )
         partition_task = asyncio.create_task(partitions.run(stop))
+        runner_tasks = [asyncio.create_task(runner(stop)) for runner in services.runners]
         await keeper
     except LockLost:
         lost = True  # another instance may serve now and write the record; this one writes no more
         # Stop background writers immediately before unsubscribing/draining so a deposed instance
         # cannot race the new lock holder during the up to 30s drain window (F9/FA-8/CR-7).
         stop.set()
-        for task in (partition_task, maintenance, upkeep):
-            if task is not None:
-                task.cancel()
-        await asyncio.gather(
-            *(task for task in (partition_task, maintenance, upkeep) if task is not None),
-            return_exceptions=True,
-        )
+        await _cancel_tasks((*runner_tasks, partition_task, maintenance, upkeep))
+        runner_tasks = []
         partition_task = maintenance = upkeep = None
         raise
     finally:
@@ -239,12 +252,7 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
             # The upkeep ends and writes its last record (drained) even when unsubscribing failed, and before
             # the caller releases the lock, so it never overwrites the record of the instance that takes over.
             stop.set()
-            if partition_task is not None:
-                partition_task.cancel()
-                await asyncio.gather(partition_task, return_exceptions=True)
-            if maintenance is not None:
-                maintenance.cancel()
-                await asyncio.gather(maintenance, return_exceptions=True)
+            await _cancel_tasks((*runner_tasks, partition_task, maintenance))
             if upkeep is not None:
                 await upkeep
 
@@ -294,6 +302,7 @@ def team_operations(
     clock: Callable[[], datetime],
     *,
     js: Any = None,
+    host: Optional[MessageHost] = None,
 ) -> list[OperationFamily]:
     """The families of people's commands this process answers, on the team's database."""
 
@@ -347,6 +356,49 @@ def team_operations(
     families: list[OperationFamily] = [memory.family(), knowledge.family(), topics.family(), schedules.family()]
     if blob_service is not None:
         families.append(BlobOperations(blob_service, people, _LOGGER).family())
+    if host is not None:
+        mapper = NatsSubjectMapper(
+            team_id=config.manager.team_id,
+            subject_prefix=config.transport.subject_prefix,
+            user_queue_name=config.manager.response_queue_name,
+        )
+        def _owner_chat_route() -> Optional[ChatRoute]:
+            found = owner_route_from_config(config, config.user.canonical_user_id)
+            return None if found is None else ChatRoute(routing_key=found[0], gateway_context=found[1])
+
+        chat_sender = LegacyNatsChatNoticeSender(
+            nc_fn=lambda: host.nc,
+            mapper=mapper,
+            people=people,
+            owner_person_id=config.user.canonical_user_id,
+            route_fn=_owner_chat_route,
+            logger=_LOGGER,
+        )
+        dead_letters = DeadLetterService(
+            team_id=config.manager.team_id,
+            live_fn=lambda: host.live,
+            access_repository=access_repo,
+            people=people,
+            chat_sender=chat_sender,
+            refresh_trust_fn=host.refresh_trust,
+            clock=clock,
+            logger=_LOGGER,
+        )
+        departure = TeamPersonDepartureService(
+            team_id=config.manager.team_id,
+            live_fn=lambda: host.live,
+            people=people,
+            blobs=blob_service,
+            logger=_LOGGER,
+        )
+        families.append(
+            TeamPersonDataOperations(
+                dead_letters=dead_letters,
+                departure=departure,
+                people=people,
+                logger=_LOGGER,
+            ).family()
+        )
     return families
 
 
@@ -378,7 +430,7 @@ async def run_team_services(config: GatewayInstanceConfig) -> None:
             host,
             team,
             stop,
-            [*team_operations(config, host.clock, js=js), relays.family()],
+            [*team_operations(config, host.clock, js=js, host=host), relays.family()],
             credential_lifetime_seconds=config.transport.nats.credential_lifetime_seconds,
         )
     except LockLost as lost:

@@ -1498,6 +1498,7 @@ class AccessNoticeKind(StrEnum):
     WORKER_POOL_CHANGED = "worker_pool_changed"  # TeamArchitect changed a worker pool size (custom_tools.providers.worker_pools)
     CREDENTIALS_IMPORTED = "credentials_imported"  # your sign-ins and keys moved here with a team transfer (team_transfer)
     MESSAGES_SET_ASIDE = "messages_set_aside"  # messages no receiver could read or handle were set aside (custom_agents.dead_letter_watch)
+    QUEUED_MESSAGE_EXPIRING = "queued_message_expiring"  # a queued work-stream message is nearing max_age without being handled (team_services.dead_letters, installation_authority)
     ACCOUNT_SHARING_CHANGED = "account_sharing_changed"  # an administrator shared a service's team account or made it private
     TOOL_LIMIT_REACHED = "tool_limit_reached"  # an agent's always-shown tools are more than its model takes in one request (custom_agents.tool_loading)
     BLOCK_WIDENED = "block_widened"  # a block named an operation an update removed, so it blocks the whole tool (access_control.stale_blocks)
@@ -1620,6 +1621,7 @@ class TeamPersonV1(AccessContractModel):
     person_ref: str = Field(pattern=PERSON_REF_PATTERN)
     standing: PersonStanding
     roles: tuple[str, ...] = ()
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
     changed_at_utc: datetime
 
     @model_validator(mode="after")

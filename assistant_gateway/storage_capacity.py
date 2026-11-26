@@ -1481,12 +1481,13 @@ def _bundled_message_store(config: Any, env: Mapping[str, str]) -> BundledMessag
         return None
     # Imported only now: the stream list comes from the contract's generated models, which cost
     # about half a second to import (queue_capacity imports them at its first check for the same reason).
-    from custom_messages.wire.queues import streams_set_aside, team_queue_streams
+    from custom_messages.wire.queues import delivery_advisory_max_bytes, streams_set_aside, team_queue_streams
     from custom_transport.protocol1.contract_files import transport as contract_transport
 
     queues = config.transport.queues
+    contract = contract_transport()
     try:
-        streams = team_queue_streams(contract_transport(), config.manager.team_id, queues.partitions)
+        streams = team_queue_streams(contract, config.manager.team_id, queues.partitions)
     except ValueError as exc:
         logger.warning(
             "The Status page does not check the message server's room: it cannot list this team's streams. "
@@ -1495,7 +1496,10 @@ def _bundled_message_store(config: Any, env: Mapping[str, str]) -> BundledMessag
             exc,
         )
         return None
-    return BundledMessageStore(folder=folder, team_set_aside=streams_set_aside(streams, queues.max_bytes.model_dump()))
+    return BundledMessageStore(
+        folder=folder,
+        team_set_aside=streams_set_aside(streams, queues.max_bytes.model_dump()) + delivery_advisory_max_bytes(contract),
+    )
 
 
 __all__ = [

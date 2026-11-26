@@ -1,7 +1,8 @@
 """Team-services blob index, retention, immediate departure deletion, and orphan sweeping.
 
-Owns ``blobs.register`` and ``blobs.delete_person`` on ``svc.team`` plus startup recovery
-and periodic maintenance for the team's objects in ``OBJ_UA1_BLOBS``:
+Owns ``blobs.register`` on ``svc.team`` plus startup recovery, departure deletion
+(invoked by the unified ``team.delete_person_data`` handler), and periodic maintenance
+for the team's objects in ``OBJ_UA1_BLOBS``:
 
 - **CR-3 serialization:** One ``asyncio.Lock`` inside the single lock-holding
   ``team_services`` process serializes ownership registration against last-owner deletion,
@@ -30,7 +31,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Literal, Mapping, Optional
 
-from access_control.people import is_administrator
 from access_control.people_directory import PeopleDirectory, PersonNow
 from custom_messages.contracts.access_v2 import PersonStanding
 from custom_messages.wire.encoding import format_timestamp
@@ -65,11 +65,10 @@ from storage.blob_index_repository import (
     BlobSizeMismatch,
     PendingBlobDelete,
 )
-from team_services.people import GATEWAY_ROLE, command_person
 from team_services.service import OperationFamily
 
 LEAD_HOST_ROLE = "lead_host"
-BLOB_KINDS = ("blobs.register", "blobs.delete_person")
+BLOB_KINDS = ("blobs.register",)
 SIDE_BY_SIDE_KINDS = frozenset(BLOB_KINDS)
 MAX_PUT_REGISTER_ATTEMPTS = 3
 _DEPARTED_STANDINGS = frozenset({PersonStanding.DISABLED, PersonStanding.REMOVED})
@@ -880,7 +879,7 @@ class BlobService:
 
 
 class BlobOperations:
-    """Protocol 1 ``svc.team`` operation family for ``blobs.register`` and ``blobs.delete_person``."""
+    """Protocol 1 ``svc.team`` operation family for ``blobs.register``."""
 
     def __init__(
         self,
@@ -899,7 +898,6 @@ class BlobOperations:
     def handlers(self) -> dict[str, Callable[[VerifiedFrame], Any]]:
         return {
             "blobs.register": self.handle_register,
-            "blobs.delete_person": self.handle_delete_person,
         }
 
     def family(self) -> OperationFamily:
@@ -949,52 +947,6 @@ class BlobOperations:
                 reply["expires_at"] = format_timestamp(result.expires_at)
             return reply
         return {"outcome": result.outcome, "message": _short_message(result.message or "Blob registration refused.")}
-
-    async def handle_delete_person(self, verified: VerifiedFrame) -> dict[str, Any]:
-        certificate = verified.certificate
-        if certificate is None:
-            return {"outcome": "not_allowed", "message": "Sender certificate is missing."}
-
-        roles = set(certificate.roles)
-        if GATEWAY_ROLE in roles:
-            check = await asyncio.to_thread(command_person, verified, self._people, self._logger)
-            if check.person is None:
-                return {"outcome": "not_allowed", "message": _short_message(check.reason)}
-            if not is_administrator(check.person.roles):
-                self._logger.warning(
-                    "Refused blobs.delete_person from a non-administrator. "
-                    "event=blob_delete_person_admin_required team=%s person_id=%s",
-                    self._service.team_id,
-                    check.person.person_id,
-                )
-                return {
-                    "outcome": "not_allowed",
-                    "message": "Only an administrator may delete a departed person's blobs.",
-                }
-        elif LEAD_HOST_ROLE not in roles:
-            return {
-                "outcome": "not_allowed",
-                "message": "Only the gateway or the team's lead host may delete a departed person's blobs.",
-            }
-
-        body = verified.raw["body"]
-        try:
-            result = await self._service.delete_person(str(body["person"]))
-        except Exception as exc:
-            self._logger.exception(
-                "Departed-person blob deletion failed unexpectedly. event=blob_delete_person_failed team=%s",
-                self._service.team_id,
-            )
-            return {"outcome": "runtime_error", "message": _short_message(f"Blob deletion failed: {exc}")}
-
-        if result.outcome == "ok":
-            return {
-                "outcome": "ok",
-                "owners_removed": result.owners_removed,
-                "blobs_deleted": result.blobs_deleted,
-                "blobs_kept": result.blobs_kept,
-            }
-        return {"outcome": result.outcome, "message": _short_message(result.message or "Blob deletion refused.")}
 
 
 __all__ = [

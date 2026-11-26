@@ -113,6 +113,7 @@ class GatewayTeamPersonRecord:
     role: str
     membership_status: str
     person_status: str
+    display_name: str | None = None
 
 
 @dataclass(frozen=True)

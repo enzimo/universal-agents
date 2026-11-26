@@ -5591,7 +5591,8 @@ class _RelationalGatewayStateRepository:
                 f"""
                 SELECT membership.canonical_user_id, membership.team_id, membership.role,
                        membership.status AS membership_status,
-                       gateway_user.status AS person_status
+                       gateway_user.status AS person_status,
+                       gateway_user.display_name AS display_name
                 FROM gateway_user_team_memberships AS membership
                 INNER JOIN gateway_users AS gateway_user
                     ON gateway_user.canonical_user_id = membership.canonical_user_id

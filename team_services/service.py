@@ -12,8 +12,9 @@ while the team services serve, which runs with theirs (``team_services.process``
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
+from typing import Any, Awaitable, Callable, Coroutine, Iterable, Mapping, Optional
 
 from custom_messages.wire.frame import VerifiedFrame
 from custom_transport.protocol1.live import Unsupported
@@ -22,6 +23,7 @@ from team_services.sessions import SessionService
 
 Handler = Callable[[VerifiedFrame], Awaitable[dict[str, Any]]]
 Upkeep = Callable[[], Awaitable[None]]
+BackgroundRunner = Callable[[asyncio.Event], Coroutine[Any, Any, None]]
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class OperationFamily:
     close: Optional[Callable[[], None]] = None
     # Called by the process after acquiring the team lock and before serving svc.team.
     prepare: Optional[Upkeep] = None
+    # Long-running background task started once serving and cancelled immediately on LockLost or stop.
+    run: Optional[BackgroundRunner] = None
 
 
 class TeamServices:
@@ -47,6 +51,7 @@ class TeamServices:
         side_by_side: set[str] = set()
         self.upkeep: list[Upkeep] = []
         self.prepare: list[Upkeep] = []
+        self.runners: list[BackgroundRunner] = []
         for family in families:
             overlap = self._handlers.keys() & family.handlers.keys()
             if overlap:
@@ -57,6 +62,8 @@ class TeamServices:
                 self.upkeep.append(family.upkeep)
             if family.prepare is not None:
                 self.prepare.append(family.prepare)
+            if family.run is not None:
+                self.runners.append(family.run)
         self.side_by_side = frozenset(side_by_side)
 
     @property

@@ -1169,7 +1169,7 @@ async def test_a_host_owning_every_partition_beside_ten_pools_logs_in_with_the_l
               "services": account.user("services", host_permissions(role_document("team_services"), team_services)),
               "gateway": account.user("gateway", host_permissions(role_document("gateway"), gateway))}
     limit = TRANSPORT["limits"]["max_credential_bytes"]
-    for name, floor in (("lead", 40_000), ("services", 20_000), ("gateway", 55_000)):
+    for name, floor in (("lead", 40_000), ("services", 35_000), ("gateway", 55_000)):
         assert floor < len(logins[name].jwt) <= limit, (name, len(logins[name].jwt))
 
     async with AsyncExitStack() as stack:
@@ -1189,11 +1189,27 @@ async def test_a_host_owning_every_partition_beside_ten_pools_logs_in_with_the_l
                                             consumer_name("agent_inbox", team, agent=agent))).num_pending == 0
         services = await connect(stack, isolated_broker, runtime, login=logins["services"])
         gateway_login = await connect(stack, isolated_broker, runtime, login=logins["gateway"])
-        # A stream that does not exist answers, which a refused request would not: the services'
-        # next-to-last partition, and the gateway's last route of its last team.
+        # The team services' new sweep grants work on the existing last partition stream at full login size.
+        last_partition_stream = consumer_stream("agent_inbox", team, last)
+        last_stream_info = json.loads(
+            (await services.nc.request(f"$JS.API.STREAM.INFO.{last_partition_stream}", b"", timeout=2)).data
+        )
+        assert "error" not in last_stream_info and last_stream_info["config"]["name"] == last_partition_stream
+        last_consumer_list = json.loads(
+            (await services.nc.request(f"$JS.API.CONSUMER.LIST.{last_partition_stream}", b"", timeout=2)).data
+        )
+        assert "error" not in last_consumer_list and last_consumer_list["total"] == 1
+        # A stream that does not exist answers 10059, which a refused request would not: the services'
+        # next-to-last partition (MSG.GET, STREAM.INFO, CONSUMER.LIST), the services' DLQ stream
+        # (STREAM.INFO), and the gateway's last route of its last team.
+        prev_partition_stream = consumer_stream("agent_inbox", team, last - 1)
+        dlq_stream = f"UA1_DLQ_{team}"
         for client, subject, payload in (
-                (services, f"$JS.API.STREAM.MSG.GET.{consumer_stream('agent_inbox', team, last - 1)}",
+                (services, f"$JS.API.STREAM.MSG.GET.{prev_partition_stream}",
                  json.dumps({"last_by_subj": "x"}).encode()),
+                (services, f"$JS.API.STREAM.INFO.{prev_partition_stream}", b""),
+                (services, f"$JS.API.CONSUMER.LIST.{prev_partition_stream}", b""),
+                (services, f"$JS.API.STREAM.INFO.{dlq_stream}", b""),
                 (gateway_login, f"$JS.API.CONSUMER.INFO.{consumer_stream('edge', teams[-1])}."
                                 f"{consumer_name('edge', teams[-1], edge=routes[-1])}", b"")):
             answer = json.loads((await client.nc.request(subject, payload, timeout=2)).data)

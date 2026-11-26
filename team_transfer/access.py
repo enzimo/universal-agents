@@ -26,7 +26,9 @@ stopped between a decision's grants and its outcome; logged, see
 ``AccessRepository.grants_without_granted_outcome``), access requests and the
 claims of decisions running on them (``AccessRepository.claim_decision``,
 transient), decision recovery records (export waits for the gateway to
-reconcile them), change plans, notices and the audit log (history), and the
+reconcile them), change plans, notices and the audit log (history), local protocol 1 dead-letter
+reporting receipts and scan cursors (``protocol1_dlq_reported_notices``,
+``protocol1_dlq_reported_originals``, and ``protocol1_dlq_scan_cursors``), and the
 gateway's copy of the people (rebuilt at gateway start). Standard role access is not stored as
 grants; it comes from the release (``access_control.standard_grants``).
 

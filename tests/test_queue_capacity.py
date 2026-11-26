@@ -170,7 +170,10 @@ def test_a_stream_at_the_level_is_a_problem_naming_the_team_its_kind_and_the_set
     assert "raise transport.queues.max_bytes.partition in instance_config.yaml and restart" in partition.action
     assert "Warning level: 80% (transport.queues.warn_at_percent); the warning ends below 77%" in partition.details
     assert dead_letters.title == f"Team {TEAM}'s message stream for set-aside messages (dead letters) is 90% full"
+    assert "Set-asides are refused while full" in dead_letters.summary
+    assert "When it is full, set-asides" not in dead_letters.summary
     assert "receivers keep each message they would set aside" in dead_letters.summary
+    assert "without taking an execution slot" in dead_letters.summary
     assert "transport.queues.max_bytes.dead_letter" in dead_letters.action
 
 

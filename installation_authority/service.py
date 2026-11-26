@@ -110,10 +110,19 @@ from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.bootstrap import BootstrapBundle, read_bundle, write_bundle
 from custom_transport.protocol1.bucket_reads import list_keys
 from custom_transport.protocol1.contract_files import max_credential_bytes, role_permissions, transport
+from custom_transport.protocol1.dead_letters import (
+    DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS,
+    DeadLetterSetter,
+    DeliveryAdvisoryWatch,
+    NearExpiryMessage,
+    SweepSummary,
+    dlq_advisory_authority_consumer_name,
+    sweep_exhausted_streams,
+)
 from custom_transport.protocol1.mapping_check import PartitionMappingError, check_partition_mapping
 from custom_transport.protocol1.host_keys import AuthorityKeys, HostKeys
 from custom_transport.protocol1.identity import HostIdentity
-from custom_transport.protocol1.joining import AUTHORITY_SERVICE_ID, HostProfile
+from custom_transport.protocol1.joining import AUTHORITY_RUNTIME as AUTHORITY_RUNTIME, AUTHORITY_SERVICE_ID, HostProfile
 from custom_transport.protocol1.live import LiveHost, ReplyWithAfterFlush, Unsupported, utc_now
 from custom_transport.protocol1.nats_jwt import NatsSigningKey, encode_user_jwt, user_credential_bytes
 from custom_transport.protocol1.nkeys import public_key_bytes
@@ -129,7 +138,6 @@ from installation_authority.revocation import LifetimeWaitRevoker, NatsRevoker, 
 from release_version import release_version
 from runtime_settings.instance_layout import InstanceLayout
 
-AUTHORITY_RUNTIME = "authority"
 AUTHORITY_ROLE = "installation_authority"
 CERTIFICATE_LIFETIME = timedelta(days=30)
 # Plan 13B.3: certificates are renewed at two thirds of their life; the authority renews its own the same way.
@@ -141,6 +149,8 @@ REVOCATIONS_RESIGN_INTERVAL = timedelta(hours=6)
 UPKEEP_INTERVAL = timedelta(minutes=1)
 # README "Forgetting": a receiver forgets at least daily.
 FORGET_INTERVAL = timedelta(days=1)
+# CRIT-1 sweep interval for each served team's UA1_TEAM_WORK_<team> stream (A4).
+DLQ_SWEEP_INTERVAL = timedelta(minutes=5)
 CERTIFICATES_BUCKET = "UA1_CERTS"
 PLACEMENT_BUCKET = "UA1_PLACEMENT"
 _PARTITION_OWNING_ROLES = frozenset({"lead_host", "worker_host"})
@@ -222,6 +232,7 @@ class InstallationAuthority:
         nats_account_public_key: Optional[str] = None,
         nats_account_signing_key: Optional[NatsSigningKey] = None,
         revoker: Optional[NatsRevoker] = None,
+        near_expiry_margin_seconds: float = DEFAULT_NEAR_EXPIRY_MARGIN_SECONDS,
     ) -> None:
         """``contract_sha256`` is the contract this authority runs: its code's, unless a test gives another.
 
@@ -275,6 +286,10 @@ class InstallationAuthority:
         # Monotonic (sequence, digest) replay protection for partition_owner records (F13/SEC-07).
         self._held_partition_owners: dict[str, tuple[int, str]] = {}
         self._forgotten_at: Optional[datetime] = None
+        self._dlq_swept_at: Optional[datetime] = None
+        self._logged_stranded_dlq: set[tuple[str, int]] = set()
+        self._near_expiry_margin_seconds = max(0.0, float(near_expiry_margin_seconds))
+        self._advisory_watches: dict[str, DeliveryAdvisoryWatch] = {}
         self._ledger = IssueLedger(layout.host_trust_dir(AUTHORITY_RUNTIME) / ISSUED_FILENAME, self.installation,
                                    logger=logger)
         # The authority host's trust store, opened first at start: it keeps the newest
@@ -1071,6 +1086,7 @@ class InstallationAuthority:
              "nats_revocation_reconcile_failed", next_check),
             (self._forget_due(now), self.forget, "authority_forget_failed",
              f"in {int(FORGET_INTERVAL.total_seconds() // 3600)} hours"),
+            (self._dlq_sweep_due(now), self._sweep_delivery_limits_step, "authority_dlq_sweep_failed", next_check),
         )
         for due, step, event, again in steps:
             if not due:
@@ -1094,6 +1110,127 @@ class InstallationAuthority:
 
     def _forget_due(self, now: datetime) -> bool:
         return self._forgotten_at is None or now - self._forgotten_at >= FORGET_INTERVAL
+
+    def _dlq_sweep_due(self, now: datetime) -> bool:
+        return bool(self._teams) and (
+            self._dlq_swept_at is None or now - self._dlq_swept_at >= DLQ_SWEEP_INTERVAL
+        )
+
+    def dead_letter_setter(self) -> DeadLetterSetter:
+        """Build a ``DeadLetterSetter`` for this authority (routes ``_install`` traffic to its first served team)."""
+
+        assert self.live is not None, "start() first"
+        return DeadLetterSetter(self.live, logger=self.logger)
+
+    async def _sweep_delivery_limits_step(self, now: datetime) -> None:
+        await self.sweep_delivery_limits()
+        self._dlq_swept_at = now
+
+    def _advisory_watch(self, team: str) -> DeliveryAdvisoryWatch:
+        watch = self._advisory_watches.get(team)
+        if watch is None:
+            team_work_stream = f"UA1_TEAM_WORK_{team}"
+
+            def _allowed(_live: LiveHost, stream: str = team_work_stream) -> tuple[str, ...]:
+                return (stream,)
+
+            watch = DeliveryAdvisoryWatch(
+                team=team,
+                consumer=dlq_advisory_authority_consumer_name(team),
+                live_fn=lambda: self.live,
+                allowed_streams_fn=_allowed,
+                logger=self.logger,
+            )
+            self._advisory_watches[team] = watch
+        return watch
+
+    async def poll_delivery_advisories_once(self, *, stop: Optional[asyncio.Event] = None) -> int:
+        """Pull captured ``MAX_DELIVERIES`` advisories for each served team's ``UA1_TEAM_WORK_<team>`` (F1)."""
+
+        assert self.live is not None and self._nc is not None, "start() first"
+        total = 0
+        for team in self._teams:
+            if stop is not None and stop.is_set():
+                break
+            total += await self._advisory_watch(team).poll_once(stop=stop)
+        return total
+
+    async def watch_delivery_advisories(self, stop: asyncio.Event) -> None:
+        """Continuously watch ``adv_auth~<team>`` on ``UA1_DLQ_ADVISORY_<team>`` for every served team (F1)."""
+
+        assert self.live is not None and self._nc is not None, "start() first"
+        if not self._teams:
+            await stop.wait()
+            return
+        await asyncio.gather(*(self._advisory_watch(team).run(stop) for team in self._teams))
+
+    async def sweep_delivery_limits(self, *, stop: Optional[asyncio.Event] = None) -> SweepSummary:
+        """Idle-cutoff backstop sweep and near-expiry log check over each served team's ``UA1_TEAM_WORK_<team>`` (A4, F1).
+
+        Administrator Inbox notices for near-expiry messages (including ``UA1_TEAM_WORK_<team>``)
+        are written by ``team_services.DeadLetterService`` so the installation authority stays
+        free of any database connection (C26).
+        """
+
+        assert self.live is not None and self._nc is not None, "start() first"
+        setter = self.dead_letter_setter()
+        now = self.clock()
+        streams_checked = 0
+        streams_failed = 0
+        consumers_checked = 0
+        messages_swept = 0
+        stopped_full = False
+        duration_ms = 0.0
+        near_expiry: list[NearExpiryMessage] = []
+        for team in self._teams:
+            if stop is not None and stop.is_set():
+                break
+            team_summary = await sweep_exhausted_streams(
+                self._nc,
+                (f"UA1_TEAM_WORK_{team}",),
+                setter,
+                team=team,
+                stop=stop,
+                logged_stranded=self._logged_stranded_dlq,
+                now=now,
+                near_expiry_margin_seconds=self._near_expiry_margin_seconds,
+                logger=self.logger,
+            )
+            streams_checked += team_summary.streams_checked
+            streams_failed += team_summary.streams_failed
+            consumers_checked += team_summary.consumers_checked
+            messages_swept += team_summary.messages_swept
+            stopped_full = stopped_full or team_summary.stopped_full
+            duration_ms += team_summary.duration_ms
+            near_expiry.extend(team_summary.near_expiry)
+        log_fn = (
+            self.logger.warning
+            if (messages_swept > 0 or stopped_full or streams_failed > 0 or near_expiry)
+            else self.logger.debug
+        )
+        log_fn(
+            "Completed installation authority dead-letter sweep pass. "
+            "event=authority_dlq_sweep_pass installation=%s teams=%s streams_checked=%s "
+            "streams_failed=%s consumers_checked=%s messages_swept=%s near_expiry=%s stopped_full=%s duration_ms=%.1f",
+            self.installation,
+            len(self._teams),
+            streams_checked,
+            streams_failed,
+            consumers_checked,
+            messages_swept,
+            len(near_expiry),
+            stopped_full,
+            duration_ms,
+        )
+        return SweepSummary(
+            streams_checked=streams_checked,
+            consumers_checked=consumers_checked,
+            messages_swept=messages_swept,
+            stopped_full=stopped_full,
+            duration_ms=duration_ms,
+            streams_failed=streams_failed,
+            near_expiry=tuple(near_expiry),
+        )
 
     async def _renew_own_certificate(self, now: datetime) -> None:
         """Replace the authority's own certificate and sign with the new one from now on.

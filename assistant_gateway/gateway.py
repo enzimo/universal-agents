@@ -204,7 +204,7 @@ from assistant_gateway.onboarding_account_keys import OnboardingAccountKeyHandov
 from assistant_gateway.installed_procedures import GatewayInstalledProcedures
 from assistant_gateway.mcp_controls import GatewayMCPControls
 from assistant_gateway.nats_manager_runtime import HANDLING_RETRY_DELAY_SECONDS, NatsGatewayManagerRuntime
-from assistant_gateway.person_departure import GatewayTeamBlobs, build_gateway_person_lifecycle
+from assistant_gateway.person_departure import GatewayTeamData, build_gateway_person_lifecycle
 from assistant_gateway.pinned_memory_commands import RuntimePinnedMemoryCodec
 from assistant_gateway.team_services_client import (
     AccessStorePersonReferences,
@@ -741,17 +741,17 @@ def _team_commands(
     )
 
 
-def _person_blobs(
+def _person_team_data(
     runtime: object,
     team_services: GatewayTeamServices | None,
     *,
     references: GatewayPersonReferences,
-) -> GatewayTeamBlobs | None:
-    """Departed-person blob deletion client when this gateway can reach protocol 1 team services."""
+) -> GatewayTeamData | None:
+    """Departed-person team data deletion client when this gateway can reach protocol 1 team services."""
 
     if team_services is None and getattr(runtime, "message_host", None) is None:
         return None
-    return GatewayTeamBlobs(
+    return GatewayTeamData(
         team_commands=_team_commands(runtime, team_services, references=references),
         references=references,
         logger_=logger,
@@ -1420,7 +1420,7 @@ class UserGateway:
                 person_schedules=self._maintenance_schedules,
                 clock=self._clock,
                 personal_setup=self.access_inbox.personal_setup,
-                blobs=_person_blobs(
+                team_data=_person_team_data(
                     resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
                 ),
                 logger=logger,

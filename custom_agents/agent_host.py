@@ -822,19 +822,19 @@ class AgentProcessHost:
         reply = await self.host.live.request(kind, body, self._audience(), team=self.team)
         return dict(reply.raw["body"])
 
-    async def delete_person_blobs(
+    async def delete_person_data(
         self,
         person_ref: str,
         *,
         request_id: Optional[str] = None,
         timeout: Optional[float] = None,
     ) -> dict[str, Any]:
-        """Ask the team services to delete a departed person's unowned blobs (``blobs.delete_person``).
+        """Ask the team services to delete a departed person's blobs and dead-letter raw copies (``team.delete_person_data``).
 
         Callable from any agent's event loop (runs on the host's loop via ``_on_host_loop`` after
-        checking join readiness and draining state, C06). Raises ``AgentUnreachable`` when the
-        host has not joined yet or is draining, and ``ServiceUnavailable`` / ``RequestRefused`` on
-        transport errors.
+        checking join readiness and draining state). Raises ``AgentUnreachable`` when the host has
+        not joined yet or is draining, and ``ServiceUnavailable`` / ``RequestRefused`` on transport
+        errors.
         """
 
         if self.loop is None or self.loop.is_closed():
@@ -853,7 +853,7 @@ class AgentProcessHost:
             req_id = request_id or new_message_id()
             body = {"request_id": req_id, "person": person_ref}
             reply = await self.host.live.request(
-                "blobs.delete_person",
+                "team.delete_person_data",
                 body,
                 self._audience(),
                 team=self.team,

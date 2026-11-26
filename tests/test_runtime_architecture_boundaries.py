@@ -846,7 +846,8 @@ def test_large_facades_cannot_grow(
 # (custom_transport.protocol1.mapping_check).
 NATS_SUBSCRIBERS = {"custom_transport/nats_adapter.py", "custom_transport/nats_pull.py",
                     "custom_transport/protocol1/live.py", "custom_transport/protocol1/bucket_reads.py",
-                    "custom_transport/protocol1/mapping_check.py"}
+                    "custom_transport/protocol1/mapping_check.py",
+                    "custom_transport/protocol1/dead_letters.py"}
 # The names a raw NATS connection or JetStream context goes by; ``nats_connection`` is the
 # adapter's property that hands the connection to the protocol 1 kernel.
 NATS_CLIENT_NAMES = ("_js", "js", "jetstream", "_nc", "nc", "nats_client", "nats_connection")
@@ -872,6 +873,7 @@ NATS_CLIENT_MODULES = {
     "custom_transport/nats_topology.py": "creates and updates the streams",
     "custom_transport/protocol1/live.py": "protocol 1 requests, replies and served addresses",
     "custom_transport/protocol1/blobs.py": "protocol 1 UA1_BLOBS object store reads, writes, deletes and orphan sweeps via JetStream APIs without rollups or consumers",
+    "custom_transport/protocol1/dead_letters.py": "protocol 1 UA1_DLQ set-aside writes, pull-consumer binding for dlq~<team>, CRIT-1 sweeps, and direct JetStream reads/deletes",
     "custom_transport/protocol1/state_records.py": "protocol 1 signed records in key-value buckets",
     "custom_transport/protocol1/bucket_reads.py": "key-value listings and watches that cannot end early",
     "custom_transport/protocol1/joining.py": "a host's join request, signed before it has a certificate",

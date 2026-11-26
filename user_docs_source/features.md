@@ -995,8 +995,14 @@ Open **Settings → Inbox** in Web Chat to decide requests:
   for tools you approved, schedules and tasks that are stuck, the data the
   team stores for you passing another 5 GB (see
   [Storage notices](configuration.md#storage-notices)), and (for
-  administrators) MCP servers that stopped answering, after agents gave up
-  retrying them. The list opens on **Unread** notices (**All** shows read
+  administrators) MCP servers that stopped answering after agents gave up
+  retrying them, and messages that could not be handled and were set aside in
+  the team's dead-letter stream. Set-aside notices appear in administrators'
+  Inbox and are also sent to the team owner's chat; each lists the copy id,
+  reason, receiver, and original stream position (and, for older-format
+  messages from an upgrade, the person and task id with what to do) without
+  copying personal request text, and flags any copy that is missing, too large
+  to store, or failed its integrity check. The list opens on **Unread** notices (**All** shows read
   ones too), 20 to a page. Mark one read with its **Mark as read** button,
   tick several and choose **Mark selected as read**, or choose **Mark all as
   read** (it asks once more) to clear every page at once.

@@ -23,6 +23,9 @@ from custom_messages.wire.partitions import agent_partition
 from custom_messages.wire.queues import (
     QueueLimits,
     agent_consumers,
+    delivery_advisory_consumers,
+    delivery_advisory_max_bytes,
+    delivery_advisory_stream_name,
     object_store_stream_config,
     object_store_streams,
     queue_stream_config,
@@ -50,6 +53,7 @@ from tests.test_partition_mapping_check import StandInServer
 TEAM, COUNT = "team_a", 2
 KINDS = ("partition", "pool", "edge", "team_services", "dead_letter", "blobs")
 STREAMS = [stream.name for stream in team_queue_streams(transport(), TEAM, COUNT)]  # 2 partitions and 4 more
+ADVISORY_STREAMS = [delivery_advisory_stream_name(transport(), TEAM)]  # UA1_DLQ_ADVISORY_<team>
 OBJECT_STORES = [stream.name for stream in object_store_streams(transport())]  # OBJ_UA1_BLOBS
 # The buckets' streams: the installation's five and two per team.
 SHARED_BUCKETS = [f"KV_{bucket}" for bucket in transport()["key_value"] if "{team}" not in bucket]
@@ -200,11 +204,15 @@ def test_every_stream_and_team_consumer_is_created_with_the_contracts_settings(c
         assert {field: getattr(stored, field) for field in wanted} == wanted
         assert stored.num_replicas == 3 and stored.max_bytes == limits.max_bytes[stream.kind]
     assert js.streams[f"UA1_PART_{TEAM}~1"].metadata["ua.partitions"] == str(COUNT)
-    assert set(js.consumers) == {(consumer.stream, consumer.name) for consumer in team_consumers(transport(), TEAM)}
-    assert caplog.text.count("event=protocol1_queue_stream_created") == len(STREAMS)
+    expected_consumers = (
+        *team_consumers(transport(), TEAM),
+        *delivery_advisory_consumers(transport(), TEAM, COUNT),
+    )
+    assert set(js.consumers) == {(consumer.stream, consumer.name) for consumer in expected_consumers}
+    assert caplog.text.count("event=protocol1_queue_stream_created") == len(STREAMS + ADVISORY_STREAMS)
     assert caplog.text.count("event=protocol1_object_store_created") == len(OBJECT_STORES)
     assert caplog.text.count("event=protocol1_bucket_created") == len(SHARED_BUCKETS + TEAM_BUCKETS)
-    created = len(STREAMS + OBJECT_STORES + SHARED_BUCKETS + TEAM_BUCKETS)
+    created = len(STREAMS + ADVISORY_STREAMS + OBJECT_STORES + SHARED_BUCKETS + TEAM_BUCKETS)
     assert f"event=protocol1_queue_streams_ready teams={TEAM} created={created} updated=0" in caplog.text
 
 
@@ -230,7 +238,7 @@ def test_the_buckets_streams_are_made_with_the_contracts_restrictions_and_update
     with caplog.at_level("INFO"):
         ensured(js)  # one copy now
     updated = [name for call, name in js.calls if call == "update"]
-    assert set(updated) == set(STREAMS + OBJECT_STORES + SHARED_BUCKETS + TEAM_BUCKETS)
+    assert set(updated) == set(STREAMS + ADVISORY_STREAMS + OBJECT_STORES + SHARED_BUCKETS + TEAM_BUCKETS)
     assert js.streams["KV_UA1_CERTS"].num_replicas == 1 and js.streams["KV_UA1_CERTS"].metadata["owner"] == "a test"
     assert "event=protocol1_bucket_updated stream=KV_UA1_CERTS changed=num_replicas:3->1" in caplog.text
 
@@ -249,7 +257,7 @@ def test_a_changed_limit_updates_the_stream_at_the_next_start_and_keeps_metadata
 
 
 def test_lowered_streams_are_changed_first_so_their_room_serves_the_others() -> None:
-    js = StandInJetStream(room=len(STREAMS + OBJECT_STORES) * (1 << 20))
+    js = StandInJetStream(room=len(STREAMS + ADVISORY_STREAMS + OBJECT_STORES) * (1 << 20))
     ensured(js)
     js.calls.clear()
     ensured(js, queue_limits(partition=1 << 19, pool=2 << 20))
@@ -305,7 +313,7 @@ def test_limits_that_do_not_fit_the_accounts_storage_limit_refuse_before_any_cha
     # Six 1 MiB streams in the contract's order; the sixth is the first that does not fit.
     assert message.startswith(f"Stream {STREAMS[5]} does not fit the storage limit of the NATS account, 5,242,880 "
                               "bytes:")
-    assert (f"Team {TEAM}'s streams set aside 6,291,456 bytes at the current settings ({COUNT} partition streams of "
+    assert (f"Team {TEAM}'s streams set aside 7,340,032 bytes at the current settings ({COUNT} partition streams of "
             "1,048,576 bytes, and transport.queues.max_bytes.dead_letter 1,048,576") in message
     assert "the NATS account sets aside 0 bytes now of its limit of 5,242,880." in message
     assert "On the bundled NATS server" not in message
@@ -322,23 +330,23 @@ def test_the_servers_storage_refusal_names_the_stream_and_setting_and_the_next_s
     assert "JetStream error 10047, insufficient storage resources available" in message
     assert "the NATS account sets aside 4,194,304 bytes now (it has no limit of its own; the server's storage " \
            "applies)" in message
-    # 4 MiB set aside and 3 MiB more to come (2 team streams + OBJ_UA1_BLOBS): bundled server needs 4/3 free disk.
+    # 4 MiB set aside and 4 MiB more to come (2 team streams + advisory + OBJ_UA1_BLOBS): bundled server needs 4/3 free disk.
     assert ("On the bundled NATS server JetStream gets three quarters of the disk's free space, measured each time "
-            "NATS starts, so for 7,340,032 bytes set aside the disk needs about 9,786,710 bytes free at every start."
+            "NATS starts, so for 8,388,608 bytes set aside the disk needs about 11,184,811 bytes free at every start."
             in message)
     assert "If NATS started with less room than its streams had already set aside, it refuses every change" in message
     assert "The streams made so far stay; once the limits fit, the next start finishes the team." in message
     assert list(js.streams) == STREAMS[:4]
     # The operator lowers the limits; the next start lowers what exists and creates the rest.
-    ensured(js, queue_limits(**{kind: 1 << 19 for kind in KINDS}))
-    assert [name for name in js.streams if not name.startswith("KV_")] == STREAMS + OBJECT_STORES
-    assert js.reserved == len(STREAMS + OBJECT_STORES) * (1 << 19)
+    ensured(js, queue_limits(**{kind: 1 << 18 for kind in KINDS}))
+    assert [name for name in js.streams if not name.startswith("KV_")] == STREAMS + ADVISORY_STREAMS + OBJECT_STORES
+    assert js.reserved == len(STREAMS + OBJECT_STORES) * (1 << 18) + delivery_advisory_max_bytes(transport())
 
 
 def test_storage_refusal_on_installation_wide_object_store_uses_installation_wording() -> None:
     """C05: OBJ_UA1_BLOBS has team=None, so its 10047 refusal says 'finishes the installation's streams'."""
 
-    js = StandInJetStream(room=len(STREAMS) * (1 << 20))  # fits the 6 team streams, refuses OBJ_UA1_BLOBS
+    js = StandInJetStream(room=len(STREAMS + ADVISORY_STREAMS) * (1 << 20))  # fits team + advisory streams, refuses OBJ_UA1_BLOBS
     with pytest.raises(StreamStorageRefused) as refused:
         ensured(js)
     message = str(refused.value)
@@ -353,7 +361,7 @@ def test_after_nats_restarts_with_less_room_than_is_set_aside_the_same_settings_
 
     js = StandInJetStream()
     ensured(js)
-    js.room = 3 << 20  # NATS restarted on a fuller disk: 6 MiB set aside, 3 MiB of storage
+    js.room = 3 << 20  # NATS restarted on a fuller disk: 8 MiB set aside, 3 MiB of storage
     ensured(js)  # nothing differs, so nothing is asked of NATS
 
     with pytest.raises(StreamStorageRefused) as lowered:
@@ -363,7 +371,7 @@ def test_after_nats_restarts_with_less_room_than_is_set_aside_the_same_settings_
     assert "NATS refuses every new or changed stream while its streams set aside more than the storage it has" \
         in message
     assert "Lowering a limit cannot help then." in message
-    assert "for 7,340,032 bytes set aside the disk needs about 9,786,710 bytes free at every start." in message
+    assert "for 8,388,608 bytes set aside the disk needs about 11,184,811 bytes free at every start." in message
     assert "Free disk space and restart the instance" in message
 
     with pytest.raises(StreamStorageRefused) as new_team:
@@ -393,7 +401,7 @@ def test_an_account_with_tiers_is_checked_against_the_tier_of_the_replica_count(
 
     js = StandInJetStream(tiers={"R1": (64 << 20, -1)})
     ensured(js)
-    assert len(js.streams) == len(STREAMS + OBJECT_STORES + SHARED_BUCKETS + TEAM_BUCKETS)
+    assert len(js.streams) == len(STREAMS + ADVISORY_STREAMS + OBJECT_STORES + SHARED_BUCKETS + TEAM_BUCKETS)
 
     js = StandInJetStream(tiers={"R1": (5 << 20, -1), "R3": (64 << 20, -1)})
     with pytest.raises(StreamStorageRefused) as refused:
@@ -418,14 +426,14 @@ def test_an_account_with_tiers_but_none_for_the_replica_count_refuses_before_any
 def test_more_streams_than_the_account_allows_refuse_before_any_change(tiered: bool) -> None:
     """C22 (b): a team needs 100 streams at the default count, so the stream limit is the one most likely met."""
 
-    wanted = len(STREAMS + OBJECT_STORES + SHARED_BUCKETS + TEAM_BUCKETS)
+    wanted = len(STREAMS + ADVISORY_STREAMS + OBJECT_STORES + SHARED_BUCKETS + TEAM_BUCKETS)
     js = StandInJetStream(tiers={"R1": (-1, wanted - 1)}) if tiered else StandInJetStream(account_streams=wanted - 1)
     with pytest.raises(StreamAccountRefused) as refused:
         ensured(js)
     where = "The NATS account's tier R1" if tiered else "The NATS account"
     assert str(refused.value) == (
-        f"{where} allows {wanted - 1} streams and holds 0; this start would add {wanted}. A team needs 8 streams at "
-        f"partition count {COUNT} ({COUNT} partition streams, 4 more and 2 buckets), and the installation 5 buckets and "
+        f"{where} allows {wanted - 1} streams and holds 0; this start would add {wanted}. A team needs 9 streams at "
+        f"partition count {COUNT} ({COUNT} partition streams, 5 more and 2 buckets), and the installation 5 buckets and "
         f"1 object store of its own. The partition count is fixed when the installation is created, so raise the "
         f"account's stream limit to at least {wanted}. Nothing was changed.")
     assert not js.streams
@@ -438,7 +446,7 @@ def test_more_streams_than_the_account_allows_refuse_before_any_change(tiered: b
 def test_a_flat_account_counts_every_copy_of_a_stream() -> None:
     """Measured on a three-server cluster: a flat account counts each copy, but reports what is set aside once."""
 
-    js = StandInJetStream(account_limit=10 << 20)  # six streams of 1 MiB: they fit once, not three times
+    js = StandInJetStream(account_limit=10 << 20)  # seven streams of 1 MiB: they fit once, not three times
     with pytest.raises(StreamStorageRefused) as refused:
         ensured(js, queue_limits(replicas=3))
     message = str(refused.value)
@@ -449,9 +457,9 @@ def test_a_flat_account_counts_every_copy_of_a_stream() -> None:
     assert "or the other transport.queues.max_bytes entries, transport.replicas, or raise" in message
     ensured(js, queue_limits(replicas=1))
     js.calls.clear()
-    with pytest.raises(StreamStorageRefused) as raised:  # three copies of what exists: 21 MiB
+    with pytest.raises(StreamStorageRefused) as raised:  # three copies of what exists: 24 MiB
         ensured(js, queue_limits(replicas=3))
-    assert "sets aside 7,340,032 bytes now, which with 3 copies of each stream counts as 22,020,096" in str(raised.value)
+    assert "sets aside 8,388,608 bytes now, which with 3 copies of each stream counts as 25,165,824" in str(raised.value)
     assert "more than its storage limit" not in str(raised.value)
     assert not [call for call in js.calls if call[0] in {"create", "update"}]
 
@@ -459,12 +467,12 @@ def test_a_flat_account_counts_every_copy_of_a_stream() -> None:
 def test_an_account_already_over_its_limit_refuses_before_any_change_and_says_lowering_cannot_help() -> None:
     js = StandInJetStream()
     ensured(js)
-    js.account_limit = 3 << 20  # lowered below the 7 MiB its streams set aside
+    js.account_limit = 3 << 20  # lowered below the 8 MiB its streams set aside
     js.calls.clear()
     with pytest.raises(StreamStorageRefused) as refused:
         ensured(js, queue_limits(partition=1 << 19))
     assert str(refused.value) == (
-        "The NATS account sets aside 7,340,032 bytes, more than its storage limit of 3,145,728: its limit was lowered "
+        "The NATS account sets aside 8,388,608 bytes, more than its storage limit of 3,145,728: its limit was lowered "
         "below what its streams had set aside. NATS refuses every new or changed stream until it is raised, a lowered "
         "limit too, so lowering transport.queues.max_bytes cannot help. Raise the account's storage limit. Nothing was "
         "changed.")
@@ -482,7 +490,7 @@ def test_the_servers_stream_limit_refusal_has_its_own_words() -> None:
         ensured(AtStreamLimit())
     assert str(refused.value).startswith(
         f"NATS refused to create stream {STREAMS[3]}: the NATS account allows no more streams (JetStream error 10027, "
-        "maximum number of streams reached). A team needs 8 streams")
+        "maximum number of streams reached). A team needs 9 streams")
     assert "Raise the account's stream limit." in str(refused.value)
     assert "transport.replicas" not in str(refused.value)
 
@@ -501,7 +509,10 @@ def test_a_changed_team_consumer_is_updated() -> None:
 def test_every_team_is_set_up() -> None:
     js = StandInJetStream()
     ensured(js, teams=("team_b", TEAM))
-    assert len(js.streams) == 2 * len(STREAMS + TEAM_BUCKETS) + len(SHARED_BUCKETS + OBJECT_STORES) and len(js.consumers) == 4
+    assert (
+        len(js.streams) == 2 * len(STREAMS + ADVISORY_STREAMS + TEAM_BUCKETS) + len(SHARED_BUCKETS + OBJECT_STORES)
+        and len(js.consumers) == 8
+    )
 
 
 class _MappedServerWithTeamAtFour(StandInServer):
@@ -602,7 +613,7 @@ def test_a_cluster_without_room_for_a_streams_copies_gets_the_storage_refusal_no
         f"NATS refused to create stream {STREAMS[0]}: {lacking} (JetStream error 10005, no suitable peers for "
         "placement, insufficient storage). Each server that keeps a copy of a stream needs room for the stream's "
         f"whole limit in its own storage, here 1,048,576 bytes ({setting}). Team {TEAM}'s streams set aside "
-        "6,291,456 bytes at the current settings")
+        "7,340,032 bytes at the current settings")
     assert f"Lower {setting} or the other transport.queues.max_bytes entries" in message
     assert ("lower transport.replicas so fewer servers need that room" in message) == (replicas > 1)
     assert "Set transport.replicas" not in message and "On the bundled NATS server" not in message

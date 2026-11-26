@@ -1,6 +1,6 @@
 {
   "protocol": "1.0-pre",
-  "kind": "blobs.delete_person",
+  "kind": "team.delete_person_data",
   "message_id": "01928f3a-7b2c-7e11-8000-000000000e11",
   "issuer": {
     "installation": "install_example",
@@ -21,10 +21,10 @@
   "expires_at": "2026-10-22T04:30:30.000Z",
   "algorithm": "ed25519",
   "body": {
-    "request_id": "blob_delete_person_2",
+    "request_id": "team_delete_person_data_2",
     "person": "person_1"
   },
-  "idempotency_key": "blobs.delete_person:tYlf-69r70UuUT6lemIqXmlONFa6UEZ-mKIbqWsXACw",
-  "body_digest": "BasE-qdOec7oHjGf0hsq7aOC7_bzwTAxAKQWhmw128c",
-  "signature": "0kWJoDUbqTNJd8d3gUOdcoNYJtxKwjQnZSNA6ESl_awjkF45tFwpvJFAMkakCeJ6CEATwZP7lD3cpBibeMPbAw"
+  "idempotency_key": "team.delete_person_data:RALboD-8IToXp_mALMUhDnbNiIuxGCsPCaJfQ-KK-xQ",
+  "body_digest": "ELmVASz1luc-lJZnr4Mq9dg_9McECtOV01h519mblJs",
+  "signature": "7gFm7DpCAhUHf-yelVi33zlQK5O_b6grH8_zBTBZCgPB8l6iW1R58yWzX2K7ocb8QxS3rlupw5F_hlasth68Dw"
 }

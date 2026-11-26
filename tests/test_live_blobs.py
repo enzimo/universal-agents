@@ -381,12 +381,8 @@ async def test_live_multi_owner_retention_departure_deletion_fa6_sweep_and_cr3_r
             team_id=LIVE_TEAM, person_id="alice", person_ref=alice_ref, standing=PersonStanding.DISABLED,
             roles=(), changed_at_utc=clock_state["now"],
         ))
-        del_alice_frame = stand_in_frame(
-            LIVE_TEAM, "blobs.delete_person", {"request_id": "del_alice_1", "person": alice_ref},
-            person_ref=admin_ref, request_id="del_alice_1",
-        )
-        del_alice_reply = checked_reply("blobs.delete_person", await ops.handle_delete_person(del_alice_frame))
-        assert del_alice_reply == {"outcome": "ok", "owners_removed": 2, "blobs_deleted": 1, "blobs_kept": 1}
+        del_alice_res = await service.delete_person(alice_ref)
+        assert (del_alice_res.outcome, del_alice_res.owners_removed, del_alice_res.blobs_deleted, del_alice_res.blobs_kept) == ("ok", 2, 1, 1)
         with pytest.raises(BlobDeleted):
             await get_blob(js, LIVE_TEAM, alice_ref_blob["sha256"])
         assert await get_blob(js, LIVE_TEAM, shared_ref["sha256"]) == shared_bytes
@@ -396,12 +392,8 @@ async def test_live_multi_owner_retention_departure_deletion_fa6_sweep_and_cr3_r
             team_id=LIVE_TEAM, person_id="bob", person_ref=bob_ref, standing=PersonStanding.REMOVED,
             roles=(), changed_at_utc=clock_state["now"],
         ))
-        del_bob_frame = stand_in_frame(
-            LIVE_TEAM, "blobs.delete_person", {"request_id": "del_bob_1", "person": bob_ref},
-            person_ref=admin_ref, request_id="del_bob_1",
-        )
-        del_bob_reply = checked_reply("blobs.delete_person", await ops.handle_delete_person(del_bob_frame))
-        assert del_bob_reply == {"outcome": "ok", "owners_removed": 1, "blobs_deleted": 1, "blobs_kept": 0}
+        del_bob_res = await service.delete_person(bob_ref)
+        assert (del_bob_res.outcome, del_bob_res.owners_removed, del_bob_res.blobs_deleted, del_bob_res.blobs_kept) == ("ok", 1, 1, 0)
         with pytest.raises(BlobDeleted):
             await get_blob(js, LIVE_TEAM, shared_ref["sha256"])
 
@@ -634,7 +626,7 @@ async def test_live_end_to_end_person_departure_blob_deletion_and_startup_recove
         stop = asyncio.Event()
         ts_host = MessageHost(config.layout, team_services_profile(LIVE_TEAM), ts_nc)
         serving = asyncio.create_task(
-            serve_team(ts_host, LIVE_TEAM, stop, team_operations(config, ts_host.clock, js=js))
+            serve_team(ts_host, LIVE_TEAM, stop, team_operations(config, ts_host.clock, js=js, host=ts_host))
         )
         try:
             await until_team_services_serve(ts_host, serving)
@@ -687,13 +679,13 @@ async def test_live_end_to_end_person_departure_blob_deletion_and_startup_recove
             assert admin_actor is not None
             lifecycle = gateway._command_operations._person_lifecycle
 
-            # 1. Non-admin member attempting blobs.delete_person through gateway command token is refused!
+            # 1. Non-admin member attempting team.delete_person_data through gateway command token is refused!
             non_admin_reply = await gateway._command_operations._team_commands.request(
-                "blobs.delete_person", {"person": alice_ref}, person_id=bob_id,
+                "team.delete_person_data", {"person": alice_ref}, person_id=bob_id,
             )
             assert non_admin_reply["outcome"] == "not_allowed"
 
-            # 2. GatewayPersonLifecycle.set_enabled(..., enabled=False) sends real signed blobs.delete_person over NATS:
+            # 2. GatewayPersonLifecycle.set_enabled(..., enabled=False) sends real signed team.delete_person_data over NATS:
             #    Alice's unshared blob is deleted immediately while Alice+Bob's shared blob stays readable!
             await lifecycle.set_enabled(
                 actor=admin_actor, target=alice_id, enabled=False, channel_name="website", chat_scope="web-chat",
@@ -709,7 +701,7 @@ async def test_live_end_to_end_person_departure_blob_deletion_and_startup_recove
             with pytest.raises(BlobDeleted):
                 await get_blob(js, LIVE_TEAM, shared_sha)
 
-            # 4. Tokenless worker_host cannot call blobs.delete_person over real NATS (sender role refused).
+            # 4. Tokenless worker_host cannot call team.delete_person_data over real NATS (sender role refused).
             access.record_person(TeamPersonV1(
                 team_id=LIVE_TEAM, person_id=carol_id, person_ref=carol_ref,
                 standing=PersonStanding.DISABLED, roles=(), changed_at_utc=datetime.now(timezone.utc),
@@ -717,18 +709,23 @@ async def test_live_end_to_end_person_departure_blob_deletion_and_startup_recove
             from custom_transport.protocol1.live import RequestRefused
             with pytest.raises(RequestRefused):
                 await worker_host.live.request(
-                    "blobs.delete_person", {"request_id": "del_worker_nope", "person": carol_ref},
+                    "team.delete_person_data", {"request_id": "del_worker_nope", "person": carol_ref},
                     team_services_audience(worker_host), team=LIVE_TEAM,
                 )
             assert await get_blob(js, LIVE_TEAM, carol_only_sha) == b"carol exclusive live bytes"
 
-            # 5. Tokenless lead_host MessageHost CAN call blobs.delete_person over real NATS and deletes Carol's blob!
+            # 5. Tokenless lead_host MessageHost CAN call team.delete_person_data over real NATS and deletes Carol's blob!
             lead_del = await lead_host.live.request(
-                "blobs.delete_person", {"request_id": "del_lead_ok", "person": carol_ref},
+                "team.delete_person_data", {"request_id": "del_lead_ok", "person": carol_ref},
                 team_services_audience(lead_host), team=LIVE_TEAM,
             )
             assert lead_del.raw["body"] == {
-                "outcome": "ok", "owners_removed": 1, "blobs_deleted": 1, "blobs_kept": 0,
+                "outcome": "ok",
+                "owners_removed": 1,
+                "blobs_deleted": 1,
+                "blobs_kept": 0,
+                "dlq_copies_deleted": 0,
+                "dlq_copies_kept": 0,
             }
             with pytest.raises(BlobDeleted):
                 await get_blob(js, LIVE_TEAM, carol_only_sha)

@@ -6,7 +6,7 @@
     "minors": "any; a newer minor's unknown optional fields are ignored"
   },
   "authority_token_domain": "universal-agents/authority-token/v1",
-  "contract_sha256": "17c1f2ffb3b77d6bd80af9c86f004fa26b37e1359029b5d3232b2bec9cc8f1cc",
+  "contract_sha256": "33a8cd0b6c980559b8c98e352fd031da6f142fd65a43859350128071233b3bdc",
   "kinds": [
     "access.decision",
     "access.request",
@@ -17,7 +17,6 @@
     "agent.pause",
     "agent.resume",
     "agent.status",
-    "blobs.delete_person",
     "blobs.register",
     "credential.form.request",
     "credential.form.result",
@@ -135,6 +134,7 @@
     "tasks.purge",
     "tasks.remove",
     "tasks.steer",
+    "team.delete_person_data",
     "tool.setup.request",
     "tool.setup.result",
     "topics.find_threads",
