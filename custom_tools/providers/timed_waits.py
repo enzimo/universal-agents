@@ -316,6 +316,10 @@ async def long_wait(minutes: int, reason: str, tool_context: ToolContext) -> str
     In a recurring scheduled run, waits that would reach or pass the schedule's
     next run time are refused so the next run is not skipped.
 
+    Do not use ``long_wait`` to wait for delegated subtasks, a person's reply,
+    or an access decision: those already pause and resume the task by
+    themselves.
+
     Args:
         minutes: Whole number of minutes to pause (>= 1).
         reason: Plain-language reason explaining what you are waiting for

@@ -36,11 +36,12 @@ from custom_agents.pinned_memory_runtime import (
 from custom_agents.control_runtime import stop_task_execution
 from custom_agents.execution_lanes import runs_in_parallel_lane
 from custom_agents.task_human_interaction_blockers import (
+    answer_held,
     blocker_request_ids,
     get_human_interaction_blocker,
     is_timed_wait_blocker,
 )
-from custom_agents.timed_waits import wait_summary
+from custom_agents.timed_waits import wait_status_summary
 from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents.objective_lifecycle import (
     LinkSwitchResult,
@@ -903,7 +904,10 @@ async def _runtime_work_root_summary(agent: Any, root: Any) -> RuntimeWorkSummar
                 + "."
             )
         elif is_timed_wait_blocker(human_blocker):
-            blocker = wait_summary(human_blocker)
+            blocker = wait_status_summary(
+                human_blocker,
+                held=answer_held(human_blocker, getattr(agent, "id", None)),
+            )
         else:
             blocker = "Waiting for required input."
     elif root.state == ProgressState.WAITING:

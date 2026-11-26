@@ -13,7 +13,11 @@ same and can also bring more records from the same backup later
 ## What moves
 
 - **Settings** you changed in `instance_config.yaml`, editable individually in
-  YAML. Unchanged settings use the new release's defaults.
+  YAML. Unchanged settings use the new release's defaults. On `0.9.x`, the two
+  timed-wait limits (`agent.max_wait_minutes_without_approval` and
+  `agent.max_wait_minutes_with_approval`) do not move with the team and must be
+  set again in the new `instance_config.yaml` after the move; the export output
+  lists them when either was changed from its default.
 - **Control files**: `SOUL.md`, chosen model overrides, the roster, templates,
   agent definitions, specialist bundles, and Objective profiles.
 - **Skills and tools**: reviewed skills, added web API and CLI tools with their

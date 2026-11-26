@@ -34,6 +34,7 @@ from custom_agents.timed_waits import (
     timed_wait_record,
     timer_running,
     validate_wait_args,
+    wait_status_summary,
     wait_summary,
 )
 from custom_messages.contracts.access_v2 import TaskContextV1
@@ -313,6 +314,20 @@ def test_timer_running_is_due_summary_and_resume_note() -> None:
     )
     assert record["kind"] == TIMED_WAIT_KIND
     assert wait_summary(record) == "Waiting until 2026-11-26 12:10:00 UTC (10-minute wait: Portainer redeploy)."
+    assert (
+        wait_status_summary(record, now=BASE_TIME + timedelta(minutes=2), held=False)
+        == "Waiting until 2026-11-26 12:10:00 UTC (10-minute wait: Portainer redeploy)."
+    )
+    assert (
+        wait_status_summary(record, now=BASE_TIME + timedelta(minutes=50), held=True)
+        == "The 10-minute wait (Portainer redeploy) ended at 2026-11-26 12:10:00 UTC; "
+        "the task continues when the agent finishes its current work."
+    )
+    assert (
+        wait_status_summary(record, now=BASE_TIME + timedelta(minutes=11), held=False)
+        == "The 10-minute wait (Portainer redeploy) ended at 2026-11-26 12:10:00 UTC; "
+        "waiting for the agent to resume the task."
+    )
 
     assert not is_due(record, BASE_TIME + timedelta(minutes=9, seconds=59))
     assert timer_running(record, BASE_TIME + timedelta(minutes=9, seconds=59))

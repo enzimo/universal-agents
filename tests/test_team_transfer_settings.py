@@ -405,8 +405,9 @@ def test_the_settings_contract_is_main_and_release_0_10s_settings_9() -> None:
     assert "max_tool_calls_per_task" in agent_properties
     assert contract.__name__ == "GatewayInstanceConfig"
     pin_hint = (
-        "main shares settings/9 with release/0.10; add a new main-line setting to "
-        "team_transfer.settings.NOT_CARRIED_SETTINGS instead of changing settings/9."
+        "main shares settings/9 with release/0.10 under the documented main-line exception "
+        "(README_ARCHITECTURE.md, 'Moving a team to a new version'); add a new main-line setting "
+        "to team_transfer.settings.NOT_CARRIED_SETTINGS instead of changing settings/9."
     )
     assert SettingsSection.schema_version == 9, pin_hint
     assert section_contract_digests()["settings/9"] == (

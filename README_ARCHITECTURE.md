@@ -1571,6 +1571,62 @@ person's request ledger. Ordinary delegated work still answers its requester.
 The limit is fixed in code because a setting would change the team transfer's
 settings format.
 
+### Timed waits (`wait` and `long_wait`)
+
+Any agent task, including a scheduled job run, can pause itself for a fixed
+number of whole minutes and continue in the same task when the timer ends.
+The feature uses two catalog tools (`custom_tools/providers/timed_waits.py`,
+pure rules in `custom_agents/timed_waits.py`, runtime in
+`custom_agents/timed_wait_runtime.py`):
+
+- `wait(minutes, reason)` is catalog tool `fn:wait` in the standard
+  `agent_runtime` tool set at level `read`, so every role holds it without a
+  grant. All waits in a task share one cumulative budget bounded by
+  `agent.max_wait_minutes_without_approval` (default `20` minutes).
+- `long_wait(minutes, reason)` is its own catalog tool `fn:long_wait` outside
+  every standard tool set and starter profile at level `write`, bounded by
+  `agent.max_wait_minutes_with_approval` (default `1440` minutes / 24 hours,
+  hard ceiling `1440`). Agents reach it only through `find_tools` +
+  `request_access` (or lasting `SubjectKind.SCHEDULE` access on a recurring
+  job). Both limits are team-wide and `operator_only` so agents cannot raise
+  their own wait budget.
+
+Both tools pause the task with a local Strands interrupt (`timed_wait`, listed
+in `task_steering_runtime._LOCAL_WAIT_KINDS` so nothing is sent to a
+requester), charge the wait once in task history (`timed_wait_started`, keyed
+by `access_runtime.step_tool_call_id`), and save one `timed_wait` record in
+`TaskRuntimeState.human_interaction_blockers` whose `resume_at` UTC timestamp
+is the single source of truth. Moving the task to `WAITING` releases the
+worker's main slot so other work can run while the timer ticks. Each
+`scheduled_runtime._scheduler_pass` runs `resume_due_timed_waits` (capping its
+idle sleep to the next resume time and backing off overdue unresumable
+records) through the shared `custom_agents/paused_wait_resume.py` helpers used
+by `tool_setup_run`: when the paused turn is still in memory, the interrupt is
+answered with the elapsed time and current UTC timestamp (marking the record
+`answer_held` while it waits for a busy lane, without overwriting another
+pending answer); after a restart or takeover, the task resumes from a durable
+next-turn note (`timed_wait_ended` is written on either path). In a recurring
+scheduled run (verified scheduler-issued task context), waits that would reach
+or pass the schedule's next fire time are refused so the next occurrence is
+not coalesced. Stuck-task checks (`custom_agents/task_wait_reasons.py`) treat
+an active timer as `WaitReason.TIMED_WAIT` (with a 5-minute grace window past
+`resume_at`) and a held answer as `WaitReason.ANSWER_HELD`, while overdue
+unheld waits are reported as stuck. Lease-loss wind-down keeps and resumes due
+timed waits before its deadline, and stopping or cancelling a waiting task
+removes the blocker record and drops the paused turn so nothing resumes later.
+
+Rationale for a paused Strands interrupt plus a saved blocker record:
+
+- **Instead of `sleep` in shell or Python**: sleeping ties up the worker's
+  execution slot and a live sandbox process for the whole wait, requires code
+  execution access, disappears across a restart, and is invisible to status
+  summaries and stuck-task checks.
+- **Instead of creating a one-time schedule**: a one-time schedule starts a
+  separate task that loses the paused turn's conversation and tool context as
+  well as the original run's signed identity and access (including a scheduled
+  job's `SubjectKind.SCHEDULE` grants), and for a recurring job a second run
+  would collide with or be coalesced by the recurring schedule.
+
 ## Authorization and credentials
 
 Every trust boundary keeps its own deterministic checks. These include gateway
@@ -4804,7 +4860,16 @@ export-requested`; guide: `user_docs_source/team-transfer.md`).
   replaced), gives the development branch's section the next number above it,
   and reads `main`'s version through one conversion step. That merge also tests
   the development branch's own earlier shape of the number with a real import,
-  since its pre-release exports may still exist. A version
+  since its pre-release exports may still exist. One deliberate exception to
+  this rule applies on `main` (owner decision, 2026-11-26): `settings` stays
+  at version 9 and leaves `agent.max_wait_minutes_without_approval` and
+  `agent.max_wait_minutes_with_approval` out of export via
+  `team_transfer.settings.NOT_CARRIED_SETTINGS` and
+  `settings_payload_contract()` (emitting `event=team_transfer_setting_not_carried`
+  and an export report note when either was changed), rather than taking
+  `settings/10` and forcing `release/0.10` to renumber its `settings/10`–`16`
+  for two rarely changed limits; the `release/0.10` port carries them at its
+  next free settings version. A version
   imports its own section versions and the ones the previous release exported,
   through one conversion step per section that changed since
   (`team_transfer.sections.SECTION_UPGRADES`). This is the one deliberate

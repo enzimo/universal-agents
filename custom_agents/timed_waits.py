@@ -299,6 +299,35 @@ def wait_summary(record: Mapping[str, Any]) -> str:
     return existing or "Waiting for a timed pause to end."
 
 
+def wait_status_summary(
+    record: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+    held: bool = False,
+) -> str:
+    """Live runtime-work summary for a timed-wait blocker, distinguishing running vs ended waits."""
+
+    moment = (now or utc_now()).astimezone(timezone.utc)
+    if not held and not is_due(record, moment):
+        return wait_summary(record)
+    minutes = record.get("minutes")
+    duration = (
+        f"{minutes}-minute"
+        if isinstance(minutes, int) and not isinstance(minutes, bool) and minutes >= 1
+        else "timed"
+    )
+    reason = str(record.get("reason") or "").strip()
+    reason_clause = f" ({reason})" if reason else ""
+    scheduled = resume_at_of(record)
+    ended_at = format_utc_display(scheduled) if scheduled is not None else "its scheduled time"
+    if held:
+        return (
+            f"The {duration} wait{reason_clause} ended at {ended_at}; "
+            "the task continues when the agent finishes its current work."
+        )
+    return f"The {duration} wait{reason_clause} ended at {ended_at}; waiting for the agent to resume the task."
+
+
 def timed_wait_record(
     *,
     interrupt_id: str,
@@ -436,6 +465,7 @@ __all__ = [
     "utc_now",
     "validate_wait_args",
     "wait_result",
+    "wait_status_summary",
     "wait_summary",
     "wait_summary_text",
     "waited_minutes",

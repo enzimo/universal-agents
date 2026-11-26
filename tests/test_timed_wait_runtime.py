@@ -1124,8 +1124,15 @@ async def test_c19_repeated_resume_failure_warns_once_and_prunes_after_recovery(
 
 
 @pytest.mark.asyncio
-async def test_a6_runtime_work_summary_describes_timed_wait_blocker(tmp_path: Path) -> None:
+async def test_a6_runtime_work_summary_describes_timed_wait_blocker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from custom_agents.manager_control_runtime import _runtime_work_root_summary
+    from custom_agents.task_human_interaction_blockers import mark_answer_held, remove_answer_mark
+    from custom_agents.timed_waits import TIMED_WAIT_KIND
+
+    now_box = [BASE_TIME + timedelta(minutes=2)]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
 
     agent = _make_runtime_agent(tmp_path / "manager.db")
     agent.task_manager.update_main_task_state(TASK_ID, ProgressState.WAITING, BASE_TIME.isoformat())
@@ -1144,8 +1151,34 @@ async def test_a6_runtime_work_summary_describes_timed_wait_blocker(tmp_path: Pa
         ),
     )
     root = agent.task_manager.get_task_info(TASK_ID)
-    summary = await _runtime_work_root_summary(agent, root)
-    assert summary.blocker == "Waiting until 2026-11-26 12:10:00 UTC (10-minute wait: Portainer redeploy)."
+    running = await _runtime_work_root_summary(agent, root)
+    assert running.blocker == "Waiting until 2026-11-26 12:10:00 UTC (10-minute wait: Portainer redeploy)."
+
+    # After the timer ends while the lane is busy with another task (answer held by this agent).
+    now_box[0] = BASE_TIME + timedelta(minutes=50)
+    assert mark_answer_held(
+        agent.task_manager,
+        TASK_ID,
+        TIMED_WAIT_KIND,
+        "int-sum",
+        holder_id=agent.id,
+        at=(BASE_TIME + timedelta(minutes=10)).isoformat(),
+    )
+    held_summary = await _runtime_work_root_summary(agent, root)
+    assert (
+        held_summary.blocker
+        == "The 10-minute wait (Portainer redeploy) ended at 2026-11-26 12:10:00 UTC; "
+        "the task continues when the agent finishes its current work."
+    )
+
+    # After the timer ends and no answer is held (waiting for the scheduler pass / recovery).
+    remove_answer_mark(agent.task_manager, TASK_ID, TIMED_WAIT_KIND, "int-sum")
+    overdue_summary = await _runtime_work_root_summary(agent, root)
+    assert (
+        overdue_summary.blocker
+        == "The 10-minute wait (Portainer redeploy) ended at 2026-11-26 12:10:00 UTC; "
+        "waiting for the agent to resume the task."
+    )
 
 
 @pytest.mark.asyncio

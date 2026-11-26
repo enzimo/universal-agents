@@ -43,8 +43,13 @@ operator).
 ## Where access comes from
 
 - **Standard tools** come with a role: every agent can manage its own work,
+  use short timed pauses (`wait`, up to the team's without-approval limit),
   use files in its task's folders, and use the internet; TeamLead also has
   the team tools. They need no grant and cannot be removed, only blocked.
+  Longer timed pauses (`fn:long_wait`, level `write`, up to 24 hours) are not
+  in any standard tool set or starter profile: a person approves them in the
+  Inbox (for one run, or kept for a scheduled job), and for a non-administrator
+  member an administrator also grants `fn:long_wait` on the person's side.
 - **Starter profile**: each person chooses TeamLead's standing access for
   their own work with `/access profile` or on the Access page.
   - Trusted: the standard tool set plus shell and Python in the sandbox, which

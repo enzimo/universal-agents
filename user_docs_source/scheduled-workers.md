@@ -610,6 +610,45 @@ Changes it already made are kept.
 The limit counts that task's own waits, including after access or setup
 approval. A child task's waits do not use its parent's allowance.
 
+## Timed waits during a run
+
+Any agent task — including a scheduled job run — can pause itself for a fixed
+number of whole minutes and continue in the same task when the timer ends,
+without running a shell `sleep` and without holding its worker's slot:
+
+- **`wait(minutes, reason)`** is a standard tool available to every role with
+  no approval required. All timed waits in one task count toward
+  `agent.max_wait_minutes_without_approval` (default `20` minutes in total).
+- **`long_wait(minutes, reason)`** allows a task's total waited time (counting
+  both `wait` and `long_wait`) to reach `agent.max_wait_minutes_with_approval`
+  (default `1440` minutes / 24 hours). It is not in any standard tool set or
+  starter profile, so a person must approve `fn:long_wait` at level `write` in
+  the Inbox — for one run, or with **Keep for later tasks** on a recurring
+  scheduled job (or by declaring `fn:long_wait` / `long_wait` in the job's
+  requirements and having the owner approve it).
+
+While a task is in a timed wait:
+
+- **Worker capacity is freed.** The worker can accept and run other tasks while
+  the timer ticks. When the timer ends, if the agent is busy with another task,
+  the wait completes and the task continues next as soon as the current task
+  finishes or pauses.
+- **Recurring schedules protect the next run.** In a recurring scheduled run, a
+  wait whose resume time would reach or pass the schedule's next fire time is
+  refused with the next run time named, so the next occurrence is not skipped.
+- **Messages in the same chat become guidance.** If you send another message in
+  a chat thread whose task is waiting on a timer, it is saved as guidance for
+  that task and applied when the wait ends; it does not wake the timer early.
+  Start separate work with **New Chat** or `/new`.
+- **Stopping ends the wait early.** Stopping or cancelling a waiting task
+  (`/stop task <task_id>`, `/stop`, or **Remove** / **Stop and remove** in
+  Settings → Tasks) clears the wait record cleanly, and nothing resumes when
+  the timer would have expired.
+- **Restarts keep the wait and budget.** A task's waited-minutes budget and
+  scheduled resume time are saved with the task; after a restart, a wait that
+  is still in the future stays waiting, and a due wait resumes the task from a
+  durable note with the current UTC time.
+
 ## Change the worker or launch rules
 
 ### Custom agent types

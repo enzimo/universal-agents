@@ -457,7 +457,12 @@ def call_operation_id(agent: Any, event: BeforeToolCallEvent) -> str | None:
     """
 
     tool_use_id = str(event.tool_use.get("toolUseId") or "")
-    return step_tool_call_id(agent, event.agent, tool_use_id, tool_name=event.tool_use.get("name"))
+    return step_tool_call_id(
+        agent,
+        getattr(event, "agent", None),
+        tool_use_id,
+        tool_name=event.tool_use.get("name"),
+    )
 
 
 def verified_task_context(agent: Any, access: RuntimeAccess | None = None) -> TaskContextV1 | None:
