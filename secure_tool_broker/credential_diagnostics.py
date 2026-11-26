@@ -9,12 +9,22 @@ CREDENTIAL_SOURCE_FAILED = "credential_source_failed"
 CREDENTIAL_VALUE_UNAVAILABLE = "credential_value_unavailable"
 CREDENTIAL_FIELD_NOT_SECRET = "credential_field_not_secret"
 CREDENTIAL_UNAVAILABLE = "credential_unavailable"
+CREDENTIAL_EXPIRED = "credential_expired"
+ACCOUNT_LINK_CREDENTIAL_EXPIRED = "account_link_credential_expired"
 
 # Codes describe observations, not guesses about upstream authentication.
 _REMEDIATION = {
     CREDENTIAL_NOT_FOUND: (
         "human",
         "The selected credential is absent from the current owner catalog. Ask the owner to select an existing credential in the secure workflow; do not guess another catalog key.",
+    ),
+    CREDENTIAL_EXPIRED: (
+        "human",
+        "The temporary credential has expired and can no longer be used. Ask the owner to store a new credential through the secure form.",
+    ),
+    ACCOUNT_LINK_CREDENTIAL_EXPIRED: (
+        "human",
+        "The temporary credential linked to this tool has expired. Ask the owner to store a new credential and re-link the tool with /link.",
     ),
     CREDENTIAL_FIELD_MISSING: (
         "human",

@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,15 @@ from secure_tool_broker.credential_diagnostics import (
     CREDENTIAL_SOURCE_FAILED,
     CREDENTIAL_SOURCES_UNCONFIGURED,
     CREDENTIAL_VALUE_UNAVAILABLE,
+)
+from secure_tool_broker.credential_expiry import (
+    CREDENTIAL_EXPIRY_FORM_ONLY,
+    CREDENTIAL_EXPIRY_INVALID,
+    CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
+    CredentialExpiryError,
+    format_utc_timestamp,
+    remaining_ttl_seconds,
+    validate_storage_expiry,
 )
 from secure_tool_broker.credential_sources import (
     CredentialRef,
@@ -102,6 +112,22 @@ _SECRET_CACHE: dict[
     tuple[str, str, str, str | None, str | None, str | None, str | None, str],
     tuple[str, float],
 ] = {}
+# Per-(scope_kind, owner_id, credential_key) lock serializing writes and janitor
+# deletions in-process so a renewal cannot interleave with an expiry sweep.
+_KEY_LOCKS_GUARD = threading.Lock()
+_KEY_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+
+
+def credential_key_lock(scope: CredentialOwnerScope, credential_key: str) -> threading.Lock:
+    """Return the in-process lock for one owner's catalog key."""
+
+    lock_key = (scope.scope_kind, scope.owner_id, _credential_key(credential_key))
+    with _KEY_LOCKS_GUARD:
+        lock = _KEY_LOCKS.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _KEY_LOCKS[lock_key] = lock
+        return lock
 _ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PLACEHOLDER_PATTERN = re.compile(
     r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}"
@@ -168,8 +194,18 @@ class CatalogCredential(BaseModel):
     purpose: str
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    expires_at: str | None = None
     approval: dict[str, Any] = Field(default_factory=dict)
     fields: dict[str, CatalogCredentialField] = Field(default_factory=dict)
+
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def _validate_expires_at(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return format_utc_timestamp(value)
 
 
 class CredentialCatalog(BaseModel):
@@ -402,7 +438,7 @@ def _metadata_for_agent(credential_key: str, credential: CatalogCredential) -> d
         if not field.is_secret() and field.value is not None:
             payload["value"] = field.value
         fields[field_name] = payload
-    return {
+    metadata: dict[str, Any] = {
         "credential_key": credential_key,
         "display_name": credential.display_name,
         "purpose": credential.purpose,
@@ -413,6 +449,9 @@ def _metadata_for_agent(credential_key: str, credential: CatalogCredential) -> d
             if key not in {"token", "password", "secret", "credential"}
         },
     }
+    if credential.expires_at is not None:
+        metadata["expires_at"] = credential.expires_at
+    return metadata
 
 
 def resolve_secret_field(
@@ -681,7 +720,17 @@ def collect_credential(
     *,
     context: ToolContext | None = None,
     scope: CredentialOwnerScope | None = None,
+    expires_at: datetime | str | None = None,
+    now: datetime | None = None,
 ) -> ToolResult:
+    """Store a credential from trusted form submission or broker-side storage.
+
+    ``expires_at`` is accepted only as an explicit keyword argument (never read
+    from ``request_payload``) so an agent's proposed expiry can only pre-fill
+    the secure form and never make a credential temporary without the person's
+    submission.
+    """
+
     try:
         resolved_scope = _owner_scope(context=context, scope=scope)
         credential_key = _credential_key(request_payload.get("credential_key"))
@@ -695,6 +744,33 @@ def collect_credential(
             write_source = normalize_credential_source_name(
                 _string(os.getenv("SECURE_TOOL_BROKER_DEFAULT_CREDENTIAL_WRITE_SOURCE")) or "sealbox"
             )
+        normalized_expires_at: str | None = None
+        ttl_seconds: int | None = None
+        if expires_at is not None:
+            current_now = now if now is not None else datetime.now(timezone.utc)
+            try:
+                validated_expiry = validate_storage_expiry(expires_at, now=current_now)
+            except CredentialExpiryError as exc:
+                return ToolResult(
+                    status="error",
+                    error=exc.message,
+                    content={"error_code": exc.code, "credential_key": credential_key},
+                )
+            if write_source != "sealbox":
+                return ToolResult(
+                    status="error",
+                    error=(
+                        "Temporary credentials with an expiry are only supported for Sealbox storage, "
+                        f"not {write_source or '<empty>'}."
+                    ),
+                    content={
+                        "error_code": CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
+                        "write_source": write_source,
+                        "credential_key": credential_key,
+                    },
+                )
+            normalized_expires_at = format_utc_timestamp(validated_expiry)
+            ttl_seconds = remaining_ttl_seconds(validated_expiry, now=current_now)
         field_specs = _normalize_field_specs(request_payload.get("fields") or [])
         if not field_specs:
             return ToolResult(
@@ -782,38 +858,41 @@ def collect_credential(
                 return generated
             values[field_name] = generated
             secret_fields[field_name] = generated
-        write_result = write_credential_to_source(
-            write_source=write_source,
-            credential_key=credential_key,
-            request_payload=request_payload,
-            values=values,
-            field_specs=active_field_specs,
-            generated_secret_fields=generated_secret_fields,
-            scope=resolved_scope,
-        )
-        if isinstance(write_result, ToolResult):
-            return write_result
-        credential = build_catalog_credential(
-            credential_key=credential_key,
-            request_payload=request_payload,
-            field_specs=active_field_specs,
-            public_fields=public_fields,
-            write_result=write_result,
-        )
-        _save_catalog_credential(credential_key, credential, scope=resolved_scope)
-        _SECRET_CACHE.clear()
-        return ToolResult(
-            status="success",
-            content={
-                "status": "credential_stored",
-                "credential_key": credential_key,
-                "write_source": write_result.source,
-                "item_id": write_result.item_id,
-                "item_name": write_result.item_name,
-                "metadata": _metadata_for_agent(credential_key, credential),
-                "stored_secret_fields": sorted(secret_fields),
-            },
-        )
+        with credential_key_lock(resolved_scope, credential_key):
+            write_result = write_credential_to_source(
+                write_source=write_source,
+                credential_key=credential_key,
+                request_payload=request_payload,
+                values=values,
+                field_specs=active_field_specs,
+                generated_secret_fields=generated_secret_fields,
+                scope=resolved_scope,
+                ttl_seconds=ttl_seconds,
+            )
+            if isinstance(write_result, ToolResult):
+                return write_result
+            credential = build_catalog_credential(
+                credential_key=credential_key,
+                request_payload=request_payload,
+                field_specs=active_field_specs,
+                public_fields=public_fields,
+                write_result=write_result,
+                expires_at=normalized_expires_at,
+            )
+            _save_catalog_credential(credential_key, credential, scope=resolved_scope)
+            _SECRET_CACHE.clear()
+        result_content: dict[str, Any] = {
+            "status": "credential_stored",
+            "credential_key": credential_key,
+            "write_source": write_result.source,
+            "item_id": write_result.item_id,
+            "item_name": write_result.item_name,
+            "metadata": _metadata_for_agent(credential_key, credential),
+            "stored_secret_fields": sorted(secret_fields),
+        }
+        if credential.expires_at is not None:
+            result_content["expires_at"] = credential.expires_at
+        return ToolResult(status="success", content=result_content)
     except Exception as exc:
         return ToolResult(status="error", error=f"Credential collection failed: {exc}")
 
@@ -826,7 +905,19 @@ def register_existing_source(
 ) -> ToolResult:
     try:
         resolved_scope = _owner_scope(context=context, scope=scope)
-        request_payload = _normalize_existing_source_request_payload(dict(params.get("request") or params))
+        raw_request = params.get("request")
+        if params.get("expires_at") is not None or (
+            isinstance(raw_request, Mapping) and raw_request.get("expires_at") is not None
+        ):
+            return ToolResult(
+                status="error",
+                error=(
+                    "register_existing_source does not write secret values and cannot set an expiry "
+                    "on an existing credential."
+                ),
+                content={"error_code": CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE},
+            )
+        request_payload = _normalize_existing_source_request_payload(dict(raw_request or params))
         credential_key = _credential_key(request_payload.get("credential_key"))
         field_specs = _normalize_field_specs(request_payload.get("fields") or [])
         if not field_specs:
@@ -896,31 +987,32 @@ def register_existing_source(
                 error=f"Missing required existing-source field metadata: {', '.join(sorted(missing_fields))}",
                 content={"status": "credential_unavailable", "missing_fields": sorted(missing_fields)},
             )
-        catalog = load_catalog(scope=resolved_scope)
-        existing_credential = catalog.credentials.get(credential_key)
-        now = utc_now_iso()
-        credential = CatalogCredential(
-            display_name=_string(request_payload.get("display_name"))
-            or (existing_credential.display_name if existing_credential is not None else credential_key),
-            purpose=_string(request_payload.get("purpose"))
-            or (
-                existing_credential.purpose
-                if existing_credential is not None
-                else "Credential registered from an existing broker-local source."
-            ),
-            created_at=existing_credential.created_at if existing_credential is not None else now,
-            updated_at=now,
-            approval={
-                "status": "approved",
-                "approved_by": "user",
-                "approved_at": now,
-                "remember": True,
-                "source": "existing_source_registration",
-            },
-            fields=catalog_fields,
-        )
-        _save_catalog_credential(credential_key, credential, scope=resolved_scope)
-        _SECRET_CACHE.clear()
+        with credential_key_lock(resolved_scope, credential_key):
+            catalog = load_catalog(scope=resolved_scope)
+            existing_credential = catalog.credentials.get(credential_key)
+            now = utc_now_iso()
+            credential = CatalogCredential(
+                display_name=_string(request_payload.get("display_name"))
+                or (existing_credential.display_name if existing_credential is not None else credential_key),
+                purpose=_string(request_payload.get("purpose"))
+                or (
+                    existing_credential.purpose
+                    if existing_credential is not None
+                    else "Credential registered from an existing broker-local source."
+                ),
+                created_at=existing_credential.created_at if existing_credential is not None else now,
+                updated_at=now,
+                approval={
+                    "status": "approved",
+                    "approved_by": "user",
+                    "approved_at": now,
+                    "remember": True,
+                    "source": "existing_source_registration",
+                },
+                fields=catalog_fields,
+            )
+            _save_catalog_credential(credential_key, credential, scope=resolved_scope)
+            _SECRET_CACHE.clear()
         return ToolResult(
             status="success",
             content={
@@ -1050,8 +1142,29 @@ def write_credential_to_source(
     field_specs: Mapping[str, Mapping[str, Any]],
     generated_secret_fields: set[str] | None = None,
     scope: CredentialOwnerScope,
+    ttl_seconds: int | None = None,
 ) -> CredentialWriteResult | ToolResult:
     source = normalize_credential_source_name(write_source)
+    if ttl_seconds is not None:
+        if source != "sealbox":
+            return ToolResult(
+                status="error",
+                error=(
+                    "Temporary credentials with an expiry are only supported for Sealbox storage, "
+                    f"not {source or '<empty>'}."
+                ),
+                content={
+                    "error_code": CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
+                    "write_source": source,
+                    "credential_key": credential_key,
+                },
+            )
+        if int(ttl_seconds) < 1:
+            return ToolResult(
+                status="error",
+                error="Sealbox TTL must be at least 1 second.",
+                content={"error_code": CREDENTIAL_EXPIRY_INVALID, "credential_key": credential_key},
+            )
     if source == "bitwarden":
         return _write_bitwarden_login_item(
             credential_key=credential_key,
@@ -1067,6 +1180,7 @@ def write_credential_to_source(
             field_specs=field_specs,
             generated_secret_fields=generated_secret_fields or set(),
             scope=scope,
+            ttl_seconds=int(ttl_seconds) if ttl_seconds is not None else None,
         )
     return ToolResult(
         status="error",
@@ -1112,6 +1226,7 @@ def _write_sealbox_credential(
     field_specs: Mapping[str, Mapping[str, Any]],
     generated_secret_fields: set[str],
     scope: CredentialOwnerScope,
+    ttl_seconds: int | None = None,
 ) -> CredentialWriteResult | ToolResult:
     tenant_env = sealbox_tenant_environment(
         scope_kind=scope.scope_kind,
@@ -1143,6 +1258,7 @@ def _write_sealbox_credential(
             field_spec=field_specs.get(password_field, {}),
             generated=password_field in generated_secret_fields,
             env=tenant_env,
+            ttl_seconds=ttl_seconds,
         )
         if isinstance(result, ToolResult):
             return result
@@ -1160,6 +1276,7 @@ def _write_sealbox_credential(
             field_spec=field_specs.get(password_field, {}),
             generated=password_field in generated_secret_fields,
             env=tenant_env,
+            ttl_seconds=ttl_seconds,
         )
         if isinstance(result, ToolResult):
             return result
@@ -1180,6 +1297,7 @@ def _write_sealbox_credential(
             field_spec=spec,
             generated=field_name in generated_secret_fields,
             env=tenant_env,
+            ttl_seconds=ttl_seconds,
         )
         if isinstance(result, ToolResult):
             return result
@@ -1200,10 +1318,13 @@ def _sealbox_set_credential(
     field_spec: Mapping[str, Any],
     generated: bool,
     env: Mapping[str, str] | None = None,
+    ttl_seconds: int | None = None,
 ) -> None | ToolResult:
     if not username.strip():
         return ToolResult(status="error", error="Sealbox credential writes require a non-empty username.")
     command = ["credential", "set", key, "--username", username, "--output", "json"]
+    if ttl_seconds is not None:
+        command.extend(["--ttl", str(int(ttl_seconds))])
     input_text: str | None = None
     if generated:
         command.append("--generate-password")
@@ -1235,6 +1356,7 @@ def _sealbox_set_secret_field(
     field_spec: Mapping[str, Any],
     generated: bool,
     env: Mapping[str, str] | None = None,
+    ttl_seconds: int | None = None,
 ) -> None | ToolResult:
     secret_value = value
     if generated:
@@ -1245,6 +1367,8 @@ def _sealbox_set_secret_field(
     if not _string(secret_value):
         return ToolResult(status="error", error=f"Sealbox secret field {key!r} resolved to an empty value.")
     command = ["secret", "set", key, "--output", "json"]
+    if ttl_seconds is not None:
+        command.extend(["--ttl", str(int(ttl_seconds))])
     completed = run_sealbox(command, input_text=secret_value, env=env, timeout_seconds=30)
     if isinstance(completed, ToolResult):
         return completed
@@ -1471,6 +1595,7 @@ def build_catalog_credential(
     field_specs: Mapping[str, Mapping[str, Any]],
     public_fields: Mapping[str, str],
     write_result: CredentialWriteResult,
+    expires_at: str | None = None,
 ) -> CatalogCredential:
     fields: dict[str, CatalogCredentialField] = {}
     for field_name, spec in field_specs.items():
@@ -1498,6 +1623,7 @@ def build_catalog_credential(
         purpose=_string(request_payload.get("purpose")) or "Credential collected for approved agent workflow.",
         created_at=now,
         updated_at=now,
+        expires_at=expires_at,
         approval={
             "status": "approved",
             "approved_by": "user",
@@ -2752,7 +2878,19 @@ def execute_credential_catalog_action(action: ValidatedAction, context: ToolCont
     params = dict(action.params or {})
     try:
         if action.action == "credential.collect":
-            request_payload = dict(params.get("request") or params)
+            raw_request = params.get("request")
+            if params.get("expires_at") is not None or (
+                isinstance(raw_request, Mapping) and raw_request.get("expires_at") is not None
+            ):
+                return ToolResult(
+                    status="error",
+                    error=(
+                        "Temporary credential expiry can only be chosen by the person on the secure "
+                        "broker form, not set directly through credential.collect."
+                    ),
+                    content={"error_code": CREDENTIAL_EXPIRY_FORM_ONLY},
+                )
+            request_payload = dict(raw_request or params)
             submitted_fields = dict(params.get("submitted_fields") or params.get("fields_values") or {})
             return collect_credential(
                 request_payload,

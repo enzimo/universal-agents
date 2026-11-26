@@ -643,6 +643,10 @@ class GatewayCredentialWorkflow:
             request_content.source_item_name,
         )
         message = str(content_payload.get("message") or "")
+        # Read the credential's deletion time strictly from stored credential
+        # metadata — never from session_payload["expires_at"], which is the
+        # form session's own short-lived expiry.
+        credential_expires_at = metadata.get("expires_at")
         session = self._require_session(session_key)
         result = SecureCredentialCollectionResult(
             credential_request_id=request_content.credential_request_id,
@@ -653,6 +657,7 @@ class GatewayCredentialWorkflow:
             parent_task_id=request_content.parent_task_id,
             broker_session_id=str(session_payload.get("session_id") or ""),
             metadata=metadata,
+            expires_at=credential_expires_at,
             message=message,
             error=str(result_payload.get("error") or "") or None,
             continue_task=request_content.continue_task,

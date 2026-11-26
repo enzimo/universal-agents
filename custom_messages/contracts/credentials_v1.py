@@ -1,15 +1,30 @@
 """credentials v1 contracts, independent of runtime hosts and SDKs."""
 
+from datetime import datetime, timezone
 from custom_messages.enums import MessageMetaType
 from id_generation import new_id
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import field_validator
 from pydantic import model_validator
 from typing import Any
 from typing import Dict
 from typing import List
 from typing import Literal
 from typing import Optional
+
+
+_DELETION_FLOWS = frozenset(
+    {"credential_deletion", "credential_delete", "delete_credential", "delete"}
+)
+
+
+def _normalize_utc_datetime(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("expires_at must be a timezone-aware UTC datetime.")
+    return value.astimezone(timezone.utc)
 
 
 SecureCredentialResultStatus = Literal[
@@ -171,6 +186,30 @@ class SecureCredentialCollectionRequest(BaseModel):
             "then answers the person itself."
         ),
     )
+    expires_at: Optional[datetime] = Field(
+        default=None,
+        description=(
+            "Optional proposed deletion time in UTC (timezone-aware ISO-8601 datetime). When the "
+            "person asks for a temporary credential (for example 'in 2 hours' or 'Friday 5 PM' in "
+            "their time zone), convert their words to UTC and set this field so the secure form "
+            "starts pre-filled; the person decides the final expiry on the form. Omit for lasting "
+            "credentials and never set on credential deletion requests."
+        ),
+    )
+
+    @field_validator("expires_at", mode="after")
+    @classmethod
+    def _validate_expires_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _normalize_utc_datetime(value)
+
+    @model_validator(mode="after")
+    def _reject_expires_at_on_delete(self) -> "SecureCredentialCollectionRequest":
+        if (
+            self.expires_at is not None
+            and str(self.flow or "").strip().lower() in _DELETION_FLOWS
+        ):
+            raise ValueError("expires_at cannot be set on a credential deletion request.")
+        return self
 
     def get_id(self) -> str:
         return self.credential_request_id
@@ -209,6 +248,13 @@ class SecureCredentialCollectionResult(BaseModel):
     metadata: Dict[str, Any] = Field(
         default_factory=dict, description="Redacted credential metadata only."
     )
+    expires_at: Optional[datetime] = Field(
+        default=None,
+        description=(
+            "Deletion time in UTC when the stored credential is temporary, or omitted when it "
+            "does not expire."
+        ),
+    )
     message: str = Field(
         default="",
         description="Optional redacted broker detail for the waiting agent, not final user-facing copy.",
@@ -220,6 +266,11 @@ class SecureCredentialCollectionResult(BaseModel):
         default=False,
         description="Copied from the request: the task resumes from this result instead of ending.",
     )
+
+    @field_validator("expires_at", mode="after")
+    @classmethod
+    def _validate_expires_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        return _normalize_utc_datetime(value)
 
     def get_id(self) -> str:
         return self.credential_request_id
