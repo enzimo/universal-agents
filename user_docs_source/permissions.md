@@ -186,9 +186,11 @@ Sandboxed code reaches only your own folders and the shared `team/` and
 the sandbox (`code:unconfined`), longer timed task pauses (`fn:long_wait` at
 level `write`, for tasks that need to wait beyond the without-approval limit up
 to `agent.max_wait_minutes_with_approval`, 24 hours max), and platform
-administration are in no starter profile; people give them with a grant (for a
-non-administrator member, an administrator must also grant `fn:long_wait` on
-the person's side). With authorization off, `wait` is included on every role
+administration are in no starter profile. A person who already holds
+`fn:long_wait` (such as an administrator) approves requests for their own work
+in the Inbox; for a member who does not hold `fn:long_wait`, an administrator
+decides the request in the Inbox, and approving it gives the member the access
+too (no separate grant step is needed). With authorization off, `wait` is included on every role
 and an operator adds `fn:long_wait` to an agent type's `default_tools` when
 that type should have `long_wait`. Model choice is in the Trusted profile only for
 administrators. The profile's credential lookup (`cli:sealbox` and

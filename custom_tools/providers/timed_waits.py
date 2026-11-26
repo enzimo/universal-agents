@@ -294,8 +294,9 @@ async def wait(minutes: int, reason: str, tool_context: ToolContext) -> str:
     Args:
         minutes: Whole number of minutes to pause (>= 1). All waits in a task
             count toward the team's without-approval total (default 20 minutes).
-            For longer waits (up to 24 hours total), ask a person for
-            ``fn:long_wait`` with ``request_access`` and use ``long_wait``.
+            If a task needs to wait longer than ``wait`` allows (up to 24 hours
+            total), ``wait`` refuses and its answer names the next step for
+            ``long_wait``.
         reason: Plain-language reason explaining what you are waiting for
             (shown in task history and status summaries; 1 to 500 characters).
     """
@@ -305,13 +306,13 @@ async def wait(minutes: int, reason: str, tool_context: ToolContext) -> str:
 
 @tool(context=True)
 async def long_wait(minutes: int, reason: str, tool_context: ToolContext) -> str:
-    """Pause this task for a longer duration (with a person's approval) and continue in the same task.
+    """Pause this task for a longer duration and continue in the same task.
 
     Works like ``wait`` but allows a task's total waited time (counting both
     ``wait`` and ``long_wait`` calls) to reach the team's with-approval limit
-    (default 1440 minutes / 24 hours). Requires a person's approval through
-    ``request_access(tool_id='fn:long_wait', level='write', ...)`` for one run,
-    or lasting schedule access for a recurring scheduled job.
+    (default 1440 minutes / 24 hours). Not in any standard tool set; when
+    access control is enabled it requires approval for one run or lasting
+    schedule access for a recurring scheduled job.
 
     In a recurring scheduled run, waits that would reach or pass the schedule's
     next run time are refused so the next run is not skipped.

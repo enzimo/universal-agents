@@ -20,14 +20,17 @@ from strands.types.tools import ToolContext
 
 from access_catalog.catalog import load_catalog
 from access_control.cedar import CedarAccessClient
-from access_control.decisions import AccessService
-from access_control.entities import PersonPrincipal
+from access_control.decisions import AccessService, HandDownRefused
+from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
 from access_control.identity import ISSUER_SCHEDULER, ContextSigner
+from access_control.inbox import StoredAccessInbox
+from access_control.requests import AccessRequests
 from access_control.starter_profiles import apply_starter_profile
 from config_loader import Config
 from custom_agents import access_runtime, timed_waits as timed_waits_rules
 from custom_agents.access_runtime import AccessDecisionHook, decide_call
 from custom_agents.agent_catalog import _hydrate_tools, load_agent_catalog
+from custom_agents.agent_instructions import shared_agent_base_prompt, strip_access_prompt
 from custom_agents.schedule_changes import WorkerConfigurationRequestV1
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.schedule_worker_service import ScheduleWorkerService
@@ -43,6 +46,8 @@ from custom_agents.timed_waits import (
 from custom_agents.tool_sync import startup_tools
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
+    AccessRequestStatus,
+    AccessReviewChoice,
     GrantLifetime,
     GrantV1,
     SubjectKind,
@@ -66,7 +71,7 @@ from custom_messages.enums import (
     TaskHistoryType,
 )
 from custom_tools.provider_contract import tool_name
-from custom_tools.providers.timed_waits import wait
+from custom_tools.providers.timed_waits import long_wait, wait
 from custom_tools.runtime_context import set_agent_ref, task_work
 from runtime_settings.timed_waits import TimedWaitLimits
 from storage.access_repository import AccessRepository
@@ -282,6 +287,67 @@ def test_a1_non_admin_member_needs_person_grant_for_long_wait_but_not_wait(stora
         assert decide_call(worker, LONG_WAIT_TOOL_NAME, {"minutes": 60, "reason": "check"}).allowed
     finally:
         service.cedar.close()
+
+
+@needs_cedar
+def test_c22_member_long_wait_request_approved_by_admin_in_one_step(storage: dict[str, Any]) -> None:
+    """When a member does not hold fn:long_wait, one admin approval in AccessRequests grants both sides."""
+
+    worker = _make_access_agent(
+        storage,
+        person=MEMBER.person_id,
+        person_roles=("member",),
+    )
+    work_id = worker.task_manager.get_task_info("task-1").meta.gateway_context.task_context.context.context_id
+    assert not decide_call(worker, LONG_WAIT_TOOL_NAME, {"minutes": 60, "reason": "redeploy"}).allowed
+
+    service = AccessService(
+        store=AccessRepository(storage),
+        catalog=load_catalog(None),
+        cedar=CedarAccessClient(binary=str(BINARY)),
+        team_id=TEAM,
+        agent_role_of=agent_role_resolver("TeamArchitect"),
+    )
+    try:
+        requests = AccessRequests(
+            service=service,
+            inbox=StoredAccessInbox(service.store),
+            lead_agent_type="TeamArchitect",
+        )
+        requester = AgentPrincipal(
+            agent_id=worker.id,
+            agent_type=worker.named_agent_type,
+            role="worker",
+            team_id=TEAM,
+            work_id=work_id,
+        )
+        outcome = requests.submit(
+            requester=requester,
+            person=MEMBER,
+            target=TargetRefV1(kind=TargetKind.TOOL, id=LONG_WAIT_TOOL_ID),
+            level=AccessLevel.WRITE,
+            reason="Wait 60 minutes for maintenance window",
+            task_id="task-1",
+        )
+        assert outcome.waiting and outcome.request is not None
+        assert outcome.request.person_lacks_access is True
+        assert not requests.may_decide(MEMBER, outcome.request)
+        assert requests.may_decide(OWNER, outcome.request)
+        with pytest.raises(HandDownRefused):
+            requests.decide(outcome.request.request_id, MEMBER, AccessReviewChoice.APPROVE_TASK)
+
+        decided = requests.decide(outcome.request.request_id, OWNER, AccessReviewChoice.APPROVE_TASK)
+        assert decided.status is AccessRequestStatus.GRANTED
+        # One administrator approval grants both the member and the worker's task; no separate grant step needed.
+        assert decide_call(worker, LONG_WAIT_TOOL_NAME, {"minutes": 60, "reason": "redeploy"}).allowed
+    finally:
+        service.cedar.close()
+
+
+def test_c21_shared_prompt_and_tool_docstrings_do_not_leak_request_access_when_auth_off() -> None:
+    assert "request_access" not in strip_access_prompt(shared_agent_base_prompt)
+    assert "request_access" not in (wait.__doc__ or "")
+    assert "request_access" not in (long_wait.__doc__ or "")
 
 
 # -- C03: scheduled job access path (SCHEDULE grants + authorize_scheduled_job_access) ------

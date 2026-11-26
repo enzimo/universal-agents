@@ -614,7 +614,9 @@ approval. A child task's waits do not use its parent's allowance.
 
 Any agent task — including a scheduled job run — can pause itself for a fixed
 number of whole minutes and continue in the same task when the timer ends,
-without running a shell `sleep` and without holding its worker's slot:
+without running a shell `sleep` and without holding its worker's slot. Timed
+waits do not count toward the five-wait limit above (which counts only turns
+that send work out and wait for a reply):
 
 - **`wait(minutes, reason)`** is a standard tool available to every role with
   no approval required. All timed waits in one task count toward
@@ -622,10 +624,13 @@ without running a shell `sleep` and without holding its worker's slot:
 - **`long_wait(minutes, reason)`** allows a task's total waited time (counting
   both `wait` and `long_wait`) to reach `agent.max_wait_minutes_with_approval`
   (default `1440` minutes / 24 hours). It is not in any standard tool set or
-  starter profile, so a person must approve `fn:long_wait` at level `write` in
-  the Inbox — for one run, or with **Keep for later tasks** on a recurring
+  starter profile, so `fn:long_wait` at level `write` must be approved in the
+  Inbox — for one run, or with **Keep for later tasks** on a recurring
   scheduled job (or by declaring `fn:long_wait` / `long_wait` in the job's
-  requirements and having the owner approve it).
+  requirements). A person who already holds `fn:long_wait` (such as an
+  administrator) approves requests for their own work; for a member who does
+  not hold it, an administrator decides the request, and approving it gives the
+  member the access too.
 
 While a task is in a timed wait:
 
@@ -641,9 +646,10 @@ While a task is in a timed wait:
   that task and applied when the wait ends; it does not wake the timer early.
   Start separate work with **New Chat** or `/new`.
 - **Stopping ends the wait early.** Stopping or cancelling a waiting task
-  (`/stop task <task_id>`, `/stop`, or **Remove** / **Stop and remove** in
-  Settings → Tasks) clears the wait record cleanly, and nothing resumes when
-  the timer would have expired.
+  (`/stop task <task_id>`, `/stop all`, or **Remove** / **Stop and remove** in
+  Settings → Tasks; bare `/stop` lists unfinished tasks with the command to
+  stop them) clears the wait record cleanly, and nothing resumes when the timer
+  would have expired.
 - **Restarts keep the wait and budget.** A task's waited-minutes budget and
   scheduled resume time are saved with the task; after a restart, a wait that
   is still in the future stays waiting, and a due wait resumes the task from a
