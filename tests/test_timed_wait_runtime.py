@@ -1296,7 +1296,7 @@ async def test_crash_between_record_and_waiting_recovers_waits_and_delivers_note
     assert restarted_mgr.get_task_info(TASK_ID).state == ProgressState.ACCEPTED
     assert list(restarted_mgr.task_state.task_queue) == [TASK_ID]
     assert get_human_interaction_blocker(restarted_mgr, TASK_ID) is None
-    expected_note = timed_waits_rules.resume_note(saved_blocker)
+    expected_note = timed_waits_rules.resume_note(saved_blocker, now=now_box[0])
     assert restarted_mgr.read_runtime_resume_directive(TASK_ID) == expected_note
 
     # Drain the queue and run the real turn owner to prove the saved note reaches the model prompt.
@@ -1359,28 +1359,30 @@ async def test_retried_resume_from_note_adds_only_one_note(
     )
     record_human_interaction_blocker(agent.task_manager, TASK_ID, rec)
 
-    # First attempt fails after saving the note and clearing the blocker, restoring the blocker.
-    orig_enqueue = agent.task_manager.enqueue_task
+    # First attempt fails during the single atomic persistence write: rolls back cleanly with no saved note.
+    orig_persist = agent.task_manager._persist_runtime_state
     fail_once = [True]
 
-    def flaky_enqueue(task_id: str, *, front: bool = False) -> bool:
+    def flaky_persist(*args: Any, **kwargs: Any) -> None:
         if fail_once[0]:
             fail_once[0] = False
             raise RuntimeError("transient sqlite failure")
-        return orig_enqueue(task_id, front=front)
+        orig_persist(*args, **kwargs)
 
-    monkeypatch.setattr(agent.task_manager, "enqueue_task", flaky_enqueue)
+    monkeypatch.setattr(agent.task_manager, "_persist_runtime_state", flaky_persist)
     assert await resume_due_timed_waits(agent) == 0
     assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is not None
+    assert agent.task_manager.read_runtime_resume_directive(TASK_ID) is None
+    assert list(agent.task_manager.task_state.task_queue) == []
 
-    # Retry 2 minutes later succeeds without appending a second, different note.
+    # Retry 2 minutes later succeeds in one write with the actual resume time and elapsed minutes.
     now_box[0] = BASE_TIME + timedelta(minutes=12, seconds=5)
     assert await resume_due_timed_waits(agent) == 1
     assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is None
     assert list(agent.task_manager.task_state.task_queue) == [TASK_ID]
 
     directive = agent.task_manager.read_runtime_resume_directive(TASK_ID) or ""
-    assert directive == timed_waits_rules.resume_note(rec)
+    assert directive == timed_waits_rules.resume_note(rec, now=now_box[0])
     assert directive.count("Portainer redeploy") == 1
 
 
@@ -1495,14 +1497,14 @@ async def test_draining_agent_start_recovery_resumes_own_due_timed_wait_and_adop
 
     if not draining:
         assert sorted(mgr.task_state.task_queue) == sorted([own_task, gone_task])
-        assert mgr.read_runtime_resume_directive(own_task) == timed_waits_rules.resume_note(own_rec)
-        assert mgr.read_runtime_resume_directive(gone_task) == timed_waits_rules.resume_note(gone_rec)
+        assert mgr.read_runtime_resume_directive(own_task) == timed_waits_rules.resume_note(own_rec, now=now_box[0])
+        assert mgr.read_runtime_resume_directive(gone_task) == timed_waits_rules.resume_note(gone_rec, now=now_box[0])
         return
 
     assert list(mgr.task_state.task_queue) == [own_task]
     assert get_human_interaction_blocker(mgr, own_task) is None
     assert mgr.get_task_info(own_task).state == ProgressState.ACCEPTED
-    assert mgr.read_runtime_resume_directive(own_task) == timed_waits_rules.resume_note(own_rec)
+    assert mgr.read_runtime_resume_directive(own_task) == timed_waits_rules.resume_note(own_rec, now=now_box[0])
     assert woken == []
 
     # The gone worker's saved timed wait is untouched and never adopted.
@@ -1650,3 +1652,215 @@ async def test_b2_custody_loss_during_stage_timed_wait_guards_rollback_and_skips
         )
     assert agent_b.task_manager.task_state.tasks == {}
     assert agent_b.task_manager.task_state.human_interaction_blockers == {}
+
+
+@pytest.mark.asyncio
+async def test_f6_held_live_answer_then_crash_writes_single_timed_wait_ended_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6: timed_wait_ended is written on live consumption (not when held), so crash+restart leaves exactly one entry."""
+
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda _a: None)
+    db_path = tmp_path / "f6_single_end.db"
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+
+    agent = _make_runtime_agent(db_path)
+    model = _ScriptedWaitModel([[("tu-f6", "wait", {"minutes": 10, "reason": "f6 check"})]])
+    res, _ = await _invoke_and_pause(agent, Agent(model=model, tools=[wait], callback_handler=None))
+    assert res.stop_reason == "interrupt"
+
+    # Timer comes due and answer is held for the live paused turn: NO timed_wait_ended yet.
+    now_box[0] = BASE_TIME + timedelta(minutes=10, seconds=5)
+    assert await resume_due_timed_waits(agent) == 1
+    info_before_crash = agent.task_manager.get_task_info(TASK_ID)
+    ended_while_held = [
+        e for e in info_before_crash.task.execution_history
+        if (e.details or {}).get("event") == TIMED_WAIT_ENDED_EVENT
+    ]
+    assert ended_while_held == []
+
+    # Crash before the lane consumes the live answer; restart recovers via note-resume.
+    restarted_mgr = TaskManager(db_path=str(db_path))
+    restarted_mgr.set_owner_identity(AGENT_ID, "Worker", TEST_TEAM, "Worker")
+    restarted_mgr.restore_runtime_state()
+    restarted = _make_runtime_agent(db_path, add_initial_task=False)
+    restarted.task_manager = restarted_mgr
+
+    now_box[0] = BASE_TIME + timedelta(minutes=11)
+    await runtime_recovery.recover_runtime_after_restart(restarted)
+
+    info_after = restarted_mgr.get_task_info(TASK_ID)
+    ended_after = [
+        e.details for e in info_after.task.execution_history
+        if (e.details or {}).get("event") == TIMED_WAIT_ENDED_EVENT
+    ]
+    assert len(ended_after) == 1
+    assert ended_after[0]["how"] == "note"
+    assert WaitLedger.from_history(info_after).total_minutes == 10
+
+
+@pytest.mark.asyncio
+async def test_f3_resumed_live_turn_releases_live_wait_note_when_decision_keeps_task_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F3: resuming a live paused turn through the real _run_resumed_turn + outbox releases the live-wait note."""
+
+    from unittest.mock import patch
+
+    from custom_agents.strands_agent import UniversalAgent
+    from custom_agents.structured_llm_messages import ModelAgentTurnDecision, ModelNoOpAction
+    from custom_agents.task_steering_runtime import resume_interrupted_task_turn
+    from storage.config import resolve_storage_settings
+
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda _a: None)
+
+    class _WaitThenKeepOpenModel(Model):
+        def __init__(self) -> None:
+            self.waited = False
+
+        def update_config(self, **config: Any) -> None:
+            pass
+
+        def get_config(self) -> dict[str, Any]:
+            return {"model_id": "scripted-f3"}
+
+        async def structured_output(self, output_model, prompt, system_prompt=None, **kwargs):
+            yield {
+                "output": ModelAgentTurnDecision(
+                    actions=[ModelNoOpAction(reason="Wait ended; keeping task open for follow-up")]
+                )
+            }
+
+        async def stream(
+            self,
+            messages,
+            tool_specs=None,
+            system_prompt=None,
+            *,
+            structured_output_model=None,
+            **kwargs,
+        ):
+            if not self.waited:
+                self.waited = True
+                yield {"messageStart": {"role": "assistant"}}
+                yield {"contentBlockStart": {"start": {"toolUse": {"toolUseId": "tu_f3", "name": "wait"}}}}
+                yield {
+                    "contentBlockDelta": {
+                        "delta": {"toolUse": {"input": json.dumps({"minutes": 5, "reason": "redeploy"})}}
+                    }
+                }
+                yield {"contentBlockStop": {}}
+                yield {"messageStop": {"stopReason": "tool_use"}}
+                return
+            decision = ModelAgentTurnDecision(
+                actions=[ModelNoOpAction(reason="Wait ended; keeping task open for follow-up")]
+            )
+            decision_tool = next(
+                (
+                    spec["name"]
+                    for spec in (tool_specs or ())
+                    if isinstance(spec, dict) and str(spec.get("name", "")).endswith("TurnDecision")
+                ),
+                None,
+            )
+            yield {"messageStart": {"role": "assistant"}}
+            if decision_tool:
+                yield {
+                    "contentBlockStart": {
+                        "start": {"toolUse": {"toolUseId": "tu_f3_dec", "name": decision_tool}}
+                    }
+                }
+                yield {"contentBlockDelta": {"delta": {"toolUse": {"input": decision.model_dump_json()}}}}
+                yield {"contentBlockStop": {}}
+                yield {"messageStop": {"stopReason": "tool_use"}}
+                return
+            yield {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": decision.model_dump_json()}}}
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {"messageStop": {"stopReason": "end_turn"}}
+
+    db_path = tmp_path / "f3_release.db"
+    workspace = tmp_path / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    storage_settings = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(db_path)}})
+    model = _WaitThenKeepOpenModel()
+
+    with patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=model):
+        agent = UniversalAgent(
+            id=AGENT_ID,
+            name="Worker",
+            named_agent_type="Worker",
+            team_id=TEST_TEAM,
+            is_team_lead=False,
+            task_manager=TaskManager(db_path=str(db_path), storage_settings=storage_settings),
+            workspace_dir=str(workspace),
+            instance_root=str(workspace),
+            memory_graph_enabled=False,
+            activity_collector_base_url=None,
+            subtask_watchdog_interval_seconds=3600,
+            model_provider="openai",
+            model_id="scripted-f3",
+        )
+        agent.authorization_config = {"enabled": False}
+        agent.tools = [wait]
+        agent.team_comms = SimpleNamespace(send_message=AsyncMock())
+        agent.task_manager.set_owner_identity(AGENT_ID, "Worker", TEST_TEAM, "Worker")
+
+        task = Task(task_id=TASK_ID, task_type=MessageMetaType.REQUEST, problem_statement="Wait then stay open")
+        header = MessageHeader(from_agent_id="gateway", response_routing_key="gateway_chat")
+        meta = MessageMeta(conversation_id="conv-f3", msg_correlation_id="corr-f3")
+        assert agent.task_manager.add_task(task, header, meta, owner_person_id=None)
+        assert agent.task_manager.get_next_task_to_process() == TASK_ID
+        agent.task_manager.update_main_task_state(TASK_ID, ProgressState.IN_PROGRESS, BASE_TIME.isoformat())
+
+        # Step 1: Run a real turn that calls wait() and pauses in WAITING with a live session.
+        set_agent_ref(agent)
+        try:
+            with task_work(TASK_ID) as work:
+                strands_agent = Agent(model=model, tools=[wait], callback_handler=None)
+                agent._strands_parts.agent = strands_agent
+                work.strands = agent._strands_parts
+                res = await strands_agent.invoke_async(
+                    "Wait 5 minutes for redeploy.",
+                    structured_output_model=ModelAgentTurnDecision,
+                )
+                assert res.stop_reason == "interrupt"
+                await send_interrupt_request_for_result(
+                    agent,
+                    result=res,
+                    task=task,
+                    msg_header=header,
+                    msg_meta=meta,
+                    invoke_kwargs={"structured_output_model": ModelAgentTurnDecision},
+                    callback_handler=lambda **_k: None,
+                    full_prompt="Wait 5 minutes for redeploy.",
+                )
+        finally:
+            set_agent_ref(None)
+
+        assert agent.task_manager.get_task_info(TASK_ID).state == ProgressState.WAITING
+        assert TASK_ID in agent._interrupted_turn_sessions
+
+        # Step 2: Advance clock past resume_at and hold the live answer.
+        now_box[0] = BASE_TIME + timedelta(minutes=5, seconds=5)
+        assert await resume_due_timed_waits(agent) == 1
+        assert TASK_ID in agent._pending_interrupt_responses
+
+        # Step 3: Resume through the REAL resume_interrupted_task_turn -> _run_resumed_turn ->
+        # _execute_turn_decision_outbox path with a NoOp decision that keeps the task open.
+        await resume_interrupted_task_turn(agent, TASK_ID)
+
+    # Task remains tracked/open (not archived), the live-wait note was released, and exactly 1 live_turn end entry exists.
+    info = agent.task_manager.get_task_info(TASK_ID)
+    assert info is not None
+    assert not agent.task_manager.is_terminal_state(info.state)
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is None
+    assert agent.task_manager.read_runtime_resume_directive(TASK_ID) is None
+    ended_events = [
+        e.details for e in info.task.execution_history
+        if (e.details or {}).get("event") == TIMED_WAIT_ENDED_EVENT
+    ]
+    assert len(ended_events) == 1
+    assert ended_events[0]["how"] == "live_turn"

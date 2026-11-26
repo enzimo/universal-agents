@@ -341,11 +341,16 @@ def test_timer_running_is_due_summary_and_resume_note() -> None:
     assert not timer_running({"kind": TIMED_WAIT_KIND, "resume_at": "not-a-date"}, BASE_TIME)
     assert not is_due({"kind": TIMED_WAIT_KIND}, BASE_TIME)
 
-    note = resume_note(record)
+    resumed_at = BASE_TIME + timedelta(hours=3)
+    note = resume_note(record, now=resumed_at)
     assert "10-minute wait (Portainer redeploy) ended" in note
+    assert "the task was resumed at 2026-11-26 15:00:00 UTC" in note
+    assert resumed_at.isoformat() in note
+    assert "after 180 minutes" in note
     assert "2026-11-26 12:10:00 UTC" in note
     assert resume_at.isoformat() in note
-    assert resume_note(record) == note
+    assert "current time" not in note.lower()
+    assert resume_note(record, now=resumed_at) == note
 
 
 # -- Tool tests: pause, resume, A4 budgets, C04 auth-off ------------------------------------

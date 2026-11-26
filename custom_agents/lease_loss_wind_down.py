@@ -286,7 +286,6 @@ async def _run_wind_down(agent: Any, state: LeaseLossWindDown) -> None:
         for task_info in custody.not_started:
             await _hand_back_unstarted_task(agent, state, task_info)
         await _hand_back_deferred_requests(agent, state)
-        await _fail_hopeless_timed_waits(agent, state, custody.resumable)
         await _wait_for_resumable_tasks(agent, state)
     except asyncio.CancelledError:
         raise
@@ -547,15 +546,20 @@ async def _send_wind_down_error_response(
 
 
 async def _fail_hopeless_timed_waits(
-    agent: Any, state: LeaseLossWindDown, candidates: Sequence[TaskInfo]
+    agent: Any,
+    state: LeaseLossWindDown,
+    candidates: Sequence[TaskInfo],
+    *,
+    cutoff: datetime | None = None,
 ) -> set[str]:
-    """Fail any WAITING timed wait whose resume time is past ``state.deadline`` at once.
+    """Fail any WAITING timed wait whose resume time is past ``cutoff`` (defaults to ``state.deadline``).
 
     Errors are isolated per task so one storage or transport fault never blocks
     handbacks, other waiting tasks, or the wind-down poll loop; a task whose
     failure was not saved stays in ``state.resumable_task_ids`` for retry.
     """
 
+    effective_cutoff = state.deadline if cutoff is None else cutoff
     handled: set[str] = set()
     for task_info in candidates:
         task_id = task_info.task.task_id
@@ -563,7 +567,7 @@ async def _fail_hopeless_timed_waits(
             outcome = await fail_timed_wait_outlasting_deadline(
                 agent,
                 task_id,
-                deadline=state.deadline,
+                deadline=effective_cutoff,
                 message_for_blocker=_early_timed_wait_wind_down_message,
                 discard_steering=discard_task_steering_state,
             )
@@ -598,6 +602,28 @@ async def _fail_hopeless_timed_waits(
     return handled
 
 
+async def _resume_due_timed_waits_safely(agent: Any, state: LeaseLossWindDown) -> int:
+    """Resume due timed waits during wind-down.
+
+    After a lost lease the scheduler loop has stopped, so this loop resumes due
+    timed waits before the deadline. During a contract drain the scheduler pass
+    still runs and may resume them too, which is safe because each resume takes
+    the task's lock.
+    """
+
+    try:
+        return int(await resume_due_timed_waits(agent))
+    except Exception:
+        agent._logger.warning(
+            "Could not check due timed waits during worker wind-down; retrying on the next poll. "
+            "event=worker_wind_down_timed_wait_check_failed agent_id=%s launch_id=%s",
+            agent.id,
+            state.evidence.launch_id,
+            exc_info=True,
+        )
+        return 0
+
+
 async def _wait_for_resumable_tasks(agent: Any, state: LeaseLossWindDown) -> None:
     """Let started tasks finish here until the deadline, then fail the rest."""
 
@@ -608,26 +634,27 @@ async def _wait_for_resumable_tasks(agent: Any, state: LeaseLossWindDown) -> Non
         )
         if not remaining:
             return
-        if datetime.now(timezone.utc) >= state.deadline:
+        # Resume any already-due wait before checking the deadline so a wait due
+        # just before the deadline gets its resume chance before _end_at_deadline.
+        if await _resume_due_timed_waits_safely(agent, state) > 0:
+            remaining = await agent.task_manager.operations_runtime.run(
+                partial(_unfinished_resumable, agent.task_manager),
+                frozenset(state.resumable_task_ids),
+            )
+            if not remaining:
+                return
+        now = datetime.now(timezone.utc)
+        if now >= state.deadline:
             await _end_at_deadline(agent, state, remaining)
             return
-        failed_early = await _fail_hopeless_timed_waits(agent, state, remaining)
+        # A wait whose resume_at falls inside the final poll interval before the
+        # deadline cannot resume and finish before exit; fail it immediately.
+        hopeless_cutoff = max(now, state.deadline - timedelta(seconds=WIND_DOWN_POLL_SECONDS))
+        failed_early = await _fail_hopeless_timed_waits(
+            agent, state, remaining, cutoff=hopeless_cutoff
+        )
         if failed_early and all(info.task.task_id in failed_early for info in remaining):
             return
-        # After a lost lease the scheduler loop has stopped, so this loop
-        # resumes due timed waits before the deadline. During a contract drain
-        # the scheduler pass still runs and may resume them too, which is safe
-        # because each resume takes the task's lock.
-        try:
-            await resume_due_timed_waits(agent)
-        except Exception:
-            agent._logger.warning(
-                "Could not check due timed waits during worker wind-down; retrying on the next poll. "
-                "event=worker_wind_down_timed_wait_check_failed agent_id=%s launch_id=%s",
-                agent.id,
-                state.evidence.launch_id,
-                exc_info=True,
-            )
         await asyncio.sleep(WIND_DOWN_POLL_SECONDS)
 
 
@@ -681,7 +708,18 @@ async def _fail_waiting_task(
         message,
         datetime.now(timezone.utc).isoformat(),
     )
-    await discard_task_steering_state(agent, task_id=task_id, reason="wind_down_wait_expired")
+    try:
+        await discard_task_steering_state(agent, task_id=task_id, reason="wind_down_wait_expired")
+    except Exception as exc:  # noqa: BLE001 - task is already FAILED; still log, notify requester, and finish remaining tasks
+        agent._logger.warning(
+            "Waiting task moved to FAILED at the wind-down deadline, but discarding steering state failed; "
+            "continuing requester notification. "
+            "event=worker_wind_down_wait_expired_discard_steering_failed agent_id=%s task_id=%s error_type=%s",
+            agent.id,
+            task_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
     agent._logger.warning(
         "Waiting task failed after the wind-down deadline. "
         "event=worker_wind_down_wait_expired agent_id=%s task_id=%s prior_state=%s "

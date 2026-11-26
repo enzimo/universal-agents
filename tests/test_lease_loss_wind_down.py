@@ -770,7 +770,7 @@ async def test_wind_down_keeps_and_resumes_a_timed_wait_before_the_deadline(mana
 
 
 @pytest.mark.asyncio
-async def test_wind_down_fails_hopeless_timed_wait_immediately_at_classification(
+async def test_wind_down_fails_hopeless_timed_wait_immediately_on_wind_down_start(
     manager, monkeypatch, caplog
 ):
     """#210 / P1 / C05: a WAITING timed wait whose resume_at outlasts the 30-minute deadline fails immediately."""
@@ -1248,3 +1248,251 @@ async def test_wind_down_for_another_contract_fails_late_timed_wait_naming_that_
     assert "event=worker_wind_down_timed_wait_outlasts_deadline" not in caplog.text
     archived = manager.get_task_from_db("waiting")
     assert archived is not None and archived["status"] == ProgressState.FAILED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cause",
+    ["launch_lease_lost", "other_message_contract"],
+    ids=["lease_loss", "contract_drain"],
+)
+async def test_f1_wind_down_treats_wait_in_last_poll_margin_as_hopeless_and_resumes_due_before_deadline(
+    manager, monkeypatch, caplog, cause
+):
+    """F1 (both causes): a wait due inside the final poll margin fails immediately as hopeless; an already-due wait resumes before deadline."""
+    monkeypatch.setattr(wind_down, "WIND_DOWN_POLL_SECONDS", 5.0)
+    start = datetime.now(timezone.utc)
+    _add(manager, "near_deadline", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("near_deadline", ProgressState.WAITING, start.isoformat())
+    agent = _worker(manager, wait_seconds=60.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    state = wind_down.start_lease_loss_wind_down(agent, reason="wind_down_reason", cause=cause)
+    state.deadline = datetime.now(timezone.utc) + timedelta(seconds=3)
+    resume_at = state.deadline - timedelta(seconds=1)
+    record_human_interaction_blocker(
+        manager,
+        "near_deadline",
+        timed_wait_record(
+            interrupt_id="int-near",
+            call_id="call-near",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-near",
+            minutes=1,
+            reason="near deadline",
+            requested_at=(resume_at - timedelta(minutes=1)).isoformat(),
+            resume_at=resume_at.isoformat(),
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        # Must fail immediately (< 2s) as hopeless instead of sleeping 5s and hitting the deadline.
+        await asyncio.wait_for(state.task, timeout=2.0)
+
+    assert agent.exited
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" in caplog.text
+    assert f"cause={cause}" in caplog.text
+    assert "event=worker_wind_down_wait_expired" not in caplog.text
+    agent._send_task_error_response.assert_awaited_once()
+    assert "shutting down before the wait ends" in agent._send_task_error_response.await_args.args[3]
+
+    # Part 2: an already-due wait at the moment the deadline arrives still gets resumed once before _end_at_deadline.
+    _add(manager, "due_at_deadline", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("due_at_deadline", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "due_at_deadline",
+        timed_wait_record(
+            interrupt_id="int-due-dl",
+            call_id="call-due-dl",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-due-dl",
+            minutes=1,
+            reason="already due",
+            requested_at=(start - timedelta(minutes=2)).isoformat(),
+            resume_at=(start - timedelta(seconds=1)).isoformat(),
+        ),
+    )
+    agent2 = _worker(manager, wait_seconds=0.0, monkeypatch=monkeypatch)
+    agent2._interrupted_turn_sessions = {}
+    agent2._pending_interrupt_responses = {}
+    resumed_at_deadline = []
+
+    def complete_on_resume(_agent):
+        resumed_at_deadline.append(True)
+        manager.complete_task("due_at_deadline", datetime.now(timezone.utc).isoformat())
+
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", complete_on_resume)
+    state2 = wind_down.start_lease_loss_wind_down(agent2, reason="wind_down_reason", cause=cause)
+    state2.deadline = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await asyncio.wait_for(state2.task, timeout=2.0)
+
+    assert resumed_at_deadline == [True]
+    assert agent2.exited
+    agent2._send_task_error_response.assert_not_awaited()
+    archived = manager.get_task_from_db("due_at_deadline")
+    assert archived is not None and archived["status"] == ProgressState.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_f5_wind_down_early_failure_finishes_followups_when_post_fail_write_raises(
+    manager, monkeypatch, caplog
+):
+    """F5: if a history write raises after fail_task committed FAILED, still stop subtasks and notify requester."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "waiting", ProgressState.IN_PROGRESS)
+    subtask = Task(
+        task_id="child_f5",
+        parent_task_id="waiting",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Subtask under hopeless wait",
+    )
+    manager.add_subtask(
+        "waiting",
+        subtask,
+        MessageHeader(from_agent_id="worker_1", to_routing_path="specialist_1"),
+        MessageMeta(),
+    )
+    manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "waiting",
+        timed_wait_record(
+            interrupt_id="int-f5",
+            call_id="call-f5",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-f5",
+            minutes=120,
+            reason="long",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+    stop_requests: list[tuple[str, str]] = []
+
+    async def record_stop(_agent, *, parent_task_id, subtask_info, reason):
+        stop_requests.append((parent_task_id, subtask_info.task.task_id))
+
+    monkeypatch.setattr(wind_down, "request_subtask_stop", record_stop)
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    orig_append = manager.append_history_entry
+    failed_once = [False]
+
+    def flaky_history(task_id, summary, **kw):
+        if summary.startswith("Task failed:") and not failed_once[0]:
+            failed_once[0] = True
+            raise RuntimeError("sqlite busy after FAILED was saved")
+        return orig_append(task_id, summary, **kw)
+
+    monkeypatch.setattr(manager, "append_history_entry", flaky_history)
+
+    with caplog.at_level(logging.WARNING):
+        wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+        await _wait_for_exit(agent, timeout=3.0)
+
+    assert agent.exited
+    assert failed_once[0] is True
+    assert stop_requests == [("waiting", "child_f5")]
+    agent._send_task_error_response.assert_awaited_once()
+    assert "event=timed_wait_wind_down_fail_post_write_error" in caplog.text
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" in caplog.text
+    assert "event=worker_wind_down_timed_wait_fail_error" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cause",
+    ["launch_lease_lost", "other_message_contract"],
+    ids=["lease_loss", "contract_drain"],
+)
+async def test_c06_discard_steering_failure_after_saved_fail_still_notifies_requester_and_stops_subtasks(
+    manager, monkeypatch, caplog, cause
+):
+    """C06: raising discard_task_steering_state after fail_task saved still finishes subtask stop, requester response, and remaining deadline tasks for both causes."""
+    start = datetime.now(timezone.utc)
+    # Part 1: early hopeless-wait path.
+    _add(manager, "early_parent", ProgressState.IN_PROGRESS)
+    subtask = Task(
+        task_id="early_child",
+        parent_task_id="early_parent",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Child work",
+    )
+    manager.add_subtask(
+        "early_parent",
+        subtask,
+        MessageHeader(from_agent_id="worker_1", to_routing_path="specialist_1"),
+        MessageMeta(),
+    )
+    manager.update_main_task_state("early_parent", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "early_parent",
+        timed_wait_record(
+            interrupt_id="int-c06-early",
+            call_id="call-c06-early",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-c06-early",
+            minutes=120,
+            reason="long",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+    stop_requests: list[tuple[str, str]] = []
+
+    async def record_stop(_agent, *, parent_task_id, subtask_info, reason):
+        stop_requests.append((parent_task_id, subtask_info.task.task_id))
+
+    async def broken_discard(*_args, **_kwargs):
+        raise RuntimeError("sqlite busy during steering discard")
+
+    monkeypatch.setattr(wind_down, "request_subtask_stop", record_stop)
+    monkeypatch.setattr(wind_down, "discard_task_steering_state", broken_discard)
+
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    with caplog.at_level(logging.WARNING):
+        wind_down.start_lease_loss_wind_down(agent, reason="wind_down_reason", cause=cause)
+        await _wait_for_exit(agent, timeout=2.0)
+
+    assert agent.exited
+    assert stop_requests == [("early_parent", "early_child")]
+    agent._send_task_error_response.assert_awaited_once()
+    assert "event=timed_wait_wind_down_discard_steering_failed" in caplog.text
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" in caplog.text
+    assert "event=worker_wind_down_timed_wait_fail_error" not in caplog.text
+
+    # Part 2: deadline path with TWO waiting tasks — steering discard failure on the first must still
+    # notify its requester AND proceed to fail and notify the second task.
+    caplog.clear()
+    for tid in ("dl_one", "dl_two"):
+        _add(manager, tid, ProgressState.IN_PROGRESS)
+        manager.update_main_task_state(tid, ProgressState.WAITING, start.isoformat())
+        record_human_interaction_blocker(
+            manager,
+            tid,
+            {"kind": "access_request", "access_request_id": f"req-{tid}"},
+        )
+    agent2 = _worker(manager, wait_seconds=0.05, monkeypatch=monkeypatch)
+    agent2._interrupted_turn_sessions = {}
+    agent2._pending_interrupt_responses = {}
+
+    with caplog.at_level(logging.WARNING):
+        wind_down.start_lease_loss_wind_down(agent2, reason="wind_down_reason", cause=cause)
+        await _wait_for_exit(agent2, timeout=2.0)
+
+    assert agent2.exited
+    notified_ids = {call.args[0].task_id for call in agent2._send_task_error_response.await_args_list}
+    assert notified_ids == {"dl_one", "dl_two"}
+    assert "event=worker_wind_down_wait_expired_discard_steering_failed" in caplog.text
+    assert caplog.text.count("event=worker_wind_down_wait_expired ") == 2
+    for tid in ("dl_one", "dl_two"):
+        archived = manager.get_task_from_db(tid)
+        assert archived is not None and archived["status"] == ProgressState.FAILED.value

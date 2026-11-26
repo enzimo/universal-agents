@@ -6,7 +6,12 @@ from custom_agents.task_runtime_state import (
     RuntimeOwnerIdentity,
     forget_task_records,
     TurnStartNotes,
+    add_runtime_resume_directive,
     release_turn_start_notes,
+)
+from custom_agents.task_state_transitions import (
+    apply_task_state_tracking,
+    build_task_history_entry,
 )
 from custom_agents.task_manager_ports import (
     AfterActionReportCoordinatorOperations,
@@ -27,7 +32,6 @@ from functools import partial
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from custom_agents.execution_lanes import lane_for_task
 from runtime_hosting.agent_execution import MAIN_LANE
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 from storage.task_custody_repository import TaskCustodyConflict, TaskCustodyTakeover
@@ -1801,8 +1805,6 @@ class TaskManager(
             )
             return None
 
-        from custom_agents.task_state_transitions import build_task_history_entry
-
         entry = build_task_history_entry(
             self,
             task_id,
@@ -2866,8 +2868,6 @@ class TaskManager(
         added again (another restart or retry before the turn). A shorter
         note contained in earlier text can be a correction, so it stays.
         """
-        from custom_agents.task_runtime_state import add_runtime_resume_directive
-
         if not add_runtime_resume_directive(self.task_state, task_id, directive):
             return
         self._persist_runtime_state()
@@ -3659,38 +3659,7 @@ class TaskManager(
         if self.get_task_info(task_id) is not task_info:
             return False
 
-        is_top_level = task_info.task.parent_task_id is None
-        is_locally_executable = self.is_locally_executable_task(task_id)
-        if is_locally_executable and self.is_executing_state(new_state):
-            if new_state == ProgressState.IN_PROGRESS:
-                self.plan_state.final_review_pending_task_ids.discard(task_id)
-            # A parallel request runs in its own lane beside the main slot
-            # (custom_agents.execution_lanes): it neither takes nor preempts it.
-            if lane_for_task(self, task_id) == MAIN_LANE:
-                self._take_main_slot(task_id, timestamp)
-            if is_top_level:
-                self.task_state.waiting_top_level_task_ids.discard(task_id)
-        elif is_locally_executable and self.is_blocked_state(new_state):
-            if is_top_level:
-                self.task_state.waiting_top_level_task_ids.add(task_id)
-            if task_id == self.task_state.current_in_progress_task_id:
-                self.task_state.current_in_progress_task_id = None
-                self._logger.info(
-                    f"Task {task_id} is {new_state.value.upper()}. Execution slot released."
-                )
-        elif (
-            is_locally_executable
-            and task_id == self.task_state.current_in_progress_task_id
-            and not self.is_executing_state(new_state)
-        ):
-            self.task_state.current_in_progress_task_id = None
-            self._logger.info(
-                f"Task {task_id} finished processing. No task is currently IN_PROGRESS."
-            )
-            if not self.is_blocked_state(new_state):
-                self.task_state.waiting_top_level_task_ids.discard(task_id)
-        elif is_top_level and not self.is_blocked_state(new_state):
-            self.task_state.waiting_top_level_task_ids.discard(task_id)
+        apply_task_state_tracking(self, task_info, new_state, timestamp)
 
         self._sync_plan_from_task(task_id, create=False)
         self._persist_runtime_state()

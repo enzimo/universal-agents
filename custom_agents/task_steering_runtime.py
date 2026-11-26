@@ -109,6 +109,7 @@ from custom_agents.task_human_interaction_blockers import (
     clear_human_interaction_blocker,
     record_human_interaction_blocker,
 )
+from custom_agents.task_state_transitions import clear_answered_blocker_with_resume_note
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -1422,13 +1423,22 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
         for block in response_blocks
         if isinstance(block.get("interruptResponse"), dict) and block["interruptResponse"].get("interruptId")
     ]
-    await agent.task_manager.operations_runtime.run(
-        partial(clear_answered_blocker, agent.task_manager),
+    existing_start_notes = getattr(session, "start_notes", None)
+    prior_live_wait_notes = (
+        existing_start_notes.trailing_resume_directives if existing_start_notes is not None else ()
+    )
+    _cleared, timed_wait_note = await agent.task_manager.operations_runtime.run(
+        partial(clear_answered_blocker_with_resume_note, agent.task_manager),
         task_id,
         _structured_answers(steering),
         resumed_interrupt_ids=[item.interrupt_id for item in session.interrupts],
         answered_interrupt_ids=answered_interrupt_ids,
+        replace_directives=prior_live_wait_notes,
     )
+    if timed_wait_note:
+        session.start_notes = TurnStartNotes.with_live_wait_directive(
+            existing_start_notes, task_id, timed_wait_note
+        )
     # A resumed turn is a new turn: it gets its own stop for its commands.
     tool_stop = agent._set_active_execution_context(task_id)
     try:
