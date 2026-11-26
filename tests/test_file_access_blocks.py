@@ -906,6 +906,11 @@ def test_person_approval_of_worker_folder_request_with_lead_block_inside(
     allowed = file_read(path=str(reports_dir / "public.csv"))
     assert allowed["status"] == "success"
     assert "open-public" in _text(allowed)
+    # C15, deliberate: the block's subject is the team lead, not the worker, so the
+    # person's approval of the whole folder includes the path the lead is blocked from.
+    blocked_for_lead = file_read(path=str(reports_dir / "payroll.csv"))
+    assert blocked_for_lead["status"] == "success"
+    assert "restricted-payroll" in _text(blocked_for_lead)
     # The team lead still may not pass the folder on itself.
     assert not service.may_hand_on_for_task(
         principal, person, TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"), AccessLevel.READ, principal.work_id
