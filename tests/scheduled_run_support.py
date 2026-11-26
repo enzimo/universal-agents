@@ -14,6 +14,7 @@ Used by ``tests/test_scheduled_run_contexts.py``, ``tests/test_schedule_permits.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -21,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping, Optional
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
@@ -39,11 +41,16 @@ from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
 from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+from custom_messages.wire.encoding import b64url, canonical_bytes
+from custom_messages.wire.frame import body_model, verify_authority_token
+from custom_messages.wire.models import AuthorityToken
 from custom_transport.protocol1.authority_tokens import root_task_token
 from storage.access_repository import AccessRepository
 from team_services.scheduler import PermitPassResult, SchedulerOperations
+from team_services.schedules import ScheduleInstallDefaults, ScheduleOperations
 from tests.broker_access_support import (
     broker_gateway_identity,
+    broker_people_store,
     broker_person_ref,
     broker_scheduler_identity,
     broker_trust_store,
@@ -81,16 +88,143 @@ def fake_verified_frame(
     )
 
 
-class FakeSchedulerHost:
-    """In-memory ``AgentProcessHost`` double that routes ``run_context.sign`` to ``SchedulerOperations``."""
+class _InMemoryBlobStore:
+    """Minimal in-memory ``BlobStore`` for unit tests exercising >32KB ``schedules.install`` instructions."""
 
-    def __init__(self, scheduler: SchedulerOperations, *, team: str = TEAM) -> None:
+    def __init__(self) -> None:
+        self._items: dict[str, bytes] = {}
+
+    async def put(
+        self,
+        data: bytes,
+        *,
+        media_type: str,
+        owner: Any,
+        name: Optional[str] = None,
+    ) -> dict[str, Any]:
+        payload = bytes(data)
+        digest = b64url(hashlib.sha256(payload).digest())
+        self._items[digest] = payload
+        ref: dict[str, Any] = {
+            "sha256": digest,
+            "size": len(payload),
+            "media_type": media_type,
+        }
+        if name is not None:
+            ref["name"] = name
+        return ref
+
+    async def get(self, ref: Mapping[str, Any], *, max_bytes: Optional[int] = None) -> bytes:
+        data = self._items[str(ref["sha256"])]
+        if max_bytes is not None and len(data) > max_bytes:
+            raise ValueError(f"Blob exceeds max_bytes={max_bytes}")
+        return data
+
+
+class _FallbackPeopleStore:
+    """Looks up people in the test's AccessRepository first, then falls back to ``broker_people_store()``."""
+
+    def __init__(self, primary: Any, fallback: Any) -> None:
+        self._primary = primary
+        self._fallback = fallback
+
+    def team_person(self, team_id: str, person_id: str) -> Any:
+        found = self._primary.team_person(team_id, person_id)
+        return found if found is not None else self._fallback.team_person(team_id, person_id)
+
+    def team_person_by_ref(self, team_id: str, person_ref: str) -> Any:
+        found = self._primary.team_person_by_ref(team_id, person_ref)
+        return found if found is not None else self._fallback.team_person_by_ref(team_id, person_ref)
+
+    def team_people(self, team_id: str) -> list[Any]:
+        primary = list(self._primary.team_people(team_id)) if hasattr(self._primary, "team_people") else []
+        seen = {getattr(p, "person_id", None) for p in primary}
+        extra = [
+            p
+            for p in (self._fallback.team_people(team_id) if hasattr(self._fallback, "team_people") else [])
+            if getattr(p, "person_id", None) not in seen
+        ]
+        return primary + extra
+
+    def people_synced_at(self, team_id: str) -> Any:
+        synced = self._primary.people_synced_at(team_id) if hasattr(self._primary, "people_synced_at") else None
+        if synced is not None:
+            return synced
+        return self._fallback.people_synced_at(team_id) if hasattr(self._fallback, "people_synced_at") else None
+
+
+def _verified_team_frame(
+    kind: str,
+    body: Mapping[str, Any],
+    *,
+    sender_agent: str,
+    authority: Mapping[str, Any],
+    team: str,
+) -> Any:
+    """Validate ``body`` and ``authority`` with the real contract models and trust store."""
+
+    body_model(kind)[0].validate_python(dict(body))
+    now = datetime.now(timezone.utc)
+    token = AuthorityToken.model_validate(dict(authority))
+    verified_authority = verify_authority_token(
+        token,
+        dict(authority),
+        broker_trust_store(),
+        valid_at=now,
+        now=now,
+    )
+    request_id = str(body.get("request_id") or uuid4().hex)
+    digest = b64url(hashlib.sha256(canonical_bytes(dict(body))).digest())
+    sender_cert = SimpleNamespace(
+        installation=verified_authority.certificate.installation,
+        runtime="lead",
+        roles=frozenset({"lead_host", "worker_host"}),
+    )
+    return SimpleNamespace(
+        frame=SimpleNamespace(
+            kind=kind,
+            issuer=SimpleNamespace(agent=sender_agent, team=team, runtime="lead"),
+        ),
+        authority=verified_authority,
+        certificate=sender_cert,
+        raw={
+            "kind": kind,
+            "body": dict(body),
+            "idempotency_key": f"{kind}:{request_id}",
+            "body_digest": digest,
+        },
+    )
+
+
+class FakeSchedulerHost:
+    """In-memory ``AgentProcessHost`` double routing ``svc.scheduler`` and ``svc.team`` (``schedules.install``)."""
+
+    def __init__(
+        self,
+        scheduler: Optional[SchedulerOperations] = None,
+        *,
+        schedule_ops: Optional[ScheduleOperations] = None,
+        team: str = TEAM,
+    ) -> None:
         self.scheduler = scheduler
+        self.schedule_ops = schedule_ops
         self.team = team
         self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.team_requests: list[tuple[str, str, dict[str, Any]]] = []
         self.custom_handler: Optional[Callable[[str, dict[str, Any], str], Any]] = None
         self.team_agents = None
         self.loop = None
+        self.blob_store = _InMemoryBlobStore()
+        self.logger = logging.getLogger("test.fake_scheduler_host")
+
+    def report(self, *_args: Any, **_kwargs: Any) -> None:
+        """No-op state report hook for tests where ``_PROCESS_HOST`` is a ``FakeSchedulerHost``."""
+
+    def usable_partitions(self) -> tuple[int, ...]:
+        return ()
+
+    def cannot_ask(self, _agent_id: str) -> Any:
+        return None
 
     async def ask_scheduler(
         self,
@@ -107,8 +241,66 @@ class FakeSchedulerHost:
             if asyncio.iscoroutine(result):
                 return await result
             return result
+        if self.scheduler is None:
+            raise RuntimeError("No test scheduler is bound on this FakeSchedulerHost.")
         verified = fake_verified_frame(kind, payload, sender_agent=sender_agent, team=self.team)
         return await self.scheduler.handle(verified)
+
+    def _resolve_schedule_ops(self, authority: Mapping[str, Any]) -> tuple[ScheduleOperations, str]:
+        if self.schedule_ops is not None:
+            return self.schedule_ops, self.team
+        from custom_tools.runtime_context import get_agent_ref
+
+        agent = get_agent_ref()
+        if agent is None:
+            raise RuntimeError("No active agent or bound ScheduleOperations for in-process schedules.install.")
+        store = getattr(agent, "_schedule_store", None)
+        if store is None:
+            raise RuntimeError("Active test agent has no _schedule_store.")
+        team_id = str(getattr(agent, "team_id", "") or authority.get("audience", {}).get("team") or self.team)
+        storage = getattr(getattr(agent, "task_manager", None), "storage_settings", None)
+        people_store: Any = broker_people_store()
+        if storage is not None:
+            people_store = _FallbackPeopleStore(AccessRepository(storage), people_store)
+        people = PeopleDirectory(people_store, team_id)
+        ops = ScheduleOperations(
+            store,
+            people,
+            None,
+            lambda person: bool(set(person.roles) & {"owner", "admin"}),
+            lambda: datetime.now(timezone.utc),
+            logging.getLogger("test.team_schedules"),
+            blobs=self.blob_store,
+            conversations=getattr(agent, "_conversation_store", None),
+            install_defaults=ScheduleInstallDefaults(
+                lead_agent_type=str(getattr(agent, "named_agent_type", None) or "TeamArchitect"),
+                default_timezone=getattr(agent, "instance_timezone", None),
+            ),
+        )
+        return ops, team_id
+
+    async def ask_team(
+        self,
+        kind: str,
+        body: Mapping[str, Any],
+        *,
+        sender_agent: str,
+        authority: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        payload = dict(body)
+        self.team_requests.append((sender_agent, kind, payload))
+        if kind != "schedules.install":
+            raise RuntimeError(f"FakeSchedulerHost does not handle svc.team kind {kind!r}")
+        if authority is None:
+            raise RuntimeError("schedules.install requires an authority token")
+        ops, team_id = self._resolve_schedule_ops(authority)
+        verified = _verified_team_frame(
+            kind, payload, sender_agent=sender_agent, authority=authority, team=team_id
+        )
+        reply = await ops.handle(verified)
+        body_model(f"{kind}.reply")[0].validate_python(reply)
+        return reply
 
 
 def bind_test_scheduler(
@@ -121,18 +313,19 @@ def bind_test_scheduler(
     identity: Any | None = None,
     heartbeat_store: HeartbeatStore | None = None,
 ) -> SimpleNamespace:
-    """Wire a protocol 1 ``SchedulerOperations`` and in-memory ``svc.scheduler`` host onto an existing store."""
-
-    from tests.broker_access_support import broker_people_store
+    """Wire protocol 1 ``SchedulerOperations`` and ``ScheduleOperations`` onto an existing store."""
 
     if storage_settings is not None:
         access_repo: Any = AccessRepository(storage_settings)
+        merged_people: Any = _FallbackPeopleStore(access_repo, broker_people_store())
     elif people_store is not None:
         access_repo = people_store
+        merged_people = people_store
     else:
         access_repo = broker_people_store()
-    people = PeopleDirectory(access_repo, team_id)
-    verifier = AuthorityTokenVerifier(broker_trust_store(), people=access_repo)
+        merged_people = access_repo
+    people = PeopleDirectory(merged_people, team_id)
+    verifier = AuthorityTokenVerifier(broker_trust_store(), people=merged_people)
     set_process_verifier(verifier)
 
     scheduler_state: dict[str, Any] = {
@@ -159,10 +352,23 @@ def bind_test_scheduler(
         clock=lambda: datetime.now(timezone.utc),
         logger=logging.getLogger("test.scheduler"),
     )
-    host = FakeSchedulerHost(scheduler, team=team_id)
+    blob_store = _InMemoryBlobStore()
+    schedule_ops = ScheduleOperations(
+        store,
+        people,
+        None,
+        lambda person: bool(set(person.roles) & {"owner", "admin"}),
+        lambda: datetime.now(timezone.utc),
+        logging.getLogger("test.team_schedules"),
+        blobs=blob_store,
+        on_schedule_installed=scheduler.issue_permit_for_schedule,
+    )
+    host = FakeSchedulerHost(scheduler, schedule_ops=schedule_ops, team=team_id)
+    host.blob_store = blob_store
     monkeypatch.setattr(agent_requests, "_PROCESS_HOST", host)
     return SimpleNamespace(
         scheduler=scheduler,
+        schedule_ops=schedule_ops,
         scheduler_state=scheduler_state,
         host=host,
         verifier=verifier,

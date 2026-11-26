@@ -306,7 +306,8 @@ def test_each_check_uses_the_owners_current_roles_and_the_schedule_as_it_is_now(
     assert not refused.allowed and "no longer exists" in refused.reason
 
 
-def test_heartbeat_items_carry_the_launcher_schedules_permit(world) -> None:
+def test_heartbeat_items_skip_launcher_permit_and_get_per_item_tokens(world) -> None:
+    """C24: Even when the launcher holds a standing permit, each heartbeat item gets a per-item token from svc.scheduler."""
     record_ann(world, ACTIVE, ("member",))
     heartbeats = HeartbeatStore(db_path=world.db_path, storage_settings=world.tasks.storage_settings)
     heartbeats.upsert_source(source_id="hb_ann", title="Ann's checks")
@@ -322,12 +323,18 @@ def test_heartbeat_items_carry_the_launcher_schedules_permit(world) -> None:
         return await fire(world, claim(world))
 
     assert asyncio.run(scenario()) == {}
-    assert world.host.requests == []
-    runs = {info.meta.gateway_context.scheduled_job_id: info.meta.gateway_context.schedule_run for info in queued(world)}
+    assert len(world.host.requests) == 2
+    runs = {info.meta.gateway_context.scheduled_job_id: info for info in queued(world)}
     assert set(runs) == {item.heartbeat_item_id for item in items}
-    assert {run.permit.schedule_id for run in runs.values()} == {SCHEDULE_ID}
-    assert {run.conversation_id for run in runs.values()} == {item.conversation_id for item in items}
-    assert len({run.context_id for run in runs.values()}) == 2, "each run has its own context id"
+    for item in items:
+        info = runs[item.heartbeat_item_id]
+        assert info.meta.gateway_context.schedule_run is None
+        assert info.meta.gateway_context.task_context is not None
+        verified = run_context(info, world)
+        assert verified.schedule_id == item.heartbeat_item_id
+        assert verified.person_id == ANN
+        assert info.meta.conversation_id == item.conversation_id
+    assert len({run_context(info, world).context_id for info in runs.values()}) == 2, "each run has its own context id"
 
 
 def test_a_maintenance_run_carries_the_permit_for_no_person(world) -> None:

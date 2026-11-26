@@ -1392,9 +1392,20 @@ def start_isolated_recovery(
                 current_task_info.task.task_id
             )
             checkpoint_schedule.payload_meta.objective_id = objective_id
-            _schedule_store(agent).add(
+            claim_scope = schedule_claim_scope_for_agent(agent, task_local=True)
+            checkpoint_schedule.claim_team_id = claim_scope.get("claim_team_id")
+            checkpoint_schedule.claim_named_agent_type = claim_scope.get("claim_named_agent_type")
+            checkpoint_schedule.claim_agent_id = claim_scope.get("claim_agent_id")
+            from custom_agents.schedule_install_client import (
+                extract_task_authority_token,
+                install_schedule_via_team_services_sync,
+            )
+
+            install_schedule_via_team_services_sync(
+                agent,
                 checkpoint_schedule,
-                **schedule_claim_scope_for_agent(agent, task_local=True),
+                mode="create",
+                authority_token=extract_task_authority_token(original_meta),
             )
             checkpoint_link_fields = _link_to_objective(
                 agent,

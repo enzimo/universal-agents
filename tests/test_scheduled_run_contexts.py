@@ -455,3 +455,100 @@ def test_each_heartbeat_item_is_signed_by_svc_scheduler_for_that_item(world) -> 
         for info in queued(world)
     }
     assert signed == {item.heartbeat_item_id: (ANN, item.conversation_id) for item in items}
+
+
+def test_heartbeat_launcher_with_standing_permit_still_asks_svc_scheduler_per_item_c24(world) -> None:
+    """Even when the launcher schedule holds a standing permit, each heartbeat item gets its own token (C24)."""
+
+    record_ann(world, PersonStanding.ACTIVE, ("member",))
+    heartbeats = HeartbeatStore(db_path=world.db_path, storage_settings=world.tasks.storage_settings)
+    heartbeats.upsert_source(source_id="hb_ann", title="Ann's checks")
+    items = [
+        heartbeats.add_item(source_id="hb_ann", title=title, instruction=title, conversation_id=f"conv_{index}")
+        for index, title in enumerate(("Check launches", "Check weather"))
+    ]
+    save_schedule(world, heartbeat_source_id="hb_ann")
+    assert issue_permits(world).issued == [SCHEDULE_ID]
+    assert world.store.run_permit(SCHEDULE_ID) is not None
+
+    async def scenario():
+        await subscribe(world)
+        return await fire(world, claim(world))
+
+    assert asyncio.run(scenario()) == {}
+    assert len(world.host.requests) == len(items)
+    signed = {
+        run_context(info, world).schedule_id: (run_context(info, world).person_id, info.meta.conversation_id)
+        for info in queued(world)
+    }
+    assert signed == {item.heartbeat_item_id: (ANN, item.conversation_id) for item in items}
+    assert SCHEDULE_ID not in signed
+
+
+# -- durable owner_vouched across gateway cert renewal and unvouched refusal (C25) -----
+
+
+def test_owner_vouched_survives_gateway_certificate_renewal_c25(world) -> None:
+    """First verified gateway_vouches promotes owner_vouched=1 so cert renewal does not break schedules (C25)."""
+
+    from team_services.scheduler import gateway_vouches
+
+    record_ann(world, PersonStanding.ACTIVE, ("member",))
+    save_schedule(world, vouched=True)
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is False
+
+    # First permit pass verifies the stored gateway token and durably marks owner_vouched=1.
+    assert issue_permits(world).issued == [SCHEDULE_ID]
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is True
+
+    # Simulate gateway certificate renewal/rotation where the old stored token can no longer be verified.
+    stored = world.store.get_scheduled_message(SCHEDULE_ID)
+    assert stored is not None
+    # Strip the stored token to mimic post-renewal inability to verify the old gateway token.
+    stripped = stored.model_copy(deep=True)
+    stripped.payload_meta.gateway_context.task_context = None
+    world.store.update(stripped, base=stored)
+    world.store.set_run_permit(
+        SCHEDULE_ID,
+        permit=None,
+        owner_permit=None,
+        checked_owner=ANN,
+        recheck_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    assert gateway_vouches(world.store.get_scheduled_message(SCHEDULE_ID), ANN, team_id=TEAM, verifier=world.verifier) is False
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is True
+
+    # Both renew_permits and svc.scheduler run_context.sign still succeed via durable owner_vouched=1.
+    assert issue_permits(world).issued == [SCHEDULE_ID]
+    assert world.store.run_permit(SCHEDULE_ID) is not None
+
+    world.store.set_run_permit(
+        SCHEDULE_ID,
+        permit=None,
+        owner_permit=None,
+        checked_owner=ANN,
+        recheck_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+
+    async def scenario():
+        await subscribe(world)
+        return await fire(world, claim(world))
+
+    assert asyncio.run(scenario()) == {}
+    assert run_context(queued_run(world), world).person_id == ANN
+
+
+def test_unvouched_schedule_records_owner_not_vouched_refusal_c25(world) -> None:
+    """An unvouched person schedule records run_permit_refusal='owner_not_vouched' for stuck notices (C25)."""
+
+    record_ann(world, PersonStanding.ACTIVE, ("member",))
+    save_schedule(world, vouched=False)
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is False
+
+    result = issue_permits(world)
+    assert result.issued == []
+    assert result.refused == {SCHEDULE_ID: "owner_not_vouched"}
+    assert world.store.run_permit(SCHEDULE_ID) is None
+    row = world.store.get_row(SCHEDULE_ID)
+    assert row is not None
+    assert row["run_permit_refusal"] == "owner_not_vouched"

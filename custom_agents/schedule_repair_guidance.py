@@ -38,6 +38,9 @@ AGENT_DEFINITION_UNAVAILABLE = "agent_definition_unavailable"
 # Not a worker block: a schedule with no worker policy is overdue and no
 # standing worker took it (custom_agents.stuck_schedules).
 SCHEDULE_OVERDUE_UNCLAIMED = "schedule_overdue_unclaimed"
+# The scheduler refused to issue a permit or sign runs because the schedule's
+# owner is not vouched for (owner_vouched=0).
+SCHEDULE_OWNER_NOT_VOUCHED = "schedule_owner_not_vouched"
 
 # A running worker's authorization mode differs from the saved configuration
 # (custom_agents.schedule_readiness); it needs a restart.
@@ -156,6 +159,11 @@ _REPAIR_BY_REASON = {
         "The target agent type is no longer registered. Retarget the schedule to "
         "a registered specialist from get_available_agent_types."
     ),
+    SCHEDULE_OWNER_NOT_VOUCHED: (
+        "This schedule's owner is not vouched for, so the scheduler cannot sign "
+        "its runs. Remove the schedule and recreate or re-install it for its owner "
+        "so the scheduler can issue a run permit."
+    ),
 }
 
 
@@ -235,6 +243,10 @@ _PERSON_EXPLANATION_BY_REASON = {
     SCHEDULE_OVERDUE_UNCLAIMED: (
         "The schedule is overdue and no worker has picked it up. " + _ADMIN_LOG
     ),
+    SCHEDULE_OWNER_NOT_VOUCHED: (
+        "This schedule's owner is not vouched for, so the scheduler cannot sign its runs. "
+        "Ask your assistant or an administrator to remove and recreate it. " + _ADMIN_LOG
+    ),
 }
 
 # Reasons only an administrator can fix (runtime or operator settings).
@@ -249,6 +261,7 @@ _ADMINISTRATOR_REASONS = frozenset(
         AUTOMATIC_WORKER_CAPACITY_LIMIT,
         TEAM_WORKER_CAPACITY_LIMIT,
         SCHEDULE_OVERDUE_UNCLAIMED,
+        SCHEDULE_OWNER_NOT_VOUCHED,
     }
 )
 

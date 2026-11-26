@@ -179,7 +179,12 @@ async def sign_scheduled_run(agent: Any, meta: Any, run: ScheduledRun) -> bool:
         meta.gateway_context = gateway_context
     person_id = run.owner.person_id if run.owner is not None else None
 
-    if await asyncio.to_thread(
+    # Heartbeat item runs must name the item id, never the launcher's standing permit (C24).
+    use_standing_permit = (
+        run.heartbeat_item_id is None
+        and run.scheduled_job_id == run.schedule.schedule_id
+    )
+    if use_standing_permit and await asyncio.to_thread(
         attach_run_permit, agent, meta, schedule_id=run.schedule.schedule_id, person_id=person_id
     ):
         if run.from_runtime_mailbox and not run.claim_token:

@@ -830,6 +830,51 @@ class AgentProcessHost:
                                                                 team=self.team, agent=sender_agent, timeout=timeout))
         return dict(reply.raw["body"])
 
+    async def ask_team(
+        self,
+        kind: str,
+        body: Mapping[str, Any],
+        *,
+        sender_agent: str,
+        authority: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """A request to the team services (``svc.team``), signed as ``sender_agent``, with optional ``authority``."""
+
+        self._sender_session(sender_agent)
+        assert self.host is not None and self.host.live is not None
+        reply = await self._on_host_loop(
+            self.host.live.request(
+                kind,
+                body,
+                self._audience(),
+                team=self.team,
+                agent=sender_agent,
+                authority=authority,
+                timeout=timeout,
+            )
+        )
+        return dict(reply.raw["body"])
+
+    async def blob_store_handle(self) -> Any:
+        """Return the ``OBJ_UA1_BLOBS`` handle once this process host has joined."""
+
+        from custom_transport.protocol1.blobs import blob_store_handle
+
+        if self.host is None or self.host.nc is None:
+            raise AgentUnreachable("this process's message host has no NATS connection yet", clears=True)
+        return blob_store_handle(self.host.nc)
+
+    async def register_blob(self, body: Mapping[str, Any], *, timeout: Optional[float] = None) -> dict[str, Any]:
+        """Send a host-authenticated ``blobs.register`` request to ``svc.team``."""
+
+        if self.host is None or self.host.live is None or self._joined is None or not self._joined.is_set():
+            raise AgentUnreachable("this process has not joined the team's messaging yet", clears=True)
+        reply = await self._on_host_loop(
+            self.host.live.request("blobs.register", body, self._audience(), team=self.team, timeout=timeout)
+        )
+        return dict(reply.raw["body"])
+
     async def announce(self, kind: str, body: Mapping[str, Any], *, sender_agent: str) -> None:
         """A team event, signed as ``sender_agent``."""
 

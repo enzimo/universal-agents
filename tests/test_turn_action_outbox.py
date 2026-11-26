@@ -143,15 +143,24 @@ def _make_agent(tmp_path, *, task_manager: TaskManager | None = None, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_normal_schedule_action_keeps_context_without_repair_anomaly(tmp_path):
+async def test_normal_schedule_action_keeps_context_without_repair_anomaly(tmp_path, monkeypatch):
     from custom_agents.structured_llm_messages import ScheduleMessageAction, StructuredScheduledMessagePayload
     from custom_agents.schedule_store import ScheduleStore
+    from tests.broker_access_support import signed_task_token
+    from tests.change_approval_support import use_signed_contexts
+    from tests.task_work_support import set_agent_ref
 
+    use_signed_contexts(monkeypatch)
     manager = _make_task_manager(tmp_path)
     parent = _add_active_parent_task(manager)
     info = manager.get_task_info(parent.task_id)
+    info.meta.gateway_context = GatewayContext(
+        canonical_user_id="user_outbox",
+        task_context=signed_task_token("user_outbox", team_id="test_team", roles=("owner",)),
+    )
     agent = _make_agent(tmp_path, task_manager=manager)
     agent._schedule_store = ScheduleStore(db_path=manager._db_path)
+    set_agent_ref(agent)
     agent._record_runtime_repair_anomaly = AsyncMock()
     await agent._execute_turn_decision_outbox(
         decision=StructuredAgentTurnDecision(actions=[ScheduleMessageAction(
@@ -162,8 +171,9 @@ async def test_normal_schedule_action_keeps_context_without_repair_anomaly(tmp_p
         ), TaskResponseAction(task=StructuredTaskPayload(task_type=MessageMetaType.RESPONSE, answer="I scheduled the check."))]), incoming_content=parent, incoming_header=info.header, incoming_meta=info.meta,
     )
     stored = agent._schedule_store.get_scheduled_message("normal_schedule")
-    assert stored.payload_header == info.header
-    assert stored.payload_meta.msg_correlation_id == info.meta.msg_correlation_id
+    assert stored is not None
+    assert stored.payload_meta.gateway_context.canonical_user_id == "user_outbox"
+    assert agent._schedule_store.is_owner_vouched("normal_schedule") is True
     repairs = [call.args[0] for call in agent._record_runtime_repair_anomaly.await_args_list]
     assert "scheduled_message_payload_header_preserved" not in repairs
     assert "scheduled_message_payload_meta_preserved" not in repairs

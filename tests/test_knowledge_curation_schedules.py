@@ -51,16 +51,16 @@ def test_the_gateway_installs_a_run_per_person_and_one_team_run(world) -> None:
     stored = _stored(world)
 
     verifier = broker_authority_verifier()
+    schedule_store = world.manager._schedule_store
     for person in ACTIVE:
-        schedule = stored[_person_id(person)]
+        schedule_id = _person_id(person)
+        schedule = stored[schedule_id]
         assert schedule.system_schedule_kind == SystemScheduleKind.KNOWLEDGE_CURATION_PERSON
         assert schedule.claim_named_agent_type == "KnowledgeCuratorAgent"
-        assert (
-            verifier.verify_root_task(
-                schedule.payload_meta.gateway_context.task_context, team_id=TEAM, require_issuer="gateway"
-            ).person_id
-            == person
-        )
+        assert schedule_store.is_owner_vouched(schedule_id) is True
+        permit_token = schedule_store.run_permit(schedule_id)
+        assert permit_token is not None
+        assert verifier.verify_schedule_permit(permit_token, team_id=TEAM).person_id == person
         assert is_person_system_schedule(schedule)
     team = stored[TEAM_ID]
     assert (team.management_class, team.system_schedule_kind) == (

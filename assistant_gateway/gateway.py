@@ -1064,6 +1064,12 @@ class UserGateway:
             delivery=self._delivery_service,
             manager=self._manager_client,
             id_generator=self._id_generator,
+            team_commands=(
+                schedule_team_commands := _team_commands(
+                    resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
+                )
+            ),
+            delivery_refs=(schedule_delivery_refs := gateway_delivery_refs(config)),
             logger=logger,
         )
         self._manager_commands = GatewayManagerCommandService(
@@ -1093,10 +1099,8 @@ class UserGateway:
             request_context=self._request_context_service,
             delivery=self._delivery_service,
             manager=self._manager_client,
-            team_commands=_team_commands(
-                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
-            ),
-            delivery_refs=gateway_delivery_refs(config),
+            team_commands=schedule_team_commands,
+            delivery_refs=schedule_delivery_refs,
             id_generator=self._id_generator,
             # The schedule, MCP and procedure controls share one check of who
             # may make platform changes directly (PersonChangeCheck).

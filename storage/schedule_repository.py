@@ -63,9 +63,11 @@ SCHEDULE_COLUMNS: tuple[str, ...] = (
     "run_permit_json",
     "run_permit_owner",
     "run_permit_recheck_at",
+    "run_permit_refusal",
     "parallel_thread",
     "owner_vouched",
     "owner_permit_json",
+    "delivery_ref",
 )
 
 
@@ -95,6 +97,8 @@ SCHEDULE_ROW_FIELDS: tuple[str, ...] = (
     "run_permit_json",
     "owner_vouched",
     "owner_permit_json",
+    "run_permit_refusal",
+    "delivery_ref",
 )
 
 
@@ -219,7 +223,10 @@ class ScheduleRepository(Protocol):
         checked_owner: Optional[str],
         recheck_at: str,
         owner_permit_json: Optional[str] = None,
+        refusal_reason: Optional[str] = None,
     ) -> bool: ...
+
+    def mark_owner_vouched(self, schedule_id: str, *, checked_owner: str) -> bool: ...
 
 
 _SCHEDULE_COLUMN_MIGRATIONS: dict[str, str] = {
@@ -236,10 +243,12 @@ _SCHEDULE_COLUMN_MIGRATIONS: dict[str, str] = {
     # The schedule's run permit (team_services.scheduler): runtime bookkeeping
     # like next_fire_at, never part of schedule_json or of the schedule's
     # control state. run_permit_owner is the row owner the scheduler last
-    # checked for; run_permit_recheck_at is when it looks again.
+    # checked for; run_permit_recheck_at is when it looks again;
+    # run_permit_refusal records why no permit was issued (e.g. owner_not_vouched).
     "run_permit_json": "TEXT",
     "run_permit_owner": "TEXT",
     "run_permit_recheck_at": "TEXT",
+    "run_permit_refusal": "TEXT",
     # Whether the schedule's runs are parallel requests, worked out from its
     # saved run metadata when the definition is written
     # (custom_agents.schedule_store._definition_columns). The scheduler claims
@@ -253,6 +262,9 @@ _SCHEDULE_COLUMN_MIGRATIONS: dict[str, str] = {
     # also name a vouched administrator owner (used by system escalations and
     # worker pool reviews so the lead holds no signing key).
     "owner_permit_json": "TEXT",
+    # Opaque protocol 1 delivery reference supplied by schedules.install
+    # (used by schedules.list chat filtering alongside legacy session_key).
+    "delivery_ref": "TEXT",
 }
 
 
@@ -300,9 +312,11 @@ class _RelationalScheduleRepository:
                         run_permit_json TEXT,
                         run_permit_owner TEXT,
                         run_permit_recheck_at TEXT,
+                        run_permit_refusal TEXT,
                         parallel_thread INTEGER NOT NULL DEFAULT 0,
                         owner_vouched INTEGER NOT NULL DEFAULT 0,
-                        owner_permit_json TEXT
+                        owner_permit_json TEXT,
+                        delivery_ref TEXT
                     )
                     """
                 )
@@ -715,6 +729,7 @@ class _RelationalScheduleRepository:
         checked_owner: Optional[str],
         recheck_at: str,
         owner_permit_json: Optional[str] = None,
+        refusal_reason: Optional[str] = None,
     ) -> bool:
         """Record the scheduler's check of a schedule's run permit (None when it issued none).
 
@@ -729,11 +744,39 @@ class _RelationalScheduleRepository:
                    SET run_permit_json = {self._dialect.bind},
                        owner_permit_json = {self._dialect.bind},
                        run_permit_owner = {self._dialect.bind},
-                       run_permit_recheck_at = {self._dialect.bind}
+                       run_permit_recheck_at = {self._dialect.bind},
+                       run_permit_refusal = {self._dialect.bind}
                  WHERE schedule_id = {self._dialect.bind}
                    AND COALESCE(owner_canonical_user_id, '') = COALESCE({self._dialect.bind}, '')
                 """,
-                (permit_json, owner_permit_json, checked_owner, recheck_at, schedule_id, checked_owner),
+                (
+                    permit_json,
+                    owner_permit_json,
+                    checked_owner,
+                    recheck_at,
+                    refusal_reason,
+                    schedule_id,
+                    checked_owner,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_owner_vouched(self, schedule_id: str, *, checked_owner: str) -> bool:
+        """Durably record ``owner_vouched = 1`` while the row's owner is still ``checked_owner``."""
+
+        if not checked_owner:
+            return False
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE scheduled_messages
+                   SET owner_vouched = 1,
+                       run_permit_refusal = NULL
+                 WHERE schedule_id = {self._dialect.bind}
+                   AND owner_canonical_user_id = {self._dialect.bind}
+                """,
+                (schedule_id, checked_owner),
             )
             conn.commit()
             return cursor.rowcount > 0

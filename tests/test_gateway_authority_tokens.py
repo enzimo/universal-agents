@@ -1268,6 +1268,21 @@ async def test_gateway_refuses_unsigned_person_request_and_maintenance_waits_for
             return gw_host2.sign_root_task_token(**kwargs)
 
     gw2._request_context_service._token_signer = _DelayedJoinSigner()
+    installed_commands: list[tuple[str, dict[str, Any], str, str]] = []
+
+    class _CaptureTeamCommands:
+        async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
+            assert joined_gate.is_set(), "schedules.install must wait until gateway host finishes joining"
+            installed_commands.append((kind, dict(body), person_ref, request_id))
+            return {
+                "outcome": "ok",
+                "state": "installed",
+                "schedule_id": str(body["schedule_id"]),
+                "timing_revision": 0,
+                "version": {"state": "available", "seen_version": "a" * 64},
+            }
+
+    gw2._maintenance_schedules._team_commands._team_services = _CaptureTeamCommands()  # type: ignore[assignment]
 
     async def _finish_join() -> None:
         await asyncio.sleep(0.05)
@@ -1279,12 +1294,9 @@ async def test_gateway_refuses_unsigned_person_request_and_maintenance_waits_for
     finally:
         await join_task
 
-    assert len(transport2.durable) >= 1
-    for env, _route in transport2.durable:
-        tok = env.msg_meta.gateway_context.task_context
-        assert isinstance(tok, AuthorityTokenRecord)
-        verified = verifier2.verify_root_task(tok, team_id=tv.TEAM, now=fixtures.NOW, require_issuer="gateway")
-        assert verified.person_id == person_id2
+    assert len(installed_commands) >= 1
+    assert all(kind == "schedules.install" and person_ref == _person_ref2 for kind, _b, person_ref, _r in installed_commands)
+    assert any(body["schedule_id"] == "heartbeat_launcher_test" for _k, body, _p, _r in installed_commands)
 
 
 @pytest.mark.parametrize(

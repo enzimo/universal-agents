@@ -398,3 +398,292 @@ def test_delivery_references_are_keyed_per_instance_and_team(tmp_path: Path) -> 
     assert refs.ref("session_ada_b") != reference
     assert DeliveryRefs.load(layout, "another_team").ref("session_ada_a") != reference
     assert DeliveryRefs.load(other_instance, TEAM).ref("session_ada_a") != reference
+
+
+# -- schedules.install (Unit 7) -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gateway_schedules_install_creates_vouches_permits_and_filters_by_delivery_ref(team: Team) -> None:
+    """Gateway schedules.install validates against the contract, sets owner_vouched=1, triggers initial
+    permit issuance, stores idempotent replies, and supports delivery_ref filtering in schedules.list."""
+
+    permitted: list[str] = []
+    team.operations._on_schedule_installed = permitted.append
+    delivery_ref_a = team.refs.ref("session_ada_a")
+    delivery_ref_b = team.refs.ref("session_ada_b")
+
+    create_body = {
+        "request_id": "cmd-install-1",
+        "schedule_id": "sched_gw_1",
+        "mode": "create",
+        "management_class": "user",
+        "name": "Morning brief",
+        "timing": {"kind": "interval", "interval_ms": 300_000},
+        "repeat_count": 0,
+        "enabled": True,
+        "action": {"type": "task", "instruction": {"type": "inline", "text": "Summarize overnight mail."}},
+        "deliver_to": {"delivery_ref": delivery_ref_a, "conversation_id": "conv_ada_a", "time_zone": "UTC"},
+    }
+    validator(body_schema_file("schedules.install")).validate(create_body)
+    frame = stand_in_frame(TEAM, "schedules.install", create_body, person_ref=reference_of("ada"), request_id="cmd-install-1")
+    created = checked_reply("schedules.install", await team.operations.handle(frame))
+    validator(body_schema_file("schedules.install.reply")).validate(created)
+
+    assert created["outcome"] == "ok"
+    assert created["state"] == "installed"
+    assert created["schedule_id"] == "sched_gw_1"
+    assert created["version"]["state"] == "available"
+    assert team.store.is_owner_vouched("sched_gw_1") is True
+    assert team.store.delivery_ref_of("sched_gw_1") == delivery_ref_a
+    assert permitted == ["sched_gw_1"]
+
+    # Idempotent retry returns the exact stored reply without re-running the install.
+    retried = checked_reply("schedules.install", await team.operations.handle(frame))
+    assert retried == created
+    assert permitted == ["sched_gw_1"]
+
+    # ensure on an existing schedule keeps it untouched.
+    ensure_body = {**create_body, "request_id": "cmd-install-2", "mode": "ensure"}
+    ensure_frame = stand_in_frame(TEAM, "schedules.install", ensure_body, person_ref=reference_of("ada"), request_id="cmd-install-2")
+    kept = checked_reply("schedules.install", await team.operations.handle(ensure_frame))
+    assert kept["outcome"] == "ok" and kept["state"] == "kept"
+
+    # schedules.list filters by the stored delivery_ref column even without gateway_context.session_key.
+    chat_a = team.listed(delivery_ref=delivery_ref_a, request_id="cmd-list-a")
+    chat_b = team.listed(delivery_ref=delivery_ref_b, request_id="cmd-list-b")
+    assert [row["schedule_id"] for row in chat_a["schedules"]] == ["sched_gw_1"]
+    assert chat_b["schedules"] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_schedules_install_enforces_seen_version_ownership_blobs_and_permits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent schedules.install uses root_task tokens, requires seen_version on replace, checks live
+    source schedule permits, protects other people's schedules, and resolves >32KB blob instructions."""
+
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from custom_transport.protocol1.knowledge_blobs import BlobOwner, encode_text_content
+    from tests.broker_access_support import (
+        broker_gateway_identity,
+        broker_people_store,
+        broker_person_ref,
+        broker_scheduler_identity,
+        forget_task_context_keys,
+    )
+    from tests.scheduled_run_support import _InMemoryBlobStore, _verified_team_frame, bind_test_scheduler
+
+    forget_task_context_keys()
+    try:
+        people_store = broker_people_store()
+        people_store.register(TEAM, "ada", roles=("member",))
+        people_store.register(TEAM, "bo", roles=("member",))
+        store = ScheduleStore(db_path=str(tmp_path / "agent_install.db"))
+        bound = bind_test_scheduler(monkeypatch, store=store, team_id=TEAM, people_store=people_store)
+        blobs = _InMemoryBlobStore()
+        bound.schedule_ops._blobs = blobs
+
+        now = datetime.now(timezone.utc)
+        gw_id = broker_gateway_identity(TEAM)
+        sched_id = broker_scheduler_identity(TEAM)
+        ada_token = root_task_token(
+            gw_id, team=TEAM, root_task_id="task_ada_1", request_id="req_ada_1", person_ref=broker_person_ref("ada"), issued=now
+        )
+        bo_token = root_task_token(
+            gw_id, team=TEAM, root_task_id="task_bo_1", request_id="req_bo_1", person_ref=broker_person_ref("bo"), issued=now
+        )
+
+        async def _send(body: dict[str, Any], token: dict[str, Any]) -> dict[str, Any]:
+            frame = _verified_team_frame("schedules.install", body, sender_agent="lead_1", authority=token, team=TEAM)
+            return checked_reply("schedules.install", await bound.schedule_ops.handle(frame))
+
+        # 1. Create with >32KB blob-backed instruction.
+        large_text = "Detailed research checklist: " + ("check status and summarize " * 1500)
+        assert len(large_text) > 32_768
+        blob_content = await encode_text_content(
+            large_text, blobs, BlobOwner(request_id="req-blob-1", person_ref=broker_person_ref("ada")), inline_limit=32_768
+        )
+        assert blob_content["type"] == "blob"
+        create_body = {
+            "request_id": "req-blob-1",
+            "schedule_id": "sched_agent_1",
+            "mode": "create",
+            "management_class": "user",
+            "name": "Large job",
+            "timing": {"kind": "interval", "interval_ms": 600_000},
+            "repeat_count": 0,
+            "enabled": True,
+            "action": {"type": "task", "instruction": blob_content},
+        }
+        created = await _send(create_body, ada_token)
+        assert created["outcome"] == "ok" and created["state"] == "installed"
+        saved = store.get_scheduled_message("sched_agent_1")
+        assert saved is not None and saved.payload.problem_statement == large_text.strip()
+        assert store.is_owner_vouched("sched_agent_1") is True
+        assert store.run_permit("sched_agent_1") is not None
+
+        # 2. Duplicate create is refused with id_in_use.
+        dup = await _send({**create_body, "request_id": "req-dup-1"}, ada_token)
+        assert dup["outcome"] == "id_in_use"
+
+        # 3. Agent replace requires seen_version and rejects stale digests.
+        replace_base = {
+            **create_body,
+            "mode": "replace",
+            "action": {"type": "task", "instruction": {"type": "inline", "text": "Updated checklist."}},
+        }
+        missing_ver = await _send({**replace_base, "request_id": "req-rep-1"}, ada_token)
+        assert missing_ver["outcome"] == "invalid_request"
+        stale_ver = await _send({**replace_base, "request_id": "req-rep-2", "seen_version": "a" * 64}, ada_token)
+        assert stale_ver["outcome"] == "changed_since_read"
+        replaced = await _send(
+            {**replace_base, "request_id": "req-rep-3", "seen_version": created["version"]["seen_version"]},
+            ada_token,
+        )
+        assert replaced["outcome"] == "ok" and replaced["state"] == "replaced"
+        assert store.get_scheduled_message("sched_agent_1").payload.problem_statement == "Updated checklist."
+
+        # 4. Another person cannot overwrite Ada's schedule.
+        other_person = await _send(
+            {**replace_base, "request_id": "req-rep-4", "seen_version": replaced["version"]["seen_version"]},
+            bo_token,
+        )
+        assert other_person["outcome"] == "not_allowed"
+
+        # 5. System-work root_task token without person is refused.
+        system_token = root_task_token(
+            sched_id, team=TEAM, root_task_id="sched_run_sys", request_id="sched_run_sys", schedule_id="sched_sys_1", issued=now
+        )
+        sys_refused = await _send(
+            {**create_body, "request_id": "req-sys-1", "schedule_id": "sched_from_sys", "action": {"type": "task", "instruction": {"type": "inline", "text": "Sys"}}},
+            system_token,
+        )
+        assert sys_refused["outcome"] == "not_allowed"
+
+        # 6. Permit-bound token from a disabled source schedule is refused live.
+        permit_token = store.run_permit("sched_agent_1")
+        assert permit_token is not None
+        store.set_enabled("sched_agent_1", False)
+        stopped_permit = await _send(
+            {
+                "request_id": "req-permit-stopped",
+                "schedule_id": "sched_from_stopped_permit",
+                "mode": "create",
+                "management_class": "user",
+                "timing": {"kind": "interval", "interval_ms": 60_000},
+                "repeat_count": 0,
+                "enabled": True,
+                "action": {"type": "task", "instruction": {"type": "inline", "text": "Should fail."}},
+            },
+            permit_token.model_dump(mode="json", exclude_none=True),
+        )
+        assert stopped_permit["outcome"] == "not_allowed"
+        assert store.get_scheduled_message("sched_from_stopped_permit") is None
+    finally:
+        forget_task_context_keys()
+
+
+@pytest.mark.asyncio
+async def test_gateway_schedule_add_and_delivery_projection_resolve_session_via_scheduled_target(
+    tmp_path: Path,
+) -> None:
+    """GatewayScheduleApplication.add installs via schedules.install (no raw session_key stored on the
+    schedule), and GatewayDeliveryProjection resolves the target session from scheduled_targets."""
+
+    from assistant_gateway.application.delivery_projection import (
+        GatewayDeliveryProjection,
+        GatewayDeliveryProjectionSettings,
+        _DeliveryMetadata,
+    )
+    from assistant_gateway.application.delivery_service import GatewayDeliveryService
+    from assistant_gateway.application.schedule_management import GatewayScheduleCreateRequest
+    from assistant_gateway.runtime_ports import UuidGatewayIdGenerator
+    from assistant_gateway.store import GatewayStateStore
+    from storage.config import resolve_storage_settings
+
+    gw_store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    gw_store.create_session(
+        session_key="session_ada_a",
+        conversation_id="conv_ada_a",
+        manager_agent_id="manager_1",
+        channel_name="telegram",
+        user_id="ada",
+        chat_id="41",
+        owner_canonical_user_id="ada",
+    )
+    delivery = GatewayDeliveryService(repository=gw_store.delivery_repository, unit_of_work_factory=gw_store)
+    team = Team(
+        tmp_path,
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "schedules.db")}}),
+    )
+    references = AccessStorePersonReferences(team.access.settings, TEAM)
+    session = gw_store.get_session("session_ada_a")
+    assert session is not None
+    gateway = GatewayScheduleApplication(
+        settings=GatewayScheduleSettings(
+            instance_name="team_schedules",
+            response_route="gateway",
+            user_display_name="Ada",
+            request_timezone="UTC",
+            default_session_key="session_ada_a",
+            default_owner_canonical_user_id="ada",
+            manager_unavailable_text="unavailable",
+        ),
+        sessions=SimpleNamespace(resolve_session=lambda **_kw: session),  # type: ignore[arg-type]
+        request_context=SimpleNamespace(  # type: ignore[arg-type]
+            canonical_user_id=lambda _route: "ada",
+            manager_principal=lambda _route: GatewayCommandPerson(canonical_user_id="ada", team_id=TEAM, roles=("member",)),
+            requester_presentation_for_session=lambda _session, _route: SimpleNamespace(timezone="UTC"),
+            users_enabled=True,
+        ),
+        delivery=delivery,
+        manager=SimpleNamespace(manager_id="manager_1"),  # type: ignore[arg-type]
+        team_commands=GatewayTeamCommandService(
+            team_services=_InProcess(team.operations),
+            references=references,
+            request_ids=_Ids().new_correlation_id,
+        ),
+        id_generator=UuidGatewayIdGenerator(),
+        delivery_refs=team.refs,
+    )
+
+    schedule_id = await gateway.add(
+        GatewayScheduleCreateRequest(
+            name="Flights",
+            instruction="Check flights",
+            interval_seconds=300,
+            session_key="session_ada_a",
+        )
+    )
+    assert schedule_id
+    stored = team.store.get_scheduled_message(schedule_id)
+    assert stored is not None
+    assert stored.payload_meta.gateway_context.session_key is None
+    assert team.store.is_owner_vouched(schedule_id) is True
+    assert team.store.delivery_ref_of(schedule_id) == team.refs.ref("session_ada_a")
+
+    # GatewayDeliveryProjection resolves session_key from scheduled_targets when metadata.session_key is None.
+    projection = GatewayDeliveryProjection(
+        settings=GatewayDeliveryProjectionSettings(default_session_key="session_ada_a"),
+        sessions=gw_store.session_repository,
+        delivery=delivery,
+        presentation=SimpleNamespace(),  # type: ignore[arg-type]
+        attachments=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    resolved_key, resolved_session = projection._resolve_session(
+        _DeliveryMetadata(
+            gateway_context=GatewayContext(
+                canonical_user_id="ada",
+                scheduled_job_id=schedule_id,
+                delivery_mode="cron",
+            ),
+            conversation_id=stored.payload_meta.conversation_id,
+            scheduled_job_id=schedule_id,
+            correlation_id=None,
+            session_key=None,
+        ),
+        request_record=None,
+    )
+    assert resolved_key == "session_ada_a"
+    assert resolved_session is not None and resolved_session.session_key == "session_ada_a"

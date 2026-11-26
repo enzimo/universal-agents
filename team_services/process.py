@@ -70,10 +70,11 @@ from team_services.memory import MemoryOperations
 from team_services.partitions import PartitionService
 from team_services.relays import Relays
 from team_services.scheduler import SCHEDULER_ADDRESS, SchedulerOperations
-from team_services.schedules import ScheduleOperations, SystemScheduleCheck
+from team_services.schedules import ScheduleInstallDefaults, ScheduleOperations, SystemScheduleCheck
 from team_services.topics import TopicOperations
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.heartbeat_store import HeartbeatStore
+from id_generation import HEARTBEAT_SOURCE_ID_PREFIX, operational_id
 from access_control.authority_verifier import AuthorityTokenVerifier
 from assistant_gateway.runtime_config import lead_memory_config
 from team_services.service import OperationFamily, TeamServices, Upkeep
@@ -364,12 +365,7 @@ def team_operations(
                                       artifacts_dir=config.layout.conversation_artifacts_dir)
     topics = TopicOperations(conversations, people, clock, _LOGGER)
     schedule_store = ScheduleStore(storage_settings=storage, default_cron_timezone=config.user.timezone)
-    schedules = ScheduleOperations(schedule_store,
-                                   people, _delivery_refs(config),
-                                   SystemScheduleCheck(config, people), clock, _LOGGER)
-    families: list[OperationFamily] = [memory.family(), knowledge.family(), topics.family(), schedules.family()]
-    if blob_service is not None:
-        families.append(BlobOperations(blob_service, people, _LOGGER).family())
+    scheduler: Optional[SchedulerOperations] = None
     if host is not None:
         scheduler = SchedulerOperations(
             schedule_store,
@@ -389,6 +385,32 @@ def team_operations(
             clock=clock,
             logger=_LOGGER,
         )
+    heartbeat_source_id = config.heartbeat.source_id or operational_id(
+        HEARTBEAT_SOURCE_ID_PREFIX, config.instance_name
+    )
+    schedules = ScheduleOperations(
+        schedule_store,
+        people,
+        _delivery_refs(config),
+        SystemScheduleCheck(config, people),
+        clock,
+        _LOGGER,
+        blobs=blob_service,
+        on_schedule_installed=scheduler.issue_permit_for_schedule if scheduler is not None else None,
+        conversations=conversations,
+        install_defaults=ScheduleInstallDefaults(
+            lead_agent_type=config.manager.named_agent_type,
+            response_route=config.manager.response_queue_name,
+            instance_name=config.instance_name,
+            heartbeat_source_id=heartbeat_source_id,
+            default_timezone=config.user.timezone,
+        ),
+    )
+    families: list[OperationFamily] = [memory.family(), knowledge.family(), topics.family(), schedules.family()]
+    if blob_service is not None:
+        families.append(BlobOperations(blob_service, people, _LOGGER).family())
+    if host is not None:
+        assert scheduler is not None
         families.append(scheduler.family())
         mapper = NatsSubjectMapper(
             team_id=config.manager.team_id,

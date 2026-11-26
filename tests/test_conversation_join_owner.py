@@ -27,7 +27,7 @@ import asyncio
 import logging
 import sqlite3
 from unittest.mock import patch
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -605,7 +605,30 @@ def test_a_failed_heartbeat_handover_stays_stopped_until_retry_and_restore_keeps
     worker.paused = True
 
     async def admit_run():
-        runs = await _signed_heartbeat_runs(agent, moved, store.list_items(item.source_id, enabled_only=True), None, store)
+        from uuid import uuid4
+
+        stored_launcher = agent._schedule_store.get_scheduled_message(moved.schedule_id)
+        assert stored_launcher is not None
+        now_utc = datetime.now(timezone.utc)
+        claimed = agent._schedule_store._repository.claim_next_due(
+            claimer_agent_id=agent.id,
+            claimer_named_agent_type=stored_launcher.claim_named_agent_type or "TeamArchitect",
+            claimer_team_id=TEAM,
+            now_iso=(now_utc + timedelta(days=2)).isoformat(),
+            claim_expires_at=(now_utc + timedelta(days=2, minutes=5)).isoformat(),
+            claim_token=f"claim_{uuid4().hex}",
+        )
+        assert claimed is not None and claimed["schedule_id"] == moved.schedule_id
+        try:
+            runs = await _signed_heartbeat_runs(
+                agent, stored_launcher, store.list_items(item.source_id, enabled_only=True), claimed["claim_token"], store
+            )
+        finally:
+            agent._schedule_store.release_claim(
+                moved.schedule_id,
+                claimer_agent_id=agent.id,
+                claim_token=claimed["claim_token"],
+            )
         assert runs and len(runs) == 1
         run = runs[0]
         await task_message_runtime._handle_task_request(worker, run.task, run.header, run.meta)

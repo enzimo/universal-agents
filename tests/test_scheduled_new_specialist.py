@@ -66,6 +66,7 @@ from custom_tools.providers.schedule_workers import install_scheduled_worker_dra
 from custom_tools.runtime_context import _agent_ctx
 from tests.task_work_support import set_agent_ref
 from runtime_settings.schedule_workers import SCHEDULE_WORKER_ELIGIBILITY_PATH
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import (
     agreement,
     authorization_config,
@@ -74,7 +75,8 @@ from tests.change_approval_support import (
     use_signed_contexts,
 )
 
-BOA = "BackgroundOperationsAgent"
+# Protocol 1 caps agent_type at 24 characters (contracts/messages/v1/schemas/common.schema.json).
+BOA = "BackgroundOpsAgent"
 STARTED_FROM = ("operator_file", "started_elsewhere")
 GOOGLE_BY_FUNCTION_NAME = {"requirements": [{"capability_id": "cli:google", "operation": "secure_cli"}]}
 GOOGLE_READS = {
@@ -158,7 +160,16 @@ def _schedule(agent: SimpleNamespace, config: GatewayInstanceConfig, schedule_id
         schedule_name="Gmail check",
         management_class=ScheduleManagementClass.USER,
         payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check email; report only important items."),
-        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id=config.user.canonical_user_id)),
+        payload_meta=MessageMeta(
+            gateway_context=GatewayContext(
+                canonical_user_id=config.user.canonical_user_id,
+                task_context=signed_task_token(
+                    config.user.canonical_user_id,
+                    team_id=agent.team_id,
+                    roles=("owner",),
+                ),
+            )
+        ),
         claim_team_id=agent.team_id,
         interval_ms=3 * 3600 * 1000,
     )

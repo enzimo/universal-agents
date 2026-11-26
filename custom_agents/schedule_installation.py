@@ -18,7 +18,6 @@ the reserved internal improvement schedule is checked in
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Any, Optional
 
 from custom_agents.schedule_conversation_context import ensure_dedicated_schedule_conversation
@@ -148,11 +147,27 @@ async def create_schedule_from_turn_action(
     """
 
     schedule_msg, claim_scope = await prepare_install(agent, msg, msg_header, msg_meta)
+    schedule_msg.claim_team_id = claim_scope.get("claim_team_id") or schedule_msg.claim_team_id
+    schedule_msg.claim_named_agent_type = claim_scope.get("claim_named_agent_type")
+    schedule_msg.claim_agent_id = claim_scope.get("claim_agent_id")
     store = agent._schedule_store
-    outcome = await agent.task_manager.operations_runtime.run(
-        partial(store.add, schedule_msg, create_only=True, **claim_scope)
+    from custom_agents.schedule_install_client import (
+        extract_task_authority_token,
+        install_schedule_via_team_services,
     )
-    if outcome == SCHEDULE_KEPT:
+
+    authority_token = extract_task_authority_token(msg_meta or schedule_msg.payload_meta)
+    try:
+        reply = await install_schedule_via_team_services(
+            agent,
+            schedule_msg,
+            mode="ensure",
+            authority_token=authority_token,
+        )
+    except ValueError:
+        await _log_kept_schedule(agent, store, schedule_msg)
+        return
+    if reply.get("state") == SCHEDULE_KEPT:
         await _log_kept_schedule(agent, store, schedule_msg)
     if agent._scheduler_wake:
         agent._scheduler_wake.set()

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -205,6 +205,7 @@ def test_heartbeat_checks_its_objective_before_any_run_state_changes(
     )
     launcher = ScheduledMessage(
         schedule_id="shared_launcher", schedule_name="heartbeat:shared", interval_ms=10_000,
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
         management_class=ScheduleManagementClass.SYSTEM, system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER,
         payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Tick"),
         payload_meta=manager.get_task_info(tasks[owner_key].task_id).meta.model_copy(deep=True),
@@ -216,6 +217,12 @@ def test_heartbeat_checks_its_objective_before_any_run_state_changes(
         monkeypatch, store=agent._schedule_store, team_id="team_1", storage_settings=manager.storage_settings
     )
     sched.scheduler.renew_permits()
+    claimed = agent._schedule_store.claim_next_due(
+        claimer_agent_id=agent.id,
+        claimer_named_agent_type="TeamArchitect",
+        claimer_team_id="team_1",
+    )
+    assert claimed is not None and claimed["schedule_id"] == launcher.schedule_id
     agent._logger = logging.getLogger("test.objective.heartbeat")
     agent._conversation_store = None
     agent.paused = False
@@ -245,7 +252,7 @@ def test_heartbeat_checks_its_objective_before_any_run_state_changes(
             return True
         monkeypatch.setattr(scheduled_runtime, "sign_scheduled_run", sign_with_new_identity)
     with caplog.at_level(logging.WARNING):
-        assert asyncio.run(enqueue_heartbeat_items(agent, launcher))
+        assert asyncio.run(enqueue_heartbeat_items(agent, launcher, claim_token=claimed["claim_token"]))
     runs = [info for key, info in manager.task_state.tasks.items() if key not in before_ids]
     assert {info.meta.gateway_context.scheduled_job_id for info in runs} == (
         {protected.heartbeat_item_id, sibling.heartbeat_item_id} if allowed else {sibling.heartbeat_item_id}

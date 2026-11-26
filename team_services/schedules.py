@@ -1,25 +1,11 @@
-"""People's schedule commands at the team's address: ``schedules.list``, ``.pause``, ``.resume``,
-``.disable`` and ``.remove``.
+"""Schedule operations at the team's address: ``schedules.list``, ``.install``, ``.pause``,
+``.resume``, ``.disable`` and ``.remove``.
 
-Until phase 2 the gateway sent these to the team lead's process as a durable
-``ManagerScheduleCommand``; they now run here on the same schedule store, with the same
-rules (``custom_agents.person_schedule_controls``):
-
-- the person comes only from the command's authority token (``team_services.people``),
-  and sees and changes only the schedules they own;
-- a system schedule changes only for people who could approve a ``system_schedule`` change
-  (the access service, with the person's current roles from the people copy); with
-  authorization off, any active member may, as before;
-- a change names the listing digest the person saw (``seen_version``), checked with the
-  permit in the store's write transaction, and its reply, with the version it saved, is
-  stored in that same transaction (``storage.operation_outcomes``).
-
-A chat's own list names the chat by its opaque delivery reference
-(``custom_transport.protocol1.delivery_refs``), compared here with the reference of each
-schedule's stored session. Schedule creation stays on today's queued path until phase 3.
-
-The team lead's scheduler wakes for a change it makes itself; a change made here reaches
-it at its next pass, within a minute (``MAX_SCHEDULER_SLEEP_SECONDS``).
+``schedules.install`` accepts either a gateway command token (for people's own installs and
+gateway maintenance schedules) or an agent host's root-task authority token (for agent schedule
+tools and turn actions), records ``owner_vouched = 1`` under the 13C.5 vouching rules, stores
+its reply atomically with the write transaction (``storage.operation_outcomes``), and triggers
+synchronous initial run-permit issuance via ``team_services.scheduler``.
 """
 
 from __future__ import annotations
@@ -27,31 +13,88 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Event, Lock
 from typing import Any, Callable, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from access_control.ownership import PRIVATE_DELETE, PRIVATE_READ, PRIVATE_UPDATE
 from access_control.people_directory import PeopleDirectory
 from custom_agents.person_schedule_controls import (
     apply_person_schedule_change,
+    person_schedule_permit,
     schedule_owned_by,
     schedule_worker_assignment,
 )
-from custom_agents.schedule_management import SystemScheduleMutationDenied, is_system_managed_schedule
-from custom_agents.schedule_store import ScheduleStore, ScheduleWriteConflict, schedule_record_digest
-from custom_messages.contracts.schedule_v1 import SYSTEM_SCHEDULE_CHANGE_KIND, ScheduledMessage
+from custom_agents.schedule_conversation_context import schedule_conversation_seed_task_id
+from custom_agents.schedule_execution_identity import follow_authorized_change
+from custom_agents.schedule_management import (
+    ScheduleMutationAuthorityMode,
+    ScheduleMutationOperation,
+    SystemScheduleMutationDenied,
+    build_schedule_mutation_permit,
+    is_system_managed_schedule,
+)
+from custom_agents.schedule_store import (
+    SCHEDULE_INSTALLED,
+    SCHEDULE_REFRESHED,
+    SCHEDULE_REPLACED,
+    ScheduleInstallRefused,
+    ScheduleInstallResult,
+    ScheduleStore,
+    ScheduleWriteConflict,
+    compute_next_fire_at,
+    owner_canonical_user_id_for_schedule,
+    schedule_record_digest,
+    schedule_stopped_reason,
+)
+from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
+from custom_messages.contracts.schedule_v1 import (
+    SYSTEM_SCHEDULE_CHANGE_KIND,
+    ScheduleMemoryPolicy,
+    ScheduleMemoryState,
+    ScheduleTaskMemory,
+    ScheduledMessage,
+)
+from custom_messages.contracts.task_v1 import Task
+from custom_messages.enums import (
+    MessageMetaType,
+    RequesterType,
+    RoutingType,
+    ScheduleManagementClass,
+    SystemScheduleKind,
+)
+from custom_messages.system_schedules import SystemScheduleScope, system_schedule_spec
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import VerifiedFrame, body_model
 from custom_messages.wire.sizes import REPLY_BODY_MAX_BYTES, encoded_size
+from custom_messages.wire.values import parse_timestamp
+from custom_transport.protocol1.blobs import BlobCorrupted, BlobTooLarge
 from custom_transport.protocol1.delivery_refs import DeliveryRefs
+from custom_transport.protocol1.knowledge_blobs import (
+    KnowledgeBlobUnavailable,
+    decode_text_content,
+)
 from storage.operation_outcomes import CommandOutcome
 from team_services.outcomes import CommandOnce
-from team_services.people import CommandPerson, command_person
+from team_services.people import CommandPerson, InstallActorCheck, command_person, schedule_install_actor
 from team_services.service import OperationFamily
 
-SCHEDULE_KINDS = ("schedules.list", "schedules.pause", "schedules.resume", "schedules.disable", "schedules.remove")
+SCHEDULE_KINDS = (
+    "schedules.list",
+    "schedules.install",
+    "schedules.pause",
+    "schedules.resume",
+    "schedules.disable",
+    "schedules.remove",
+)
 _STATES = {"pause": "paused", "resume": "resumed", "disable": "disabled", "remove": "removed"}
+_AGENT_PERSON_SYSTEM_KINDS = frozenset({
+    SystemScheduleKind.OBJECTIVE_WORK_SESSION,
+    SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT,
+})
+_INSTRUCTION_MAX_CHARS = 2_000_000
 _MESSAGE_MAX = 500
 _PREVIEW_MAX = 500
 # The schedule list schema's name and run-note string limit.
@@ -61,22 +104,48 @@ CHANGED_TEXT = "The schedule changed since you listed it. Refresh and try again.
 SYSTEM_NOT_ALLOWED_TEXT = "Only people who may change the team's system schedules can change this one."
 
 
+@dataclass(frozen=True)
+class ScheduleInstallDefaults:
+    """Instance defaults applied when ``schedules.install`` omits optional routing or worker fields."""
+
+    lead_agent_type: str = "TeamArchitect"
+    response_route: Optional[str] = None
+    instance_name: str = ""
+    heartbeat_source_id: Optional[str] = None
+    default_timezone: Optional[str] = None
+
+
 class ScheduleNotFound(LookupError):
     """An absent schedule or one outside the command person's team and ownership."""
 
 
 class ScheduleOperations:
-    """Answers people's schedule commands for one team (module docstring)."""
+    """Answers schedule operations for one team (module docstring)."""
 
-    def __init__(self, store: ScheduleStore, people: PeopleDirectory, delivery_refs: Optional[DeliveryRefs],
-                 may_change_system_schedules: Callable[[CommandPerson], bool], clock: Callable[[], datetime],
-                 logger: logging.Logger) -> None:
+    def __init__(
+        self,
+        store: ScheduleStore,
+        people: PeopleDirectory,
+        delivery_refs: Optional[DeliveryRefs],
+        may_change_system_schedules: Callable[[CommandPerson], bool],
+        clock: Callable[[], datetime],
+        logger: logging.Logger,
+        *,
+        blobs: Any = None,
+        on_schedule_installed: Optional[Callable[[str], Any]] = None,
+        conversations: Any = None,
+        install_defaults: Optional[ScheduleInstallDefaults] = None,
+    ) -> None:
         self._store = store
         self._people = people
         self._delivery_refs = delivery_refs
         self._may_change_system = may_change_system_schedules
         self._clock = clock
         self._logger = logger
+        self._blobs = blobs
+        self._on_schedule_installed = on_schedule_installed
+        self._conversations = conversations
+        self._install_defaults = install_defaults or ScheduleInstallDefaults()
 
     def family(self) -> OperationFamily:
         return OperationFamily({kind: self.handle for kind in SCHEDULE_KINDS}, frozenset(SCHEDULE_KINDS),
@@ -90,8 +159,28 @@ class ScheduleOperations:
             self._may_change_system.close()
 
     async def handle(self, verified: VerifiedFrame) -> dict[str, Any]:
+        resolved_instruction: Optional[str] = None
+        if verified.frame.kind == "schedules.install":
+            body = verified.raw["body"]
+            action_spec = body.get("action")
+            if isinstance(action_spec, dict) and action_spec.get("type") == "task":
+                instruction_content = action_spec.get("instruction")
+                if isinstance(instruction_content, dict) and instruction_content.get("type") == "blob":
+                    try:
+                        resolved_instruction = await self._decode_blob_instruction(instruction_content)
+                    except (BlobCorrupted, BlobTooLarge) as exc:
+                        return _message("invalid_request", str(exc))
+                    except KnowledgeBlobUnavailable as exc:
+                        return _message("runtime_error", str(exc))
         cancelled = Event()
-        running = asyncio.create_task(asyncio.to_thread(self.answer, verified, cancelled=cancelled))
+        running = asyncio.create_task(
+            asyncio.to_thread(
+                self.answer,
+                verified,
+                cancelled=cancelled,
+                resolved_instruction=resolved_instruction,
+            )
+        )
         cancellation = None
         # Retain the same worker through overlapping stop and shutdown requests.
         # Its write must finish before the host counts this handler as drained.
@@ -107,9 +196,25 @@ class ScheduleOperations:
             if cancellation is not None:
                 raise cancellation
 
-    def answer(self, verified: VerifiedFrame, *, cancelled: Optional[Event] = None) -> dict[str, Any]:
+    async def _decode_blob_instruction(self, content: dict[str, Any]) -> str:
+        from team_services.knowledge import _as_blob_store
+
+        blob_store = _as_blob_store(self._blobs)
+        if blob_store is None:
+            raise KnowledgeBlobUnavailable("The team's blob store is not available to read this schedule instruction.")
+        return await decode_text_content(content, blob_store, max_chars=_INSTRUCTION_MAX_CHARS)
+
+    def answer(
+        self,
+        verified: VerifiedFrame,
+        *,
+        cancelled: Optional[Event] = None,
+        resolved_instruction: Optional[str] = None,
+    ) -> dict[str, Any]:
         action = verified.frame.kind.removeprefix("schedules.")
         body = verified.raw["body"]
+        if action == "install":
+            return self._answer_install(verified, body, cancelled=cancelled, resolved_instruction=resolved_instruction)
         check = command_person(verified, self._people, self._logger)
         once = None
         if action != "list" and check.person_id is not None:
@@ -143,6 +248,442 @@ class ScheduleOperations:
         return once.run(lambda: self._change(person, action, body, once.outcome, cancelled),
                         refusal_for=lambda error: self._refusal(person, action, body, error))
 
+    # -- install ----------------------------------------------------------------------
+
+    def _answer_install(
+        self,
+        verified: VerifiedFrame,
+        body: dict[str, Any],
+        *,
+        cancelled: Optional[Event],
+        resolved_instruction: Optional[str],
+    ) -> dict[str, Any]:
+        actor = schedule_install_actor(verified, self._people, self._logger)
+        once = None
+        if actor.person_id is not None:
+            outcome = CommandOutcome(
+                team_id=self._people.team_id,
+                person_id=actor.person_id,
+                retry_key=str(verified.raw["idempotency_key"]),
+                kind=verified.frame.kind,
+                body_digest=str(verified.raw["body_digest"]),
+                now=self._clock(),
+                reply_for=lambda write: _checked_install_reply(write.result),
+                logger=self._logger,
+            )
+            once = CommandOnce(
+                self._store.command_outcomes,
+                outcome,
+                reply_from_receipt=lambda reply: reply,
+                key_taken=lambda error: _message("not_allowed", str(error)),
+                not_stored=_message(
+                    "runtime_error",
+                    "The schedule install could not be answered. Check the schedule before sending it again.",
+                ),
+                logger=self._logger,
+            )
+            stored = once.stored_reply()
+            if stored is not None:
+                return stored
+        person = actor.person
+        if person is None:
+            reply = _message("not_allowed", actor.reason)
+            return once.final(reply) if once is not None else reply
+        assert once is not None
+        captured: list[ScheduleInstallResult] = []
+        reply = once.run(
+            lambda: self._install(
+                actor,
+                body,
+                once.outcome,
+                cancelled,
+                resolved_instruction=resolved_instruction,
+                captured=captured,
+            ),
+            refusal_for=lambda error: self._install_refusal(person, body, error),
+        )
+        if captured:
+            result = captured[-1]
+            if result.state == SCHEDULE_REFRESHED and result.previous is not None and result.saved is not None:
+                follow_authorized_change(
+                    self._store.worker_records,
+                    person.team_id,
+                    result.previous,
+                    result.saved,
+                    source="gateway_context_refresh",
+                )
+            if (
+                result.state in (SCHEDULE_INSTALLED, SCHEDULE_REPLACED, SCHEDULE_REFRESHED)
+                and self._on_schedule_installed is not None
+            ):
+                try:
+                    self._on_schedule_installed(result.schedule_id)
+                except Exception:
+                    self._logger.exception(
+                        "Could not issue an initial run permit right after schedules.install; upkeep will retry. "
+                        "event=team_schedule_initial_permit_failed schedule_id=%s",
+                        result.schedule_id,
+                    )
+        return reply
+
+    def _check_permit_source(self, actor: InstallActorCheck, now: datetime) -> None:
+        if actor.permit_schedule_id is None or actor.person is None:
+            return
+        source = self._store.read_scheduled_message(actor.permit_schedule_id)
+        if (
+            source is None
+            or source.claim_team_id != actor.person.team_id
+            or owner_canonical_user_id_for_schedule(source) != actor.person.person_id
+            or schedule_stopped_reason(source, now) is not None
+            or not (self._store.is_owner_vouched(actor.permit_schedule_id) or is_system_managed_schedule(source))
+        ):
+            raise ScheduleInstallRefused(
+                "not_allowed",
+                "The schedule permit backing this task is no longer active or vouched.",
+            )
+
+    def _authorize_install(
+        self,
+        actor: InstallActorCheck,
+        body: dict[str, Any],
+        management_class: ScheduleManagementClass,
+        system_kind: Optional[SystemScheduleKind],
+    ) -> bool:
+        """Check system-schedule installation authority; returns whether team-owner takeover is allowed."""
+
+        assert actor.person is not None
+        person = actor.person
+        if management_class != ScheduleManagementClass.SYSTEM:
+            return False
+        mode = str(body["mode"])
+        spec = system_schedule_spec(system_kind) if system_kind is not None else None
+        if actor.from_gateway:
+            if mode in ("ensure", "refresh") and spec is not None and spec.scope is SystemScheduleScope.PERSON:
+                return False
+            if not self._may_change_system(person):
+                raise ScheduleInstallRefused("not_allowed", SYSTEM_NOT_ALLOWED_TEXT)
+            return bool(spec is not None and spec.scope is SystemScheduleScope.TEAM)
+        if system_kind in _AGENT_PERSON_SYSTEM_KINDS:
+            if system_kind == SystemScheduleKind.OBJECTIVE_WORK_SESSION and not body.get("objective_id"):
+                raise ScheduleInstallRefused(
+                    "invalid_request", "An objective_work_session schedule requires objective_id."
+                )
+            return False
+        if not self._may_change_system(person):
+            raise ScheduleInstallRefused("not_allowed", SYSTEM_NOT_ALLOWED_TEXT)
+        return False
+
+    def _build_schedule_from_install(
+        self,
+        actor: InstallActorCheck,
+        body: dict[str, Any],
+        *,
+        resolved_instruction: Optional[str],
+    ) -> tuple[ScheduledMessage, Optional[str]]:
+        assert actor.person is not None
+        person = actor.person
+        schedule_id = str(body["schedule_id"])
+        management_class = ScheduleManagementClass(body["management_class"])
+        system_kind: Optional[SystemScheduleKind] = None
+        if management_class == ScheduleManagementClass.SYSTEM:
+            system_kind = SystemScheduleKind(body.get("system_schedule_kind") or "unclassified")
+
+        action_spec = body["action"]
+        if action_spec["type"] == "fixed_message":
+            raise ScheduleInstallRefused(
+                "invalid_request",
+                "Fixed-message schedules without a model turn are not supported by this runtime yet.",
+            )
+        instruction_content = action_spec["instruction"]
+        if instruction_content["type"] == "inline":
+            instruction = str(instruction_content["text"])
+        else:
+            if resolved_instruction is None:
+                raise ScheduleInstallRefused(
+                    "invalid_request", "Blob-backed schedule instructions must be resolved before saving."
+                )
+            instruction = resolved_instruction
+        if not instruction.strip():
+            raise ScheduleInstallRefused("invalid_request", "Schedule instruction must not be empty.")
+
+        timing = body["timing"]
+        timing_kind = timing["kind"]
+        interval_ms: Optional[int] = None
+        cron_expression: Optional[str] = None
+        cron_timezone: Optional[str] = None
+        next_fire_at: Optional[str] = None
+        now = self._clock().astimezone(timezone.utc)
+        if timing_kind == "interval":
+            interval_ms = int(timing["interval_ms"])
+            try:
+                next_fire_at = compute_next_fire_at(interval_ms=interval_ms, from_time=now)
+            except (OverflowError, ValueError) as exc:
+                raise ScheduleInstallRefused("invalid_request", f"Invalid interval timing: {exc}") from exc
+        elif timing_kind == "cron":
+            cron_expression = str(timing["expression"])
+            cron_timezone = str(timing["time_zone"])
+            try:
+                ZoneInfo(cron_timezone)
+                next_fire_at = compute_next_fire_at(
+                    cron_expression=cron_expression,
+                    cron_timezone=cron_timezone,
+                    from_time=now,
+                )
+            except (ZoneInfoNotFoundError, ValueError, KeyError, OverflowError) as exc:
+                raise ScheduleInstallRefused("invalid_request", f"Invalid cron schedule or time zone: {exc}") from exc
+        elif timing_kind == "once":
+            try:
+                next_fire_at = parse_timestamp(str(timing["at"])).isoformat()
+            except ValueError as exc:
+                raise ScheduleInstallRefused("invalid_request", f"Invalid one-time timestamp: {exc}") from exc
+        else:
+            raise ScheduleInstallRefused("invalid_request", f"Unsupported timing kind: {timing_kind!r}")
+
+        raw_repeat = body.get("repeat_count")
+        if timing_kind == "once":
+            if raw_repeat is not None and int(raw_repeat) not in (0, 1):
+                raise ScheduleInstallRefused("invalid_request", "A one-time schedule runs once (repeat_count 0 or 1).")
+            repeat_count: Optional[int] = 1
+        else:
+            repeat_count = None if raw_repeat is None or int(raw_repeat) == 0 else int(raw_repeat)
+
+        expires_at_utc = parse_timestamp(str(body["expires_at"])).isoformat() if "expires_at" in body else None
+        paused_until = parse_timestamp(str(body["paused_until"])).isoformat() if "paused_until" in body else None
+
+        worker = body.get("worker") or {}
+        agent_type = worker.get("agent_type")
+        agent_id = worker.get("agent_id")
+        if not agent_type and not agent_id:
+            spec = system_schedule_spec(system_kind) if system_kind is not None else None
+            agent_type = (spec.agent_type if spec is not None and spec.agent_type else None) or self._install_defaults.lead_agent_type
+
+        deliver_to = body.get("deliver_to")
+        delivery_ref = str(deliver_to["delivery_ref"]) if isinstance(deliver_to, dict) and deliver_to.get("delivery_ref") else None
+        conversation_id = str(deliver_to["conversation_id"]) if isinstance(deliver_to, dict) and deliver_to.get("conversation_id") else None
+        followup_to_task_id: Optional[str] = None
+        if conversation_id is None and self._conversations is not None:
+            seed_task_id = schedule_conversation_seed_task_id(schedule_id)
+            existing_seed = self._conversations.get_turn_by_task_id(seed_task_id)
+            if existing_seed and existing_seed.get("conversation_id"):
+                conversation_id = str(existing_seed["conversation_id"])
+                followup_to_task_id = seed_task_id
+        schedule_name = str(body["name"]) if "name" in body and body["name"] != "" else None
+        if system_kind == SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT and schedule_name:
+            parts = schedule_name.split(":", 2)
+            if len(parts) == 3 and parts[1]:
+                followup_to_task_id = parts[1]
+        request_timezone = (
+            (str(deliver_to["time_zone"]) if isinstance(deliver_to, dict) and deliver_to.get("time_zone") else None)
+            or cron_timezone
+            or self._install_defaults.default_timezone
+        )
+
+        schedule_memory = _parse_run_notes(body.get("run_notes"))
+        delivery_mode = _delivery_mode_for(management_class, system_kind)
+        heartbeat_source_id = (
+            self._install_defaults.heartbeat_source_id
+            if system_kind == SystemScheduleKind.HEARTBEAT_LAUNCHER
+            else None
+        )
+        is_response_requested = (
+            management_class == ScheduleManagementClass.USER
+            or system_kind in (SystemScheduleKind.HEARTBEAT_LAUNCHER, SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT)
+        )
+        response_route = self._install_defaults.response_route
+        payload_header = MessageHeader(
+            from_agent_id=response_route or "team_services",
+            to_routing_path=agent_id or RoutingType.SELF_ROUTE.value,
+            response_routing_key=response_route,
+            agent_signature="",
+        )
+        payload_meta = MessageMeta(
+            from_agent_name=(
+                f"{self._install_defaults.instance_name}_gateway"
+                if actor.from_gateway and self._install_defaults.instance_name
+                else "team_services"
+            ),
+            conversation_id=conversation_id,
+            followup_to_task_id=followup_to_task_id,
+            objective_id=body.get("objective_id"),
+            request_timezone=request_timezone,
+            requester_type=RequesterType.TIMER_REQUESTER,
+            is_response_requested=is_response_requested,
+            to_named_agent_type=agent_type if agent_type and agent_type != self._install_defaults.lead_agent_type else None,
+            gateway_context=GatewayContext(
+                gateway_instance_name=self._install_defaults.instance_name or None,
+                canonical_user_id=person.person_id,
+                delivery_mode=delivery_mode,
+                scheduled_job_id=schedule_id,
+                heartbeat_source_id=heartbeat_source_id,
+            ),
+        )
+        schedule = ScheduledMessage(
+            schedule_id=schedule_id,
+            schedule_name=schedule_name,
+            management_class=management_class,
+            system_schedule_kind=system_kind,
+            objective_id=body.get("objective_id"),
+            payload=Task(
+                task_type=MessageMetaType.REQUEST,
+                problem_statement=instruction.strip(),
+            ),
+            payload_header=payload_header,
+            payload_meta=payload_meta,
+            interval_ms=interval_ms,
+            cron_expression=cron_expression,
+            cron_timezone=cron_timezone,
+            repeat_count=repeat_count,
+            next_fire_at=next_fire_at,
+            paused_until=paused_until,
+            expires_at_utc=expires_at_utc,
+            enabled=bool(body["enabled"]),
+            schedule_memory=schedule_memory,
+            claim_team_id=person.team_id,
+            claim_named_agent_type=agent_type,
+            claim_agent_id=agent_id,
+        )
+        return schedule, delivery_ref
+
+    def _install(
+        self,
+        actor: InstallActorCheck,
+        body: dict[str, Any],
+        outcome: CommandOutcome,
+        cancelled: Optional[Event],
+        *,
+        resolved_instruction: Optional[str],
+        captured: list[ScheduleInstallResult],
+    ) -> dict[str, Any]:
+        assert actor.person is not None
+        person = actor.person
+        now = self._clock().astimezone(timezone.utc)
+        self._check_permit_source(actor, now)
+        schedule, delivery_ref = self._build_schedule_from_install(
+            actor, body, resolved_instruction=resolved_instruction
+        )
+        allow_team_owner_change = self._authorize_install(
+            actor, body, schedule.management_class, schedule.system_schedule_kind
+        )
+        if cancelled is not None and cancelled.is_set():
+            raise RuntimeError("The schedule install was cancelled before its write.")
+
+        def _check_existing(current: ScheduledMessage) -> None:
+            if not is_system_managed_schedule(current):
+                return
+            if actor.from_gateway:
+                spec = system_schedule_spec(current.effective_system_schedule_kind)
+                if body["mode"] == "refresh" and spec is not None and spec.scope is SystemScheduleScope.PERSON:
+                    return
+                if not self._may_change_system(person):
+                    raise ScheduleInstallRefused("not_allowed", SYSTEM_NOT_ALLOWED_TEXT)
+                return
+            if current.effective_system_schedule_kind in _AGENT_PERSON_SYSTEM_KINDS:
+                if (
+                    current.effective_system_schedule_kind == SystemScheduleKind.OBJECTIVE_WORK_SESSION
+                    and current.objective_id != schedule.objective_id
+                ):
+                    raise ScheduleInstallRefused(
+                        "not_allowed",
+                        "The existing schedule id is not the protected schedule for this Objective.",
+                    )
+                return
+            if not self._may_change_system(person):
+                raise ScheduleInstallRefused("not_allowed", SYSTEM_NOT_ALLOWED_TEXT)
+
+        def _permit_for(current: ScheduledMessage, candidate: ScheduledMessage) -> Any:
+            if body["mode"] == "refresh":
+                return build_schedule_mutation_permit(
+                    schedule=current,
+                    operation=ScheduleMutationOperation.UPDATE,
+                    authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
+                    actor_principal_id=person.person_id,
+                    owner_canonical_user_id=owner_canonical_user_id_for_schedule(current) or person.person_id,
+                    team_id=person.team_id,
+                    candidate=candidate,
+                )
+            if not actor.from_gateway:
+                return build_schedule_mutation_permit(
+                    schedule=current,
+                    operation=ScheduleMutationOperation.UPDATE,
+                    authority_mode=ScheduleMutationAuthorityMode.HELD_ACCESS,
+                    actor_principal_id=str(actor.agent_id or person.person_id),
+                    owner_canonical_user_id=owner_canonical_user_id_for_schedule(current) or person.person_id,
+                    team_id=person.team_id,
+                    candidate=candidate,
+                )
+            return person_schedule_permit(
+                current,
+                person_id=person.person_id,
+                team_id=person.team_id,
+                operation=ScheduleMutationOperation.UPDATE,
+                candidate=candidate,
+            )
+
+        replies: list[dict[str, Any]] = []
+        result = self._store.install(
+            schedule,
+            mode=str(body["mode"]),
+            team_id=person.team_id,
+            owner_id=person.person_id,
+            owner_vouched=True,
+            delivery_ref=delivery_ref,
+            expected_record_digest=body.get("seen_version"),
+            require_seen_version_on_update=actor.from_agent,
+            allow_team_owner_change=allow_team_owner_change,
+            check_existing=_check_existing,
+            system_mutation_permit_fn=_permit_for,
+            command_outcome=_capturing(outcome, replies),
+        )
+        captured.append(result)
+        self._logger.info(
+            "Installed schedule via schedules.install. event=team_schedule_installed schedule_id=%s "
+            "mode=%s state=%s person=%s from_gateway=%s",
+            result.schedule_id,
+            body["mode"],
+            result.state,
+            person.person_id,
+            actor.from_gateway,
+        )
+        return replies[-1]
+
+    def _install_refusal(self, person: CommandPerson, body: dict[str, Any], error: Exception) -> dict[str, Any]:
+        if isinstance(error, ScheduleInstallRefused):
+            if error.outcome == "changed_since_read" and error.current_version:
+                return {
+                    "outcome": "changed_since_read",
+                    "current_version": error.current_version,
+                    "message": str(error),
+                }
+            return _message(error.outcome, str(error))
+        if isinstance(error, (ScheduleWriteConflict, SystemScheduleMutationDenied)):
+            try:
+                current = self._store.read_scheduled_message(str(body["schedule_id"]))
+            except Exception as failure:
+                return self._install_refusal(person, body, failure)
+            if current is None or current.claim_team_id != person.team_id or not schedule_owned_by(
+                current, person_id=person.person_id, action=PRIVATE_READ
+            ):
+                return _message("not_found", NOT_FOUND_TEXT)
+            return {
+                "outcome": "changed_since_read",
+                "current_version": schedule_record_digest(current),
+                "message": CHANGED_TEXT,
+            }
+        if isinstance(error, PermissionError):
+            return _message("not_allowed", str(error))
+        if isinstance(error, ValueError):
+            return _message("invalid_request", str(error))
+        self._logger.error(
+            "A schedule install failed. event=team_schedule_install_failed schedule_id=%s mode=%s "
+            "person=%s error_type=%s",
+            body.get("schedule_id"),
+            body.get("mode"),
+            person.person_id,
+            type(error).__name__,
+            exc_info=error,
+        )
+        return _message("runtime_error", "The schedule was not installed.")
+
     # -- list -------------------------------------------------------------------------
 
     def _list(self, person: CommandPerson, body: dict[str, Any]) -> dict[str, Any]:
@@ -163,6 +704,10 @@ class ScheduleOperations:
             if not schedule_owned_by(schedule, person_id=person.person_id, action=PRIVATE_READ):
                 continue
             if wanted is not None:
+                stored_ref = self._store.delivery_ref_of(schedule.schedule_id)
+                if stored_ref == wanted:
+                    rows.append(schedule)
+                    continue
                 session_key = getattr(getattr(schedule.payload_meta, "gateway_context", None), "session_key", None)
                 if not session_key or self._delivery_refs.ref(str(session_key)) != wanted:  # type: ignore[union-attr]
                     continue
@@ -378,6 +923,75 @@ def _checked_change_reply(action: str, schedule_id: str, write: Any) -> dict[str
     reply = _changed_reply(action, schedule_id, write)
     body_model(f"schedules.{action}.reply")[0].validate_python(reply)
     return reply
+
+
+def _checked_install_reply(result: ScheduleInstallResult) -> dict[str, Any]:
+    reply: dict[str, Any] = {
+        "outcome": "ok",
+        "state": result.state,
+        "schedule_id": result.schedule_id,
+        "timing_revision": int(result.timing_revision),
+        "version": (
+            {"state": "available", "seen_version": result.seen_version}
+            if result.seen_version
+            else {"state": "unavailable"}
+        ),
+    }
+    if result.next_fire_at:
+        reply["next_fire_at"] = _timestamp(result.next_fire_at)
+    body_model("schedules.install.reply")[0].validate_python(reply)
+    return reply
+
+
+def _parse_json_object(raw: Optional[str], *, field_name: str) -> dict[str, Any]:
+    if raw is None or not str(raw).strip():
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except ValueError as exc:
+        raise ScheduleInstallRefused("invalid_request", f"{field_name} must be valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise ScheduleInstallRefused("invalid_request", f"{field_name} must be a JSON object.")
+    return parsed
+
+
+def _parse_run_notes(raw: Any) -> Optional[ScheduleTaskMemory]:
+    if not isinstance(raw, dict):
+        return None
+    policy_raw = raw.get("policy") or {}
+    state_raw = raw.get("state") or {}
+    policy = ScheduleMemoryPolicy(
+        notify=policy_raw.get("notify", "on_change"),
+        notify_on_failure=bool(policy_raw.get("notify_on_failure", False)),
+        evidence_required=str(policy_raw.get("evidence_required") or ""),
+        custom=_parse_json_object(policy_raw.get("custom_json"), field_name="run_notes.policy.custom_json"),
+    )
+    state = ScheduleMemoryState(
+        summary=str(state_raw.get("summary") or ""),
+        confidence=str(state_raw.get("confidence") or "unknown"),
+        last_observed_at=state_raw.get("last_observed_at"),
+        last_changed_at=state_raw.get("last_changed_at"),
+        domain=_parse_json_object(state_raw.get("domain_json"), field_name="run_notes.state.domain_json"),
+    )
+    return ScheduleTaskMemory(
+        schedule_kind=str(raw.get("schedule_kind") or ""),
+        policy=policy,
+        state=state,
+        domain_schema_hint=_parse_json_object(
+            raw.get("domain_schema_hint_json"), field_name="run_notes.domain_schema_hint_json"
+        ),
+    )
+
+
+def _delivery_mode_for(
+    management_class: ScheduleManagementClass,
+    system_kind: Optional[SystemScheduleKind],
+) -> str:
+    if management_class == ScheduleManagementClass.SYSTEM and system_kind is not None:
+        spec = system_schedule_spec(system_kind)
+        if spec is not None and spec.delivery_mode:
+            return str(spec.delivery_mode)
+    return "cron"
 
 
 def _timing(schedule: ScheduledMessage) -> dict[str, Any]:

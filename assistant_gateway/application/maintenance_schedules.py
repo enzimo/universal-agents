@@ -56,13 +56,15 @@ from assistant_gateway.application.request_context import (
     GatewayRequestContextService,
     GatewayRequestRoute,
 )
+from assistant_gateway.application.schedule_management import GatewayDeliveryRefs
+from assistant_gateway.application.team_commands import (
+    GatewayTeamCommandService,
+    TeamCommandRefused,
+    TeamServicesUnavailable,
+)
 from assistant_gateway.domain.sessions import SessionRecord
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.schedule_v1 import ScheduledMessage
-from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
-    MessageMetaType,
     RequesterType,
     ScheduleManagementClass,
     SystemScheduleKind,
@@ -219,6 +221,8 @@ class GatewayMaintenanceScheduleApplication:
         delivery: GatewayDeliveryService,
         manager: GatewayManagerClient,
         id_generator: GatewayIdGenerator,
+        team_commands: GatewayTeamCommandService,
+        delivery_refs: GatewayDeliveryRefs | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._settings = settings
@@ -228,6 +232,8 @@ class GatewayMaintenanceScheduleApplication:
         self._delivery = delivery
         self._manager = manager
         self._id_generator = id_generator
+        self._team_commands = team_commands
+        self._delivery_refs = delivery_refs
         self._logger = logger or logging.getLogger(__name__)
 
     async def ensure_all(self) -> None:
@@ -460,74 +466,70 @@ class GatewayMaintenanceScheduleApplication:
         session: SessionRecord,
         owner_canonical_user_id: str,
     ) -> None:
-        """Send one schedule to the manager, for this owner, delivered through this session."""
+        """Install or refresh one maintenance schedule via ``schedules.install`` on team services."""
 
-        manager_id = self._manager.manager_id
-        if manager_id is None:
-            raise RuntimeError("The manager route became unavailable.")
-        await self._request_context.ensure_signer_ready()
-        correlation_id = self._id_generator.new_correlation_id()
-        payload_header = self._manager_header(manager_id)
+        body: dict[str, object] = {
+            "schedule_id": definition.schedule_id,
+            "mode": definition.install_mode,
+            "name": definition.schedule_name,
+            "management_class": ScheduleManagementClass.SYSTEM.value,
+            "system_schedule_kind": definition.system_schedule_kind.value,
+            "timing": {"kind": "interval", "interval_ms": definition.interval_seconds * 1000},
+            "repeat_count": 0,
+            "enabled": True,
+            "action": {"type": "task", "instruction": {"type": "inline", "text": definition.instruction}},
+        }
+        if definition.target_agent_type:
+            body["worker"] = {"agent_type": definition.target_agent_type}
+        if self._delivery_refs is not None:
+            deliver_to: dict[str, str] = {
+                "delivery_ref": self._delivery_refs.ref(session.session_key),
+                "time_zone": self._settings.request_timezone,
+            }
+            if session.conversation_id:
+                deliver_to["conversation_id"] = session.conversation_id
+            body["deliver_to"] = deliver_to
         try:
-            payload_meta = self._message_meta(
-                session=session,
-                manager_id=manager_id,
-                owner_canonical_user_id=owner_canonical_user_id,
-                correlation_id=correlation_id,
-                definition=definition,
-                requester_type=RequesterType.TIMER_REQUESTER,
-                response_requested=definition.response_requested,
+            reply = await self._team_commands.request(
+                "schedules.install",
+                body,
+                person_id=owner_canonical_user_id,
             )
-            envelope_meta = self._message_meta(
-                session=session,
-                manager_id=manager_id,
-                owner_canonical_user_id=owner_canonical_user_id,
-                correlation_id=correlation_id,
-                definition=definition,
-                requester_type=RequesterType.USER_REQUESTER,
-                response_requested=False,
-            )
-        except GatewayAuthorityTokenUnavailable:
+        except (GatewayAuthorityTokenUnavailable, TeamServicesUnavailable, TeamCommandRefused) as exc:
             self._logger.warning(
-                "Gateway skipped publishing maintenance schedule because its host could not sign "
-                "an authority token yet. event=gateway_maintenance_schedule_signer_unavailable "
-                "schedule_id=%s install_mode=%s person_id=%s",
+                "Gateway skipped installing maintenance schedule because team services or signing "
+                "was unavailable. event=gateway_maintenance_schedule_signer_unavailable "
+                "schedule_id=%s install_mode=%s person_id=%s error=%s",
                 definition.schedule_id,
                 definition.install_mode,
                 owner_canonical_user_id,
+                exc,
             )
             return
-        if definition.target_agent_type:
-            payload_meta.to_named_agent_type = definition.target_agent_type
-            payload_meta.to_agent_name = None
-        schedule_message = ScheduledMessage(
-            schedule_id=definition.schedule_id,
-            schedule_name=definition.schedule_name,
-            claim_named_agent_type=definition.target_agent_type,
-            management_class=ScheduleManagementClass.SYSTEM,
-            system_schedule_kind=definition.system_schedule_kind,
-            payload=Task(
-                task_type=MessageMetaType.REQUEST,
-                problem_statement=definition.instruction,
-            ),
-            payload_header=payload_header,
-            payload_meta=payload_meta,
-            interval_ms=definition.interval_seconds * 1000,
-            repeat_count=None,
-            install_mode=definition.install_mode,
-        )
-        envelope = MessageEnvelope(
-            msg_content=schedule_message,
-            msg_meta=envelope_meta,
-            msg_header=self._manager_header(manager_id),
-        )
+        outcome = str(reply.get("outcome") or "")
+        if outcome != "ok":
+            log = (
+                self._logger.info
+                if definition.install_mode == "refresh" and outcome == "not_found"
+                else self._logger.warning
+            )
+            log(
+                "Team services did not apply maintenance schedule install. "
+                "event=gateway_maintenance_schedule_install_refused "
+                "schedule_id=%s install_mode=%s person_id=%s outcome=%s message=%s",
+                definition.schedule_id,
+                definition.install_mode,
+                owner_canonical_user_id,
+                outcome,
+                reply.get("message") or "",
+            )
+            return
         self._delivery.upsert_scheduled_target(
             scheduled_job_id=definition.schedule_id,
             session_key=session.session_key,
             conversation_id=session.conversation_id,
             owner_canonical_user_id=owner_canonical_user_id,
         )
-        await self._manager.publish_durable(envelope, routing_key=manager_id)
 
     def _message_meta(
         self,

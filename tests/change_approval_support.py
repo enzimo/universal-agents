@@ -45,10 +45,14 @@ OWNER_ROLES = ("owner",)
 
 
 def use_signed_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Trust the test protocol 1 authority and forget identity/access caches from earlier tests."""
+    """Trust the test protocol 1 authority and bind an in-process ``svc.team`` host for ``schedules.install``."""
+
+    from custom_agents import agent_requests
+    from tests.scheduled_run_support import FakeSchedulerHost
 
     forget_task_context_keys()
     use_broker_authority_verifier()
+    monkeypatch.setattr(agent_requests, "_PROCESS_HOST", FakeSchedulerHost())
 
 
 def authorization_config(enabled: bool) -> dict[str, Any]:

@@ -891,7 +891,11 @@ def test_get_runtime_pressure_is_manager_only(tmp_path):
     assert result["manager_only"] is True
 
 
-def test_start_isolated_recovery_tool_queues_fresh_manager_task(tmp_path):
+def test_start_isolated_recovery_tool_queues_fresh_manager_task(tmp_path, monkeypatch):
+    from tests.broker_access_support import signed_task_token
+    from tests.change_approval_support import use_signed_contexts
+
+    use_signed_contexts(monkeypatch)
     task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
     task_manager.set_owner_identity(
         agent_id="manager_agent",
@@ -916,6 +920,10 @@ def test_start_isolated_recovery_tool_queues_fresh_manager_task(tmp_path):
             is_response_requested=True,
             msg_correlation_id="corr_original",
             conversation_id="conversation_original",
+            gateway_context=GatewayContext(
+                canonical_user_id="live-test-user",
+                task_context=signed_task_token("live-test-user", team_id="team_1", roles=("owner",)),
+            ),
         ),
         owner_person_id=None,
     )

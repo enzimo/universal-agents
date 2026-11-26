@@ -104,9 +104,12 @@ def is_schedule_vouched(
     """Whether ``owner_id`` on ``schedule`` is vouched for by trusted installation state.
 
     True when the schedule row carries ``owner_vouched = 1`` (from ``schedules.install``,
-    vouched import, or upgrade conversion), when the schedule is runtime/system-managed,
-    or when its stored ``payload_meta.gateway_context.task_context`` is a verified
-    gateway-signed authority token for ``owner_id``.
+    vouched import, upgrade conversion, or a prior verified gateway token), when the
+    schedule is runtime/system-managed, or when its stored
+    ``payload_meta.gateway_context.task_context`` is a verified gateway-signed authority
+    token for ``owner_id``. When the fallback succeeds, ``owner_vouched = 1`` is recorded
+    durably for ``owner_id`` so future gateway certificate renewals or epoch changes never
+    invalidate the schedule (C25).
     """
 
     if store.is_owner_vouched(schedule_id):
@@ -114,7 +117,9 @@ def is_schedule_vouched(
     if is_system_managed_schedule(schedule):
         return True
     gateway_context = getattr(schedule.payload_meta, "gateway_context", None)
-    return gateway_vouches(gateway_context, owner_id, team_id=team_id, verifier=verifier)
+    if gateway_vouches(gateway_context, owner_id, team_id=team_id, verifier=verifier):
+        return store.mark_owner_vouched(schedule_id, checked_owner=owner_id)
+    return False
 
 
 class SchedulerOperations:
@@ -285,6 +290,14 @@ class SchedulerOperations:
             team_id=self._team_id,
             verifier=self._verifier_fn(),
         ):
+            self._store.set_run_permit(
+                schedule_id,
+                permit=None,
+                owner_permit=None,
+                checked_owner=owner_id,
+                recheck_at=now + RECHECK_REFUSED_AFTER,
+                refusal_reason=REFUSED_NOT_VOUCHED,
+            )
             return {"outcome": "owner_inactive", "message": "The schedule's owner is not vouched for."}
         person_ref = _person_ref_of(self._people, owner_id)
         if person_ref is None:
@@ -446,14 +459,15 @@ class SchedulerOperations:
 
         person_ref, refusal = self._permit_person_ref(schedule_id, schedule, owner)
         if refusal is not None or person_ref is None:
+            reason = refusal or REFUSED_NO_PERSON_REF
             self._store.set_run_permit(
                 schedule_id,
                 permit=None,
                 owner_permit=None,
                 checked_owner=owner,
                 recheck_at=now + RECHECK_REFUSED_AFTER,
+                refusal_reason=reason,
             )
-            reason = refusal or REFUSED_NO_PERSON_REF
             result.refused[schedule_id] = reason
             self._logger.info(
                 "The scheduler issued no run permit for a schedule. event=schedule_permit_refused "

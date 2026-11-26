@@ -397,7 +397,8 @@ def test_schedule_tools_create_pause_resume_disable_and_remove(tmp_path: Path):
     assert listing["schedules"][0]["notify_policy"] == "on_change"
     assert "schedule_memory" not in listing["schedules"][0]
     detail = tool_json(list_scheduled_jobs(schedule_id=schedule_id))["schedules"][0]["detail"]
-    assert "session_sched" in detail["text"]
+    assert "usr_sched_a" in detail["text"]
+    assert "tool schedule" in detail["text"]
     stored = agent._schedule_store.get_scheduled_message(schedule_id)
     assert stored is not None
     assert stored.schedule_memory is not None
@@ -740,12 +741,12 @@ def test_schedule_telemetry_reports_counts_timing_and_scheduler_identity(
     assert schedule["schedule_name"] == "status poll"
     assert schedule["interval_ms"] == 120000
     assert schedule["interval_seconds"] == 120
-    assert schedule["scheduled_by"]["from_agent_id"] == "gateway_queue"
-    assert schedule["scheduled_by"]["from_agent_name"] == "user"
+    assert schedule["scheduled_by"]["from_agent_id"] == "team_services"
+    assert schedule["scheduled_by"]["from_agent_name"] == "team_services"
     assert schedule["scheduled_by"]["followup_to_task_id"].startswith(
         "sched_conv_seed_"
     )
-    assert schedule["target"]["to_routing_path"] == "manager_id"
+    assert schedule["target"]["to_routing_path"] == "++<self>++"
     assert "gateway_context" not in schedule
     assert "schedule_memory" not in schedule
     assert "project status" in schedule["problem_preview"]

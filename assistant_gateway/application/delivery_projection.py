@@ -139,6 +139,16 @@ class GatewayDeliveryProjection:
                 metadata.conversation_id,
                 session_key,
             )
+        if session_key is None and metadata.scheduled_job_id:
+            target = self._delivery.get_scheduled_target(metadata.scheduled_job_id)
+            if target is not None and target.session_key:
+                person = (
+                    getattr(metadata.gateway_context, "canonical_user_id", None)
+                    if metadata.gateway_context
+                    else None
+                )
+                if not person or not target.owner_canonical_user_id or person == target.owner_canonical_user_id:
+                    session_key = target.session_key
         session = self._sessions.get_session(session_key) if session_key else None
         if session is None and metadata.conversation_id:
             session = self._sessions.get_session_by_conversation_id(

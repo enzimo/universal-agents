@@ -165,6 +165,7 @@ def _lead(tmp_path: Path, store: ScheduleStore):
         )
     agent.team_comms = SimpleNamespace(send_message=AsyncMock(return_value=1))
     agent._schedule_store = store
+    set_agent_ref(agent)
     return agent
 
 
@@ -177,7 +178,11 @@ def _persons_running_task(agent: Any, person: str) -> tuple[Task, MessageHeader,
         is_response_requested=True,
         msg_correlation_id=f"corr_{person}",
         conversation_id=f"conv_{person}",
-        gateway_context=GatewayContext(canonical_user_id=person, session_key=f"session_{person}"),
+        gateway_context=GatewayContext(
+            canonical_user_id=person,
+            session_key=f"session_{person}",
+            task_context=signed_task_token(person, team_id=TEAM, roles=("owner",)),
+        ),
     )
     manager = agent.task_manager
     assert manager.add_task(task, header, meta, owner_person_id=None)
