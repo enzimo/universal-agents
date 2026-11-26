@@ -44,6 +44,13 @@ class TaskAnswer(BaseModel):
     )
 
 
+# History entry ``details`` key set by ``TaskManager._bubble_subtask_entries``
+# on copies of a child task's entries bubbled into its parent's history.
+# Readers that count a task's own events (turn notes, kept files, wait budgets)
+# skip entries carrying this key.
+BUBBLED_ENTRY_ID_KEY = "bubbled_entry_id"
+
+
 class TaskHistoryEntry(BaseModel):
     """
     A structured timeline entry capturing an important execution moment for a task.
