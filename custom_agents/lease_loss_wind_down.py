@@ -15,11 +15,15 @@ refused to start a replacement for the live worker. The wind-down instead:
    instead: handing it back made another worker run it again and send a second
    answer (2026-10-17);
 3. keeps tasks that already started and now wait on a person, a subtask or a
-   timed wait, because their replies or paused turns live on this worker; they
-   may finish here until ``lease_loss_wait_timeout_seconds`` after the lease
-   was lost (the wind-down loop resumes due timed waits because the scheduler
-   loop has stopped), after which they fail with an explanation to the
-   requester;
+   timed wait that can finish before ``lease_loss_wait_timeout_seconds``,
+   because their replies or paused turns live on this worker; they may finish
+   here until ``lease_loss_wait_timeout_seconds`` after the lease was lost (the
+   wind-down loop resumes due timed waits because the scheduler loop has
+   stopped), after which remaining waits fail with an explanation to the
+   requester. Any ``WAITING`` timed wait whose saved ``resume_at`` is already
+   after the wind-down deadline (with no held answer and not yet resumed) fails
+   at once—at classification and on each poll—instead of holding the old worker
+   until the deadline;
 4. exits once it holds no unfinished task.
 
 The worker keeps publishing presence while it winds down so a starting worker
@@ -29,6 +33,7 @@ of the same type does not adopt tasks this worker is still finishing.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -45,7 +50,11 @@ from custom_agents.task_human_interaction_blockers import (
     is_timed_wait_blocker,
 )
 from custom_agents.task_records import TaskInfo
-from custom_agents.timed_wait_runtime import resume_due_timed_waits
+from custom_agents.task_steering_runtime import discard_task_steering_state
+from custom_agents.timed_wait_runtime import (
+    fail_timed_wait_outlasting_deadline,
+    resume_due_timed_waits,
+)
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
@@ -234,6 +243,7 @@ async def _run_wind_down(agent: Any, state: LeaseLossWindDown) -> None:
         for task_info in custody.not_started:
             await _hand_back_unstarted_task(agent, state, task_info)
         await _hand_back_deferred_requests(agent, state)
+        await _fail_hopeless_timed_waits(agent, state, custody.resumable)
         await _wait_for_resumable_tasks(agent, state)
     except asyncio.CancelledError:
         raise
@@ -450,6 +460,100 @@ async def _hand_back_deferred_requests(agent: Any, state: LeaseLossWindDown) -> 
         await inbox.remove_messages(handed_back_ids)
 
 
+def _early_timed_wait_wind_down_message(blocker: Mapping[str, Any]) -> str:
+    """Accurate requester message when a timed wait outlasts the worker's shutdown deadline."""
+
+    raw_minutes = blocker.get("minutes")
+    if isinstance(raw_minutes, int) and not isinstance(raw_minutes, bool) and raw_minutes >= 1:
+        duration = "1 minute" if raw_minutes == 1 else f"{raw_minutes} minutes"
+        return (
+            f"This task paused for {duration}, but its worker is shutting down before the wait ends, "
+            "so the task was stopped. Ask again to rerun it."
+        )
+    return (
+        "This task was paused on a timed wait, but its worker is shutting down before the wait ends, "
+        "so the task was stopped. Ask again to rerun it."
+    )
+
+
+def _deadline_timed_wait_wind_down_message(waited_minutes: int) -> str:
+    """Requester message when a timed wait still has not finished at the wind-down deadline."""
+
+    return (
+        "This task was paused on a timed wait when its worker lost its launch lease. "
+        f"The wait did not finish within {waited_minutes} minutes, so the task ended without a result."
+    )
+
+
+async def _send_wind_down_error_response(
+    agent: Any, state: LeaseLossWindDown, task_info: TaskInfo, message: str
+) -> None:
+    try:
+        await agent._send_task_error_response(
+            task_info.task, task_info.header, task_info.meta, message
+        )
+    except Exception:
+        agent._logger.warning(
+            "Could not send wind-down failure response to requester. "
+            "event=worker_wind_down_error_response_failed agent_id=%s task_id=%s launch_id=%s",
+            agent.id,
+            task_info.task.task_id,
+            state.evidence.launch_id,
+            exc_info=True,
+        )
+
+
+async def _fail_hopeless_timed_waits(
+    agent: Any, state: LeaseLossWindDown, candidates: Sequence[TaskInfo]
+) -> set[str]:
+    """Fail any WAITING timed wait whose resume time is past ``state.deadline`` at once.
+
+    Errors are isolated per task so one storage or transport fault never blocks
+    handbacks, other waiting tasks, or the wind-down poll loop; a task whose
+    failure was not saved stays in ``state.resumable_task_ids`` for retry.
+    """
+
+    handled: set[str] = set()
+    for task_info in candidates:
+        task_id = task_info.task.task_id
+        try:
+            outcome = await fail_timed_wait_outlasting_deadline(
+                agent,
+                task_id,
+                deadline=state.deadline,
+                message_for_blocker=_early_timed_wait_wind_down_message,
+                discard_steering=discard_task_steering_state,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            agent._logger.warning(
+                "Could not fail a timed wait outlasting the wind-down deadline; retrying on the next poll. "
+                "event=worker_wind_down_timed_wait_fail_error agent_id=%s task_id=%s launch_id=%s",
+                agent.id,
+                task_id,
+                state.evidence.launch_id,
+                exc_info=True,
+            )
+            continue
+        if outcome is None:
+            continue
+        state.resumable_task_ids.discard(task_id)
+        handled.add(task_id)
+        agent._logger.warning(
+            "Waiting task failed immediately because its timed wait outlasts the wind-down deadline. "
+            "event=worker_wind_down_timed_wait_outlasts_deadline agent_id=%s task_id=%s "
+            "resume_at=%s deadline=%s",
+            agent.id,
+            task_id,
+            outcome.resume_at,
+            state.deadline.isoformat(),
+        )
+        await _stop_pending_subtasks(agent, task_id, reason=outcome.message)
+        await _send_wind_down_error_response(agent, state, outcome.task_info, outcome.message)
+    return handled
+
+
 async def _wait_for_resumable_tasks(agent: Any, state: LeaseLossWindDown) -> None:
     """Let started tasks finish here until the deadline, then fail the rest."""
 
@@ -462,6 +566,9 @@ async def _wait_for_resumable_tasks(agent: Any, state: LeaseLossWindDown) -> Non
             return
         if datetime.now(timezone.utc) >= state.deadline:
             await _end_at_deadline(agent, state, remaining)
+            return
+        failed_early = await _fail_hopeless_timed_waits(agent, state, remaining)
+        if failed_early and all(info.task.task_id in failed_early for info in remaining):
             return
         # The scheduler loop has already stopped during wind-down, so this loop
         # resumes any timed wait that comes due before the deadline.
@@ -510,10 +617,7 @@ async def _fail_waiting_task(
         partial(get_human_interaction_blocker, agent.task_manager), task_id
     )
     if is_timed_wait_blocker(blocker):
-        message = (
-            f"This task was paused on a timed wait when its worker lost its launch lease. "
-            f"The wait did not finish within {waited_minutes} minutes, so the task ended without a result."
-        )
+        message = _deadline_timed_wait_wind_down_message(waited_minutes)
     else:
         message = (
             f"This task was waiting for a reply from a person or a delegated subtask "
@@ -531,6 +635,7 @@ async def _fail_waiting_task(
         message,
         datetime.now(timezone.utc).isoformat(),
     )
+    await discard_task_steering_state(agent, task_id=task_id, reason="wind_down_wait_expired")
     agent._logger.warning(
         "Waiting task failed after the wind-down deadline. "
         "event=worker_wind_down_wait_expired agent_id=%s task_id=%s prior_state=%s "
@@ -541,9 +646,7 @@ async def _fail_waiting_task(
         failed,
     )
     if failed:
-        await agent._send_task_error_response(
-            task_info.task, task_info.header, task_info.meta, message
-        )
+        await _send_wind_down_error_response(agent, state, task_info, message)
 
 
 async def _stop_pending_subtasks(agent: Any, task_id: str, *, reason: str) -> None:

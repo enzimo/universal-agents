@@ -150,7 +150,7 @@ def record_blocker_with_history(
     task was released during the write (``TaskCustodyTakenOver``).
     """
 
-    from custom_agents.task_manager import build_task_history_entry
+    from custom_agents.task_state_transitions import build_task_history_entry
 
     task_info = host.get_task_info(task_id)
     if task_info is None:

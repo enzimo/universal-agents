@@ -14,10 +14,11 @@ Both tools pause the active turn with a local Strands interrupt
   history entry are the single source of truth (including for a wait deferred
   behind an earlier pause whose reused Strands ``Interrupt`` object still holds
   its first call's payload) and re-checks the recurring-schedule next-run rule
-  against that ``resume_at``. ``write_timed_wait`` writes the
-  ``timed_wait_started`` history entry (the budget charge) and saves the
-  blocker record *before* ``ProgressState.WAITING`` is persisted, so a crash
-  after pausing can never leave a ``WAITING`` task without its blocker. A
+  against that ``resume_at``. ``write_timed_wait`` persists the
+  ``timed_wait_started`` history entry (the budget charge) and the blocker
+  record together in one persisted write (``record_blocker_with_history``)
+  *before* ``ProgressState.WAITING`` is saved, so a crash can neither leave a
+  charge without a blocker nor leave a ``WAITING`` task without its blocker. A
   re-raise of an already-charged ``call_id`` adds no second charge and restores
   an unmarked blocker with the original times. After ``WAITING`` is saved,
   ``finish_timed_wait`` wakes the scheduler loop (or, if the wait was refused
@@ -43,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -63,6 +65,7 @@ from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_human_interaction_blockers import (
     TIMED_WAIT_BLOCKER,
     answer_held,
+    clear_human_interaction_blocker,
     get_human_interaction_blocker,
     is_timed_wait_blocker,
     record_blocker_with_history,
@@ -499,14 +502,11 @@ async def write_timed_wait(agent: Any, decision: TimedWaitDecision) -> bool:
         assert decision.history_details is not None
         # Persist the budget charge (history) and the blocker record in one atomic write.
         written = await run_ops(
-            partial(
-                record_blocker_with_history,
-                manager,
-                decision.task_id,
-                record,
-                history_summary=record["summary"],
-                history_details=decision.history_details,
-            )
+            partial(record_blocker_with_history, manager),
+            decision.task_id,
+            record,
+            history_summary=record["summary"],
+            history_details=decision.history_details,
         )
         if not written:
             return False
@@ -957,10 +957,95 @@ async def seconds_until_next_resume(agent: Any, *, now: datetime | None = None) 
     return result
 
 
+# -- wind-down early failure for timed waits past a shutdown deadline ------------------------
+
+
+@dataclass(frozen=True)
+class HopelessTimedWaitFailure:
+    """Outcome of failing a WAITING timed wait whose resume time outlasts a shutdown deadline."""
+
+    task_info: Any
+    resume_at: str
+    message: str
+
+
+def _hopeless_timed_wait_snapshot(
+    agent: Any,
+    manager: Any,
+    task_id: str,
+    deadline_utc: datetime,
+) -> tuple[Any, dict[str, Any]] | None:
+    """Return ``(task_info, blocker)`` if ``task_id`` is an unheld WAITING timed wait past ``deadline_utc``."""
+
+    task_info = manager.get_task_info(task_id)
+    if task_info is None or task_info.state != ProgressState.WAITING:
+        return None
+    if task_id in manager.task_state.task_queue:
+        return None
+    blocker = get_human_interaction_blocker(manager, task_id)
+    if blocker is None or not is_timed_wait_blocker(blocker):
+        return None
+    target = resume_at_of(blocker)
+    if target is None or target <= deadline_utc:
+        return None
+    if answer_held(blocker):
+        return None
+    if task_id in (getattr(agent, "_pending_interrupt_responses", None) or {}):
+        return None
+    return task_info, blocker
+
+
+async def fail_timed_wait_outlasting_deadline(
+    agent: Any,
+    task_id: str,
+    *,
+    deadline: datetime,
+    message_for_blocker: Callable[[Mapping[str, Any]], str],
+    discard_steering: Callable[..., Awaitable[Any]] | None = None,
+) -> HopelessTimedWaitFailure | None:
+    """Fail ``task_id`` under its timed-wait lock if it is an unheld WAITING wait past ``deadline``.
+
+    Holds the per-task lock only across the re-check, ``fail_task``, and local
+    steering/blocker cleanup; callers perform network notifications (stopping
+    subtasks, sending the requester error response) after this returns.
+    """
+
+    manager = getattr(agent, "task_manager", None)
+    if manager is None:
+        return None
+    run_ops = manager.operations_runtime.run
+    deadline_utc = deadline.astimezone(timezone.utc)
+    async with _lock(agent, task_id):
+        found = await run_ops(partial(_hopeless_timed_wait_snapshot, agent, manager), task_id, deadline_utc)
+        if found is None:
+            return None
+        task_info, blocker = found
+        message = message_for_blocker(blocker)
+        now_iso = timed_waits_rules.utc_now().isoformat()
+        failed = bool(await run_ops(manager.fail_task, task_id, message, now_iso))
+        if not failed:
+            return None
+        if discard_steering is not None:
+            await discard_steering(
+                agent,
+                task_id=task_id,
+                reason="wind_down_timed_wait_outlasts_deadline",
+            )
+        else:
+            await run_ops(partial(clear_human_interaction_blocker, manager), task_id)
+        return HopelessTimedWaitFailure(
+            task_info=task_info,
+            resume_at=str(blocker.get("resume_at") or ""),
+            message=message,
+        )
+
+
 __all__ = [
+    "HopelessTimedWaitFailure",
     "TimedWaitDecision",
     "check_schedule_next_run",
     "decide_timed_wait",
+    "fail_timed_wait_outlasting_deadline",
     "finish_timed_wait",
     "resume_due_timed_waits",
     "resume_without_paused_turn",

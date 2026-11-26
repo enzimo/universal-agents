@@ -1458,6 +1458,14 @@ async def test_b2_charge_and_blocker_saved_in_one_write_and_failure_rolls_back_c
     saved_blocker = get_human_interaction_blocker(manager, TASK_ID)
     assert saved_blocker is not None and saved_blocker["call_id"] == "call-after-restart"
 
+    # C11: prove both the budget charge and the blocker record arrived on disk together.
+    reloaded_after = TaskManager(db_path=str(db_path))
+    reloaded_after.set_owner_identity(AGENT_ID, "Worker", TEST_TEAM, "Worker")
+    reloaded_after.restore_runtime_state()
+    assert WaitLedger.from_history(reloaded_after.get_task_info(TASK_ID)).total_minutes == 10
+    reloaded_blocker = get_human_interaction_blocker(reloaded_after, TASK_ID)
+    assert reloaded_blocker is not None and reloaded_blocker["call_id"] == "call-after-restart"
+
 
 @pytest.mark.asyncio
 async def test_b2_custody_loss_during_stage_timed_wait_guards_rollback_and_skips_wake(

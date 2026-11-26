@@ -6,9 +6,13 @@ TeamLead's turn with a local Strands interrupt (``TOOL_SETUP_RUN_KIND``); it
 never asks the person whether to start. This module does the rest, in trusted
 code:
 
-- **Begin** (``begin_run``, from ``task_steering_runtime`` when the turn
-  pauses): records the task's blocker, so recovery and status summaries know
-  the task waits, and opens every piece that may start now.
+- **Begin** (``stage_run`` before ``ProgressState.WAITING`` and ``start_run``
+  after it, from ``task_steering_runtime`` when the turn pauses): ``stage_run``
+  persists the task's blocker record and updates ``run.interrupt_id`` before
+  ``WAITING`` so a crash around pausing never leaves an unblocked waiting task;
+  ``start_run`` then announces the workflow link and opens every piece that may
+  start now. If a crash skips ``start_run``, recovery announces the workflow
+  once before advancing or waiting.
 - **Open pieces** (``advance``): each setup page or external step is one
   ``ToolSetupRequestV1`` sent to the gateway's route for the person's chat,
   the same route the removed ``tool_setup_request`` model action used
@@ -253,15 +257,6 @@ async def start_run(agent: Any, *, task_id: str, run_id: str) -> None:
         len(run.pieces),
     )
     await advance(agent, run_id)
-
-
-async def begin_run(agent: Any, *, task_id: str, interrupt_id: str, reason: dict[str, Any], msg_meta: Any) -> None:
-    """The turn paused on a run: record the wait, then open what may start now."""
-
-    run_id = await stage_run(
-        agent, task_id=task_id, interrupt_id=interrupt_id, reason=reason, msg_meta=msg_meta
-    )
-    await start_run(agent, task_id=task_id, run_id=run_id)
 
 
 # -- telling the person --------------------------------------------------------------------
@@ -672,33 +667,47 @@ async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any, *, wa
     # (the mark's compare-and-set, the note path's conditional removal) lets
     # only one caller through even without the lock.
     async with _lock(agent, run.run_id):
-        blocker = await manager.operations_runtime.run(partial(get_human_interaction_blocker, manager), run.task_id)
+        current = await _load(agent, run.run_id) or run
+        blocker = await manager.operations_runtime.run(
+            partial(get_human_interaction_blocker, manager), current.task_id
+        )
         # Only the task's own wait is answered.
-        if not is_setup_run_blocker(blocker, run.run_id):
-            logger.info("No task waits on this setup run. event=tool_setup_run_not_waited run_id=%s", run.run_id)
+        if not is_setup_run_blocker(blocker, current.run_id):
+            logger.info("No task waits on this setup run. event=tool_setup_run_not_waited run_id=%s", current.run_id)
             return False
-        if paused_turn_waits(agent, run.task_id, run.interrupt_id):
+        if paused_turn_waits(agent, current.task_id, current.interrupt_id):
             if answer_held(blocker):
                 return False  # answered already: the answer waits for the lane, or the lane is resuming it
-            return await _answer_paused_turn(agent, run)
-        result = await asyncio.to_thread(outcome_for, agent, run)
+            return await _answer_paused_turn(agent, current)
+        task_info = await manager.operations_runtime.run(manager.get_task_info, current.task_id)
+        if task_info is not None and await manager.operations_runtime.run(manager.is_executing_state, task_info.state):
+            logger.warning(
+                "Task is still in an executing state with a setup-run record and no matching paused turn; "
+                "leaving for recovery pass. event=tool_setup_run_executing_with_blocker "
+                "run_id=%s task_id=%s state=%s",
+                current.run_id,
+                current.task_id,
+                task_info.state.value,
+            )
+            return False
+        result = await asyncio.to_thread(outcome_for, agent, current)
         resumed = await resume_from_note(
             agent,
-            task_id=run.task_id,
+            task_id=current.task_id,
             kind=SETUP_RUN_BLOCKER,
-            wait_id=run.run_id,
+            wait_id=current.run_id,
             note=RUN_ENDED_NOTE + json.dumps(result, sort_keys=True),
             history="Tool setup ended; the task resumes.",
-            history_details={"event": "tool_setup_run_resume", "run_id": run.run_id},
+            history_details={"event": "tool_setup_run_resume", "run_id": current.run_id},
             log=_SETUP_WAIT_LOG,
             wake=wake,
         )
     if resumed:
         logger.info(
             "A setup run ended; the task resumes from a note. event=tool_setup_run_ended run_id=%s task_id=%s status=%s",
-            run.run_id,
-            run.task_id,
-            run.status,
+            current.run_id,
+            current.task_id,
+            current.status,
         )
     return resumed
 
@@ -993,7 +1002,6 @@ __all__ = [
     "PageResultOutcome",
     "advance",
     "apply_page_result",
-    "begin_run",
     "complete_access_steps",
     "continue_after_page_result",
     "mark_page_result_handled",

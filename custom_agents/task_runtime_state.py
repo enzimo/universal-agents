@@ -72,6 +72,25 @@ class TurnStartNotes:
         return cls(task_id, resume_directive, partial_tool_call_limit)
 
 
+def add_runtime_resume_directive(
+    state: TaskRuntimeState, task_id: str, directive: str
+) -> bool:
+    """Append ``directive`` to ``task_id``'s resume note with whole-block deduplication.
+
+    Returns True when the stored note changed. Lives beside
+    ``release_turn_start_notes`` so single-write persistence paths share one
+    in-memory rule with ``TaskManager.append_runtime_resume_directive``.
+    """
+    text = str(directive or "").strip()
+    earlier = state.runtime_resume_directives.get(task_id, "").strip()
+    # Match the entire note between the separators, including all of its
+    # paragraphs, rather than dropping a prefix, suffix or substring.
+    if not text or f"\n\n{text}\n\n" in f"\n\n{earlier}\n\n":
+        return False
+    state.runtime_resume_directives[task_id] = f"{earlier}\n\n{text}" if earlier else text
+    return True
+
+
 def release_turn_start_notes(
     state: TaskRuntimeState, notes: TurnStartNotes, logger: logging.Logger
 ) -> bool:
