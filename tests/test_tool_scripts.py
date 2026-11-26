@@ -253,7 +253,9 @@ def test_a_real_team_lead_chains_index_tools_in_one_script_without_loading_them(
     [payload] = results
     assert "run_tool_script" in first and "describe_tools" in first
     assert "get_self_status" not in first and "calculator" not in first, "both wait in the index"
-    assert "- get_self_status [script]:" in inner.system_prompt and "- calculator [script]:" in inner.system_prompt
+    prompt_lines = inner.system_prompt.splitlines()
+    assert any(line.startswith("- get_self_status(") and ") [script]:" in line for line in prompt_lines)
+    assert any(line.startswith("- calculator(expression,") and ") [script]:" in line for line in prompt_lines)
     assert payload["status"] == "success", payload
     assert payload["result"]["total"] and payload["result"]["status_kind"] in {"dict", "str", "list"}
     assert "changes things" in payload["result"]["write"]

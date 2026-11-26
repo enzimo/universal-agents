@@ -142,6 +142,23 @@ def _found_tool(tool_def: Any, functions: list[str], held: AccessLevel | None, l
     return found
 
 
+def _shown_candidate(catalog: Any, tool_def: Any, withheld: frozenset[str]) -> tuple[Any, list[str]] | None:
+    """A catalog tool and the functions find_tools reports for it, or None when this setting withholds them all.
+
+    An MCP server's functions are its discovered tools, ``<prefix>_<tool>``. Withheld
+    functions (call_tool in full_definitions, run_tool_script when scripts are off) are
+    left out, and a tool whose every function is withheld is not offered at all. An MCP
+    server with no tools discovered yet has no catalog functions, so it stays listed
+    with its load status.
+    """
+
+    own = functions_of_tools(catalog, {tool_def.tool_id})
+    mcp = mcp_function_names(catalog, tool_def.tool_id)
+    if own and own <= withheld and not mcp:
+        return None
+    return tool_def, sorted((own - withheld) | mcp)
+
+
 def _find_with_authorization(agent: Any, query: str) -> list[dict[str, Any]]:
     from custom_agents.mcp_server_tools import server_status
     from custom_agents.tool_loading import hidden_tool_ids
@@ -154,15 +171,10 @@ def _find_with_authorization(agent: Any, query: str) -> list[dict[str, Any]]:
     hidden = hidden_tool_ids(agent, catalog)
     withheld = withheld_functions(agent, catalog)
     grants = requests.service.agent_grants(principal, task_id=task_id, person_id=person_id)
-    # An MCP server's functions are its discovered tools, <prefix>_<tool>.
-    # Withheld functions (such as call_tool in full_definitions or run_tool_script when scripts are off)
-    # are left out so find_tools reflects what this setting actually shows.
     candidates = [
-        (
-            tool_def,
-            sorted((functions_of_tools(catalog, {tool_def.tool_id}) - withheld) | mcp_function_names(catalog, tool_def.tool_id)),
-        )
+        candidate
         for tool_def in sorted(catalog.tools.values(), key=lambda t: t.tool_id)
+        if (candidate := _shown_candidate(catalog, tool_def, withheld)) is not None
     ]
     results: list[dict[str, Any]] = []
     for tool_def, functions in _best_matches(candidates, query):
@@ -433,6 +445,28 @@ def _closest_names(name: str, known: set[str]) -> list[str]:
     return difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.5)
 
 
+WITHHELD_FUNCTION_ERROR = "Not available with this team's tool presentation setting."
+
+
+def _described_entry(
+    name: str, tools: Any, catalog: Any, held: set[str], withheld: frozenset[str], *, scripts: bool
+) -> dict[str, Any]:
+    """What describe_tools answers for one name; a withheld function is not described."""
+
+    from custom_agents.tool_index import described
+
+    if name in withheld:
+        return {"name": name, "error": WITHHELD_FUNCTION_ERROR}
+    tool_def = tools.get(name)
+    if tool_def is None:
+        return {"name": name, "error": "No tool function has this name.", "closest": _closest_names(name, set(tools) - withheld)}
+    entry = described(name, tool_def, catalog, scripts=scripts)
+    entry["you_hold_it"] = name in held
+    if not entry["you_hold_it"]:
+        entry["how_to_get"] = "find_tools shows whether you may use it and how to ask for access."
+    return entry
+
+
 @tool
 def describe_tools(names: list[str]) -> str:
     """Get the exact inputs of tool functions before calling them, such as names=['knowledge_search'].
@@ -446,7 +480,7 @@ def describe_tools(names: list[str]) -> str:
 
     from custom_agents.access_runtime import runtime_access
     from custom_agents.strands_parts import current_parts
-    from custom_agents.tool_index import described, held_functions
+    from custom_agents.tool_index import held_functions
     from custom_agents.tool_presentation import scripts_enabled
     from custom_tools.tool_lookup import trusted_tools
     from custom_tools.providers.access import _guarded
@@ -461,31 +495,7 @@ def describe_tools(names: list[str]) -> str:
         held = held_functions(agent, current_parts(agent))
         withheld = withheld_functions(agent, catalog)
         scripts = scripts_enabled(agent)
-        results: list[dict[str, Any]] = []
-        for name in wanted[:MAX_DESCRIBED]:
-            if name in withheld:
-                results.append(
-                    {
-                        "name": name,
-                        "error": "Not available with this team's tool presentation setting.",
-                    }
-                )
-                continue
-            tool_def = tools.get(name)
-            if tool_def is None:
-                results.append(
-                    {
-                        "name": name,
-                        "error": "No tool function has this name.",
-                        "closest": _closest_names(name, set(tools) - withheld),
-                    }
-                )
-                continue
-            entry = described(name, tool_def, catalog, scripts=scripts)
-            entry["you_hold_it"] = name in held
-            if not entry["you_hold_it"]:
-                entry["how_to_get"] = "find_tools shows whether you may use it and how to ask for access."
-            results.append(entry)
+        results = [_described_entry(name, tools, catalog, held, withheld, scripts=scripts) for name in wanted[:MAX_DESCRIBED]]
         payload: dict[str, Any] = {"tools": results}
         if len(wanted) > MAX_DESCRIBED:
             payload["not_described"] = wanted[MAX_DESCRIBED:]

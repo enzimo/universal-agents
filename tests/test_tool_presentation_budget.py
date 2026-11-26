@@ -1,8 +1,10 @@
 """What each role's first request carries in tool definitions, per tool presentation (scripts/measure_tool_context.py).
 
 The tool index experiment merges only if it saves context; these checks keep
-the measured savings from eroding as tools are added. Numbers on 2026-11-26:
-worker 11,665 -> 4,173 tokens, team lead 18,641 -> 7,637, system 15,135 -> 4,445.
+the measured savings from eroding as tools are added. Numbers on 2026-11-26
+with compact index signatures and ``call_tool``:
+worker 11,665 -> 4,561 / 4,919 tokens, team lead 18,641 -> 8,748 / 9,229,
+system 15,135 -> 4,960 / 5,353.
 """
 
 from __future__ import annotations

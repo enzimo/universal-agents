@@ -205,14 +205,28 @@ experiment setting while its effect is measured:
 - `full_definitions` (default): every tool the agent holds is sent with its full
   definition, except the groups that load on request.
 - `index`: only a small core keeps full definitions (messages to the person,
-  files, finding tools, asking for access, the plan and the task queue). Every
-  other tool the agent holds is listed in one line in its instructions and is
-  loaded when the agent needs it.
+  files, finding and calling tools, asking for access, the plan and the task
+  queue). Every other tool the agent holds is listed in one line with a compact
+  input signature in its instructions, and the agent can call any listed
+  function in one step through `call_tool(name, inputs)` without loading its
+  group first. Tools already in the agent's tool list and MCP server tools are
+  still called directly (`use_tools` loads MCP server groups or full definitions
+  when needed).
 - `index_and_scripts`: like `index`, and agents may also run a short script that
   chains read-only tool lookups in one step. The script runs in the code
   sandbox with no files and no network, so this needs the sandbox on.
 
-Access does not change with this setting: every tool call is still checked.
+Measured first-request tool context per role (`scripts/measure_tool_context.py`,
+`o200k_base` tokens):
+
+| Role | `full_definitions` | `index` | `index_and_scripts` |
+| --- | ---: | ---: | ---: |
+| `worker` | 11,665 tokens (47 shown) | 4,561 tokens (20 shown, 28 indexed) | 4,919 tokens (21 shown, 28 indexed) |
+| `team_lead` | 18,641 tokens (77 shown) | 8,748 tokens (31 shown, 92 indexed) | 9,229 tokens (32 shown, 92 indexed) |
+| `system` | 15,135 tokens (57 shown) | 4,960 tokens (20 shown, 38 indexed) | 5,353 tokens (21 shown, 38 indexed) |
+
+Access does not change with this setting: every tool call is still checked,
+including calls made through `call_tool`.
 
 ## Instance Folders
 
