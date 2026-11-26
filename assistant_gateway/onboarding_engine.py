@@ -91,6 +91,8 @@ AGENT_RUNTIME_TEMPLATE_KEYS = {
     "same_role_runtime_takeover_enabled",
     "max_tool_calls_per_task",
     "max_tool_result_tokens_per_call",
+    "max_wait_minutes_without_approval",
+    "max_wait_minutes_with_approval",
     "runtime_budget_policy",
     "turn_action_outbox",
     "runtime_coordinator",

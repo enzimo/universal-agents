@@ -108,6 +108,7 @@ from custom_agents.memory_review_runtime import memory_review_notification_instr
 from custom_agents.memory_plugins.manager import MemoryPluginManager
 from runtime_settings.governance import MAX_RETENTION_DAYS
 from runtime_settings.memory import MemoryConfig
+from runtime_settings.timed_waits import TimedWaitLimits
 from custom_agents.automation_runtime import handle_automation_message
 from custom_agents.agent_instructions import MESSAGE_FILL_NAME
 from custom_agents.agent_result_transformers import load_agent_result_transformer
@@ -953,6 +954,13 @@ class UniversalAgent(BaseModel):
         description=(
             "Number of later Strands messages to keep full provider reasoning traces for tool-call "
             "continuation. None disables pruning."
+        ),
+    )
+    timed_wait_limits: TimedWaitLimits = Field(
+        default_factory=TimedWaitLimits,
+        description=(
+            "How long one task may pause itself in total with wait and long_wait "
+            "(agent.max_wait_minutes_without_approval and agent.max_wait_minutes_with_approval)."
         ),
     )
     subtask_timeout_seconds: Optional[float] = Field(

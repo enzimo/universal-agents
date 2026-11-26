@@ -27,6 +27,7 @@ from default_values import (
     TRANSPORT_DEFAULTS,
 )
 from runtime_settings.instance_layout import InstanceLayout
+from runtime_settings.timed_waits import TimedWaitLimits
 from custom_agents.lease_loss_wind_down import is_winding_down
 from custom_agents.agent_instantiation_skill import (
     ensure_runtime_agent_instantiation_skill,
@@ -836,6 +837,14 @@ def create_strands_agent(config: dict):
             ),
         ),
         "default_request_timezone": config.get("default_request_timezone"),
+        "timed_wait_limits": TimedWaitLimits(
+            without_approval=config.get(
+                "max_wait_minutes_without_approval", AGENT_DEFAULTS.max_wait_minutes_without_approval.value
+            ),
+            with_approval=config.get(
+                "max_wait_minutes_with_approval", AGENT_DEFAULTS.max_wait_minutes_with_approval.value
+            ),
+        ),
         "subtask_timeout_seconds": config.get(
             "subtask_timeout_seconds",
             AGENT_DEFAULTS.subtask_timeout_seconds.value,

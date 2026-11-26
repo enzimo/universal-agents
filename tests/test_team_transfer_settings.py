@@ -148,7 +148,7 @@ def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tm
     ).heartbeat.interval_seconds
 
 
-@pytest.mark.parametrize("exported_version", [5, 6, 7, 8])
+@pytest.mark.parametrize("exported_version", [5, 6, 7, 8, 9])
 def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defaults(
     tmp_path: Path, exported_version: int
 ) -> None:
@@ -156,7 +156,8 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
 
     Version 8 predates the skill semantic-review settings, so its import keeps
     the review turned off even when the team changed another skill
-    installation setting.
+    installation setting. Version 9 predates the wait limits, so its import
+    gets the defaults (20 and 1440 minutes).
     """
 
     from assistant_gateway.config import GatewayInstanceConfig
@@ -197,6 +198,30 @@ def test_a_previous_export_keeps_its_values_and_the_new_settings_keep_their_defa
     skill_installation = imported.workspace.skill_installation
     assert skill_installation.safe_max_score == (10 if exported_version == 8 else 20)
     assert skill_installation.semantic_review.model_dump() == {"mode": "off", "max_input_bytes": 262144}
+    assert (imported.agent.max_wait_minutes_without_approval, imported.agent.max_wait_minutes_with_approval) == (20, 1440)
+
+
+def test_changed_wait_limits_move_with_the_team(tmp_path: Path) -> None:
+    """This version's export carries the operator's wait limits, and the import applies them."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    def shorter_waits(config: Any) -> None:
+        config.agent.max_wait_minutes_without_approval = 10
+        config.agent.max_wait_minutes_with_approval = 120
+
+    path, _config = _old_instance(tmp_path, shorter_waits)
+    out = _export(tmp_path, path)
+    assert {record.dotted: record.value for record in _records(out)} == {
+        "agent.max_wait_minutes_without_approval": 10,
+        "agent.max_wait_minutes_with_approval": 120,
+    }
+    target = tmp_path / "new"
+
+    _import(out, target, dry_run=False)
+
+    imported = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert (imported.agent.max_wait_minutes_without_approval, imported.agent.max_wait_minutes_with_approval) == (10, 120)
 
 
 def test_a_selected_skill_semantic_review_moves_with_the_team(tmp_path: Path) -> None:

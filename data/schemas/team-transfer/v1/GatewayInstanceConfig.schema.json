@@ -407,6 +407,18 @@
           "default": 20000,
           "title": "Max Tool Result Tokens Per Call"
         },
+        "max_wait_minutes_with_approval": {
+          "default": 1440,
+          "minimum": 1,
+          "title": "Max Wait Minutes With Approval",
+          "type": "integer"
+        },
+        "max_wait_minutes_without_approval": {
+          "default": 20,
+          "minimum": 1,
+          "title": "Max Wait Minutes Without Approval",
+          "type": "integer"
+        },
         "memory": {
           "additionalProperties": true,
           "title": "Memory",
