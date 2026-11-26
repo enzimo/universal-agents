@@ -1,4 +1,8 @@
-"""Real-browser (Chromium) check for Web Chat attachment sandboxing and media playback (C05 + C12)."""
+"""Real-browser (Chromium) check for Web Chat attachment sandboxing and media playback.
+
+Covers the attachment route on a probe page, each attachment opened as its own
+page, and the real /webchat page rendering a transcript reply with attachments.
+"""
 
 from __future__ import annotations
 
@@ -18,8 +22,13 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from assistant_gateway.application.gateway_application import GatewayApplicationResponse
+from assistant_gateway.application.request_context import GatewayRequestRoute
+from assistant_gateway.application.transcript_service import GatewayTranscriptService
 from assistant_gateway.interactive_apps.website_support import _WEB_CHAT_CSP
+from assistant_gateway.runtime_ports import UuidGatewayIdGenerator
 from assistant_gateway.store import GatewayStateStore
+from custom_messages.contracts.delivery_v1 import UserNotificationAttachment
 from tests.browser_probe import requires_chromium
 from tests.staged_attachment_helpers import staged_attachment
 from tests.test_gateway_website_app import (
@@ -93,7 +102,7 @@ async def test_web_chat_attachments_in_chromium(
     store = GatewayStateStore(str(tmp_path / "gateway.db"))
     session_key = "website:web-chat:browser-probe"
     owner = config.user.canonical_user_id
-    store.create_session(
+    session = store.create_session(
         session_key=session_key,
         conversation_id="conv_browser_probe",
         manager_agent_id="manager_1",
@@ -130,6 +139,7 @@ async def test_web_chat_attachments_in_chromium(
         ("att_js", "script.js", b"window.__attachment_script_ran = true;\n", "text/javascript", "document"),
         ("att_css", "style.css", b"body { --attachment-style-applied: 1; }\n", "text/css", "document"),
     ]
+    transcript_attachments: list[UserNotificationAttachment] = []
     for att_id, filename, data, content_type, kind in records:
         staged = staged_attachment(
             config,
@@ -137,6 +147,7 @@ async def test_web_chat_attachments_in_chromium(
             filename=filename,
             content_type="application/octet-stream",
         )
+        sha256 = staged.sha256 or hashlib.sha256(data).hexdigest()
         store.upsert_attachment(
             attachment_id=att_id,
             session_key=session_key,
@@ -146,10 +157,56 @@ async def test_web_chat_attachments_in_chromium(
             content_type=content_type,
             kind=kind,
             size_bytes=len(data),
-            sha256=staged.sha256 or hashlib.sha256(data).hexdigest(),
+            sha256=sha256,
             local_path=staged.path,
             owner_canonical_user_id=owner,
         )
+        if att_id not in {"att_js", "att_css"}:
+            transcript_attachments.append(
+                UserNotificationAttachment(
+                    path=staged.path,
+                    filename=filename,
+                    content_type=content_type,
+                    kind=kind,
+                    size_bytes=len(data),
+                    sha256=sha256,
+                )
+            )
+
+    transcript = GatewayTranscriptService(
+        repository=store.transcript_repository,
+        unit_of_work_factory=store,
+        session_repository=store.session_repository,
+        id_generator=UuidGatewayIdGenerator(),
+    )
+    route = GatewayRequestRoute(
+        channel_name="website",
+        user_id=owner,
+        chat_id="web-chat",
+        canonical_user_id=owner,
+        original_message_id="req_browser_probe",
+    )
+    accepted = transcript.accept_user_message(
+        session=session,
+        route=route,
+        conversation_id="conv_browser_probe",
+        text="Show the attachments",
+        attachments=(),
+    )
+    assert accepted is not None
+    projected = transcript.append_gateway_response(
+        session=session,
+        route=route,
+        response=GatewayApplicationResponse(
+            text="Here are the files.",
+            conversation_id="conv_browser_probe",
+            correlation_id="corr_browser_reply",
+            message_type="user_notification",
+            attachments=tuple(transcript_attachments),
+        ),
+        reply_to=accepted,
+    )
+    assert projected is not None
 
     async def probe_page(_request: web.Request) -> web.Response:
         return web.Response(
@@ -194,3 +251,14 @@ async def test_web_chat_attachments_in_chromium(
     assert report["own_page"]["att_webm"]["downloaded_as"] == "clip.webm"
     assert report["own_page"]["att_svg"]["downloaded_as"] == "vector.svg"
     assert report["own_page"]["att_html"]["downloaded_as"] == "fake.png"
+    assert report["web_chat"]["imageAlts"] == ["pic.png"]
+    assert report["web_chat"]["imageNaturalWidths"] == [8]
+    assert report["web_chat"]["audioDurations"][0] > 0
+    assert report["web_chat"]["videoDurations"][0] > 0
+    assert report["web_chat"]["chipLabels"] == ["vector.svg", "fake.png"]
+    assert report["web_chat"]["thumb_tab"] == {"page_origin": "null", "naturalWidth": 8}
+    assert report["web_chat"]["chip_downloads"] == {
+        "vector.svg": "vector.svg",
+        "fake.png": "fake.png",
+    }
+    assert report["web_chat"]["page_errors"] == []

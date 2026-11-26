@@ -1463,7 +1463,10 @@ document directly in chat:
    normalized `content_type` (only PNG, JPEG, GIF, and WebP are `image`; non-XML
    `audio/*` and `video/*` are `audio`/`video`; everything else is `document`)
    and rejects a `kind` that disagrees with the media type or a malformed
-   `content_type`. For browser Web Chat requests, the default `target="auto"`
+   `content_type`. In Web Chat only PNG, JPEG, GIF, and WebP appear as inline
+   images; save charts and screenshots as PNG (or another of those formats),
+   because SVG and other image formats arrive as downloadable files. For browser
+   Web Chat requests, the default `target="auto"`
    keeps the attachment visible in that same Web Chat thread.
 
 Do not paste binary bytes or base64 into `notify_user`; the gateway checks

@@ -7,6 +7,10 @@
 // - Opening an attachment URL directly as its own page: PNG displays with
 //   naturalWidth > 0 in a sandboxed opaque origin; WAV, WebM, SVG, and forged HTML
 //   download instead of rendering a dead player or running scripts.
+// - The real /webchat page renders a transcript reply through chat.js ->
+//   chat_attachments.mjs: the PNG thumbnail loads and opens in an opaque-origin tab,
+//   the WAV and WebM players load, and the SVG and forged HTML show as file chips
+//   that download under their own names, with no page script errors.
 const assert = require("node:assert/strict");
 const { chromium } = require("playwright");
 
@@ -101,6 +105,121 @@ async function loadElement({ tag, url }) {
       report.own_page[id] = { downloaded_as: suggested };
       assert.equal(suggested, expectedFilename, `expected ${id} to download as ${expectedFilename}`);
     }
+
+    // 3. Real /webchat page rendering a transcript reply through chat.js -> chat_attachments.mjs.
+    const chatPage = await context.newPage();
+    const pageErrors = [];
+    chatPage.on("pageerror", (error) => pageErrors.push(String(error)));
+    await chatPage.goto(`${origin}/webchat`, { waitUntil: "domcontentloaded" });
+    await chatPage.waitForSelector(".message-attachments", { timeout: 10000 });
+
+    const webChatState = await chatPage.evaluate(async () => {
+      const waitFor = (fn, timeoutMs = 8000) =>
+        new Promise((resolve) => {
+          const deadline = Date.now() + timeoutMs;
+          const poll = () => {
+            if (fn() || Date.now() >= deadline) {
+              resolve(fn());
+              return;
+            }
+            setTimeout(poll, 50);
+          };
+          poll();
+        });
+
+      const images = Array.from(document.querySelectorAll(".message-image-attachment img"));
+      const audios = Array.from(document.querySelectorAll("audio.message-media-attachment"));
+      const videos = Array.from(document.querySelectorAll("video.message-media-attachment"));
+      const chips = Array.from(document.querySelectorAll("a.message-file-attachment"));
+
+      await waitFor(() => images.every((img) => img.complete && img.naturalWidth > 0));
+      await waitFor(() =>
+        audios.every((el) => el.readyState >= 1 && Number.isFinite(el.duration) && el.duration > 0)
+      );
+      await waitFor(() =>
+        videos.every((el) => el.readyState >= 1 && Number.isFinite(el.duration) && el.duration > 0)
+      );
+
+      return {
+        imageAlts: images.map((img) => img.alt),
+        imageNaturalWidths: images.map((img) => img.naturalWidth),
+        audioDurations: audios.map((el) => el.duration),
+        videoDurations: videos.map((el) => el.duration),
+        chipLabels: chips.map((chip) => {
+          const label = chip.querySelector(".message-file-label");
+          return label ? label.textContent.trim() : "";
+        }),
+      };
+    });
+
+    assert.deepEqual(webChatState.imageAlts, ["pic.png"]);
+    assert.deepEqual(webChatState.imageNaturalWidths, [8]);
+    assert.equal(webChatState.audioDurations.length, 1);
+    assert.ok(webChatState.audioDurations[0] > 0);
+    assert.equal(webChatState.videoDurations.length, 1);
+    assert.ok(webChatState.videoDurations[0] > 0);
+    assert.deepEqual(webChatState.chipLabels, ["vector.svg", "fake.png"]);
+
+    // Clicking the raster thumbnail opens an isolated opaque-origin tab.
+    const [thumbTab] = await Promise.all([
+      context.waitForEvent("page", { timeout: 5000 }),
+      chatPage.locator(".message-image-attachment").first().click(),
+    ]);
+    await thumbTab.waitForLoadState("load");
+    const thumbTabInfo = await thumbTab.evaluate(() => {
+      const img = document.querySelector("img");
+      return {
+        page_origin: self.origin,
+        naturalWidth: img ? img.naturalWidth : 0,
+      };
+    });
+    await thumbTab.close();
+    assert.equal(thumbTabInfo.page_origin, "null");
+    assert.equal(thumbTabInfo.naturalWidth, 8);
+
+    // Clicking each non-raster file chip downloads under its filename without running scripts.
+    const chipDownloads = {};
+    for (const label of ["vector.svg", "fake.png"]) {
+      const chip = chatPage
+        .locator("a.message-file-attachment")
+        .filter({ hasText: label })
+        .first();
+      const download = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`timed out downloading ${label}`)), 5000);
+        const finish = (dl) => {
+          clearTimeout(timer);
+          chatPage.off("download", onDownload);
+          context.off("page", onPopup);
+          resolve(dl);
+        };
+        const onDownload = (dl) => finish(dl);
+        const onPopup = (popup) => {
+          popup.once("download", (dl) => {
+            popup.close().catch(() => {});
+            finish(dl);
+          });
+        };
+        chatPage.on("download", onDownload);
+        context.on("page", onPopup);
+        chip.click().catch((err) => {
+          clearTimeout(timer);
+          chatPage.off("download", onDownload);
+          context.off("page", onPopup);
+          reject(err);
+        });
+      });
+      chipDownloads[label] = download.suggestedFilename();
+      assert.equal(chipDownloads[label], label);
+    }
+
+    assert.deepEqual(pageErrors, []);
+    await chatPage.close();
+    report.web_chat = {
+      ...webChatState,
+      thumb_tab: thumbTabInfo,
+      chip_downloads: chipDownloads,
+      page_errors: pageErrors,
+    };
   } finally {
     await browser.close();
   }

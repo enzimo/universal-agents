@@ -356,7 +356,10 @@ def notify_user(
              "caption": "Screenshot"}. Only path is required. Attachment kind is
              derived from the file's media type (only PNG, JPEG, GIF, and WebP
              are kind "image"; non-XML audio/* and video/* are "audio"/"video";
-             other types including SVG and HEIC are "document"). Leave kind out,
+             other types including SVG and HEIC are "document"). In Web Chat
+             only PNG, JPEG, GIF, and WebP appear inline as images; save charts
+             and screenshots as PNG (or another of those formats), because SVG
+             and other image formats arrive as downloadable files. Leave kind out,
              or set content_type when the filename suffix is unknown; a kind
              that disagrees with the resolved content_type is rejected. Relative
              paths start in
