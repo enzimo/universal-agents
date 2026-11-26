@@ -344,14 +344,16 @@ def _operator_authority_verifier(context: OperatorContext) -> Any:
 
     async def _snapshot() -> Any:
         from custom_transport.nats_adapter import NatsTransportAdapter
-        from custom_transport.protocol1.trust_reader import TrustReader
+        from custom_transport.protocol1.trust_reader import (
+            TrustReader,
+            trust_reader_transport_config,
+        )
         from custom_transport.subjects import NatsSubjectMapper
-        from team_services.process import transport_config as build_transport_config
 
         if context.instance_config is None:
             return None
         adapter = NatsTransportAdapter(
-            config=build_transport_config(context.instance_config),
+            config=trust_reader_transport_config(context.instance_config, reader_id="strands-operator"),
             mapper=NatsSubjectMapper(team_id=str(context.team_id or "")),
             logger=logger,
         )
@@ -374,7 +376,13 @@ def _operator_authority_verifier(context: OperatorContext) -> Any:
     return AuthorityTokenVerifier(reader, people=AccessRepository(context.storage_settings))
 
 
-def _verified_deferred_task_owner(context: OperatorContext, task_id: str, msg_meta: Any) -> Optional[str]:
+def _verified_deferred_task_owner(
+    context: OperatorContext,
+    task_id: str,
+    msg_meta: Any,
+    *,
+    verifier: Any = None,
+) -> Optional[str]:
     """The person a deferred task verifiably works for, or None (logged).
 
     No agent admitted this task, so nothing recorded its owner. The operator
@@ -390,9 +398,10 @@ def _verified_deferred_task_owner(context: OperatorContext, task_id: str, msg_me
     from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
 
     gateway_context = getattr(msg_meta, "gateway_context", None)
+    active_verifier = verifier if verifier is not None else _operator_authority_verifier(context)
     try:
         return resolve_task_identity(
-            verifier=_operator_authority_verifier(context),
+            verifier=active_verifier,
             # An empty team id refuses every token instead of skipping the team check.
             team_id=str(context.team_id or ""),
             task_context=getattr(gateway_context, "task_context", None),
@@ -422,10 +431,12 @@ def _archive_failed_envelope_task(
 ) -> str:
     from custom_agents.task_manager import TaskManager
 
+    verifier = _operator_authority_verifier(context)
     task_manager = TaskManager(
         db_path=context.db_path,
         logger=logging.getLogger("TaskRuntimeOperator"),
         storage_settings=context.storage_settings,
+        authority_verifier=verifier,
     )
     task_manager.set_owner_identity(
         owner_agent_id,
@@ -437,7 +448,12 @@ def _archive_failed_envelope_task(
         task_request,
         msg_header,
         msg_meta,
-        owner_person_id=_verified_deferred_task_owner(context, task_request.task_id, msg_meta),
+        owner_person_id=_verified_deferred_task_owner(
+            context,
+            task_request.task_id,
+            msg_meta,
+            verifier=verifier,
+        ),
     )
     if not added:
         raise RuntimeError(f"Failed to admit operator-selected task {task_request.task_id} into the archive path.")

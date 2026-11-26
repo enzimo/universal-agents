@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Iterator, Optional
@@ -31,6 +31,7 @@ from typing import Any, Iterator, Optional
 from custom_messages.wire.authority_bindings import extract_token_issuer
 from custom_messages.wire.refusals import FrameRefused
 from custom_messages.wire.trust import TrustStore
+from custom_transport.nats_adapter import NatsTransportConfig
 from custom_transport.protocol1.bootstrap import read_bundle
 from custom_transport.protocol1.host_runtime import FORGET_INTERVAL, TRUST_REFRESH_INTERVAL
 from custom_transport.protocol1.identity import HostIdentity
@@ -44,6 +45,23 @@ _WATCH_RETRY_SECONDS = 5.0
 _UPKEEP_CHECK_INTERVAL = timedelta(seconds=10)
 
 
+def trust_reader_transport_config(config: Any, *, reader_id: str) -> NatsTransportConfig:
+    """Build a read-only NATS transport config identifying ``reader_id`` (not ``team-services``)."""
+
+    transport = config.transport
+    servers = list(transport.nats_servers or ([transport.nats_url] if transport.nats_url else []))
+    return NatsTransportConfig(
+        servers=servers,
+        name=f"{config.instance_name}-{reader_id}",
+        subject_prefix=transport.subject_prefix,
+        jetstream_enabled=False,
+        user=transport.nats_user,
+        password=transport.nats_password,
+        credentials_file=transport.credentials_file,
+        reply_inbox_runtime=reader_id,
+    )
+
+
 def _no_signing_identity() -> HostIdentity:
     raise RuntimeError("TrustReader is read-only and holds no host signing key.")
 
@@ -54,15 +72,17 @@ class TrustReader:
     def __init__(
         self,
         trust: PersistentTrustStore,
-        records: StateRecords,
+        records: Optional[StateRecords],
         *,
         reader_id: str,
+        connect: Optional[Callable[[], Awaitable[Any]]] = None,
         clock: Callable[[], datetime] = utc_now,
         logger: logging.Logger = _LOGGER,
     ) -> None:
         self.trust = trust
         self.records = records
         self.reader_id = reader_id
+        self._connect = connect
         self.clock = clock
         self.logger = logger
         self._last_refresh: Optional[datetime] = None
@@ -73,17 +93,33 @@ class TrustReader:
         cls,
         layout: InstanceLayout,
         reader_id: str,
-        nc: Any,
+        nc: Any = None,
         *,
+        connect: Optional[Callable[[], Awaitable[Any]]] = None,
         clock: Callable[[], datetime] = utc_now,
         logger: logging.Logger = _LOGGER,
     ) -> "TrustReader":
-        """Open a reader from ``layout.trust_bootstrap_path`` without loading any private key."""
+        """Open a reader from ``layout.trust_bootstrap_path`` without loading any private key.
+
+        When ``nc`` is ``None`` (for example, NATS is unreachable at startup), the reader still
+        loads its persisted trust state so callers fail closed with the trust refusal reason,
+        and ``watch_and_refresh`` connects via ``connect`` in the background once NATS answers.
+        """
 
         bundle = read_bundle(layout.trust_bootstrap_path)
         trust = PersistentTrustStore.open(bundle, layout.reader_trust_dir(reader_id), clock())
-        records = StateRecords.on_connection(nc, _no_signing_identity, trust)
-        return cls(trust, records, reader_id=reader_id, clock=clock, logger=logger)
+        records = StateRecords.on_connection(nc, _no_signing_identity, trust) if nc is not None else None
+        return cls(trust, records, reader_id=reader_id, connect=connect, clock=clock, logger=logger)
+
+    def attach_connection(self, nc: Any) -> StateRecords:
+        """Bind a live NATS connection to this reader once connected."""
+
+        self.records = StateRecords.on_connection(nc, _no_signing_identity, self.trust)
+        return self.records
+
+    @property
+    def connected(self) -> bool:
+        return self.records is not None
 
     @classmethod
     async def snapshot(
@@ -128,6 +164,8 @@ class TrustReader:
     async def _take_watch_bytes(self, key: str, raw: bytes) -> bool:
         """Verify key binding and add one watched trust record through ``StateRecords``."""
 
+        if self.records is None:
+            return False
         try:
             return await self.records.take_trust_bytes(key, raw, now=self.clock())
         except FrameRefused as refused:
@@ -143,6 +181,8 @@ class TrustReader:
     async def _take_key(self, record: str, key: str) -> bool:
         """Read one key from ``UA1_CERTS`` through ``StateRecords.take_trust_record``; skip invalid records."""
 
+        if self.records is None:
+            return False
         try:
             return await self.records.take_trust_record(record, key, now=self.clock())
         except FrameRefused as refused:
@@ -158,6 +198,8 @@ class TrustReader:
     async def sync_once(self) -> None:
         """Load every host certificate of this installation and the current revocations record."""
 
+        if self.records is None:
+            raise RuntimeError("TrustReader is not connected to NATS yet.")
         installation = self.installation
         prefix = f"host.{installation}."
         cert_keys = await self.records.keys("certificate", prefix)
@@ -169,6 +211,8 @@ class TrustReader:
     async def refresh_revocations(self) -> bool:
         """Read the installation's newest revocations record from ``UA1_CERTS``."""
 
+        if self.records is None:
+            return False
         taken = await self._take_key("revocations", f"revocations.{self.installation}")
         self._last_refresh = self.clock()
         return taken
@@ -176,7 +220,7 @@ class TrustReader:
     async def fetch_certificate(self, installation: str, runtime: str, membership_epoch: int) -> bool:
         """Fetch one host certificate of this installation on demand (returns whether it was new)."""
 
-        if installation != self.installation:
+        if self.records is None or installation != self.installation:
             return False
         key = f"host.{installation}.{runtime}.{membership_epoch}"
         return await self._take_key("certificate", key)
@@ -184,6 +228,8 @@ class TrustReader:
     async def fetch_token_issuer(self, token: Any) -> bool:
         """Fetch the issuer certificate named by ``token`` (and revocations if not current)."""
 
+        if self.records is None:
+            return False
         extracted = extract_token_issuer(token)
         if extracted is None:
             return False
@@ -218,9 +264,42 @@ class TrustReader:
                 )
         return taken
 
-    async def watch_and_refresh(self, stop: asyncio.Event) -> None:
-        """Watch ``UA1_CERTS`` for new certificates and revocations, and refresh periodically until ``stop``."""
+    async def _ensure_connected(self, stop: asyncio.Event) -> bool:
+        """Connect in the background when started offline; returns False if stopped before connecting."""
 
+        if self.records is not None:
+            return True
+        if self._connect is None:
+            return False
+        while not stop.is_set():
+            try:
+                nc = await self._connect()
+                self.attach_connection(nc)
+                await self.sync_once()
+                self.logger.info(
+                    "Trust reader connected to NATS and synced UA1_CERTS. event=trust_reader_connected reader=%s",
+                    self.reader_id,
+                )
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - keep retrying while NATS is unreachable
+                self.logger.warning(
+                    "Trust reader could not connect to NATS; retrying. event=trust_reader_connect_failed "
+                    "reader=%s error=%s: %s",
+                    self.reader_id,
+                    type(error).__name__,
+                    error,
+                )
+            if await _stopped_within(stop, timedelta(seconds=_WATCH_RETRY_SECONDS)):
+                return False
+        return False
+
+    async def watch_and_refresh(self, stop: asyncio.Event) -> None:
+        """Connect if offline, watch ``UA1_CERTS`` for changes, and refresh periodically until ``stop``."""
+
+        if not await self._ensure_connected(stop):
+            return
         installation = self.installation
         cert_task = asyncio.create_task(self._watch_pattern("certificate", f"host.{installation}.>", stop))
         rev_task = asyncio.create_task(self._watch_pattern("revocations", f"revocations.{installation}", stop))
@@ -235,6 +314,8 @@ class TrustReader:
 
     async def _watch_pattern(self, record: str, pattern: str, stop: asyncio.Event) -> None:
         while not stop.is_set():
+            if self.records is None:
+                return
             try:
                 async for key, raw in self.records.watch(record, pattern):
                     if stop.is_set():
@@ -279,4 +360,4 @@ async def _stopped_within(stop: asyncio.Event, interval: timedelta) -> bool:
     return stop.is_set()
 
 
-__all__ = ["TrustReader"]
+__all__ = ["TrustReader", "trust_reader_transport_config"]

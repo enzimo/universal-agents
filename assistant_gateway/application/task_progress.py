@@ -149,6 +149,7 @@ class GatewayTaskProgressService:
             session_key=session.session_key,
             conversation_id=resolved_conversation_id,
         )
+        await self._request_context.ensure_signer_ready()
         envelope = MessageEnvelope(
             msg_content=progress_request,
             msg_header=MessageHeader(
@@ -170,6 +171,7 @@ class GatewayTaskProgressService:
                     delivery_mode="task_progress_status",
                     route=resolved_route,
                     manager_agent_id=manager_id,
+                    root_task_id=progress_request.progress_status_id,
                 ),
             ),
         )

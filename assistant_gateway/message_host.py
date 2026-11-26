@@ -44,9 +44,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional
 
+from custom_messages.wire.authority_bindings import AUTHORITY_TOKEN_MAX_LIFETIME_SECONDS, AuthorityTokenRecord
 from custom_messages.wire.frame import VerifiedFrame
 from custom_messages.wire.kinds import CONTRACT_SHA256
-from custom_transport.protocol1.authority_tokens import command_binding_id, command_token, require_person_ref
+from custom_transport.protocol1.authority_tokens import (
+    command_binding_id,
+    command_token,
+    require_person_ref,
+    root_task_token,
+)
 from custom_transport.protocol1.host_runtime import MessageHost
 from custom_transport.protocol1.joining import HostProfile, JoinRefused
 from release_version import release_version
@@ -253,6 +259,42 @@ class GatewayMessageHost:
         if not self._joined:  # woken by close()
             raise GatewayHostUnavailable("The gateway's host has stopped.")
         return self.host
+
+    def sign_root_task_token(
+        self,
+        *,
+        person_ref: str,
+        root_task_id: str,
+        request_id: str,
+        team: Optional[str] = None,
+        lifetime_seconds: int = AUTHORITY_TOKEN_MAX_LIFETIME_SECONDS,
+    ) -> AuthorityTokenRecord:
+        """Sign one protocol 1 root-task authority token with this gateway host's certificate key.
+
+        Bound to ``root_task_id`` and ``request_id``, naming the person only by opaque ``person_ref``,
+        with no ``schedule_id`` (only a scheduler certificate may name a schedule), and lasting at
+        most ``authority_token_max_seconds``. Raises ``GatewayHostUnavailable`` before join or after
+        stop/refusal.
+        """
+
+        require_person_ref(person_ref)
+        target_team = self.team if team is None else team
+        if target_team not in self.teams:
+            raise ValueError(f"gateway {self.runtime_id!r} does not serve team {target_team!r}")
+        if self._refusal is not None:
+            raise GatewayHostUnavailable(self._refusal)
+        if self._stop.is_set() or not self._joined or self.host is None or self.host.identity is None:
+            raise GatewayHostUnavailable("The gateway has not joined the installation yet.")
+        signed = root_task_token(
+            self.host.identity,
+            team=target_team,
+            root_task_id=root_task_id,
+            request_id=request_id,
+            person_ref=person_ref,
+            issued=self.host.clock(),
+            lifetime_seconds=lifetime_seconds,
+        )
+        return AuthorityTokenRecord.model_validate(signed)
 
     async def command(
         self,

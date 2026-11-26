@@ -1391,6 +1391,7 @@ class UniversalAgent(BaseModel):
         self.task_manager.set_owner_identity(
             self.id, self.name, self.team_id, self.named_agent_type
         )
+        self._bind_task_manager_authority_verifier()
         self.task_manager.set_activity_emitter(self.emit_activity_event)
         shared_storage_settings = self.task_manager.storage_settings
         self._conversation_store = ConversationStore(
@@ -1511,6 +1512,22 @@ class UniversalAgent(BaseModel):
 
         # Create the internal Strands Agent
         self._create_strands_agent()
+
+    def _bind_task_manager_authority_verifier(self) -> None:
+        """Pass the active agent host's verifier explicitly into TaskManager's runtime repository (C14)."""
+
+        from access_control.authority_verifier import AuthorityTokenVerifier
+        from custom_agents.access_runtime import _default_agent_trust_source
+        from storage.access_repository import AccessRepository
+
+        if _default_agent_trust_source() is None:
+            return
+        self.task_manager.runtime_state_store.set_authority_verifier(
+            AuthorityTokenVerifier(
+                _default_agent_trust_source,
+                people=AccessRepository(self.task_manager.storage_settings),
+            )
+        )
 
     def _adopt_agent_id(self, new_agent_id: str) -> None:
         """Update an auto-generated agent ID before NATS routes subscribe (A3 partition-scoped IDs)."""
@@ -4873,6 +4890,7 @@ class UniversalAgent(BaseModel):
         await assign_partition_agent_id(self, adapter)
         # This process's protocol 1 host gives the agent a session; it never waits for it.
         attach_agent(self, adapter)
+        self._bind_task_manager_authority_verifier()
         try:
             # A durable subscription can deliver before its setup await returns.
             # Prepare shared schedule state first; start the scheduler only after

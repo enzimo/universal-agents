@@ -40,7 +40,6 @@ from uuid import uuid4
 
 import pytest
 
-from access_control.identity import ENV_VERIFY_KEYS
 from custom_agents import task_message_runtime
 from custom_agents.conversation_attachments import (
     CONVERSATION_ATTACHMENTS_SECTION,
@@ -59,7 +58,11 @@ from custom_messages.enums import MessageMetaType, RequesterType
 from runtime_settings.instance_layout import InstanceLayout
 from storage.config import StorageSettings, resolve_storage_settings
 from storage.postgres_connection import connect_postgres
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, SESSION, TEAM, _admit
 from tests.test_question_answer_files import _prompt, _sections
 from tests.test_turn_files_recording import _outside, _upload
@@ -72,8 +75,8 @@ FOLLOW_UP = "task_follow_up"
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -144,7 +147,7 @@ async def _admit_signed_before_the_update(agent: Any, attachments: list[Any]) ->
     """Ann's request as a gateway from before the update signed it: team, person and roles, no task."""
 
     task = Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="What is in it?", attachments=attachments)
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
     meta = MessageMeta(
         conversation_id=CONVERSATION,
         msg_correlation_id="corr_queued",

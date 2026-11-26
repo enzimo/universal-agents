@@ -116,11 +116,13 @@ class GatewayAutomatedSubmissionApplication:
             followup_to_task_id=None,
         )
         route = self._resolved_route(request.route, session)
+        await self._request_context.ensure_signer_ready()
+        task = Task(
+            task_type=MessageMetaType.REQUEST,
+            problem_statement=request.instruction.strip(),
+        )
         envelope = MessageEnvelope(
-            msg_content=Task(
-                task_type=MessageMetaType.REQUEST,
-                problem_statement=request.instruction.strip(),
-            ),
+            msg_content=task,
             msg_meta=MessageMeta(
                 from_agent_name=f"{self._settings.instance_name}_gateway",
                 msg_correlation_id=correlation_id,
@@ -133,6 +135,7 @@ class GatewayAutomatedSubmissionApplication:
                     delivery_mode=delivery_mode,
                     route=route,
                     manager_agent_id=manager_id,
+                    root_task_id=task.task_id,
                 ),
             ),
             msg_header=MessageHeader(
@@ -172,6 +175,7 @@ class GatewayAutomatedSubmissionApplication:
             snapshot_context.session_key if snapshot_context else None
         )
         session = self._resolve_session(session_key, route)
+        await self._request_context.ensure_signer_ready()
         submission = build_automation_submission(
             instance_name=self._settings.instance_name,
             response_queue_name=self._settings.response_route,
@@ -189,6 +193,7 @@ class GatewayAutomatedSubmissionApplication:
                 delivery_mode="automation",
                 route=self._resolved_route(route, session),
                 manager_agent_id=manager_id,
+                root_task_id=request.automation_id,
             ),
             automation_id=request.automation_id,
             hook_name=request.hook_name,

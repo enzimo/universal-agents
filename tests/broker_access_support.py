@@ -135,7 +135,7 @@ def _protocol1_test_authority() -> dict[str, Any]:
         signed = sign_state(doc, auth_key)
         return json.dumps(signed, separators=(",", ":")).encode("utf-8")
 
-    def _make_host(runtime: str, roles: list[str]) -> HostIdentity:
+    def _make_host(runtime: str, roles: list[str], *, teams: list[str] | None = None) -> HostIdentity:
         app_key = Ed25519PrivateKey.generate()
         app_pub = b64url(app_key.public_key().public_bytes_raw())
         key_id = f"k-{runtime}-1"
@@ -145,7 +145,7 @@ def _protocol1_test_authority() -> dict[str, Any]:
             "runtime": runtime,
             "membership_epoch": 1,
             "roles": roles,
-            "teams": [TEST_TEAM, "team-other", "team_other", "team", "team_control", "test_team", "another_team"],
+            "teams": teams or [TEST_TEAM, "team-other", "team_other", "team", "team_control", "test_team", "team_test", "another_team", "default_team", "team-alpha", "team-beta"],
             "agent_types": [],
             "session_limit": 0,
             "revocation_epoch": 1,
@@ -188,6 +188,8 @@ def _protocol1_test_authority() -> dict[str, Any]:
         "gateway": gw_identity,
         "scheduler": sched_identity,
         "people": people,
+        "make_host": _make_host,
+        "extra_hosts": {},
     }
 
 
@@ -199,12 +201,26 @@ def broker_people_store() -> _InMemoryBrokerPeople:
     return _protocol1_test_authority()["people"]
 
 
-def broker_gateway_identity() -> Any:
-    return _protocol1_test_authority()["gateway"]
+def _host_for_team(kind: str, team_id: str) -> Any:
+    auth = _protocol1_test_authority()
+    default_host = auth[kind]
+    if team_id in default_host.certificate.teams:
+        return default_host
+    cache_key = (kind, team_id)
+    extra = auth["extra_hosts"]
+    if cache_key not in extra:
+        roles = ["gateway"] if kind == "gateway" else ["team_services", "scheduler"]
+        runtime = f"{kind}-extra-{len(extra) + 1}"
+        extra[cache_key] = auth["make_host"](runtime, roles, teams=[team_id])
+    return extra[cache_key]
 
 
-def broker_scheduler_identity() -> Any:
-    return _protocol1_test_authority()["scheduler"]
+def broker_gateway_identity(team_id: str = TEST_TEAM) -> Any:
+    return _host_for_team("gateway", team_id)
+
+
+def broker_scheduler_identity(team_id: str = TEST_TEAM) -> Any:
+    return _host_for_team("scheduler", team_id)
 
 
 def broker_authority_verifier(*, people: Any = None) -> AuthorityTokenVerifier:
@@ -220,6 +236,115 @@ def use_broker_authority_verifier(*, people: Any = None) -> AuthorityTokenVerifi
     verifier = broker_authority_verifier(people=people)
     set_process_verifier(verifier)
     return verifier
+
+
+def signed_task_token(
+    person_id: str | None = "user-1",
+    *,
+    team_id: str = TEST_TEAM,
+    roles: tuple[str, ...] = ("member",),
+    root_task_id: str = "task-1",
+    request_id: str | None = None,
+    expires_at: datetime | None = None,
+) -> Any:
+    """Return a real protocol 1 gateway-signed root-task ``AuthorityTokenRecord``."""
+
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+
+    return AuthorityTokenRecord.model_validate(
+        signed_task_context(
+            person_id,
+            team_id=team_id,
+            roles=roles,
+            root_task_id=root_task_id,
+            request_id=request_id,
+            expires_at=expires_at,
+        )
+    )
+
+
+def signed_scheduler_token(
+    person_id: str | None = "user-1",
+    *,
+    team_id: str = TEST_TEAM,
+    roles: tuple[str, ...] = ("member",),
+    root_task_id: str = "task-sched-1",
+    request_id: str | None = None,
+    schedule_id: str = "sched-1",
+) -> Any:
+    """Return a real protocol 1 scheduler-signed root-task ``AuthorityTokenRecord``."""
+
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+
+    return AuthorityTokenRecord.model_validate(
+        signed_scheduler_task_context(
+            person_id,
+            team_id=team_id,
+            roles=roles,
+            root_task_id=root_task_id,
+            request_id=request_id,
+            schedule_id=schedule_id,
+        )
+    )
+
+
+def signed_schedule_permit(
+    schedule_id: str = "sched-1",
+    *,
+    person_id: str | None = "user-1",
+    team_id: str = TEST_TEAM,
+    roles: tuple[str, ...] = ("member",),
+    owner_permit: bool = False,
+) -> Any:
+    """Return a real protocol 1 scheduler-signed permit ``AuthorityTokenRecord``."""
+
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+    from custom_transport.protocol1.authority_tokens import schedule_permit_token
+
+    person_ref: str | None = None
+    if person_id is not None:
+        record = broker_people_store().register(team_id, person_id, roles=roles)
+        person_ref = record.person_ref
+    return AuthorityTokenRecord.model_validate(
+        schedule_permit_token(
+            broker_scheduler_identity(team_id),
+            team=team_id,
+            schedule_id=schedule_id,
+            person_ref=person_ref,
+            owner_permit=owner_permit,
+            issued=datetime.now(timezone.utc),
+        )
+    )
+
+
+class BrokerGatewayTokenSigner:
+    """Test double implementing ``GatewayTokenSigner`` with the shared protocol 1 gateway cert."""
+
+    def __init__(self, *, team_id: str = TEST_TEAM) -> None:
+        self._default_team = team_id
+
+    def sign_root_task_token(
+        self,
+        *,
+        person_ref: str,
+        root_task_id: str,
+        request_id: str,
+        team: str | None = None,
+    ) -> Any:
+        from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+        from custom_transport.protocol1.authority_tokens import root_task_token
+
+        target_team = team or self._default_team
+        return AuthorityTokenRecord.model_validate(
+            root_task_token(
+                broker_gateway_identity(target_team),
+                team=target_team,
+                root_task_id=root_task_id,
+                request_id=request_id,
+                person_ref=person_ref,
+                issued=datetime.now(timezone.utc),
+            )
+        )
 
 
 def signed_scheduler_task_context(
@@ -241,7 +366,7 @@ def signed_scheduler_task_context(
         record = broker_people_store().register(team_id, person_id, roles=roles)
         person_ref = record.person_ref
     return root_task_token(
-        broker_scheduler_identity(),
+        broker_scheduler_identity(team_id),
         team=team_id,
         root_task_id=root_task_id,
         request_id=request_id or new_id("task_context"),
@@ -327,6 +452,7 @@ def signed_task_context(
     roles: tuple[str, ...] = ("member",),
     root_task_id: str = "task-1",
     request_id: str | None = None,
+    expires_at: datetime | None = None,
 ) -> dict[str, Any]:
     """Return a real protocol 1 gateway-signed root-task authority token as JSON."""
 
@@ -338,12 +464,13 @@ def signed_task_context(
         record = broker_people_store().register(team_id, person_id, roles=roles)
         person_ref = record.person_ref
     return root_task_token(
-        broker_gateway_identity(),
+        broker_gateway_identity(team_id),
         team=team_id,
         root_task_id=root_task_id,
         request_id=request_id or new_id("task_context"),
         person_ref=person_ref,
         issued=datetime.now(timezone.utc),
+        expires_at=expires_at,
     )
 
 

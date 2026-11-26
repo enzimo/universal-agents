@@ -52,7 +52,6 @@ from access_control.authority_verifier import (
     AuthorityTokenVerifier,
     IdentityRejected,
     get_process_verifier,
-    set_process_verifier,
 )
 from access_control.inbox import StoredAccessInbox
 from access_control.requests import AccessRequests
@@ -179,9 +178,6 @@ def runtime_access(agent: Any) -> RuntimeAccess:
     )
     override = get_process_verifier()
     if _default_agent_trust_source() is not None:
-        if override is None:
-            # Expose this live verifier to storage/change_ledger.py in the same process.
-            set_process_verifier(access.verifier)
         return access
     if override is not None:
         return replace(access, verifier=override)

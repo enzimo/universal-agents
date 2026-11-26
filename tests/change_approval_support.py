@@ -29,7 +29,11 @@ from custom_agents import access_runtime
 from custom_messages.contracts.access_v2 import AccessRequestV1, AccessReviewChoice, ChangeApprovalMode
 from custom_tools.providers.changes import apply_change
 from tests.task_work_support import bind_task, set_agent_ref
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 from tests.tool_result_support import tool_json
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,10 +44,10 @@ OWNER_ROLES = ("owner",)
 
 
 def use_signed_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Trust the test gateway key and forget identity/access caches from earlier tests."""
+    """Trust the test protocol 1 authority and forget identity/access caches from earlier tests."""
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
 
 
 def authorization_config(enabled: bool) -> dict[str, Any]:
@@ -88,7 +92,7 @@ class SignedTaskManager:
         self.storage_settings = storage_settings
         self.current_task_id = task_id
         self.person_id = person_id
-        signed = context_signer().issue(team_id=team_id, person_id=person_id, person_roles=roles)
+        signed = signed_task_token(person_id, team_id=team_id, roles=roles, root_task_id=task_id)
         # canonical_user_id locates the person's task folders (workspace scope).
         self.meta = SimpleNamespace(
             gateway_context=SimpleNamespace(task_context=signed, canonical_user_id=person_id),

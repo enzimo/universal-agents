@@ -540,6 +540,7 @@ class GatewayInteractiveSubmissionService:
                     query_handler=request.query_handler,
                     response_task_id=task.task_id,
                 )
+            await self._request_context.ensure_signer_ready()
             envelope = MessageEnvelope(
                 msg_content=task,
                 msg_meta=MessageMeta(

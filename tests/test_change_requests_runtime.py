@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Event, get_ident
 import time
 from uuid import uuid4
@@ -12,21 +12,31 @@ from uuid import uuid4
 import pytest
 
 import storage.change_ledger as ledger
-from access_control.identity import ENV_VERIFY_KEYS, ISSUER_SCHEDULER, ContextSigner, IdentityRejected
+from access_control.authority_verifier import IdentityRejected, use_process_verifier
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import RuntimeSnapshotV3, TaskSnapshotRecord
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+from custom_transport.protocol1.authority_tokens import root_task_token
 from storage.runtime_state_repository import create_runtime_state_repository
 from storage.task_custody_repository import TaskCustodyConflict
-from tests.broker_access_support import _scheduler_key, context_signer, forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import (
+    broker_gateway_identity,
+    broker_people_store,
+    forget_task_context_keys,
+    signed_scheduler_token,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 from tests.knowledge_support import BACKENDS, NOW, TEAM, knowledge_storage
 from tests.test_change_ledger import _connect
 
 
 @pytest.fixture(autouse=True)
 def _keys(monkeypatch):
-    use_scheduler_key(monkeypatch)
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -60,8 +70,8 @@ def rows(storage):
         return {str(row[0]): str(row[1]) for row in conn.execute("SELECT request_id, state FROM change_requests").fetchall()}
 
 
-def signed_request():
-    return context_signer().issue(team_id=TEAM, person_id="alice", person_roles=("member",))
+def signed_request(*, team_id: str = TEAM, root_task_id: str = "task_root"):
+    return signed_task_token("alice", team_id=team_id, roles=("member",), root_task_id=root_task_id)
 
 
 @pytest.mark.parametrize("terminal", [ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.ABANDONED])
@@ -70,14 +80,14 @@ def test_root_admission_and_terminal_state_save_the_request_with_the_task(storag
     signed = signed_request()
     root = record(signed)
     save(repo, root)
-    assert rows(storage) == {signed.context.context_id: "open"}
+    assert rows(storage) == {signed.bound_to.request_id: "open"}
 
     # A worker carries the same context but never owns the request's lifecycle.
     child = record(signed, task_id="child", parent=root.task_id, state=ProgressState.COMPLETED)
     save(repo, child, agent_id="worker")
-    assert rows(storage) == {signed.context.context_id: "open"}
+    assert rows(storage) == {signed.bound_to.request_id: "open"}
     save(repo, root.model_copy(update={"state": terminal}), existing=True)
-    assert rows(storage) == {signed.context.context_id: "ended"}
+    assert rows(storage) == {signed.bound_to.request_id: "ended"}
 
 
 def test_cancelled_task_and_request_are_stopped_together(storage):
@@ -86,14 +96,12 @@ def test_cancelled_task_and_request_are_stopped_together(storage):
     root = record(signed)
     save(repo, root)
     save(repo, root.model_copy(update={"state": ProgressState.CANCELLED}), existing=True)
-    assert rows(storage) == {signed.context.context_id: "stopped"}
+    assert rows(storage) == {signed.bound_to.request_id: "stopped"}
 
 
 def test_scheduled_and_unsigned_work_have_no_request_row(storage):
     repo = create_runtime_state_repository(storage)
-    scheduled = ContextSigner.from_value(ISSUER_SCHEDULER, _scheduler_key()[0]).issue(
-        team_id=TEAM, person_id="alice", person_roles=("member",), schedule_id="schedule_1",
-    )
+    scheduled = signed_scheduler_token("alice", team_id=TEAM, roles=("member",), schedule_id="schedule_1")
     save(repo, record(scheduled), agent_id="scheduled")
     save(repo, record(None, task_id="unsigned_root", owner=None), agent_id="unsigned")
     assert rows(storage) == {}
@@ -106,9 +114,9 @@ def test_unverified_or_mismatched_identity_cannot_close_a_request(storage, inval
     save(repo, record(signed))
     owner = "alice"
     if invalid == "signature":
-        signed = signed.model_copy(update={"signature": "AA"})
+        signed = signed.model_copy(update={"signature": "A" * 86})
     elif invalid == "team":
-        signed = context_signer().sign(signed.context.model_copy(update={"team_id": "other_team"}))
+        signed = signed_request(team_id="other_team")
     else:
         owner = "bob"
     # Even a supplied owner cannot substitute for the signature and its team.
@@ -120,13 +128,23 @@ def test_unverified_or_mismatched_identity_cannot_close_a_request(storage, inval
 
 def test_expired_original_context_still_closes_its_request(storage):
     repo = create_runtime_state_repository(storage)
-    signed = context_signer().issue(
-        team_id=TEAM, person_id="alice", person_roles=("member",), now=NOW - timedelta(days=10),
+    now = datetime.now(timezone.utc)
+    person = broker_people_store().register(TEAM, "alice", roles=("member",))
+    signed = AuthorityTokenRecord.model_validate(
+        root_task_token(
+            broker_gateway_identity(TEAM),
+            team=TEAM,
+            root_task_id="task_root",
+            request_id=f"task_context_{uuid4().hex}",
+            person_ref=person.person_ref,
+            issued=now - timedelta(minutes=30),
+            expires_at=now - timedelta(minutes=5),
+        )
     )
     root = record(signed)
     save(repo, root)
     save(repo, root.model_copy(update={"state": ProgressState.COMPLETED}), existing=True)
-    assert rows(storage) == {signed.context.context_id: "ended"}
+    assert rows(storage) == {signed.bound_to.request_id: "ended"}
 
 
 @pytest.mark.parametrize("operation", ["open_request", "close_request"])
@@ -149,14 +167,14 @@ def test_lifecycle_failure_rolls_back_task_save_and_recovers_on_retry(storage, m
 
     # Reopening models restart: both records retain their last committed state.
     recovered = create_runtime_state_repository(storage)
-    assert rows(storage) == ({signed.context.context_id: "open"} if closing else {})
+    assert rows(storage) == ({signed.bound_to.request_id: "open"} if closing else {})
     snapshots = recovered.load_task_runtime_by_owner("agent_lead")
     if closing:
         assert RuntimeSnapshotV3.model_validate_json(snapshots[0].runtime_state_json).tasks[0].state is ProgressState.ACCEPTED
     else:
         assert snapshots == []
     save(recovered, root, existing=closing)
-    assert rows(storage) == {signed.context.context_id: "stopped" if closing else "open"}
+    assert rows(storage) == {signed.bound_to.request_id: "stopped" if closing else "open"}
 
 
 def test_failure_after_both_writes_rolls_back_admission(storage, monkeypatch):
@@ -184,7 +202,7 @@ def test_recovery_keeps_the_original_request_start(storage):
     repo.commit_task_runtime_recovery(sources=sources, replacement=replace(sources[0], owner_agent_id="replacement"))
     with _connect(storage) as conn:
         assert conn.execute("SELECT start_position FROM change_requests").fetchone()[0] == before
-    assert rows(storage) == {signed.context.context_id: "open"}
+    assert rows(storage) == {signed.bound_to.request_id: "open"}
 
 
 def cancel(repo, task_ids, *, root_id="task_root"):
@@ -199,7 +217,7 @@ def test_stop_marker_closes_request_before_crash_and_recovery_discards_the_task(
     signed = signed_request()
     save(repo, record(signed))
     cancel(repo, ["task_root"])
-    assert rows(storage) == {signed.context.context_id: "stopped"}
+    assert rows(storage) == {signed.bound_to.request_id: "stopped"}
     # Crash before the terminal snapshot: recovery intentionally discards the
     # cancelled task, so there will never be a later terminal-state callback.
     sources = repo.load_task_runtime_by_owner("agent_lead")
@@ -208,7 +226,7 @@ def test_stop_marker_closes_request_before_crash_and_recovery_discards_the_task(
     repo.commit_task_runtime_recovery(
         sources=sources, replacement=replace(sources[0], owner_agent_id="replacement", runtime_state_json=empty),
     )
-    assert rows(storage) == {signed.context.context_id: "stopped"}
+    assert rows(storage) == {signed.bound_to.request_id: "stopped"}
     restored = repo.load_task_runtime_by_owner("replacement")
     assert RuntimeSnapshotV3.model_validate_json(restored[0].runtime_state_json).tasks == []
 
@@ -219,7 +237,7 @@ def test_cancelling_a_delegated_task_does_not_close_the_request(storage):
     save(repo, record(signed))
     save(repo, record(signed, task_id="child", parent="task_root"), agent_id="worker")
     cancel(repo, ["child"], root_id="child")
-    assert rows(storage) == {signed.context.context_id: "open"}
+    assert rows(storage) == {signed.bound_to.request_id: "open"}
 
 
 def test_failed_request_closure_also_rolls_back_its_stop_marker(storage, monkeypatch):
@@ -234,27 +252,29 @@ def test_failed_request_closure_also_rolls_back_its_stop_marker(storage, monkeyp
         failure.setattr(ledger, "close_request", unavailable)
         with pytest.raises(RuntimeError, match="database unavailable"):
             cancel(repo, ["task_root"])
-    assert rows(storage) == {signed.context.context_id: "open"}
+    assert rows(storage) == {signed.bound_to.request_id: "open"}
     assert repo.get_task_cancellation(team_id=TEAM, task_id="task_root") is None
     cancel(repo, ["task_root"])
-    assert rows(storage) == {signed.context.context_id: "stopped"}
+    assert rows(storage) == {signed.bound_to.request_id: "stopped"}
 
 
-def test_missing_historical_key_aborts_terminal_save_instead_of_losing_closure(storage, monkeypatch):
+def test_missing_trust_aborts_unadmitted_save_but_still_closes_admitted_terminal_request(storage):
     repo = create_runtime_state_repository(storage)
     signed = signed_request()
     root = record(signed)
     save(repo, root)
     terminal = root.model_copy(update={"state": ProgressState.CANCELLED})
-    with monkeypatch.context() as failure:
-        failure.setenv(ENV_VERIFY_KEYS, "")
+    unadmitted = record(signed_request(root_task_id="task_new"), task_id="task_new")
+    with use_process_verifier(None):
         with pytest.raises(IdentityRejected):
-            save(repo, terminal, existing=True)
+            save(repo, unadmitted, agent_id="other_agent")
+        # Already-admitted task (verified at admission + require_same_request_identity) still closes
+        # its request row rather than leaving the task stuck or losing closure (C14).
+        save(repo, terminal, existing=True)
+    assert repo.load_task_runtime_by_owner("other_agent") == []
     saved = repo.load_task_runtime_by_owner("agent_lead")
-    assert RuntimeSnapshotV3.model_validate_json(saved[0].runtime_state_json).tasks[0].state is ProgressState.ACCEPTED
-    assert rows(storage) == {signed.context.context_id: "open"}
-    save(repo, terminal, existing=True)
-    assert rows(storage) == {signed.context.context_id: "stopped"}
+    assert RuntimeSnapshotV3.model_validate_json(saved[0].runtime_state_json).tasks[0].state is ProgressState.CANCELLED
+    assert rows(storage) == {signed.bound_to.request_id: "stopped"}
 
 
 def test_partial_task_record_save_closes_the_request_in_the_same_transaction(storage):
@@ -266,7 +286,7 @@ def test_partial_task_record_save_closes_the_request_in_the_same_transaction(sto
         owner_agent_id="agent_lead", task=root.model_copy(update={"state": ProgressState.COMPLETED}),
         task_plan_links={}, task_objective_links={}, plan_objective_links={},
     )
-    assert rows(storage) == {signed.context.context_id: "ended"}
+    assert rows(storage) == {signed.bound_to.request_id: "ended"}
 
 
 def test_task_manager_undoes_in_memory_admission_when_ledger_save_fails(tmp_path, monkeypatch):
@@ -289,7 +309,7 @@ def test_task_manager_undoes_in_memory_admission_when_ledger_save_fails(tmp_path
     assert list(manager.task_state.task_queue) == []
     assert rows(settings) == {}
     assert manager.add_task(root.task, root.header, root.meta, owner_person_id="alice")
-    assert rows(settings) == {root.meta.gateway_context.task_context.context.context_id: "open"}
+    assert rows(settings) == {root.meta.gateway_context.task_context.bound_to.request_id: "open"}
 
 
 @pytest.mark.parametrize("changed", ["missing", "owner", "context", "parent"])

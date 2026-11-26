@@ -104,6 +104,7 @@ class GatewayManagerCommandService:
         on the loop.
         """
 
+        await self._request_context.ensure_signer_ready()
         manager_id, correlation_id, envelope = await asyncio.to_thread(self._prepared_command, request)
         async with self._manager.control_channel(correlation_id) as response_queue:
             await self._manager.publish_durable(envelope, routing_key=manager_id)
@@ -143,6 +144,7 @@ class GatewayManagerCommandService:
         manager_id = self._require_manager_id()
         correlation_id = self._id_generator.new_correlation_id()
         route = GatewayRequestRoute(canonical_user_id=actor_person_id)
+        await self._request_context.ensure_signer_ready()
         envelope = MessageEnvelope(
             msg_content=command,
             msg_header=MessageHeader(
@@ -162,6 +164,7 @@ class GatewayManagerCommandService:
                     delivery_mode="manager_control",
                     route=route,
                     manager_agent_id=manager_id,
+                    root_task_id=command.get_id(),
                 ),
             ),
         )
@@ -305,6 +308,7 @@ class GatewayManagerCommandService:
                     delivery_mode="manager_control",
                     route=route,
                     manager_agent_id=manager_id,
+                    root_task_id=command.get_id(),
                 ),
             ),
         )

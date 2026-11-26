@@ -97,9 +97,16 @@ from pydantic import MISSING
 from access_control.authority_verifier import (
     AuthorityTokenVerifier,
     IdentityRejected,
+    REFUSAL_NO_PEOPLE_STORE,
+    REFUSAL_NO_TRUST_STORE,
+    REFUSAL_PERSON_UNKNOWN,
+    REFUSAL_UNKNOWN_ISSUER,
     get_process_verifier,
 )
-from custom_messages.wire.authority_bindings import is_schedule_permit_binding
+from custom_messages.wire.authority_bindings import (
+    AuthorityTokenBoundToRootTaskRecord,
+    is_schedule_permit_binding,
+)
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal, ProgressState
 from knowledge_base.sensitive_content import SensitiveContentRules
@@ -446,6 +453,14 @@ def close_request(
     )
 
 
+_ADMITTED_CLOSE_TRUST_GAP_CODES = frozenset({
+    REFUSAL_NO_TRUST_STORE,
+    REFUSAL_UNKNOWN_ISSUER,
+    REFUSAL_NO_PEOPLE_STORE,
+    REFUSAL_PERSON_UNKNOWN,
+})
+
+
 def record_task_request_state(
     conn: Any,
     dialect: SqlDialect,
@@ -454,15 +469,18 @@ def record_task_request_state(
     task: TaskSnapshotRecord,
     now: datetime,
     verifier: AuthorityTokenVerifier | None = None,
+    admitted: bool = False,
 ) -> None:
     """Save a root request's lifecycle with its task, never in a later callback.
 
     The stored owner was verified at admission. Recheck the original authority
-    token's signature, issuer certificate, team, installation, and current
-    revocations before attributing the request id, including when the token
-    has since expired. This reads historical identity only and grants no
-    authority. A failed lifecycle write aborts the task save, so recovery
-    cannot expose a queued or terminal task whose request state was lost.
+    token's signature, issuer certificate validity at issue time, team, and
+    installation before attributing the request id, including when the token
+    has since expired, its issuer was later revoked, or revocations are stale.
+    This reads historical identity only and grants no authority. For an already
+    admitted task being closed into a terminal state, a missing trust store or
+    aged-out issuer certificate logs a warning and still closes the request
+    row so stops and terminal saves are never blocked.
     """
 
     if not team_id or task.task.parent_task_id or not task.owner_person_id:
@@ -473,16 +491,49 @@ def record_task_request_state(
         raise IdentityRejected("A task cannot carry both an authority token and a scheduled run identity.")
     if signed is None:
         return
+    terminal = task.state in {
+        ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED,
+    }
     active_verifier = verifier or get_process_verifier() or AuthorityTokenVerifier(None)
     try:
-        verified = active_verifier.verify_root_task(
+        verified = active_verifier.verify_historical_root_task(
             signed,
             team_id=team_id,
             now=now,
-            check_expiry=False,
-            require_active_person=False,
         )
-    except (IdentityRejected, ValueError):
+    except IdentityRejected as exc:
+        if (
+            admitted
+            and terminal
+            and exc.code in _ADMITTED_CLOSE_TRUST_GAP_CODES
+            and isinstance(signed.bound_to, AuthorityTokenBoundToRootTaskRecord)
+            and signed.schedule_id is MISSING
+            and signed.person is not MISSING
+            and not is_schedule_permit_binding(signed.bound_to.id)
+        ):
+            logger.warning(
+                "Closing an already-admitted root request without its issuer trust record so "
+                "terminalization and stop commands can complete; this grants no access. "
+                "event=change_ledger_close_admitted_without_trust task_id=%s team_id=%s code=%s request_id=%s",
+                task.task_id,
+                team_id,
+                exc.code,
+                signed.bound_to.request_id,
+            )
+            state = RequestState.STOPPED if task.state is ProgressState.CANCELLED else RequestState.ENDED
+            close_request(
+                conn, dialect, team_id=team_id, request_id=signed.bound_to.request_id,
+                person_id=task.owner_person_id, now=now, state=state,
+            )
+            prune(conn, dialect, team_id=team_id, before=now - LEDGER_RETENTION)
+            return
+        logger.warning(
+            "Ignored unverified request identity while saving a task. "
+            "event=change_ledger_task_identity_rejected task_id=%s team_id=%s code=%s",
+            task.task_id, team_id, exc.code,
+        )
+        raise
+    except ValueError:
         logger.warning(
             "Ignored unverified request identity while saving a task. "
             "event=change_ledger_task_identity_rejected task_id=%s team_id=%s",
@@ -498,9 +549,6 @@ def record_task_request_state(
             task.task_id, team_id,
         )
         raise IdentityRejected("The request identity does not match the task's admitted owner.")
-    terminal = task.state in {
-        ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED,
-    }
     if terminal:
         state = RequestState.STOPPED if task.state is ProgressState.CANCELLED else RequestState.ENDED
         close_request(

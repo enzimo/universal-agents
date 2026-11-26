@@ -39,7 +39,7 @@ from custom_messages.contracts.access_workflow_v2 import WorkflowProgressV2, Wor
 from custom_tools.providers import access_workflows as tools
 from storage.access_workflow_repository import AccessWorkflowRepository, WorkflowConflict
 from custom_tools.provider_contract import tool_name
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_scheduler_token
 from tests.access_workflow_support import (
     OWNER,
     TEAM,
@@ -183,7 +183,11 @@ def test_a_workflow_needs_a_person_and_is_published_once_per_task(lead, tmp_path
     other = run_tool(lead, tools.submit_access_workflow, proposal(title="Another plan"), "other-key")
     assert other["status"] == "refused" and "existing workflow" in other["reason"]
 
-    system = make_agent(tmp_path, task_id="task-system", signed=context_signer().issue(team_id=TEAM, person_id=None))
+    system = make_agent(
+        tmp_path,
+        task_id="task-system",
+        signed=signed_scheduler_token(None, team_id=TEAM, schedule_id="sched-system"),
+    )
     refused = run_tool(system, tools.submit_access_workflow, proposal(), "k")
     assert refused["status"] == "refused" and "works for nobody" in refused["reason"]
 

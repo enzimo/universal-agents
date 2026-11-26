@@ -203,6 +203,7 @@ class GatewayScheduleApplication:
         # The person's own time zone: the manager reads the schedule's cron
         # expression in it (the manager fills the schedule's cron_timezone from it).
         person_timezone = self._request_context.requester_presentation_for_session(session, resolved_route).timezone
+        await self._request_context.ensure_signer_ready()
         payload_meta = MessageMeta(
             from_agent_name=f"{self._settings.instance_name}_gateway",
             msg_correlation_id=correlation_id,

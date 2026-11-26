@@ -65,7 +65,13 @@ class _AnsweringTransport(_SteeringTransport):
         return [envelope.msg_meta.gateway_context.parallel_thread for envelope in self.durable]
 
 
-def _gateway(tmp_path: Path, *, web_chat: bool = False, monkeypatch=None) -> tuple[UserGateway, _AnsweringTransport]:
+def _gateway(
+    tmp_path: Path,
+    *,
+    web_chat: bool = False,
+    monkeypatch=None,
+    token_signer=None,
+) -> tuple[UserGateway, _AnsweringTransport]:
     config = steering_config(tmp_path)
     if web_chat:
         config.network.public_origin = "http://127.0.0.1"
@@ -79,6 +85,7 @@ def _gateway(tmp_path: Path, *, web_chat: bool = False, monkeypatch=None) -> tup
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "gateway.db")),
         manager_transport=transport,
+        token_signer=token_signer,
     )
     transport.gateway = gateway
     return gateway, transport

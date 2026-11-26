@@ -3,15 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+from typing import Callable, Protocol
+from uuid import uuid4
 
 from assistant_gateway.application.identity_service import (
     GatewayIdentityService,
     ResolvedGatewayUser,
 )
-from access_control.identity import ContextSigner
 from access_control.people import effective_roles
 from assistant_gateway.domain.sessions import SessionRecord
 from custom_messages.contracts.routing_v1 import GatewayContext
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+
+logger = logging.getLogger(__name__)
+
+
+class GatewayTokenSigner(Protocol):
+    """Protocol 1 gateway host capability that signs root-task authority tokens."""
+
+    def sign_root_task_token(
+        self,
+        *,
+        person_ref: str,
+        root_task_id: str,
+        request_id: str,
+        team: str | None = None,
+    ) -> AuthorityTokenRecord: ...
 
 
 @dataclass(frozen=True)
@@ -77,11 +95,32 @@ class GatewayRequestContextService:
         *,
         settings: GatewayRequestContextSettings,
         identity: GatewayIdentityService,
-        context_signer: ContextSigner | None = None,
+        token_signer: GatewayTokenSigner | None = None,
+        person_ref_resolver: Callable[[str], str | None] | None = None,
     ) -> None:
         self.settings = settings
         self._identity = identity
-        self._context_signer = context_signer
+        self._token_signer = token_signer
+        self._person_ref_resolver = person_ref_resolver
+
+    async def ensure_signer_ready(self, *, timeout: float = 5.0) -> None:
+        """Wait briefly for a joining gateway host so startup requests receive signed authority tokens."""
+
+        if self._token_signer is None:
+            return
+        ready = getattr(self._token_signer, "ready", None)
+        if not callable(ready):
+            return
+        try:
+            await ready(timeout)
+        except Exception as exc:  # noqa: BLE001 - build_gateway_context degrades to unsigned (fail-closed at verifier)
+            logger.warning(
+                "Gateway protocol 1 host was not ready to sign an authority token; "
+                "verifiers will refuse unsigned requests. event=gateway_authority_token_host_not_ready "
+                "error=%s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     @property
     def users_enabled(self) -> bool:
@@ -330,21 +369,32 @@ class GatewayRequestContextService:
         """
 
         canonical_user_id = self.canonical_user_id(route)
-        # The signed context is what enforcement points trust: the person and
-        # their current team roles, vouched for by the gateway.
-        task_context = (
-            self._context_signer.issue(
-                team_id=self.settings.team_id,
-                person_id=canonical_user_id,
-                person_roles=self.team_roles(canonical_user_id),
-                root_task_id=root_task_id,
-                conversation_id=conversation_id,
-                schedule_id=scheduled_job_id,
-                context_id=context_id,
-            )
-            if self._context_signer is not None
-            else None
-        )
+        # The protocol 1 root-task authority token is what enforcement points trust:
+        # bound to the root task and request id, naming the person by opaque person_ref
+        # only, signed with the gateway host's certificate key (never schedule_id).
+        task_context: AuthorityTokenRecord | None = None
+        if self._token_signer is not None and canonical_user_id:
+            person_ref = self._resolve_person_ref(canonical_user_id)
+            if person_ref is not None:
+                resolved_request_id = context_id or f"task_context_{uuid4().hex}"
+                resolved_root_task_id = root_task_id or resolved_request_id
+                try:
+                    task_context = self._token_signer.sign_root_task_token(
+                        person_ref=person_ref,
+                        root_task_id=resolved_root_task_id,
+                        request_id=resolved_request_id,
+                        team=self.settings.team_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - receiving verifier fails closed on missing token
+                    logger.warning(
+                        "Gateway could not sign a protocol 1 root-task authority token; "
+                        "verifiers will refuse this task. event=gateway_authority_token_unavailable "
+                        "team_id=%s delivery_mode=%s error=%s: %s",
+                        self.settings.team_id,
+                        delivery_mode,
+                        type(exc).__name__,
+                        exc,
+                    )
         return GatewayContext(
             gateway_instance_name=self.settings.instance_name,
             session_key=session_key,
@@ -361,3 +411,32 @@ class GatewayRequestContextService:
             task_context=task_context,
             parallel_thread=parallel_thread,
         )
+
+    def _resolve_person_ref(self, canonical_user_id: str) -> str | None:
+        if self._person_ref_resolver is None:
+            logger.warning(
+                "Gateway has no person reference resolver configured for authority token signing; "
+                "verifiers will refuse this task. event=gateway_person_ref_resolver_missing team_id=%s",
+                self.settings.team_id,
+            )
+            return None
+        try:
+            person_ref = self._person_ref_resolver(canonical_user_id)
+        except Exception as exc:  # noqa: BLE001 - fail closed when people copy cannot be updated
+            logger.warning(
+                "Could not resolve opaque person_ref for authority token signing; "
+                "verifiers will refuse this task. event=gateway_person_ref_lookup_failed "
+                "team_id=%s error=%s: %s",
+                self.settings.team_id,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        if not person_ref:
+            logger.warning(
+                "No opaque person_ref is stored in this team for the requesting user; "
+                "verifiers will refuse this task. event=gateway_person_ref_missing team_id=%s",
+                self.settings.team_id,
+            )
+            return None
+        return person_ref

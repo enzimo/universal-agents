@@ -48,7 +48,11 @@ from tests.task_work_support import bind_task, set_agent_ref
 from custom_tools.workspace_scope import current_workspace_scope
 from runtime_settings.code_sandbox_contract import ENV_CODE_SANDBOX_MODE
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 from tests.data_folder_support import store_data_folder
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, Context, owner_service
 from tests.test_access_service import spec
@@ -69,16 +73,16 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     (layout.root / "team.env").write_text("SECRET=runtime-secret\n", encoding="utf-8")
     monkeypatch.setenv("AGENT_WORKSPACE_DIR", str(layout.workspaces_dir))
     monkeypatch.setenv("TEAM_INSTANCE_ROOT", str(layout.root))
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     monkeypatch.delenv(ENV_CODE_SANDBOX_MODE, raising=False)
     monkeypatch.setattr(code_sandbox, "_status_logged", False)
-    access_runtime._runtime_access.cache_clear()
     folder_access.forget_kept_answers()
     manager = TaskManager(db_path=str(layout.root / "manager.db"))
     manager.set_owner_identity(f"agent-{WORKER_TYPE}", WORKER_TYPE, TEAM, WORKER_TYPE)
     meta = MessageMeta(conversation_id="conv-1")
     meta.gateway_context = SimpleNamespace(
-        task_context=context_signer().issue(team_id=TEAM, person_id=OWNER.person_id, person_roles=("owner",))
+        task_context=signed_task_token(OWNER.person_id, team_id=TEAM, roles=("owner",), root_task_id="task-1")
     )
     manager.add_task(Task(task_id="task-1", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
     agent = SimpleNamespace(

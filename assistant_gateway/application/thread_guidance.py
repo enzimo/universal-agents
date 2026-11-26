@@ -264,6 +264,7 @@ class GatewayThreadGuidance:
         manager_id = self._manager.manager_id
         if not manager_id:
             return _Attempt(GuidanceDelivery.NO_LEAD, target_task_id=target.active_task_id)
+        await self._request_context.ensure_signer_ready()
         envelope = await asyncio.to_thread(self._envelope, held, target, manager_id)
         if envelope is None:
             return _Attempt(GuidanceDelivery.REQUEST_FINISHED)

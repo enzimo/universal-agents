@@ -53,7 +53,11 @@ from custom_tools.providers import tool_loading
 from tests.task_work_support import acting_as, bind_turn, set_agent_ref
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -81,17 +85,17 @@ class Context:
 
 @pytest.fixture
 def storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
     set_agent_ref(None)
 
 
 def a_request(person: PersonPrincipal = OWNER):
     """A person's request: the gateway-signed context every task of the request carries."""
 
-    return context_signer().issue(team_id=TEAM, person_id=person.person_id, person_roles=person.roles)
+    return signed_task_token(person.person_id, team_id=TEAM, roles=person.roles)
 
 
 def decide(agent, function, arguments):

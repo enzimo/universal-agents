@@ -4298,13 +4298,15 @@ async def _run_secure_tool_broker_service(
             mcp=config.mcp,
         )
         from custom_transport.nats_adapter import NatsTransportAdapter
-        from custom_transport.protocol1.trust_reader import TrustReader
+        from custom_transport.protocol1.trust_reader import (
+            TrustReader,
+            trust_reader_transport_config,
+        )
         from custom_transport.subjects import NatsSubjectMapper
         from runtime_settings.services import web_service_urls
         from secure_tool_broker.access_gate import build_broker_access_gate
         from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
         from secure_tool_broker.page_view import web_chat_origin
-        from team_services.process import transport_config as build_transport_config
 
         execution_ssh_config = BrokerExecutionSSHConfig.from_runtime_settings(
             instance_root_path=str(config.instance_root_path),
@@ -4319,25 +4321,44 @@ async def _run_secure_tool_broker_service(
         trust_adapter: NatsTransportAdapter | None = None
         trust_reader: TrustReader | None = None
         if config.layout.trust_bootstrap_path.exists():
+            trust_logger = logging.getLogger("secure_tool_broker.trust_reader")
             trust_adapter = NatsTransportAdapter(
-                config=build_transport_config(config),
+                config=trust_reader_transport_config(config, reader_id="secure-tool-broker"),
                 mapper=NatsSubjectMapper(team_id=config.manager.team_id),
-                logger=logging.getLogger("secure_tool_broker.trust_reader"),
+                logger=trust_logger,
             )
-            await trust_adapter.connect(reconcile_topology=False)
+
+            async def _connect_trust_nats() -> Any:
+                assert trust_adapter is not None
+                await trust_adapter.connect(reconcile_topology=False)
+                return trust_adapter.nats_connection
+
+            connected_nc: Any = None
+            try:
+                connected_nc = await _connect_trust_nats()
+            except Exception:
+                trust_logger.warning(
+                    "Could not reach NATS at broker startup; starting anyway (tool calls that need "
+                    "protocol 1 trust will fail closed until NATS is reachable and UA1_CERTS syncs). "
+                    "event=broker_trust_nats_connect_failed",
+                    exc_info=True,
+                )
             trust_reader = TrustReader.open(
                 config.layout,
                 "secure-tool-broker",
-                trust_adapter.nats_connection,
+                connected_nc,
+                connect=_connect_trust_nats,
+                logger=trust_logger,
             )
-            try:
-                await trust_reader.sync_once()
-            except Exception:
-                logging.getLogger("secure_tool_broker.trust_reader").warning(
-                    "Initial UA1_CERTS sync did not finish; broker will fetch certificates on demand. "
-                    "event=broker_trust_initial_sync_failed",
-                    exc_info=True,
-                )
+            if connected_nc is not None:
+                try:
+                    await trust_reader.sync_once()
+                except Exception:
+                    trust_logger.warning(
+                        "Initial UA1_CERTS sync did not finish; broker will fetch certificates on demand. "
+                        "event=broker_trust_initial_sync_failed",
+                        exc_info=True,
+                    )
         try:
             access_gate = build_broker_access_gate(
                 instance_root=config.instance_root_path,

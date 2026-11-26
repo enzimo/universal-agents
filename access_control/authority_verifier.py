@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 from access_control.people_directory import PeopleDirectory, PeopleStore, PersonNow
 from custom_messages.contracts.access_v2 import is_person_ref
 from custom_messages.wire.authority_bindings import (
+    AUTHORITY_ISSUER_ROLES,
     AuthorityTokenRecord,
     GATEWAY_ISSUER_ROLE,
     ROOT_TASK_BINDING,
@@ -548,6 +549,175 @@ class AuthorityTokenVerifier:
                 request_id,
             )
             return verify_fn(raw_token, **kwargs)
+
+    def verify_historical_root_task(
+        self,
+        raw_token: Any,
+        *,
+        team_id: str,
+        now: Optional[datetime] = None,
+        require_issuer: IssuerRequirement = "any",
+        people: Optional[PeopleStore] = None,
+    ) -> VerifiedTaskToken:
+        """Verify historical root-task attribution (change ledger saves and stops).
+
+        Checks Ed25519 signature, issuer certificate validity at ``issued_at``,
+        installation, team, issuer role, max lifetime, and non-permit binding,
+        without failing on token expiry, a later issuer revocation, or stale
+        revocations. Logs a warning when the issuer is revoked or revocations
+        are stale so operators see it, while keeping snapshot saves and stop
+        commands working for already-admitted tasks. Grants no authority.
+        """
+
+        from cryptography.exceptions import InvalidSignature
+        from pydantic import MISSING
+
+        from custom_messages.wire.encoding import b64url_decode
+        from custom_messages.wire.frame import authority_signing_bytes
+        from custom_messages.wire.kinds import AUTHORITY_TOKEN_MAX_SECONDS
+        from custom_messages.wire.models import AuthorityTokenBoundToRootTask
+        from custom_messages.wire.values import parse_timestamp
+
+        token, fields = _parse_token(raw_token)
+        if not isinstance(token.bound_to, AuthorityTokenBoundToRootTask):
+            raise IdentityRejected(
+                f"Expected a root-task authority token, got bound_to.type={token.bound_to.type!r}.",
+                code=REFUSAL_MALFORMED,
+            )
+
+        bound_id = token.bound_to.id
+        request_id = token.bound_to.request_id
+        schedule_id = None if token.schedule_id is MISSING else token.schedule_id
+        person_ref = None if token.person is MISSING else token.person
+        if is_schedule_permit_binding(bound_id) or is_schedule_permit_binding(request_id):
+            raise IdentityRejected(
+                "A schedule permit cannot be presented as a task token directly; it must travel inside a scheduled run identity.",
+                code=REFUSAL_PERMIT_NOT_ALLOWED,
+            )
+
+        issued_at = parse_timestamp(token.issued_at)
+        expires_at = parse_timestamp(token.expires_at)
+        if expires_at <= issued_at:
+            raise IdentityRejected("The authority token ends at or before it was issued.", code=REFUSAL_MALFORMED)
+        if (expires_at - issued_at).total_seconds() > AUTHORITY_TOKEN_MAX_SECONDS:
+            raise IdentityRejected("The authority token lasts longer than the contract allows.", code=REFUSAL_EXPIRED)
+
+        moment = now or self._clock()
+        store, expected_installation, lock = self._require_trust()
+        lock_ctx = lock if lock is not None else nullcontext()
+        with lock_ctx:
+            if token.issuer.installation != expected_installation or token.audience.installation != expected_installation:
+                raise IdentityRejected(
+                    "The authority token belongs to another installation.",
+                    code=REFUSAL_WRONG_INSTALLATION,
+                )
+            if token.audience.team != team_id:
+                raise IdentityRejected("The authority token belongs to another team.", code=REFUSAL_WRONG_TEAM)
+            certificate = store.host_certificate(
+                token.issuer.installation,
+                token.issuer.runtime,
+                token.issuer.membership_epoch,
+            )
+            if certificate is None:
+                raise IdentityRejected(
+                    f"No certificate is held yet for token issuer {token.issuer.runtime} "
+                    f"(membership epoch {token.issuer.membership_epoch}).",
+                    code=REFUSAL_UNKNOWN_ISSUER,
+                )
+            if certificate.key_id != token.issuer.key_id:
+                raise IdentityRejected("The token issuer's certificate names another key.", code=REFUSAL_KEY_MISMATCH)
+            if not certificate.valid_at(issued_at):
+                raise IdentityRejected(
+                    "The token issuer's certificate was not valid when the token was issued.",
+                    code=REFUSAL_ISSUER_CERT_NOT_VALID,
+                )
+            if not (certificate.roles & AUTHORITY_ISSUER_ROLES) or team_id not in certificate.teams:
+                raise IdentityRejected(
+                    "The token issuer's certificate is not allowed to sign this token.",
+                    code=REFUSAL_WRONG_ISSUER,
+                )
+            if schedule_id is not None and SCHEDULER_ISSUER_ROLE not in certificate.roles:
+                raise IdentityRejected(
+                    "Only a scheduler may name a schedule in an authority token.",
+                    code=REFUSAL_WRONG_ISSUER,
+                )
+            if person_ref is None and schedule_id is None:
+                raise IdentityRejected(
+                    "The authority token names neither a person nor a schedule.",
+                    code=REFUSAL_BAD_AUTHORITY,
+                )
+            try:
+                certificate.public_key.verify(
+                    b64url_decode(fields["signature"]),
+                    authority_signing_bytes(fields),
+                )
+            except (InvalidSignature, KeyError, TypeError, ValueError) as exc:
+                raise IdentityRejected("The token's signature does not verify.", code=REFUSAL_BAD_SIGNATURE) from exc
+
+            issuer_revoked = store.revoked(certificate)
+            revocations_current = store.revocations_current(certificate.installation, moment)
+            issuer_roles = certificate.roles
+            issuer_runtime = certificate.runtime
+
+        if issuer_revoked:
+            logger.warning(
+                "Historical token attribution accepted a token whose issuer certificate is now revoked; "
+                "this records request lifecycle only and grants no access. "
+                "event=change_ledger_historical_issuer_revoked issuer_runtime=%s membership_epoch=%s "
+                "team=%s request_id=%s",
+                issuer_runtime,
+                token.issuer.membership_epoch,
+                team_id,
+                request_id,
+            )
+        if not revocations_current:
+            logger.warning(
+                "Historical token attribution ran without a current revocations record; "
+                "this records request lifecycle only and grants no access. "
+                "event=change_ledger_historical_revocations_stale issuer_runtime=%s membership_epoch=%s "
+                "team=%s request_id=%s",
+                issuer_runtime,
+                token.issuer.membership_epoch,
+                team_id,
+                request_id,
+            )
+
+        if require_issuer == "gateway":
+            if GATEWAY_ISSUER_ROLE not in issuer_roles or schedule_id is not None:
+                raise IdentityRejected(
+                    "Only a gateway-signed authority token is accepted here.",
+                    code=REFUSAL_WRONG_ISSUER,
+                )
+        elif require_issuer == "scheduler":
+            if SCHEDULER_ISSUER_ROLE not in issuer_roles:
+                raise IdentityRejected(
+                    "Only a scheduler-signed authority token is accepted here.",
+                    code=REFUSAL_WRONG_ISSUER,
+                )
+
+        person, person_id, person_roles = self._resolve_person(
+            person_ref=person_ref,
+            team_id=team_id,
+            people_override=people,
+            require_active_person=False,
+        )
+        return VerifiedTaskToken(
+            token=token,
+            token_id=token.token_id,
+            installation=expected_installation,
+            team_id=token.audience.team,
+            root_task_id=bound_id,
+            request_id=request_id,
+            person_ref=person_ref,
+            person_id=person_id,
+            person_roles=person_roles,
+            person=person,
+            schedule_id=schedule_id,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            issuer_runtime=issuer_runtime,
+            issuer_roles=issuer_roles,
+        )
 
     def verify_root_task(
         self,

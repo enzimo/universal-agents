@@ -30,7 +30,7 @@ from aiohttp.test_utils import TestServer
 from custom_tools.runtime_context import task_work
 from tests.task_work_support import bind_task, strands_parts
 from access_control.person_settings import PersonSettings
-from custom_agents import access_runtime, model_failover_runtime, person_model_runtime
+from custom_agents import model_failover_runtime, person_model_runtime
 from custom_agents.model_keys import ModelKeys
 from custom_agents.strands_model_factory import StrandsModelFactoryConfig, build_strands_model
 from custom_messages.contracts.person_settings_v1 import PersonModelProfileV1
@@ -38,7 +38,12 @@ from custom_messages.contracts.routing_v1 import GatewayContext
 from model_providers.endpoints import EndpointKind
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import TEST_TEAM, context_signer, context_verify_keys
+from tests.broker_access_support import (
+    TEST_TEAM,
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 TEAM_MODEL = "team/model-1"
 ALICE_MODEL = "openai/gpt-6-luna"
@@ -89,22 +94,22 @@ async def servers():
 
 @pytest.fixture(autouse=True)
 def _keys_and_contexts(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     # Every endpoint's key from the environment: this test is about which model runs, not keys.
     keys = ModelKeys(None, env_lookup={"LITELLM_API_KEY": "sk-test-key-000000001"}.get)
     monkeypatch.setattr("custom_agents.model_keys.process_model_keys", lambda: keys)
     monkeypatch.setattr("custom_agents.strands_model_factory.process_model_keys", lambda: keys)
-    access_runtime._runtime_access.cache_clear()
     person_model_runtime.forget_cached_profiles()
     yield
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
     person_model_runtime.forget_cached_profiles()
 
 
 def _meta(person: str | None, *, signed: bool = True) -> SimpleNamespace:
     if person is None:
         return SimpleNamespace(gateway_context=None)
-    task_context = context_signer().issue(team_id=TEST_TEAM, person_id=person, person_roles=("member",)) if signed else None
+    task_context = signed_task_token(person, team_id=TEST_TEAM, roles=("member",)) if signed else None
     return SimpleNamespace(gateway_context=GatewayContext(canonical_user_id=person, task_context=task_context))
 
 

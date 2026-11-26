@@ -212,6 +212,7 @@ class GatewayClarificationCore:
             target_named_agent_type=self._settings.manager_named_agent_type,
             correlation_id=correlation_id,
         )
+        await self._request_context.ensure_signer_ready()
         async with self._manager.control_channel(correlation_id) as queue:
             try:
                 envelope = MessageEnvelope(
@@ -238,6 +239,7 @@ class GatewayClarificationCore:
                                     canonical_user_id=(canonical_user_id or None)
                                 ),
                                 manager_agent_id=manager_id,
+                                root_task_id=request.task_status_id,
                             )
                         ),
                     ),
@@ -315,6 +317,7 @@ class GatewayClarificationCore:
                 response_text,
             ),
         )
+        await self._request_context.ensure_signer_ready()
         envelope = MessageEnvelope(
             msg_content=answer,
             msg_meta=MessageMeta(

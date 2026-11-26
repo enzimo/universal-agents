@@ -19,19 +19,25 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from access_control.authority_verifier import AuthorityTokenVerifier
 from access_control.ownership import request_context_id, sent_files_access, steering_context_id
-from custom_agents.task_context_runtime import context_verifier
+from access_control.task_identity import resolve_task_identity
 from custom_messages.enums import RoutingType
 from custom_messages.transport_codec import decode_envelope, encode_envelope
-from tests.broker_access_support import forget_task_context_keys, use_gateway_key
+from storage.access_repository import AccessRepository
+from tests.broker_access_support import (
+    BrokerGatewayTokenSigner,
+    broker_trust_store,
+    forget_task_context_keys,
+)
 from tests.test_gateway_parallel_threads import _gateway, _send, _web_chat_thread
 from tests.test_gateway_task_steering import RUN_STATE_RUNNING
 from tests.test_gateway_website_app import InternalWebsiteInteractiveApp
 
 
 @pytest.fixture
-def gateway_key(monkeypatch: pytest.MonkeyPatch):
-    use_gateway_key(monkeypatch)
+def gateway_key():
+    forget_task_context_keys()
     yield
     forget_task_context_keys()
 
@@ -40,7 +46,12 @@ def gateway_key(monkeypatch: pytest.MonkeyPatch):
 async def test_a_request_and_its_guidance_carry_contexts_naming_the_task_and_conversation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gateway_key: None
 ) -> None:
-    gateway, transport = _gateway(tmp_path, web_chat=True, monkeypatch=monkeypatch)
+    gateway, transport = _gateway(
+        tmp_path,
+        web_chat=True,
+        monkeypatch=monkeypatch,
+        token_signer=BrokerGatewayTokenSigner(),
+    )
 
     async def unanswered(envelope, *, routing_key):
         # The lead does not answer, so the guidance stays held and is sent again.
@@ -73,13 +84,35 @@ async def test_a_request_and_its_guidance_carry_contexts_naming_the_task_and_con
     assert request.msg_content.attachments and guidance.msg_content.attachments
     # Guidance goes to every agent process of the team, not only the lead.
     assert routing_key == RoutingType.ALL_AGENTS_ROUTE.value
-    verifier = context_verifier()
-    request_context = verifier.verify(request.msg_meta.gateway_context.task_context)
-    guidance_context = verifier.verify(guidance.msg_meta.gateway_context.task_context)
-    resent_context = verifier.verify(resent.msg_meta.gateway_context.task_context)
+    verifier = AuthorityTokenVerifier(
+        broker_trust_store(),
+        people=AccessRepository(gateway.config.manager_storage_settings),
+    )
+    team_id = gateway.config.manager.team_id
+    request_context = resolve_task_identity(
+        verifier=verifier,
+        team_id=team_id,
+        task_context=request.msg_meta.gateway_context.task_context,
+        schedule_run=None,
+        schedule_runs=None,
+    )
+    guidance_context = resolve_task_identity(
+        verifier=verifier,
+        team_id=team_id,
+        task_context=guidance.msg_meta.gateway_context.task_context,
+        schedule_run=None,
+        schedule_runs=None,
+    )
+    resent_context = resolve_task_identity(
+        verifier=verifier,
+        team_id=team_id,
+        task_context=resent.msg_meta.gateway_context.task_context,
+        schedule_run=None,
+        schedule_runs=None,
+    )
     task_id = request.msg_content.task_id
-    assert (request_context.root_task_id, request_context.conversation_id) == (task_id, conversation_id)
-    assert (guidance_context.root_task_id, guidance_context.conversation_id) == ("task_open", conversation_id)
+    assert request_context.root_task_id == task_id
+    assert guidance_context.root_task_id == "task_open"
     assert guidance_context.person_id == request_context.person_id
     # Each context is bound to its message and files; a resend is the same message.
     assert request_context.context_id == request_context_id(request.msg_content)
@@ -98,6 +131,7 @@ async def test_a_request_and_its_guidance_carry_contexts_naming_the_task_and_con
         sender=request_context,
         task_id=task_id,
         conversation_id=conversation_id,
+        message_conversation_id=request.msg_meta.conversation_id,
         person_id=person,
         message_context_id=request_context_id(request.msg_content),
     ).allowed
@@ -105,6 +139,7 @@ async def test_a_request_and_its_guidance_carry_contexts_naming_the_task_and_con
         sender=guidance_context,
         task_id="task_open",
         conversation_id=conversation_id,
+        message_conversation_id=guidance.msg_meta.conversation_id,
         person_id=person,
         message_context_id=steering_context_id(guidance.msg_content),
     ).allowed
@@ -113,6 +148,7 @@ async def test_a_request_and_its_guidance_carry_contexts_naming_the_task_and_con
         sender=request_context,
         task_id=task_id,
         conversation_id=conversation_id,
+        message_conversation_id=guidance.msg_meta.conversation_id,
         person_id=person,
         message_context_id=steering_context_id(guidance.msg_content),
     )
@@ -123,6 +159,7 @@ async def test_a_request_and_its_guidance_carry_contexts_naming_the_task_and_con
         sender=guidance_context,
         task_id="task_open",
         conversation_id=conversation_id,
+        message_conversation_id=guidance.msg_meta.conversation_id,
         person_id=person,
         message_context_id=steering_context_id(guidance.msg_content.model_copy(update={"attachments": [other_file]})),
     )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 
@@ -27,6 +27,7 @@ class RuntimeStateStore:
         db_path: str = STORAGE_DEFAULTS.task_history_db_path.value,
         logger: logging.Logger = None,
         storage_settings: Optional[StorageSettings] = None,
+        authority_verifier: Any = None,
     ):
         self._db_path = storage_settings.sqlite_path if storage_settings and storage_settings.sqlite_path else db_path
         self._logger = logger or logging.getLogger(__name__)
@@ -36,7 +37,15 @@ class RuntimeStateStore:
         self._repository = create_runtime_state_repository(
             self._storage_settings,
             logger=self._logger,
+            authority_verifier=authority_verifier,
         )
+
+    def set_authority_verifier(self, verifier: Any) -> None:
+        """Bind an explicit ``AuthorityTokenVerifier`` on the underlying runtime state repository."""
+
+        setter = getattr(self._repository, "set_authority_verifier", None)
+        if callable(setter):
+            setter(verifier)
 
     def save_task_runtime(
         self,

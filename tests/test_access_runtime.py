@@ -23,12 +23,16 @@ from access_control.entities import PersonPrincipal
 from access_control.starter_profiles import REASON_PREFIX, applied_profile, apply_starter_profile, chosen_by_person
 from assistant_gateway.access_setup import apply_configured_starter_profile
 from tests.task_work_support import bind_task
-from custom_agents import access_runtime
 from custom_agents.access_runtime import AccessDecisionHook, decide_call
 from custom_messages.contracts.access_v2 import GrantStatus, GrantV1, SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_scheduler_token,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 from strands.models.model import Model as _StrandsModel
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,16 +45,19 @@ pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-aut
 
 @pytest.fixture
 def storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
 
 
 def agent(storage, *, agent_type="WebResearchAgent", lead=False, role="worker", person="user-1", enabled=True, signed=True):
-    signed_context = (
-        context_signer().issue(team_id=TEAM, person_id=person, person_roles=("admin",)) if signed else None
-    )
+    if not signed:
+        signed_context = None
+    elif person is None:
+        signed_context = signed_scheduler_token(None, team_id=TEAM, root_task_id="task-1", schedule_id="sched-system")
+    else:
+        signed_context = signed_task_token(person, team_id=TEAM, roles=("admin",), root_task_id="task-1")
     meta = SimpleNamespace(gateway_context=SimpleNamespace(task_context=signed_context), conversation_id="c1")
     task_manager = SimpleNamespace(
         storage_settings=storage,

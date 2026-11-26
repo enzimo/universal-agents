@@ -54,7 +54,6 @@ from access_control.cedar import CedarAccessClient
 from access_control.data_folders import DataFolderRegistry
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import PersonPrincipal, agent_role_resolver
-from access_control.identity import ContextVerifier
 from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalApplier
 from access_control.requests import AccessRequests
 from assistant_gateway.config import GatewayInstanceConfig
@@ -96,7 +95,12 @@ from secure_tool_broker.mcp_config import BrokerMCPConfig
 from secure_tool_broker.mcp_runtime import BrokerMCPRuntime
 from secure_tool_broker.service import SecureToolBrokerService
 from storage.access_repository import AccessRepository
-from tests.broker_access_support import BROKER_ROOT, caller_token, context_signer, context_verify_keys
+from tests.broker_access_support import (
+    BROKER_ROOT,
+    broker_authority_verifier,
+    caller_token,
+    signed_task_token,
+)
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, Context, make_agent
 from tests.test_access_request_tools import storage as access_storage
 
@@ -185,7 +189,7 @@ class World:
     def broker(self) -> SecureToolBrokerService:
         gate = BrokerAccessGate(
             catalogs=CatalogSource(self.root),
-            verifier=ContextVerifier.from_value(context_verify_keys()),
+            verifier=broker_authority_verifier(),
             team_id=TEAM,
             access=self.service if self.config.authorization.enabled else None,
             links=self.service.store,
@@ -289,7 +293,7 @@ def work_for(agent: Any, person: PersonPrincipal, task_id: str) -> None:
 
     meta = MessageMeta(conversation_id=f"conv-{task_id}")
     meta.gateway_context = SimpleNamespace(
-        task_context=context_signer().issue(team_id=TEAM, person_id=person.person_id, person_roles=person.roles)
+        task_context=signed_task_token(person.person_id, team_id=TEAM, roles=person.roles, root_task_id=task_id)
     )
     agent.task_manager.add_task(Task(task_id=task_id, task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
     agent.test_task_id = task_id

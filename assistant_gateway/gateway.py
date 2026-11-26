@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 if TYPE_CHECKING:
     from assistant_gateway.team_view import GatewayTeamView, TeamLeadFollower
 
-from access_control.identity import ISSUER_GATEWAY, ContextSigner
 from assistant_gateway.access_commands import GatewayAccessCommands
 from assistant_gateway.account_sharing import GatewayAccountSharing
 from assistant_gateway.status_page import StatusPage
@@ -295,23 +294,6 @@ ACTIVITY_NOTICE_POLL_SECONDS = 2.0
 OutputSink = Callable[[str], Optional[Awaitable[None]] | None]
 QueryHandler = Callable[[TaskQuery], Awaitable[str] | str]
 EventSink = Callable[[GatewayDeliveryEvent], Optional[Awaitable[None]] | None]
-
-
-def _gateway_context_signer() -> ContextSigner | None:
-    """The gateway's task-context signing key from team.env, if configured.
-
-    Without it, tasks carry no signed context and every enforcement point that
-    needs one refuses (access_control.identity).
-    """
-
-    signer = ContextSigner.from_env(ISSUER_GATEWAY)
-    if signer is None:
-        logger.warning(
-            "No gateway task-context signing key is configured; access checks that need a "
-            "verified person will refuse. Regenerate internal credentials. "
-            "event=task_context_signer_missing"
-        )
-    return signer
 
 
 # The stored task text of memory-review schedules; the manager replaces it with
@@ -794,6 +776,7 @@ class UserGateway:
         secure_broker: GatewaySecureBroker | None = None,
         activity_source: GatewayActivitySource | None = None,
         team_services: GatewayTeamServices | None = None,
+        token_signer: Any = None,
     ):
         self.config = config
         self._logger = logger
@@ -909,7 +892,12 @@ class UserGateway:
                 users_enabled=identity_users.enabled,
             ),
             identity=self._identity_service,
-            context_signer=_gateway_context_signer(),
+            token_signer=(
+                token_signer
+                if token_signer is not None
+                else getattr(resolved_manager_runtime, "message_host", None)
+            ),
+            person_ref_resolver=ownership_bootstrap.people_directory.person_ref,
         )
         self._request_service = GatewayRequestService(
             repository=self.request_repository,
