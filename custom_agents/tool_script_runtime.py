@@ -358,7 +358,8 @@ def run_script(
         # _serve owns and closes these two from here on.
         served = (request_read, reply_write)
         request_read = reply_write = -1
-        _serve(agent, strands_agent, invocation_state, catalog, held, process, *served, run, limits, tool_stop)
+        session = _Session(agent, strands_agent, invocation_state, catalog, held, run, limits)
+        _serve(session, *served, tool_stop)
         _end_process(process)
         printed.join(timeout=2)
         run.output = printed.text().strip()
@@ -384,56 +385,71 @@ def run_script(
     return run
 
 
-def _serve(
-    agent: Any,
-    strands_agent: Any,
-    invocation_state: dict[str, Any],
-    catalog: Any,
-    held: set[str],
-    process: subprocess.Popen[bytes],
-    request_read: int,
-    reply_write: int,
-    run: ScriptRun,
-    limits: ScriptLimits,
-    tool_stop: Any,
-) -> None:
+@dataclass
+class _Session:
+    """What answering one script needs: the agent, its turn, what it holds, and the run so far."""
+
+    agent: Any
+    strands_agent: Any
+    invocation_state: dict[str, Any]
+    catalog: Any
+    held: set[str]
+    run: ScriptRun
+    limits: ScriptLimits
+
+
+def _stop_reason(session: _Session, tool_stop: Any, deadline: float) -> str | None:
+    if tool_stop is not None and tool_stop.is_requested():
+        return "The task was stopped, so the script was ended."
+    if time.monotonic() > deadline:
+        return f"The script ran longer than {int(session.limits.wall_seconds)} seconds and was ended."
+    return None
+
+
+def _handle(session: _Session, line: str | None, replies: Any) -> bool:
+    """Handle one line from the script; True when the script has ended."""
+
+    run = session.run
+    if line is None:
+        if run.result is None and run.error is None:
+            run.error = "The script process ended without a result."
+        return True
+    message = _parsed(line)
+    kind = message.get("kind")
+    if kind == "done":
+        run.result = message.get("result")
+        return True
+    if kind == "error":
+        run.error = str(message.get("error") or "The script failed.")
+        return True
+    if kind != "call":
+        run.error = "The script sent something that is not a tool call."
+        return True
+    replies.write(json.dumps(_answer(session, message), default=str) + "\n")
+    replies.flush()
+    return False
+
+
+def _serve(session: _Session, request_read: int, reply_write: int, tool_stop: Any) -> None:
     """Answer the script's calls until it ends, is stopped, or runs out of time."""
 
     requests = os.fdopen(request_read, "r", encoding="utf-8")
     replies = os.fdopen(reply_write, "w", encoding="utf-8", buffering=1)
     lines: queue.Queue[str | None] = queue.Queue()
     threading.Thread(target=_line_reader, args=(requests, lines), daemon=True).start()
-    deadline = time.monotonic() + limits.wall_seconds
+    deadline = time.monotonic() + session.limits.wall_seconds
     try:
         while True:
-            if tool_stop is not None and tool_stop.is_requested():
-                run.stopped = "The task was stopped, so the script was ended."
-                return
-            if time.monotonic() > deadline:
-                run.stopped = f"The script ran longer than {int(limits.wall_seconds)} seconds and was ended."
+            reason = _stop_reason(session, tool_stop, deadline)
+            if reason:
+                session.run.stopped = reason
                 return
             try:
                 line = lines.get(timeout=0.2)
             except queue.Empty:
                 continue
-            if line is None:
-                if run.result is None and run.error is None:
-                    run.error = "The script process ended without a result."
+            if _handle(session, line, replies):
                 return
-            message = _parsed(line)
-            kind = message.get("kind")
-            if kind == "done":
-                run.result = message.get("result")
-                return
-            if kind == "error":
-                run.error = str(message.get("error") or "The script failed.")
-                return
-            if kind == "call":
-                replies.write(json.dumps(_answer(agent, strands_agent, invocation_state, catalog, held, message, run, limits), default=str) + "\n")
-                replies.flush()
-                continue
-            run.error = "The script sent something that is not a tool call."
-            return
     finally:
         for stream in (replies, requests):
             try:
@@ -450,21 +466,13 @@ def _parsed(line: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _answer(
-    agent: Any,
-    strands_agent: Any,
-    invocation_state: dict[str, Any],
-    catalog: Any,
-    held: set[str],
-    message: dict[str, Any],
-    run: ScriptRun,
-    limits: ScriptLimits,
-) -> dict[str, Any]:
+def _answer(session: _Session, message: dict[str, Any]) -> dict[str, Any]:
+    agent, run, limits = session.agent, session.run, session.limits
     name, inputs = message.get("tool"), message.get("input")
     if len(run.calls) >= limits.max_calls:
         refusal: str | None = f"A script may make at most {limits.max_calls} tool calls."
     else:
-        refusal = check_call(agent, catalog, name, inputs, held)
+        refusal = check_call(agent, session.catalog, name, inputs, session.held)
     if refusal:
         run.calls.append({"tool": str(name), "ok": False, "refused": True, "error": refusal})
         logger.info(
@@ -475,7 +483,7 @@ def _answer(
         )
         return {"ok": False, "error": refusal}
     try:
-        ok, value, notes = execute_call(strands_agent, invocation_state, str(name), dict(inputs or {}))
+        ok, value, notes = execute_call(session.strands_agent, session.invocation_state, str(name), dict(inputs or {}))
     except Exception as exc:  # noqa: BLE001 - one failed call fails in the script, not the turn
         logger.exception(
             "A tool script's call failed. event=tool_script_call_failed agent_id=%s tool=%s", getattr(agent, "id", None), name

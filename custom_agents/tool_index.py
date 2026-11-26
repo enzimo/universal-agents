@@ -106,37 +106,48 @@ def script_note(catalog: Any, name: str) -> str:
     return f"script: {allowed.argument}={'|'.join(allowed.values)}"
 
 
-def index_text(catalog: Any, names: Iterable[str], tools: Mapping[str, Any], *, scripts: bool) -> str:
-    """The prompt's index of the functions in ``names`` (tool name -> Strands tool in ``tools``), or empty."""
+INDEX_HEADER = (
+    "Your other tools:",
+    "Each line below is a tool function you may use but whose full definition is not in your tool list. "
+    "To use one, load its group with use_tools(tool_ids=['<group id>']) (it is in your tool list from your "
+    "next step), or call it by name. describe_tools(names=['<function>']) gives its exact inputs first.",
+)
+INDEX_SCRIPT_NOTE = (
+    "Functions marked script also run from run_tool_script without loading: use it to chain several "
+    "lookups and return only what you need. A mark like script: action=list|read allows only those values."
+)
+
+
+def _by_group(catalog: Any, names: Iterable[str], tools: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Catalog functions among ``names`` that have a tool, by the group ``use_tools`` loads."""
 
     by_group: dict[str, list[str]] = {}
     for name in sorted(set(names)):
         binding = catalog.functions.get(name)
-        if binding is None or name not in tools:
-            continue
-        by_group.setdefault(binding.tool_id, []).append(name)
+        if binding is not None and name in tools:
+            by_group.setdefault(binding.tool_id, []).append(name)
+    return by_group
+
+
+def _group_lines(catalog: Any, tool_id: str, names: list[str], tools: Mapping[str, Any], *, scripts: bool) -> list[str]:
+    tool = catalog.tools.get(tool_id)
+    lines = [f"{tool_id} ({getattr(tool, 'display_name', '') or tool_id})"]
+    for name in names:
+        note = script_note(catalog, name) if scripts else ""
+        marker = f" [{note}]" if note else ""
+        lines.append(f"- {name}{marker}: {first_sentence(_description(tools[name]))}")
+    return lines
+
+
+def index_text(catalog: Any, names: Iterable[str], tools: Mapping[str, Any], *, scripts: bool) -> str:
+    """The prompt's index of the functions in ``names`` (tool name -> Strands tool in ``tools``), or empty."""
+
+    by_group = _by_group(catalog, names, tools)
     if not by_group:
         return ""
-    lines = [
-        "Your other tools:",
-        "Each line below is a tool function you may use but whose full definition is not in your tool list. "
-        "To use one, load its group with use_tools(tool_ids=['<group id>']) (it is in your tool list from your "
-        "next step), or call it by name. describe_tools(names=['<function>']) gives its exact inputs first.",
-    ]
-    if scripts:
-        lines.append(
-            "Functions marked script also run from run_tool_script without loading: use it to chain several "
-            "lookups and return only what you need. A mark like script: action=list|read allows only those values."
-        )
+    lines = [*INDEX_HEADER, *((INDEX_SCRIPT_NOTE,) if scripts else ())]
     for tool_id in sorted(by_group):
-        tool = catalog.tools.get(tool_id)
-        title = getattr(tool, "display_name", "") or tool_id
-        lines.append(f"{tool_id} ({title})")
-        for name in by_group[tool_id]:
-            note = script_note(catalog, name) if scripts else ""
-            marker = f" [{note}]" if note else ""
-            sentence = first_sentence(_description(tools[name]))
-            lines.append(f"- {name}{marker}: {sentence}")
+        lines.extend(_group_lines(catalog, tool_id, by_group[tool_id], tools, scripts=scripts))
     return "\n".join(lines)
 
 

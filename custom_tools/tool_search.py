@@ -140,30 +140,40 @@ def document(tool_def: Any, functions: Sequence[str], function_texts: Iterable[s
     )
 
 
-def rank(documents: Sequence[ToolDocument], query: str) -> list[tuple[float, ToolDocument]]:
-    """Documents with a positive score for the query, best first (ties by tool id)."""
+def _frequencies(documents: Sequence[ToolDocument], wanted: set[str]) -> dict[str, int]:
+    """How many tools use each query word, in any field."""
 
-    wanted = query_words(query)
-    exact = {word for word in _WORD.findall(str(query or "").lower())} | set(str(query or "").lower().split())
-    if not wanted and not exact:
-        return [(0.0, doc) for doc in documents]
-    total = len(documents) or 1
     frequency: dict[str, int] = {}
     for doc in documents:
         present = set().union(*doc.fields.values())
         for word in wanted & present:
             frequency[word] = frequency.get(word, 0) + 1
-    scored: list[tuple[float, ToolDocument]] = []
-    for doc in documents:
-        score = 0.0
-        for word in wanted:
-            weight = max((FIELD_WEIGHTS[field] for field, terms in doc.fields.items() if word in terms), default=0.0)
-            if weight:
-                score += weight * math.log(1.0 + total / frequency[word])
-        if exact & set(doc.functions):
-            score += EXACT_FUNCTION_BONUS
-        if score > 0:
-            scored.append((score, doc))
+    return frequency
+
+
+def _score(doc: ToolDocument, wanted: set[str], frequency: Mapping[str, int], total: int, exact: set[str]) -> float:
+    """One tool's score: each word's best field weight times its rarity, plus the exact-name bonus."""
+
+    score = 0.0
+    for word in wanted:
+        weight = max((FIELD_WEIGHTS[field] for field, terms in doc.fields.items() if word in terms), default=0.0)
+        if weight:
+            score += weight * math.log(1.0 + total / frequency[word])
+    if exact & set(doc.functions):
+        score += EXACT_FUNCTION_BONUS
+    return score
+
+
+def rank(documents: Sequence[ToolDocument], query: str) -> list[tuple[float, ToolDocument]]:
+    """Documents with a positive score for the query, best first (ties by tool id)."""
+
+    wanted = query_words(query)
+    exact = set(_WORD.findall(str(query or "").lower())) | set(str(query or "").lower().split())
+    if not wanted and not exact:
+        return [(0.0, doc) for doc in documents]
+    total = len(documents) or 1
+    frequency = _frequencies(documents, wanted)
+    scored = [(score, doc) for doc in documents if (score := _score(doc, wanted, frequency, total, exact)) > 0]
     scored.sort(key=lambda item: (-item[0], item[1].tool_id))
     return scored
 
