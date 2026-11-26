@@ -1416,9 +1416,9 @@ def collect_credential(
     """Store a credential from trusted form submission or broker-side storage.
 
     ``expires_at`` is accepted only as an explicit keyword argument (never read
-    from ``request_payload``) and only when ``allow_expiry_change=True`` (set
-    by the secure form submission handler and trusted broker capture; team
-    transfer import writes through ``write_credential_to_source`` and
+    from ``request_payload``) and only when ``allow_expiry_change=True``
+    (currently set only by the secure form submission handler in ``service.py``;
+    team transfer import writes through ``write_credential_to_source`` and
     ``_save_credential_and_cleanup_dropped`` directly rather than calling
     ``collect_credential``). When ``allow_expiry_change=False`` (the default,
     used by agent-callable ``credential.collect``), overwriting a key that
@@ -1427,11 +1427,14 @@ def collect_credential(
 
     Dropping and deleting Sealbox records referenced by an existing catalog
     entry is permitted only when ``allow_drop_stored_records=True`` (set only
-    by the person's submitted secure form in ``service.py``). Any caller with
+    by the person's submitted secure form in ``service.py``). The two flags are
+    separate so a caller (including a future broker-side capture path) may set
+    an expiry without gaining the right to drop stored records. Any caller with
     ``allow_drop_stored_records=False`` — including agent-callable
-    ``credential.collect`` and expiry-setting trusted broker capture — is
-    refused with ``credential_replacement_form_only`` before writing anything
-    when the save would drop a stored Sealbox record.
+    ``credential.collect`` and any caller that sets ``allow_expiry_change=True``
+    without ``allow_drop_stored_records=True`` — is refused with
+    ``credential_replacement_form_only`` before writing anything when the save
+    would drop a stored Sealbox record.
     """
 
     try:

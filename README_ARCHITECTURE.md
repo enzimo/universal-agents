@@ -3824,15 +3824,20 @@ non-Sealbox write sources refuse an expiry (`credential_expiry_unsupported_sourc
   lasting credentials.
 - **Deleting dropped Sealbox records on overwrite.** Deleting a person's stored
   Sealbox data requires the person's own action. Direct agent-callable saves
-  (`credential.collect` with `allow_expiry_change=False` and
-  `credential.register_existing_source`) over an existing key refuse before
-  writing anything with `credential_replacement_form_only` (and a next step
-  directing the agent to request a secure form via
-  `secure_credential_collection_request`) whenever the save would drop any
-  Sealbox record referenced by the existing row (a different `item_id`, removed
-  secret field, or move to another source); saves that keep the same Sealbox
-  records proceed unchanged. The person's submitted secure form
-  (`allow_expiry_change=True`) and team transfer import check under
+  (`credential.collect` with `allow_drop_stored_records=False` and
+  `credential.register_existing_source`), and any other `collect_credential`
+  caller without `allow_drop_stored_records=True`, refuse before writing
+  anything with `credential_replacement_form_only` (and a next step directing
+  the agent to request a secure form via `secure_credential_collection_request`)
+  whenever the save would drop any Sealbox record referenced by the existing
+  row (a different `item_id`, removed secret field, or move to another source),
+  regardless of `allow_expiry_change`; saves that keep the same Sealbox records
+  proceed unchanged. `allow_expiry_change` and `allow_drop_stored_records` are
+  kept separate so a caller can set an expiry without gaining the right to drop
+  stored Sealbox records. Only the person's submitted secure form sets
+  `allow_drop_stored_records=True` (team transfer import writes directly and
+  runs its own replacement cleanup through
+  `_save_credential_and_cleanup_dropped`); both check under
   `credential_key_lock` and `_scope_catalog_lock` whether the new row drops any
   Sealbox record referenced by the previous row: they refuse before saving if
   another catalog entry still references any dropped record
