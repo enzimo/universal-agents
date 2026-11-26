@@ -23,9 +23,9 @@ refused to start a replacement for the live worker. The wind-down instead:
    runs and may resume them too, which is safe because each resume takes the
    task's lock), after which remaining waits fail with an explanation to the
    requester. Any ``WAITING`` timed wait whose saved ``resume_at`` is already
-   after the wind-down deadline (with no held answer and not yet resumed) fails
-   at once—at classification and on each poll—instead of holding the old worker
-   until the deadline;
+   after the wind-down deadline, or within one poll interval of it (with no held
+   answer and not yet resumed), fails at once, when the wind-down starts and on
+   each poll, instead of holding the old worker until the deadline;
 4. exits once it holds no unfinished task.
 
 The worker keeps refreshing its own status row (its heartbeat, every 20 seconds)
@@ -634,27 +634,27 @@ async def _wait_for_resumable_tasks(agent: Any, state: LeaseLossWindDown) -> Non
         )
         if not remaining:
             return
-        # Resume any already-due wait before checking the deadline so a wait due
-        # just before the deadline gets its resume chance before _end_at_deadline.
-        if await _resume_due_timed_waits_safely(agent, state) > 0:
-            remaining = await agent.task_manager.operations_runtime.run(
-                partial(_unfinished_resumable, agent.task_manager),
-                frozenset(state.resumable_task_ids),
-            )
-            if not remaining:
-                return
         now = datetime.now(timezone.utc)
         if now >= state.deadline:
+            # No resume here: a task resumed in this pass could not finish
+            # before _end_at_deadline fails it, and its wait record would be
+            # gone, so the requester would get the wrong explanation.
             await _end_at_deadline(agent, state, remaining)
             return
-        # A wait whose resume_at falls inside the final poll interval before the
-        # deadline cannot resume and finish before exit; fail it immediately.
+        # The next poll is WIND_DOWN_POLL_SECONDS away, so a wait due after
+        # deadline - WIND_DOWN_POLL_SECONDS cannot be resumed before the
+        # deadline: fail it now. Any earlier wait comes due at a poll before
+        # the deadline (polls on time), so the two sets are disjoint.
         hopeless_cutoff = max(now, state.deadline - timedelta(seconds=WIND_DOWN_POLL_SECONDS))
         failed_early = await _fail_hopeless_timed_waits(
             agent, state, remaining, cutoff=hopeless_cutoff
         )
         if failed_early and all(info.task.task_id in failed_early for info in remaining):
             return
+        # After a lost lease the scheduler loop has stopped, so this loop resumes
+        # any timed wait that comes due before the deadline (during a contract
+        # drain the scheduler pass may resume it too; each resume takes the lock).
+        await _resume_due_timed_waits_safely(agent, state)
         await asyncio.sleep(WIND_DOWN_POLL_SECONDS)
 
 

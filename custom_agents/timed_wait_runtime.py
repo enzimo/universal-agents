@@ -52,6 +52,7 @@ from typing import Any, Literal
 
 from access_control.identity import ISSUER_SCHEDULER
 from custom_agents import timed_waits as timed_waits_rules
+from custom_agents.custody_loss import custody_moved
 from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS
 from custom_agents.paused_wait_resume import (
     WaitLogSpec,
@@ -970,6 +971,54 @@ def _hopeless_timed_wait_snapshot(
     return task_info, blocker, pending_subtasks
 
 
+def _saved_as_failed(manager: Any, task_id: str) -> bool:
+    """Whether this agent's own records show ``task_id`` FAILED (in memory, or archived once it left memory)."""
+
+    task_info = manager.get_task_info(task_id)
+    if task_info is not None:
+        return bool(task_info.state == ProgressState.FAILED)
+    archived = manager.get_task_from_db(task_id)
+    return archived is not None and archived.get("status") == ProgressState.FAILED
+
+
+async def _failed_despite_error(agent: Any, manager: Any, task_id: str, error: Exception) -> bool:
+    """Decide whether a ``fail_task`` that raised still failed the task; re-raise when it did not.
+
+    ``fail_task`` saves FAILED before its history entry and later steps, so a
+    later write can raise for a task that is already terminal; the next poll
+    would skip it and nobody would tell the requester or stop its subtasks.
+    Only positive evidence counts: the task is FAILED in memory or archived as
+    FAILED. A task that is simply gone from memory may have been taken over by
+    another agent (the snapshot save was refused with ``RuntimeCustodyLost`` and
+    memory emptied); that agent still runs it, so this one must neither answer
+    nor stop it (the rule ``custody_loss.custody_moved`` keeps for failed turns).
+    """
+
+    run_ops = manager.operations_runtime.run
+    if await run_ops(partial(_saved_as_failed, manager), task_id):
+        logger.warning(
+            "Timed wait moved to FAILED during wind-down, but a post-transition write failed; "
+            "continuing subtask stop and requester notification. "
+            "event=timed_wait_wind_down_fail_post_write_error task_id=%s agent_id=%s error_type=%s",
+            task_id,
+            getattr(agent, "id", "-"),
+            type(error).__name__,
+            exc_info=True,
+        )
+        return True
+    if custody_moved(agent, task_id, error):
+        logger.warning(
+            "Another agent took over a timed wait this winding-down worker tried to fail; "
+            "leaving it to that agent without answering or stopping its subtasks. "
+            "event=timed_wait_wind_down_custody_moved task_id=%s agent_id=%s error_type=%s",
+            task_id,
+            getattr(agent, "id", "-"),
+            type(error).__name__,
+        )
+        return False
+    raise error
+
+
 async def fail_timed_wait_outlasting_deadline(
     agent: Any,
     task_id: str,
@@ -1002,26 +1051,7 @@ async def fail_timed_wait_outlasting_deadline(
         try:
             failed = bool(await run_ops(manager.fail_task, task_id, message, now_iso))
         except Exception as exc:
-            # fail_task commits FAILED before appending its history entry; if a
-            # post-transition write raised, the task is already terminal and the
-            # next wind-down poll will skip it, so finish follow-ups now instead
-            # of claiming a retry.
-            info_after = await run_ops(manager.get_task_info, task_id)
-            already_terminal = info_after is None or bool(
-                await run_ops(manager.is_terminal_state, info_after.state)
-            )
-            if not already_terminal:
-                raise
-            logger.warning(
-                "Timed wait moved to FAILED during wind-down, but a post-transition write failed; "
-                "continuing subtask stop and requester notification. "
-                "event=timed_wait_wind_down_fail_post_write_error task_id=%s agent_id=%s error_type=%s",
-                task_id,
-                getattr(agent, "id", "-"),
-                type(exc).__name__,
-                exc_info=True,
-            )
-            failed = True
+            failed = await _failed_despite_error(agent, manager, task_id, exc)
         if not failed:
             return None
         try:
