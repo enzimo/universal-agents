@@ -186,11 +186,35 @@ _RESTART_ORDER = {
     RESTART_SCOPE_GATEWAY: 1,
     RESTART_SCOPE_ALL: 2,
 }
+# Stricter approval ranks higher so a plan mixing a user_authorized setting
+# with an administrator-managed setting follows the stricter class.
 _DECISION_ORDER = {
-    SettingDecisionClass.LEAD_MANAGED: 0,
-    SettingDecisionClass.USER_AUTHORIZED: 1,
+    SettingDecisionClass.USER_AUTHORIZED: 0,
+    SettingDecisionClass.LEAD_MANAGED: 1,
     SettingDecisionClass.OPERATOR_ONLY: 2,
 }
+
+
+def _plan_decision_class(
+    changes: list[RuntimeSettingPlanChange],
+) -> SettingDecisionClass:
+    if not changes:
+        raise ValueError("At least one change is required.")
+    return max(
+        (change.decision_class for change in changes),
+        key=_DECISION_ORDER.__getitem__,
+    )
+
+
+def _all_changes_user_authorized(
+    changes: list[RuntimeSettingPlanChange],
+) -> bool:
+    return bool(changes) and all(
+        change.decision_class == SettingDecisionClass.USER_AUTHORIZED
+        and (definition := RUNTIME_SETTING_REGISTRY.get(change.path)) is not None
+        and definition.decision_class == SettingDecisionClass.USER_AUTHORIZED
+        for change in changes
+    )
 
 
 def runtime_settings_options_payload() -> dict[str, Any]:
@@ -320,7 +344,6 @@ class RuntimeSettingsService:
         normalized_changes: list[RuntimeSettingPlanChange] = []
         snapshots: dict[str, RuntimeSettingSourceSnapshot] = {}
         restart_scope = RESTART_SCOPE_NONE
-        decision_class = SettingDecisionClass.LEAD_MANAGED
         seen_targets: set[tuple[str, str | None, str]] = set()
 
         for raw_change in changes:
@@ -409,11 +432,8 @@ class RuntimeSettingsService:
                 )
             )
             restart_scope = _combine_restart_scope(restart_scope, change_restart_scope)
-            if (
-                _DECISION_ORDER[definition.decision_class]
-                > _DECISION_ORDER[decision_class]
-            ):
-                decision_class = definition.decision_class
+
+        decision_class = _plan_decision_class(normalized_changes)
 
         if len(snapshots) != 1:
             raise ValueError(
@@ -582,6 +602,22 @@ class RuntimeSettingsService:
             or plan.owner_canonical_user_id != actor.person_id
         ):
             raise PermissionError("Runtime settings change plan actor, team or person no longer matches.")
+        if not plan.changes:
+            raise PermissionError("Runtime settings change plan contains no changes. Stage a fresh plan.")
+        for change in plan.changes:
+            definition = RUNTIME_SETTING_REGISTRY.get(change.path)
+            if definition is None:
+                raise PermissionError(
+                    f"Runtime setting {change.path!r} is no longer agent-controllable. Stage a fresh plan."
+                )
+            if change.decision_class != definition.decision_class:
+                raise PermissionError(
+                    f"Runtime setting {change.path!r} approval class changed after planning. Stage a fresh plan."
+                )
+        if plan.decision_class != _plan_decision_class(plan.changes):
+            raise PermissionError(
+                "Runtime settings change plan decision class does not match its changes. Stage a fresh plan."
+            )
         return plan
 
     def _verify_current(self, config: Any, plan: RuntimeSettingsChangePlan) -> None:
@@ -639,7 +675,10 @@ class RuntimeSettingsService:
             effect=tuple(line[:1000] for line in effect[:40]),
             owner_person_id=(
                 plan.owner_canonical_user_id
-                if plan.decision_class == SettingDecisionClass.USER_AUTHORIZED
+                if (
+                    plan.decision_class == SettingDecisionClass.USER_AUTHORIZED
+                    and _all_changes_user_authorized(plan.changes)
+                )
                 else None
             ),
             agreement_required=plan.agreement_required,
