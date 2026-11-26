@@ -321,39 +321,64 @@ When a workflow needs a new named credential:
 - Saving a new value without automatic deletion over a temporary credential
   through the secure form clears its expiry; direct agent `credential.collect`
   or `credential.register_existing_source` calls cannot set or clear an expiry.
+  Agent-callable `credential.collect` also refuses secret values in
+  `submitted_fields` (secrets come only from the person's secure form,
+  account-link forms, `credential.capture_file`, or store-native generation
+  with `value_source="store_generated_secret"` on the existing layout) and
+  records agent provenance rather than person approval.
 - **Capturing a secret you already hold (`credential.capture_file`)**: when you
   already hold a temporary secret in a file (for example an auth file a sign-in
   wrote in the sandbox), store it in the verified person's Sealbox credential
   store with `secure_cli(provider="credential_catalog",
-  action="credential.capture_file", params=...)`. If you hold a temporary
-  password or token in text, first write it to a file inside the person's
-  `scratch/` folder with the file tool and capture it immediately with
-  `credential.capture_file` — never pass a secret value in a tool parameter or
-  your reply.
+  action="credential.capture_file", params=...)` so its bytes never pass
+  through a tool parameter or reply. **One narrow exception (owner-accepted)**:
+  if you already hold a temporary password or token as text, you may write it
+  once to a file inside the person's `scratch/` folder with the file tool and
+  capture it immediately with `credential.capture_file` (the broker then
+  deletes that file). For every other tool and parameter — including
+  `credential.capture_file`, `credential.collect`, other `secure_cli` calls,
+  and your reply — never pass a secret value in a tool parameter or message.
   - Required `params`: `path` (regular UTF-8 file in the person's folder or
     shared `team/` / `agents/`, no symbolic links; relative paths start in the
-    person's folder), `credential_key`, `display_name`, `purpose`, and
-    `expires_at` (required timezone-aware UTC ISO-8601 timestamp, 5 minutes to
-    90 days ahead; because the 5-minute floor moves with the clock, pick a time
-    comfortably past it). Optional `field_name` defaults to `"secret"` (pass
-    the specific field name an account link expects, such as `token` or
-    `api_token`).
+    person's folder), `credential_key` (already in normalized form: ASCII
+    letters, digits, `.`, `_`, or `-`, starting and ending with a letter or
+    digit, no surrounding spaces), `display_name`, `purpose`, and `expires_at`
+    (required timezone-aware UTC ISO-8601 timestamp, 5 minutes to 90 days
+    ahead; because the 5-minute floor moves with the clock, pick a time
+    comfortably past it). Optional `field_name` (same normalized rule) defaults
+    to `"secret"` (pass the specific field name an account link expects, such
+    as `token` or `api_token`).
   - `credential.capture_file` works only for a verified person's task (never
     system work, never team scope) and refuses to replace a credential the
     person entered, an external-source key, or a team key. Capturing a
     credential does not link it to a tool; when a tool needs it, TeamArchitect
     requests an account link afterwards (see Tool Setup). After a successful
-    save, the broker deletes the source file (check `source_file_deleted`) and
-    sends the person one Inbox notice unless the operator turned it off (check
-    `notice_status`: `sent`, `off`, or `failed` beside `notice_sent`).
-  - On any refusal the source file stays in place. If `source_file_deleted` is
-    `false`, or after a refusal you will not retry, delete the secret file you
-    wrote with the file tool so it does not linger in `scratch/`. Treat
-    `capture_access_gate_required` as a broker fault to stop and report; treat
-    `capture_folder_check_unavailable` as a transient check error worth one
-    retry. Tell the person in plain language that the temporary credential was
-    saved and when it will be deleted, without repeating any secret or machine
-    error code.
+    save, the broker deletes the source file (check `source_file_deleted` and
+    `source_file_status`) and sends the person one Inbox notice unless the
+    operator turned it off (check `notice_status`: `sent`, `off`, or `failed`
+    beside `notice_sent`).
+  - **Checking the post-capture file state and timeouts**:
+    - If `credential.capture_file` or `credential.collect` returns
+      `outcome_unknown` (for example after a client timeout or connection drop),
+      do not retry blindly — call `credential_catalog` action
+      `credential.get_metadata` for `credential_key` first to check whether the
+      save already succeeded before retrying.
+    - If `source_file_changed_after_read` is `true` (`source_file_status` is
+      `"changed_after_read"`), the source file was rewritten after the broker
+      read it (for example a sign-in tool refreshed it), so the stored value
+      may be stale and the newer file was left in place: **re-capture the
+      updated file instead of deleting it**.
+    - If `source_file_already_gone` is `true` (`source_file_status` is
+      `"already_gone"`), the source file was already removed (for example by a
+      concurrent capture) and nothing remains to delete.
+    - Only when `source_file_status` is `"left_in_place"` (or after a refusal
+      you will not retry and the file still exists) should you delete the
+      secret file you wrote with the file tool so it does not linger in
+      `scratch/`. Treat `capture_access_gate_required` as a broker fault to
+      stop and report; treat `capture_folder_check_unavailable` as a transient
+      check error worth one retry. Tell the person in plain language that the
+      temporary credential was saved and when it will be deleted, without
+      repeating any secret or machine error code.
 
 ## Updating Or Repairing Credentials
 

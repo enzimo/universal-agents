@@ -58,6 +58,9 @@ from secure_tool_broker.credential_capture import (
     NOTICE_STATUS_FAILED,
     NOTICE_STATUS_OFF,
     NOTICE_STATUS_SENT,
+    SOURCE_FILE_STATUS_ALREADY_GONE,
+    SOURCE_FILE_STATUS_CHANGED_AFTER_READ,
+    SOURCE_FILE_STATUS_DELETED,
     capture_file_credential,
     is_agent_captured_for_person,
 )
@@ -158,6 +161,10 @@ class FakeSealbox:
                     return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="secret not found")
                 value = self.secrets[key]
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"value": value}), stderr="")
+        if cmd[:2] == ["password", "generate"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout='{"password": "generated-sealbox-password-123"}', stderr=""
+            )
         if cmd[:2] in (["secret", "delete"], ["credential", "delete"]):
             key = cmd[2]
             with self.lock:
@@ -661,6 +668,7 @@ def test_expiry_refusals_report_broker_clock_and_window_and_leave_file(env_setup
 
 def test_overwrite_guards_refuse_person_form_external_team_field_mismatch_and_shared_record(
     env_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout, sealbox, _store, gate = env_setup
     ctx = _person_context()
@@ -724,6 +732,7 @@ def test_overwrite_guards_refuse_person_form_external_team_field_mismatch_and_sh
         {"secret": "person-owned-now"},
         scope=alice_scope,
         allow_expiry_change=True,
+        allow_drop_stored_records=True,
         now=BASE_NOW,
     )
     assert person_takeover.status == "success"
@@ -810,7 +819,8 @@ def test_overwrite_guards_refuse_person_form_external_team_field_mismatch_and_sh
     assert src_fn2.exists()
 
     # 6. Shared Sealbox record collision refused.
-    planned_item = "team-nats-agents:default:shared_target:secret"
+    monkeypatch.setattr(credential_capture.secrets, "token_hex", lambda _n=8: "fixed00011112222")
+    planned_item = "agent-capture:shared_target:fixed00011112222:secret"
     sealbox.secrets[planned_item] = "preexisting-record-secret"
     reg = register_existing_source(
         {
@@ -883,6 +893,9 @@ def test_post_commit_delete_refuses_if_file_changed_after_read(
     )
     assert res.status == "success", res.error
     assert res.content["source_file_deleted"] is False
+    assert res.content["source_file_changed_after_read"] is True
+    assert res.content["source_file_already_gone"] is False
+    assert res.content["source_file_status"] == SOURCE_FILE_STATUS_CHANGED_AFTER_READ
     assert res.content["source_file_delete_reason"] == "source_file_changed"
     assert source.read_text(encoding="utf-8") == "newer-unrelated-file"
 
@@ -923,6 +936,7 @@ def test_race_between_person_form_and_capture_never_leaves_agent_value_after_for
                 {"secret": f"person-secret-{iteration}"},
                 scope=alice_scope,
                 allow_expiry_change=True,
+                allow_drop_stored_records=True,
                 now=BASE_NOW,
             )
 
@@ -1240,21 +1254,21 @@ def test_capture_without_access_gate_refuses_and_leaves_file_in_place(
     assert source.exists()
 
 
-def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_file_and_catalog_row(
+def test_second_overwrite_guard_call_refuses_on_concurrent_person_takeover_and_rolls_back_fresh_record(
     env_setup,
 ) -> None:
-    """C11 + C15: a conflicting team key created mid-write routes through collect_credential's
-    post_write_conflict cleanup: brand-new Sealbox writes are rolled back, while an existing
-    captured key reports partial_store_write and notes that the stored value may have changed."""
+    """F1 + F2 + C11: a concurrent person-form takeover mid-write refuses at the second guard call,
+    rolls back the fresh Sealbox record cleanly (no partial_store_write), and keeps the prior row,
+    prior Sealbox value/TTL, and source file untouched."""
 
     layout, sealbox, _store, gate = env_setup
     alice_scope = CredentialOwnerScope.user(PERSON_ID)
-    team_scope = CredentialOwnerScope.team(TEST_TEAM)
 
-    def _team_cred(item_id: str) -> CatalogCredential:
+    def _person_cred(item_id: str) -> CatalogCredential:
         return CatalogCredential(
-            display_name="Team Key Added Mid-Write",
-            purpose="Concurrent team key",
+            display_name="Person Form Credential Added Mid-Write",
+            purpose="Concurrent person save",
+            approval={"status": "approved", "approved_by": "user", "approved_at": format_utc_timestamp(BASE_NOW)},
             fields={
                 "secret": CatalogCredentialField(
                     kind="token",
@@ -1267,21 +1281,24 @@ def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_fi
             },
         )
 
-    # 1. Brand-new key refused at second guard call: Sealbox record must be rolled back (deleted).
+    # 1. Brand-new key refused at second guard call: fresh Sealbox record is rolled back (deleted).
     new_src = layout.person_dir(PERSON_ID) / "scratch" / "guard_new.txt"
     new_src.write_text("brand-new-secret", encoding="utf-8")
     injected_new = {"done": False, "written_key": ""}
 
-    def inject_team_key_for_new(_cmd: list[str], key: str, _val: str | None) -> None:
+    def inject_person_key_for_new(_cmd: list[str], key: str, _val: str | None) -> None:
         if injected_new["done"]:
             return
         injected_new["done"] = True
         injected_new["written_key"] = key
+        sealbox.secrets["team-nats-agents:default:guard_new_race_key:secret"] = "person-secret"
         credential_catalog._save_catalog_credential(
-            "guard_new_race_key", _team_cred("team-guard-new:secret"), scope=team_scope
+            "guard_new_race_key",
+            _person_cred("team-nats-agents:default:guard_new_race_key:secret"),
+            scope=alice_scope,
         )
 
-    sealbox.on_set_hook = inject_team_key_for_new
+    sealbox.on_set_hook = inject_person_key_for_new
     new_refused = capture_file_credential(
         _valid_params(
             path="scratch/guard_new.txt",
@@ -1296,16 +1313,17 @@ def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_fi
     sealbox.on_set_hook = None
     assert injected_new["done"] is True
     assert new_refused.status == "error"
-    assert new_refused.content["error_code"] == CAPTURE_TEAM_KEY_REFUSED
+    assert new_refused.content["error_code"] == CAPTURE_PERSON_CREDENTIAL_REFUSED
     assert new_refused.content["source_file_deleted"] is False
     assert not new_refused.content.get("partial_store_write")
     assert new_src.exists()
-    assert "guard_new_race_key" not in load_catalog(scope=alice_scope).credentials
-    # The newly written Sealbox record was rolled back and deleted.
+    # The freshly written Sealbox record was rolled back and deleted; person's record untouched.
     assert injected_new["written_key"] not in sealbox.secrets
+    assert sealbox.secrets["team-nats-agents:default:guard_new_race_key:secret"] == "person-secret"
 
-    # 2. Existing captured key refused at second guard call: existing Sealbox key cannot be deleted
-    # without destroying prior versions, so partial_store_write=True and error text warns clearly.
+    # 2. Existing captured key re-captured when a person-form takeover happens mid-write:
+    # because re-capture writes to a fresh record name (F2), rollback deletes the fresh
+    # record cleanly (partial_store_write is False) and leaves the prior record untouched.
     first_src = layout.person_dir(PERSON_ID) / "scratch" / "guard_first.txt"
     first_src.write_text("initial-secret", encoding="utf-8")
     first_expiry = format_utc_timestamp(BASE_NOW + timedelta(hours=1))
@@ -1322,20 +1340,26 @@ def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_fi
     )
     assert first.status == "success", first.error
     assert not first_src.exists()
+    first_record_key = (
+        load_catalog(scope=alice_scope).credentials["guard_race_key"].fields["secret"].resolution_order[0].item_id
+    )
+    assert first_record_key is not None
+    first_ttl = sealbox.ttls[first_record_key]
 
     second_src = layout.person_dir(PERSON_ID) / "scratch" / "guard_second.txt"
     second_src.write_text("updated-secret", encoding="utf-8")
-    injected = {"done": False}
+    injected = {"done": False, "fresh_key": ""}
 
-    def inject_team_key_during_write(_cmd: list[str], _key: str, _val: str | None) -> None:
+    def inject_person_takeover_during_write(_cmd: list[str], key: str, _val: str | None) -> None:
         if injected["done"]:
             return
         injected["done"] = True
+        injected["fresh_key"] = key
         credential_catalog._save_catalog_credential(
-            "guard_race_key", _team_cred("team-guard:secret"), scope=team_scope
+            "guard_race_key", _person_cred("team-nats-agents:default:guard_race_key:secret"), scope=alice_scope
         )
 
-    sealbox.on_set_hook = inject_team_key_during_write
+    sealbox.on_set_hook = inject_person_takeover_during_write
     second = capture_file_credential(
         _valid_params(
             path="scratch/guard_second.txt",
@@ -1349,22 +1373,24 @@ def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_fi
     )
     sealbox.on_set_hook = None
     assert injected["done"] is True
+    assert injected["fresh_key"] != first_record_key
     assert second.status == "error"
-    assert second.content["error_code"] == CAPTURE_TEAM_KEY_REFUSED
+    assert second.content["error_code"] == CAPTURE_PERSON_CREDENTIAL_REFUSED
     assert second.content["source_file_deleted"] is False
-    assert second.content.get("partial_store_write") is True
-    assert "stored value may have changed" in (second.error or "").lower()
+    assert not second.content.get("partial_store_write")
     assert second_src.exists()
-    # The person's catalog row kept its original 1-hour expiry.
-    assert load_catalog(scope=alice_scope).credentials["guard_race_key"].expires_at == first_expiry
+    assert injected["fresh_key"] not in sealbox.secrets
+    assert sealbox.secrets[first_record_key] == "initial-secret"
+    assert sealbox.ttls[first_record_key] == first_ttl
 
 
-def test_capture_file_never_passes_allow_drop_stored_records_when_layout_differs(
+def test_capture_recaptures_different_layout_for_own_capture_and_never_passes_allow_drop_stored_records(
     env_setup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Lead ruling (PR #199 merge): capture_file must not pass allow_drop_stored_records=True,
-    so even an agent-captured key whose stored Sealbox record key differs from the new planned
-    record key is refused with credential_replacement_form_only before any Sealbox write."""
+    """F2 + F7: re-capture writes a fresh Sealbox record, commits, and deletes the old record
+    ONLY when the old row is this person's own agent capture; capture_file never passes
+    allow_drop_stored_records=True, and collect_credential still refuses dropping non-capture rows."""
 
     layout, sealbox, _store, gate = env_setup
     alice_scope = CredentialOwnerScope.user(PERSON_ID)
@@ -1394,9 +1420,17 @@ def test_capture_file_never_passes_allow_drop_stored_records_when_layout_differs
     )
     credential_catalog._save_catalog_credential("layout_diff_key", existing_captured, scope=alice_scope)
 
+    seen_kwargs: list[dict[str, Any]] = []
+    real_collect = credential_capture.collect_credential
+
+    def spy_collect(*args: Any, **kwargs: Any):
+        seen_kwargs.append(dict(kwargs))
+        return real_collect(*args, **kwargs)
+
+    monkeypatch.setattr(credential_capture, "collect_credential", spy_collect)
+
     src = layout.person_dir(PERSON_ID) / "scratch" / "layout_diff.txt"
     src.write_text("new-secret-value", encoding="utf-8")
-    commands_before = len(sealbox.commands)
 
     res = capture_file_credential(
         _valid_params(
@@ -1410,13 +1444,94 @@ def test_capture_file_never_passes_allow_drop_stored_records_when_layout_differs
         access_gate=gate,
         now=BASE_NOW,
     )
-    assert res.status == "error"
-    assert res.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
-    assert res.content["source_file_deleted"] is False
-    assert src.exists()
-    # Refused pre-write: no Sealbox write or delete occurred and existing record is untouched.
+    assert res.status == "success", res.error
+    assert res.content["source_file_deleted"] is True
+    assert not src.exists()
+    assert len(seen_kwargs) == 1
+    assert not seen_kwargs[0].get("allow_drop_stored_records", False)
+    assert seen_kwargs[0].get("allow_drop_captured_for_person") == PERSON_ID
+
+    updated_row = load_catalog(scope=alice_scope).credentials["layout_diff_key"]
+    new_record_key = updated_row.fields["secret"].resolution_order[0].item_id
+    assert new_record_key is not None and new_record_key != legacy_item_key
+    assert sealbox.secrets[new_record_key] == "new-secret-value"
+    assert legacy_item_key not in sealbox.secrets
+
+    # Even without overwrite_guard, collect_credential with allow_drop_captured_for_person
+    # MUST refuse dropping records of a person-entered, external, or team credential.
+    person_row = CatalogCredential(
+        display_name="Person Row",
+        purpose="Form entered",
+        approval={"status": "approved", "approved_by": "user"},
+        fields={
+            "secret": CatalogCredentialField(
+                kind="token",
+                visibility="secret",
+                value_source="user_input",
+                resolution_order=[CatalogSourceRef(source="sealbox", item_id="person-old:secret", field_ref="value")],
+            )
+        },
+    )
+    sealbox.secrets["person-old:secret"] = "keep-person-secret"
+    credential_catalog._save_catalog_credential("person_no_drop", person_row, scope=alice_scope)
+
+    commands_before = len(sealbox.commands)
+    refused_person_drop = real_collect(
+        {
+            "credential_key": "person_no_drop",
+            "display_name": "Person Row",
+            "purpose": "Attempt drop",
+            "store_target": "sealbox",
+            "item_id": "agent-capture:person_no_drop:deadbeef",
+            "fields": [{"name": "secret", "kind": "credential_file", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"secret": "hijack"},
+        scope=alice_scope,
+        expires_at=BASE_NOW + timedelta(hours=1),
+        allow_expiry_change=True,
+        allow_drop_captured_for_person=PERSON_ID,
+        now=BASE_NOW,
+    )
+    assert refused_person_drop.status == "error"
+    assert refused_person_drop.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
     assert len(sealbox.commands) == commands_before
-    assert sealbox.secrets[legacy_item_key] == "legacy-value"
+    assert sealbox.secrets["person-old:secret"] == "keep-person-secret"
+
+    # Team-scope credential with spoofed capture approval is also refused.
+    team_scope = CredentialOwnerScope.team(TEST_TEAM)
+    team_row = existing_captured.model_copy(
+        update={
+            "fields": {
+                "secret": CatalogCredentialField(
+                    kind="credential_file",
+                    visibility="secret",
+                    value_source=CAPTURE_APPROVAL_SOURCE,
+                    resolution_order=[CatalogSourceRef(source="sealbox", item_id="team-old:secret", field_ref="value")],
+                )
+            }
+        }
+    )
+    sealbox.secrets["team-old:secret"] = "keep-team-secret"
+    credential_catalog._save_catalog_credential("team_no_drop", team_row, scope=team_scope)
+    refused_team_drop = real_collect(
+        {
+            "credential_key": "team_no_drop",
+            "display_name": "Team Row",
+            "purpose": "Attempt team drop",
+            "store_target": "sealbox",
+            "item_id": "agent-capture:team_no_drop:deadbeef",
+            "fields": [{"name": "secret", "kind": "credential_file", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"secret": "hijack"},
+        scope=team_scope,
+        expires_at=BASE_NOW + timedelta(hours=1),
+        allow_expiry_change=True,
+        allow_drop_captured_for_person=PERSON_ID,
+        now=BASE_NOW,
+    )
+    assert refused_team_drop.status == "error"
+    assert refused_team_drop.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert sealbox.secrets["team-old:secret"] == "keep-team-secret"
 
 
 def test_operability_messages_folder_check_runtime_error_and_notice_status(
@@ -1748,3 +1863,1183 @@ security_layer:
     assert "notify_on_agent_capture: Boolean(sharedState.state.credentialCatalogNotifyOnAgentCapture)" in (
         assets_dir / "app_finalization.mjs"
     ).read_text(encoding="utf-8")
+
+
+# --- Project-review fix round (F1-F8, F10-F13) -------------------------------
+
+
+def test_f1_post_write_exception_rolls_back_sealbox_and_team_check_runs_pre_write_only(
+    env_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: team-key check runs only before writing, and any exception after
+    write_credential_to_source (including post-write load_catalog) rolls back
+    newly written Sealbox records for both capture_file and base collect_credential."""
+
+    import sqlite3
+
+    layout, sealbox, _store, gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    team_scope = CredentialOwnerScope.team(TEST_TEAM)
+
+    # 1. Successful capture calls team load_catalog exactly ONCE (pre-write only).
+    team_loads = 0
+    real_capture_load = credential_capture.load_catalog
+
+    def count_team_load(*, scope: CredentialOwnerScope | None = None, **kwargs: Any):
+        nonlocal team_loads
+        if scope == team_scope:
+            team_loads += 1
+        return real_capture_load(scope=scope, **kwargs)
+
+    monkeypatch.setattr(credential_capture, "load_catalog", count_team_load)
+    src_ok = layout.person_dir(PERSON_ID) / "scratch" / "team_once.txt"
+    src_ok.write_text("secret-v1", encoding="utf-8")
+    first_expiry = format_utc_timestamp(BASE_NOW + timedelta(hours=1))
+    first = capture_file_credential(
+        _valid_params(path="scratch/team_once.txt", credential_key="f1_key", expires_at=first_expiry, now=BASE_NOW),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert first.status == "success", first.error
+    assert team_loads == 1
+    first_record_key = (
+        load_catalog(scope=alice_scope).credentials["f1_key"].fields["secret"].resolution_order[0].item_id
+    )
+    assert first_record_key is not None
+    first_ttl = sealbox.ttls[first_record_key]
+
+    # 2. Post-write load_catalog raising sqlite3.OperationalError('database is locked')
+    # during re-capture rolls back the fresh Sealbox record and keeps the old value + TTL.
+    real_catalog_load = credential_catalog.load_catalog
+    written_keys: list[str] = []
+    fail_after_write = {"armed": False, "raised": False}
+
+    def arm_on_set(_cmd: list[str], key: str, _val: str | None) -> None:
+        written_keys.append(key)
+        fail_after_write["armed"] = True
+
+    def flaky_load(*, scope: CredentialOwnerScope | None = None, **kwargs: Any):
+        if fail_after_write["armed"] and scope == alice_scope:
+            fail_after_write["armed"] = False
+            fail_after_write["raised"] = True
+            raise sqlite3.OperationalError("database is locked")
+        return real_catalog_load(scope=scope, **kwargs)
+
+    monkeypatch.setattr(credential_catalog, "load_catalog", flaky_load)
+    sealbox.on_set_hook = arm_on_set
+
+    src_recap = layout.person_dir(PERSON_ID) / "scratch" / "f1_recap.txt"
+    src_recap.write_text("secret-v2", encoding="utf-8")
+    recap_failed = capture_file_credential(
+        _valid_params(
+            path="scratch/f1_recap.txt",
+            credential_key="f1_key",
+            expires_at=format_utc_timestamp(BASE_NOW + timedelta(hours=6)),
+            now=BASE_NOW,
+        ),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert fail_after_write["raised"] is True
+    assert recap_failed.status == "error"
+    assert "database is locked" in (recap_failed.error or "")
+    assert recap_failed.content["source_file_deleted"] is False
+    assert not recap_failed.content.get("partial_store_write")
+    assert src_recap.exists()
+    fresh_key = written_keys[-1]
+    assert fresh_key != first_record_key
+    assert fresh_key not in sealbox.secrets
+    assert sealbox.secrets[first_record_key] == "secret-v1"
+    assert sealbox.ttls[first_record_key] == first_ttl
+    assert real_catalog_load(scope=alice_scope).credentials["f1_key"].expires_at == first_expiry
+
+    # 3. Base collect_credential also rolls back on post-write load_catalog OperationalError.
+    written_keys.clear()
+    fail_after_write["raised"] = False
+    base_failed = collect_credential(
+        {
+            "credential_key": "f1_base_key",
+            "display_name": "Base Key",
+            "purpose": "Test post-write load_catalog rollback",
+            "store_target": "sealbox",
+            "fields": [{"name": "secret", "kind": "token", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"secret": "base-secret"},
+        scope=alice_scope,
+        expires_at=BASE_NOW + timedelta(hours=1),
+        allow_expiry_change=True,
+        now=BASE_NOW,
+    )
+    sealbox.on_set_hook = None
+    assert fail_after_write["raised"] is True
+    assert base_failed.status == "error"
+    assert not base_failed.content.get("partial_store_write")
+    assert written_keys and written_keys[-1] not in sealbox.secrets
+    assert "f1_base_key" not in real_catalog_load(scope=alice_scope).credentials
+
+
+def test_f2_f7_recapture_fresh_record_after_transfer_and_instance_rename_and_save_failure(
+    env_setup,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2 + F7: failed re-capture rolls back its fresh record without mutating the old
+    captured secret/TTL; re-capture succeeds after team transfer and instance rename,
+    committing the fresh record and deleting the old one."""
+
+    layout, sealbox, _store, gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    # Initial capture.
+    src1 = layout.person_dir(PERSON_ID) / "scratch" / "f2_v1.txt"
+    src1.write_text("v1-secret", encoding="utf-8")
+    exp1 = format_utc_timestamp(now + timedelta(hours=1))
+    res1 = capture_file_credential(
+        _valid_params(path="scratch/f2_v1.txt", credential_key="f2_recap_key", expires_at=exp1, now=now),
+        context=_person_context(),
+        access_gate=gate,
+        now=now,
+    )
+    assert res1.status == "success", res1.error
+    rec1 = load_catalog(scope=alice_scope).credentials["f2_recap_key"].fields["secret"].resolution_order[0].item_id
+    assert rec1 is not None
+    ttl1 = sealbox.ttls[rec1]
+
+    # Catalog save failure on re-capture: fresh record is deleted, old record + TTL untouched.
+    real_save = credential_catalog._save_catalog_credential
+
+    def fail_save(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("disk full on catalog commit")
+
+    monkeypatch.setattr(credential_catalog, "_save_catalog_credential", fail_save)
+    src2 = layout.person_dir(PERSON_ID) / "scratch" / "f2_v2.txt"
+    src2.write_text("v2-secret", encoding="utf-8")
+    res2 = capture_file_credential(
+        _valid_params(
+            path="scratch/f2_v2.txt",
+            credential_key="f2_recap_key",
+            expires_at=format_utc_timestamp(now + timedelta(hours=5)),
+            now=now,
+        ),
+        context=_person_context(),
+        access_gate=gate,
+        now=now,
+    )
+    monkeypatch.setattr(credential_catalog, "_save_catalog_credential", real_save)
+    assert res2.status == "error"
+    assert not res2.content.get("partial_store_write")
+    assert src2.exists()
+    assert sealbox.secrets == {rec1: "v1-secret"}
+    assert sealbox.ttls[rec1] == ttl1
+    assert load_catalog(scope=alice_scope).credentials["f2_recap_key"].expires_at == exp1
+
+    # F7(a): export and import via team transfer (record name becomes team-transfer:...),
+    # then re-capture succeeds and deletes the team-transfer record.
+    exported = export_credentials(TEST_TEAM, [PERSON_ID])
+    dest_db = tmp_path / "f7_transfer_dest.db"
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(dest_db))
+    outcomes = import_credentials(exported, team_id=TEST_TEAM, now=now)
+    assert any(o.key.endswith("/catalog_entry/f2_recap_key") and o.imported for o in outcomes)
+    transfer_rec = (
+        load_catalog(scope=alice_scope).credentials["f2_recap_key"].fields["secret"].resolution_order[0].item_id
+    )
+    assert transfer_rec is not None and transfer_rec.startswith("team-transfer:")
+    assert transfer_rec in sealbox.secrets
+
+    # F7(b): also rename TEAM_INSTANCE_NAME before re-capturing.
+    monkeypatch.setenv("TEAM_INSTANCE_NAME", "renamed-instance")
+    exp2 = format_utc_timestamp(now + timedelta(hours=8))
+    res3 = capture_file_credential(
+        _valid_params(path="scratch/f2_v2.txt", credential_key="f2_recap_key", expires_at=exp2, now=now),
+        context=_person_context(),
+        access_gate=gate,
+        now=now,
+    )
+    assert res3.status == "success", res3.error
+    assert not src2.exists()
+    fresh_rec = (
+        load_catalog(scope=alice_scope).credentials["f2_recap_key"].fields["secret"].resolution_order[0].item_id
+    )
+    assert fresh_rec is not None and fresh_rec.startswith("agent-capture:f2_recap_key:")
+    assert sealbox.secrets[fresh_rec] == "v2-secret"
+    assert transfer_rec not in sealbox.secrets
+
+
+def test_f3_normalized_record_locks_serialize_alias_keys_and_capture_refuses_non_normalized(
+    env_setup,
+) -> None:
+    """F3: capture refuses non-normalized credential_key/field_name; alias catalog keys
+    normalizing to the same Sealbox record serialize on normalized record locks; janitor
+    deletes and pending dropped-record retries use the same record locks."""
+
+    from secure_tool_broker.credential_catalog import (
+        delete_credential,
+        retry_pending_dropped_sealbox_deletes,
+        sealbox_record_locks,
+    )
+    from secure_tool_broker.credential_catalog_store import (
+        DROPPED_DELETE_QUEUED_BY_FORM,
+        CredentialCatalogStore,
+        resolve_catalog_db_path,
+    )
+
+    layout, sealbox, _store, gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    src = layout.person_dir(PERSON_ID) / "scratch" / "norm.txt"
+    src.write_text("norm-secret", encoding="utf-8")
+
+    # 1. Capture refuses non-normalized credential_key and field_name.
+    for bad in (
+        {"credential_key": "tok-"},
+        {"credential_key": "tok."},
+        {"credential_key": "tok_"},
+        {"credential_key": " tok "},
+        {"field_name": "sec-"},
+        {"field_name": "sec."},
+        {"field_name": "sec_"},
+        {"field_name": " sec "},
+    ):
+        params = _valid_params(path="scratch/norm.txt", now=BASE_NOW)
+        params.update(bad)
+        refused = capture_file_credential(params, context=_person_context(), access_gate=gate, now=BASE_NOW)
+        assert refused.status == "error", bad
+        assert refused.content["error_code"] == CAPTURE_INVALID_PARAMS, bad
+        assert src.exists()
+
+    # 2. Form saving 'tok-' and another temporary write saving 'tok' target the EXACT SAME
+    # normalized Sealbox record ('team-nats-agents:default:tok:secret'). Normalized record
+    # locks must serialize them so only one writes and the loser is refused pre-write.
+    shared_record = "team-nats-agents:default:tok:secret"
+    active_writers = {"count": 0, "max_concurrent": 0}
+    write_guard = threading.Lock()
+
+    def track_overlap(_cmd: list[str], key: str, _val: str | None) -> None:
+        if key != shared_record:
+            return
+        with write_guard:
+            active_writers["count"] += 1
+            active_writers["max_concurrent"] = max(active_writers["max_concurrent"], active_writers["count"])
+        time.sleep(0.03)
+        with write_guard:
+            active_writers["count"] -= 1
+
+    sealbox.on_set_hook = track_overlap
+    barrier = threading.Barrier(2)
+    results: dict[str, Any] = {}
+
+    def save_form_dash() -> None:
+        barrier.wait()
+        results["dash"] = collect_credential(
+            {
+                "credential_key": "tok-",
+                "display_name": "Form Tok Dash",
+                "purpose": "Form save",
+                "store_target": "sealbox",
+                "fields": [{"name": "secret", "kind": "token", "visibility": "secret", "value_source": "user_input"}],
+            },
+            {"secret": "person-dash-value"},
+            scope=alice_scope,
+            allow_expiry_change=True,
+            allow_drop_stored_records=True,
+            now=BASE_NOW,
+        )
+
+    def save_temp_plain() -> None:
+        barrier.wait()
+        results["plain"] = collect_credential(
+            {
+                "credential_key": "tok",
+                "display_name": "Temp Tok Plain",
+                "purpose": "Temp save",
+                "store_target": "sealbox",
+                "fields": [{"name": "secret", "kind": "token", "visibility": "secret", "value_source": "user_input"}],
+            },
+            {"secret": "temp-plain-value"},
+            scope=alice_scope,
+            expires_at=BASE_NOW + timedelta(hours=1),
+            allow_expiry_change=True,
+            now=BASE_NOW,
+        )
+
+    t1 = threading.Thread(target=save_form_dash)
+    t2 = threading.Thread(target=save_temp_plain)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+    sealbox.on_set_hook = None
+    assert not t1.is_alive() and not t2.is_alive()
+    assert active_writers["max_concurrent"] == 1
+    statuses = sorted([results["dash"].status, results["plain"].status])
+    assert statuses == ["error", "success"], results
+    loser = results["plain"] if results["plain"].status == "error" else results["dash"]
+    winner_val = "person-dash-value" if results["dash"].status == "success" else "temp-plain-value"
+    assert loser.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert sealbox.secrets[shared_record] == winner_val
+
+    # 3. delete_credential (janitor) and retry_pending_dropped_sealbox_deletes respect
+    # sealbox_record_locks on the same normalized record name.
+    winner_key = "tok-" if results["dash"].status == "success" else "tok"
+    delete_done = threading.Event()
+
+    def run_delete() -> None:
+        delete_credential({"credential_key": winner_key}, scope=alice_scope)
+        delete_done.set()
+
+    with sealbox_record_locks(alice_scope, [shared_record]):
+        t_del = threading.Thread(target=run_delete)
+        t_del.start()
+        assert not delete_done.wait(timeout=0.08), "delete_credential must wait for sealbox_record_locks"
+    t_del.join(timeout=5)
+    assert delete_done.is_set()
+
+    # Queue a pending dropped delete and verify retry_pending_dropped_sealbox_deletes waits on the record lock.
+    queued_record = "team-nats-agents:default:orphan_rec:secret"
+    sealbox.secrets[queued_record] = "orphan-secret"
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        alice_scope,
+        "dummy_drop_key",
+        CatalogCredential(display_name="Dummy", purpose="Dummy").model_dump(mode="json", exclude_none=True),
+        dropped_sealbox_targets=[(queued_record, "secret")],
+        queued_by=DROPPED_DELETE_QUEUED_BY_FORM,
+    )
+    retry_done = threading.Event()
+
+    def run_retry() -> None:
+        retry_pending_dropped_sealbox_deletes(scope=alice_scope)
+        retry_done.set()
+
+    with sealbox_record_locks(alice_scope, [queued_record]):
+        t_retry = threading.Thread(target=run_retry)
+        t_retry.start()
+        assert not retry_done.wait(timeout=0.08), "retry_pending_dropped_sealbox_deletes must wait for record lock"
+    t_retry.join(timeout=5)
+    assert retry_done.is_set()
+    assert queued_record not in sealbox.secrets
+
+
+def test_f4_agent_collect_refuses_submitted_secrets_stamps_agent_provenance_and_allows_rotation(
+    env_setup,
+) -> None:
+    """F4: agent-callable credential.collect refuses secret values in submitted_fields/fields_values,
+    stamps agent provenance (never person approval), keeps store-generated rotation working, and
+    never rewrites a captured row as person-approved."""
+
+    from secure_tool_broker.credential_catalog import execute_credential_catalog_action
+    from secure_tools.providers import ValidatedAction
+
+    layout, sealbox, _store, gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    ctx = _person_context(agent_type="ResearchAgent")
+
+    # Seed person-entered credential.
+    person_save = collect_credential(
+        {
+            "credential_key": "f4_person_key",
+            "display_name": "Person Entered",
+            "purpose": "Person form",
+            "store_target": "sealbox",
+            "fields": [{"name": "secret", "kind": "token", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"secret": "person-secret-original"},
+        scope=alice_scope,
+        allow_expiry_change=True,
+        allow_drop_stored_records=True,
+        now=BASE_NOW,
+    )
+    assert person_save.status == "success", person_save.error
+    person_rec = (
+        load_catalog(scope=alice_scope).credentials["f4_person_key"].fields["secret"].resolution_order[0].item_id
+    )
+    assert person_rec is not None
+
+    # Seed agent-captured credential (future relative to wall-clock because execute_credential_catalog_action uses utcnow).
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    src_cap = layout.person_dir(PERSON_ID) / "scratch" / "f4_cap.txt"
+    src_cap.write_text("captured-secret-v1", encoding="utf-8")
+    cap_expiry = format_utc_timestamp(now_utc + timedelta(hours=2))
+    cap_res = capture_file_credential(
+        _valid_params(
+            path="scratch/f4_cap.txt",
+            credential_key="f4_captured_key",
+            expires_at=cap_expiry,
+            now=now_utc,
+        ),
+        context=ctx,
+        access_gate=gate,
+        now=now_utc,
+    )
+    assert cap_res.status == "success", cap_res.error
+    cap_rec = (
+        load_catalog(scope=alice_scope).credentials["f4_captured_key"].fields["secret"].resolution_order[0].item_id
+    )
+    assert cap_rec is not None
+
+    # 1. Agent credential.collect with submitted_fields over person-entered key is refused without echoing secret.
+    hijack_person = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "f4_person_key",
+                    "display_name": "Hijacked",
+                    "purpose": "Overwrite person key",
+                    "store_target": "sealbox",
+                    "fields": [{"name": "secret", "kind": "token", "visibility": "secret", "value_source": "user_input"}],
+                },
+                "submitted_fields": {"secret": "HIJACK-SECRET-999"},
+            },
+        ),
+        ctx,
+    )
+    assert hijack_person.status == "error"
+    assert hijack_person.content["error_code"] == "secret_value_in_request_rejected"
+    assert "HIJACK-SECRET-999" not in (hijack_person.error or "") + json.dumps(dict(hijack_person.content))
+    assert sealbox.secrets[person_rec] == "person-secret-original"
+    assert load_catalog(scope=alice_scope).credentials["f4_person_key"].approval.get("approved_by") == "user"
+
+    # 2. Agent credential.collect with fields_values over captured key is refused; capture provenance untouched.
+    hijack_cap = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "f4_captured_key",
+                    "display_name": "Hijacked Cap",
+                    "purpose": "Rewrite captured key",
+                    "store_target": "sealbox",
+                    "fields": [{"name": "secret", "kind": "token", "visibility": "secret", "value_source": "user_input"}],
+                },
+                "fields_values": {"secret": "HIJACK-CAPTURED-888"},
+            },
+        ),
+        ctx,
+    )
+    assert hijack_cap.status == "error"
+    assert hijack_cap.content["error_code"] == "secret_value_in_request_rejected"
+    assert "HIJACK-CAPTURED-888" not in (hijack_cap.error or "") + json.dumps(dict(hijack_cap.content))
+    assert sealbox.secrets[cap_rec] == "captured-secret-v1"
+    assert is_agent_captured_for_person(load_catalog(scope=alice_scope).credentials["f4_captured_key"], PERSON_ID)
+
+    # 3. Undeclared key in submitted_fields is also refused.
+    smuggled = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "f4_smuggle",
+                    "display_name": "Smuggle",
+                    "purpose": "Test",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {"name": "password", "kind": "password", "visibility": "secret", "value_source": "store_generated_secret"}
+                    ],
+                },
+                "submitted_fields": {"extra_secret": "SMUGGLED-777"},
+            },
+        ),
+        ctx,
+    )
+    assert smuggled.status == "error"
+    assert smuggled.content["error_code"] == "secret_value_in_request_rejected"
+    assert "SMUGGLED-777" not in (smuggled.error or "") + json.dumps(dict(smuggled.content))
+
+    # 4. Store-generated creation/rotation with metadata still works and stamps agent provenance
+    # (never approved_by="user").
+    rotated = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "f4_gen_key",
+                    "display_name": "Generated Service",
+                    "purpose": "Store generated password",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {"name": "username", "kind": "username", "visibility": "metadata_visible", "value_source": "agent_supplied_metadata"},
+                        {"name": "password", "kind": "password", "visibility": "secret", "value_source": "store_generated_secret"},
+                    ],
+                },
+                "submitted_fields": {"username": "svc-bot"},
+            },
+        ),
+        ctx,
+    )
+    assert rotated.status == "success", rotated.error
+    gen_row = load_catalog(scope=alice_scope).credentials["f4_gen_key"]
+    assert gen_row.approval.get("recorded_by") == "agent"
+    assert gen_row.approval.get("agent_type") == "ResearchAgent"
+    assert gen_row.approval.get("for_person_id") == PERSON_ID
+    assert gen_row.approval.get("approved_by") != "user"
+
+    # 5. Store-generated rotation over a captured row preserves expiry and stamps agent provenance
+    # (never rewrites as person-approved).
+    cap_item_id = cap_rec.rsplit(":", 1)[0]
+    rotated_cap = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "f4_captured_key",
+                    "display_name": "Rotated Captured",
+                    "purpose": "Rotate captured secret via store generation",
+                    "store_target": "sealbox",
+                    "item_id": cap_item_id,
+                    "fields": [
+                        {"name": "secret", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"},
+                    ],
+                },
+            },
+        ),
+        ctx,
+    )
+    assert rotated_cap.status == "success", rotated_cap.error
+    rotated_cap_row = load_catalog(scope=alice_scope).credentials["f4_captured_key"]
+    assert rotated_cap_row.expires_at == cap_expiry
+    assert rotated_cap_row.approval.get("recorded_by") == "agent"
+    assert rotated_cap_row.approval.get("approved_by") != "user"
+
+    # 6. Agent register_existing_source also stamps agent provenance, not approved_by="user".
+    sealbox.secrets["existing-agent-rec:token"] = "existing-val"
+    reg = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "f4_reg_key",
+                "field_name": "token",
+                "source": "sealbox",
+                "item_id": "existing-agent-rec:token",
+                "field_ref": "value",
+            },
+        ),
+        ctx,
+    )
+    assert reg.status == "success", reg.error
+    reg_row = load_catalog(scope=alice_scope).credentials["f4_reg_key"]
+    assert reg_row.approval.get("recorded_by") == "agent"
+    assert reg_row.approval.get("agent_type") == "ResearchAgent"
+    assert reg_row.approval.get("for_person_id") == PERSON_ID
+    assert reg_row.approval.get("approved_by") != "user"
+
+
+@NEEDS_CEDAR
+@pytest.mark.asyncio
+async def test_f5_real_cedar_folder_decision_uses_gate_roles_schedule_id_and_work_id(
+    env_setup,
+) -> None:
+    """F5: real Cedar HTTP tests proving decide_folder_for_context consumes the gate's
+    person_roles, schedule_id, and work_id (stripping any of the three breaks the test)."""
+
+    from access_control.entities import role_id, schedule_subject_id
+    from access_control.identity import (
+        ISSUER_SCHEDULER,
+        ContextSigner,
+        generate_signing_key,
+        verify_keys_value,
+    )
+    from custom_messages.contracts.access_v2 import GrantLifetime, TaskContextV1
+    from tests.broker_access_support import context_signer
+
+    layout, _sealbox, store, _open_gate = env_setup
+    (layout.team_dir / "reports").mkdir(parents=True, exist_ok=True)
+    (layout.team_dir / "handoff").mkdir(parents=True, exist_ok=True)
+    (layout.team_dir / "delegated").mkdir(parents=True, exist_ok=True)
+
+    sched_priv, sched_pub = generate_signing_key(ISSUER_SCHEDULER)
+    sched_signer = ContextSigner.from_value(ISSUER_SCHEDULER, sched_priv)
+    combined_verify_keys = verify_keys_value([*json.loads(context_verify_keys()), sched_pub])
+
+    catalogs = CatalogSource(layout.root)
+    access = AccessService(
+        store=store,
+        catalog=catalogs.current(),
+        cedar=CedarAccessClient(binary=str(CEDAR_BINARY)),
+        team_id=TEST_TEAM,
+        agent_role_of=agent_role_resolver("TeamArchitect"),
+        lead_agent_type="TeamArchitect",
+    )
+    gate = BrokerAccessGate(
+        catalogs=catalogs,
+        verifier=ContextVerifier.from_value(combined_verify_keys),
+        team_id=TEST_TEAM,
+        access=access,
+        links=store,
+    )
+    admin = PersonPrincipal("admin-1", TEST_TEAM, ("admin",))
+    now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    expiry_iso = format_utc_timestamp(now_utc + timedelta(hours=1))
+
+    # Base grants so alice + worker can call procedure:credentials write.
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-alice-cred",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.USER, id=PERSON_ID),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="procedure:credentials"),
+            level=AccessLevel.WRITE,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="alice may capture credentials",
+        ),
+    )
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-lead-cred",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEST_TEAM, "TeamArchitect")),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="procedure:credentials"),
+            level=AccessLevel.WRITE,
+            delegation_depth=1,
+            for_person_id=PERSON_ID,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="lead hands on credential capture",
+        ),
+    )
+
+    # Case 1 (person_roles): team/finance granted on person side ONLY to role 'ops'
+    # (standard_grants only covers 'member', so 'viewer' has no grant while 'ops' does).
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-role-ops-finance",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEST_TEAM, "ops")),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance"),
+            level=AccessLevel.WRITE,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="ops role writes team/finance",
+        ),
+    )
+
+    # Case 2 (schedule_id):
+    # - Positive schedule grant on data/reports (no standard grant for workers).
+    # - Schedule-scoped block on team/reports to prove HTTP _admitted_context -> capture_file
+    #   propagates schedule_id end-to-end into decide_folder_for_context.
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-alice-data-reports",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.USER, id=PERSON_ID),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"),
+            level=AccessLevel.WRITE,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="alice writes data/reports",
+        ),
+    )
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-sched-cred",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.SCHEDULE, id=schedule_subject_id(TEST_TEAM, "nightly-sync")),
+            target=TargetRefV1(kind=TargetKind.TOOL, id="procedure:credentials"),
+            level=AccessLevel.WRITE,
+            for_person_id=PERSON_ID,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="schedule captures credentials",
+        ),
+    )
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-sched-data-reports",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.SCHEDULE, id=schedule_subject_id(TEST_TEAM, "nightly-sync")),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"),
+            level=AccessLevel.WRITE,
+            for_person_id=PERSON_ID,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="schedule writes data/reports",
+        ),
+    )
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-sched-block-team-reports",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.SCHEDULE, id=schedule_subject_id(TEST_TEAM, "nightly-sync")),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/reports"),
+            level=AccessLevel.WRITE,
+            kind=GrantKind.BLOCK,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="nightly-sync cannot write team/reports",
+        ),
+    )
+
+    # Case 3 (work_id):
+    # - Positive task hand-on grant on data/delegated via TeamArchitect delegation_depth=1
+    #   (hand_on_for_task requires work_id/task_id and fails without it).
+    # - Task-scoped block on team/handoff bound to ctx_a's work_id to prove HTTP
+    #   _admitted_context -> capture_file propagates work_id end-to-end.
+    ctx_a = context_signer().issue(team_id=TEST_TEAM, person_id=PERSON_ID, person_roles=("member",))
+    ctx_b = context_signer().issue(team_id=TEST_TEAM, person_id=PERSON_ID, person_roles=("member",))
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-alice-data-delegated",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.USER, id=PERSON_ID),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/delegated"),
+            level=AccessLevel.WRITE,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="alice writes data/delegated",
+        ),
+    )
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-lead-data-delegated",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEST_TEAM, "TeamArchitect")),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/delegated"),
+            level=AccessLevel.WRITE,
+            delegation_depth=1,
+            for_person_id=PERSON_ID,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="lead delegates data/delegated for one task",
+        ),
+    )
+    access.grant_by_person(
+        admin,
+        GrantV1(
+            grant_id="f5-task-block-handoff",
+            team_id=TEST_TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEST_TEAM, TEST_AGENT_TYPE)),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/handoff"),
+            level=AccessLevel.WRITE,
+            kind=GrantKind.BLOCK,
+            lifetime=GrantLifetime.TASK,
+            task_id=ctx_a.context.context_id,
+            for_person_id=PERSON_ID,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=admin.person_id),
+            created_at_utc=now_utc,
+            reason="task-scoped block on team/handoff for ctx_a",
+        ),
+    )
+
+    fin_file = layout.team_dir / "finance" / "role.txt"
+    fin_file.write_text("role-secret", encoding="utf-8")
+    rep_file = layout.team_dir / "reports" / "sched.txt"
+    rep_file.write_text("sched-secret", encoding="utf-8")
+    ho_file = layout.team_dir / "handoff" / "work.txt"
+    ho_file.write_text("work-secret", encoding="utf-8")
+
+    sched_signed = sched_signer.sign(
+        TaskContextV1(
+            context_id="ctx-sched-1",
+            issuer=ISSUER_SCHEDULER,
+            team_id=TEST_TEAM,
+            person_id=PERSON_ID,
+            person_roles=("member",),
+            schedule_id="nightly-sync",
+            issued_at_utc=now_utc,
+            expires_at_utc=now_utc + timedelta(hours=1),
+        )
+    ).model_dump(mode="json")
+
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
+    try:
+        # Verify positive schedule grant and positive task hand-on grant through decide_folder_for_context
+        # using the exact ToolContext produced by SecureToolBrokerService._admitted_context.
+        from access_control.caller_tokens import CALLER_MANAGER, BrokerCaller
+        from secure_tools.providers import ValidatedAction
+
+        caller = BrokerCaller(label=CALLER_MANAGER)
+        action = ValidatedAction(
+            provider="credential_catalog",
+            action="credential.capture_file",
+            params=_valid_params(path="scratch/x.txt", expires_at=expiry_iso),
+        )
+        # Positive schedule grant on data/reports: denied without schedule_id, allowed with schedule_id.
+        plain_trusted = agent_context(PERSON_ID)
+        plain_admitted = service._admitted_context(
+            caller,
+            action,
+            service._request_tool_context({"context": plain_trusted}, plain_trusted, provider="credential_catalog"),
+            plain_trusted,
+        )
+        dec_no_sched = gate.decide_folder_for_context(plain_admitted, "data/reports/nightly.txt")
+        assert dec_no_sched is not None and not dec_no_sched.allowed
+
+        sched_trusted = {
+            "canonical_user_id": PERSON_ID,
+            "principal_type": "user",
+            "team_id": TEST_TEAM,
+            "agent_id": TEST_AGENT_ID,
+            "named_agent_type": TEST_AGENT_TYPE,
+            "task_context": sched_signed,
+        }
+        sched_admitted = service._admitted_context(
+            caller,
+            action,
+            service._request_tool_context({"context": sched_trusted}, sched_trusted, provider="credential_catalog"),
+            sched_trusted,
+        )
+        assert sched_admitted.schedule_id == "nightly-sync"
+        dec_with_sched = gate.decide_folder_for_context(sched_admitted, "data/reports/nightly.txt")
+        assert dec_with_sched is not None and dec_with_sched.allowed, dec_with_sched
+
+        # Positive task hand-on grant on data/delegated: requires work_id (stripping work_id denies it).
+        ctx_a_trusted = {
+            "canonical_user_id": PERSON_ID,
+            "principal_type": "user",
+            "team_id": TEST_TEAM,
+            "agent_id": TEST_AGENT_ID,
+            "named_agent_type": TEST_AGENT_TYPE,
+            "task_context": ctx_a.model_dump(mode="json"),
+        }
+        ctx_a_admitted = service._admitted_context(
+            caller,
+            action,
+            service._request_tool_context({"context": ctx_a_trusted}, ctx_a_trusted, provider="credential_catalog"),
+            ctx_a_trusted,
+        )
+        assert ctx_a_admitted.work_id == ctx_a.context.context_id
+        import dataclasses
+
+        no_work_id_ctx = dataclasses.replace(ctx_a_admitted, work_id=None)
+        dec_no_work = gate.decide_folder_for_context(no_work_id_ctx, "data/delegated/item.txt")
+        assert dec_no_work is not None and not dec_no_work.allowed
+        dec_with_work = gate.decide_folder_for_context(ctx_a_admitted, "data/delegated/item.txt")
+        assert dec_with_work is not None and dec_with_work.allowed, dec_with_work
+
+        # Now prove all three fields end-to-end over real HTTP POST /v1/tools/credential_catalog.
+        async with TestClient(TestServer(service.build_app())) as client:
+            # 1a. viewer role (no standard member grant, no ops grant) denied on team/finance.
+            r_viewer = await (
+                await client.post(
+                    "/v1/tools/credential_catalog",
+                    headers=caller_headers(),
+                    json={
+                        "provider": "credential_catalog",
+                        "action": "credential.capture_file",
+                        "params": _valid_params(path=str(fin_file), credential_key="f5_fin", expires_at=expiry_iso),
+                        "context": agent_context(PERSON_ID, roles=("viewer",)),
+                    },
+                )
+            ).json()
+            assert r_viewer["status"] == "error"
+            assert r_viewer["content"]["error_code"] == CAPTURE_FOLDER_ACCESS_DENIED
+            assert fin_file.exists()
+
+            # 1b. ops role succeeds on team/finance via the role-dependent grant.
+            r_ops = await (
+                await client.post(
+                    "/v1/tools/credential_catalog",
+                    headers=caller_headers(),
+                    json={
+                        "provider": "credential_catalog",
+                        "action": "credential.capture_file",
+                        "params": _valid_params(path=str(fin_file), credential_key="f5_fin", expires_at=expiry_iso),
+                        "context": agent_context(PERSON_ID, roles=("ops",)),
+                    },
+                )
+            ).json()
+            assert r_ops["status"] == "success", r_ops
+            assert not fin_file.exists()
+
+            # 2a. scheduler-signed job run is blocked on team/reports because schedule_id reaches Cedar.
+            r_sched_blocked = await (
+                await client.post(
+                    "/v1/tools/credential_catalog",
+                    headers=caller_headers(),
+                    json={
+                        "provider": "credential_catalog",
+                        "action": "credential.capture_file",
+                        "params": _valid_params(path=str(rep_file), credential_key="f5_rep", expires_at=expiry_iso),
+                        "context": sched_trusted,
+                    },
+                )
+            ).json()
+            assert r_sched_blocked["status"] == "error"
+            assert r_sched_blocked["content"]["error_code"] == CAPTURE_FOLDER_ACCESS_DENIED
+            assert rep_file.exists()
+
+            # 2b. normal non-scheduled request succeeds on team/reports.
+            r_no_sched = await (
+                await client.post(
+                    "/v1/tools/credential_catalog",
+                    headers=caller_headers(),
+                    json={
+                        "provider": "credential_catalog",
+                        "action": "credential.capture_file",
+                        "params": _valid_params(path=str(rep_file), credential_key="f5_rep", expires_at=expiry_iso),
+                        "context": agent_context(PERSON_ID),
+                    },
+                )
+            ).json()
+            assert r_no_sched["status"] == "success", r_no_sched
+            assert not rep_file.exists()
+
+            # 3a. ctx_a (matching work_id) is blocked on team/handoff because work_id reaches Cedar.
+            r_blocked_work = await (
+                await client.post(
+                    "/v1/tools/credential_catalog",
+                    headers=caller_headers(),
+                    json={
+                        "provider": "credential_catalog",
+                        "action": "credential.capture_file",
+                        "params": _valid_params(path=str(ho_file), credential_key="f5_ho", expires_at=expiry_iso),
+                        "context": ctx_a_trusted,
+                    },
+                )
+            ).json()
+            assert r_blocked_work["status"] == "error"
+            assert r_blocked_work["content"]["error_code"] == CAPTURE_FOLDER_ACCESS_DENIED
+            assert ho_file.exists()
+
+            # 3b. ctx_b (different work_id) succeeds on team/handoff.
+            r_other_work = await (
+                await client.post(
+                    "/v1/tools/credential_catalog",
+                    headers=caller_headers(),
+                    json={
+                        "provider": "credential_catalog",
+                        "action": "credential.capture_file",
+                        "params": _valid_params(path=str(ho_file), credential_key="f5_ho", expires_at=expiry_iso),
+                        "context": {
+                            "canonical_user_id": PERSON_ID,
+                            "principal_type": "user",
+                            "team_id": TEST_TEAM,
+                            "agent_id": TEST_AGENT_ID,
+                            "named_agent_type": TEST_AGENT_TYPE,
+                            "task_context": ctx_b.model_dump(mode="json"),
+                        },
+                    },
+                )
+            ).json()
+            assert r_other_work["status"] == "success", r_other_work
+            assert not ho_file.exists()
+    finally:
+        access.cedar.close()
+
+
+def test_f6_not_found_omits_left_in_place_and_secure_cli_marks_capture_and_collect_outcome_unknown(
+    env_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F6: capture_file_not_found drops 'left in place'; secure_cli marks both
+    credential.capture_file and credential.collect as outcome_unknown on transport errors."""
+
+    from urllib.error import URLError
+
+    from custom_tools import secure_cli_tool
+
+    _layout, _sealbox, _store, gate = env_setup
+    not_found = capture_file_credential(
+        _valid_params(path="scratch/does_not_exist.txt", now=BASE_NOW),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert not_found.status == "error"
+    assert not_found.content["error_code"] == CAPTURE_FILE_NOT_FOUND
+    assert "left in place" not in (not_found.error or "").lower()
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_INTERNAL_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.setattr(
+        secure_cli_tool,
+        "_trusted_runtime_context",
+        lambda: {"canonical_user_id": PERSON_ID, "principal_type": "user"},
+    )
+
+    def raise_timeout(_req: Any, **_kwargs: Any) -> Any:
+        raise URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(secure_cli_tool, "urlopen", raise_timeout)
+    for action, params in (
+        ("credential.capture_file", _valid_params(path="scratch/x.txt", now=BASE_NOW)),
+        ("credential.collect", {"credential_key": "k", "fields": []}),
+    ):
+        res = secure_cli_tool._secure_cli_impl(
+            provider="credential_catalog",
+            action=action,
+            params=params,
+            reason="test timeout",
+        )
+        assert res["status"] == "error"
+        payload = json.loads(res["content"][1]["text"])
+        assert payload["error_code"] == "outcome_unknown", action
+        assert payload["retry_safe"] is False, action
+
+    # Read action does NOT claim outcome_unknown.
+    meta_res = secure_cli_tool._secure_cli_impl(
+        provider="credential_catalog",
+        action="credential.get_metadata",
+        params={"credential_key": "k"},
+        reason="check metadata",
+    )
+    assert meta_res["status"] == "error"
+    assert len(meta_res["content"]) == 1
+
+
+def test_f8_concurrent_same_file_reports_already_gone_not_left_in_place(
+    env_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F8: when two concurrent captures read the same file and one unlinks it first,
+    the second reports source_file_already_gone=True / source_file_status='already_gone'."""
+
+    layout, _sealbox, _store, gate = env_setup
+    source = layout.person_dir(PERSON_ID) / "scratch" / "concurrent.txt"
+    source.write_text("concurrent-secret", encoding="utf-8")
+
+    # Two concurrent captures synchronized right after file read, before store/delete.
+    barrier = threading.Barrier(2)
+    real_read = credential_capture._read_secret_file
+
+    def synced_read(*args: Any, **kwargs: Any):
+        result = real_read(*args, **kwargs)
+        barrier.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(credential_capture, "_read_secret_file", synced_read)
+    outcomes: list[Any] = []
+
+    def run_one() -> None:
+        outcomes.append(
+            capture_file_credential(
+                _valid_params(path="scratch/concurrent.txt", credential_key="f8_same_file", now=BASE_NOW),
+                context=_person_context(),
+                access_gate=gate,
+                now=BASE_NOW,
+            )
+        )
+
+    t1 = threading.Thread(target=run_one)
+    t2 = threading.Thread(target=run_one)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+    assert len(outcomes) == 2
+    assert all(res.status == "success" for res in outcomes), outcomes
+    assert not source.exists()
+    statuses = sorted(res.content["source_file_status"] for res in outcomes)
+    assert statuses == [SOURCE_FILE_STATUS_ALREADY_GONE, SOURCE_FILE_STATUS_DELETED]
+    gone = next(res for res in outcomes if res.content["source_file_status"] == SOURCE_FILE_STATUS_ALREADY_GONE)
+    assert gone.content["source_file_deleted"] is False
+    assert gone.content["source_file_already_gone"] is True
+    assert gone.content["source_file_changed_after_read"] is False
+
+
+@pytest.mark.asyncio
+async def test_f11_folder_decision_sqlite_error_returns_unavailable_not_http_500(
+    env_setup,
+) -> None:
+    """F11: sqlite3/storage errors from decide_folder_for_context return
+    capture_folder_check_unavailable cleanly instead of HTTP 500."""
+
+    import sqlite3
+
+    layout, _sealbox, _store, gate = env_setup
+    src = layout.person_dir(PERSON_ID) / "scratch" / "db_locked.txt"
+    src.write_text("keep-on-db-error", encoding="utf-8")
+
+    class _StubAccess:
+        lead_agent_type = "TeamArchitect"
+
+        def __init__(self, catalog: Any) -> None:
+            self.catalog = catalog
+
+        def agent_role_of(self, _agent_type: str) -> str:
+            return "worker"
+
+        def decide(self, **_kwargs: Any) -> Any:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(allowed=True, reason="", next_step="")
+
+        def decide_folder(self, **_kwargs: Any) -> Any:
+            raise sqlite3.OperationalError(f"database is locked: {layout.root}/access.db")
+
+    locked_gate = BrokerAccessGate(
+        catalogs=gate.catalogs,
+        verifier=gate.verifier,
+        team_id=gate.team_id,
+        access=_StubAccess(gate.catalogs.current()),  # type: ignore[arg-type]
+        links=gate.links,
+    )
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=locked_gate)
+    expiry_iso = format_utc_timestamp(datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1))
+    async with TestClient(TestServer(service.build_app())) as client:
+        resp = await client.post(
+            "/v1/tools/credential_catalog",
+            headers=caller_headers(),
+            json={
+                "provider": "credential_catalog",
+                "action": "credential.capture_file",
+                "params": _valid_params(path="scratch/db_locked.txt", credential_key="f11_key", expires_at=expiry_iso),
+                "context": agent_context(PERSON_ID),
+            },
+        )
+        body = await resp.json()
+    assert resp.status == 200
+    assert body["status"] == "error"
+    assert body["content"]["error_code"] == CAPTURE_FOLDER_CHECK_UNAVAILABLE
+    assert body["content"]["source_file_deleted"] is False
+    assert str(layout.root) not in (body.get("error") or "") + json.dumps(body["content"])
+    assert src.exists()
+
+
+def test_f13_capture_refusals_never_return_host_paths(env_setup) -> None:
+    """F13: capture refusals name files by folder id and relative path, never host paths."""
+
+    layout, _sealbox, _store, gate = env_setup
+    alice_scratch = layout.person_dir(PERSON_ID) / "scratch"
+    real = alice_scratch / "real_f13.txt"
+    real.write_text("ok", encoding="utf-8")
+    link = alice_scratch / "link_f13.txt"
+    os.symlink(real, link)
+    fifo = alice_scratch / "fifo_f13"
+    os.mkfifo(fifo)
+    hard = alice_scratch / "hard_f13.txt"
+    os.link(real, hard)
+
+    host_markers = (str(layout.root), str(layout.workspaces_dir), str(layout.person_dir(PERSON_ID)))
+    refusal_paths = [
+        ("scratch/missing_f13.txt", CAPTURE_FILE_NOT_FOUND, True),
+        ("scratch/link_f13.txt", CAPTURE_SYMLINK_REFUSED, True),
+        ("scratch", CAPTURE_NOT_REGULAR_FILE, True),
+        ("scratch/fifo_f13", CAPTURE_NOT_REGULAR_FILE, True),
+        ("scratch/hard_f13.txt", CAPTURE_NOT_REGULAR_FILE, True),
+        ("../../../team.env", CAPTURE_PATH_OUTSIDE_SCOPE, False),
+        (str(layout.root / "team.env"), CAPTURE_PATH_OUTSIDE_SCOPE, False),
+        (str(layout.person_dir(PERSON_ID)), CAPTURE_PATH_OUTSIDE_SCOPE, False),
+    ]
+    for path_arg, expected_code, expect_folder_id in refusal_paths:
+        res = capture_file_credential(
+            _valid_params(path=path_arg, now=BASE_NOW),
+            context=_person_context(),
+            access_gate=gate,
+            now=BASE_NOW,
+        )
+        assert res.status == "error", path_arg
+        assert res.content["error_code"] == expected_code, (path_arg, res)
+        rendered = (res.error or "") + json.dumps(dict(res.content))
+        for marker in host_markers:
+            assert marker not in rendered, f"host path {marker!r} leaked for {path_arg!r}: {rendered}"
+        if expect_folder_id:
+            assert f"users/{PERSON_ID}/" in rendered, (path_arg, rendered)
+

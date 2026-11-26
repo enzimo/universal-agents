@@ -64,7 +64,7 @@ def _task_scope(*, instance_root: str | None, person_id: str | None) -> Workspac
 
 def _require_file(located: LocatedTaskFile) -> LocatedTaskFile:
     if not located.parts:
-        raise TaskFileRejected(f"A task folder is not a file: {located.display}")
+        raise TaskFileRejected(f"A task folder is not a file: {located.folder_id}")
     return located
 
 
@@ -87,8 +87,8 @@ def _locate(raw: str, scope: WorkspaceScope) -> LocatedTaskFile:
                 break
             return LocatedTaskFile(root, parts, normalized, folder_id)
     raise TaskFileRejected(
-        f"Local files must be in this task's folders ({scope.home} or the shared team/ "
-        f"and agents/ folders): {normalized}"
+        "Local files must be inside this task's folders (the person's workspace folder "
+        "or the shared team/ and agents/ folders)."
     )
 
 
@@ -161,7 +161,7 @@ class TaskFileStage:
 
         located = _locate(raw, self.scope)
         if not located.parts:
-            raise TaskFileRejected(f"Give a file name inside the task folder: {located.display}")
+            raise TaskFileRejected(f"Give a file name inside the task folder: {located.folder_id}")
         _require_folder(located, located.parts[:-1])
         target = self._slot() / located.parts[-1]
         self._outputs.append((target, located, False))

@@ -47,6 +47,7 @@ from secure_tool_broker.defaults import (
     credential_max_file_bytes,
     notify_on_agent_capture_enabled,
 )
+from secure_tool_broker.sealbox_cli import safe_key_component
 from secure_tool_broker.task_files import LocatedTaskFile, TaskFileRejected, locate_task_file
 from secure_tools.providers import ToolContext, ToolResult
 
@@ -84,6 +85,11 @@ CAPTURE_FIELD_NAME_MISMATCH = "capture_field_name_mismatch"
 NOTICE_STATUS_SENT = "sent"
 NOTICE_STATUS_OFF = "off"
 NOTICE_STATUS_FAILED = "failed"
+
+SOURCE_FILE_STATUS_DELETED = "deleted"
+SOURCE_FILE_STATUS_ALREADY_GONE = "already_gone"
+SOURCE_FILE_STATUS_CHANGED_AFTER_READ = "changed_after_read"
+SOURCE_FILE_STATUS_LEFT_IN_PLACE = "left_in_place"
 
 _ALLOWED_PARAMS = frozenset(
     {"path", "credential_key", "display_name", "purpose", "field_name", "expires_at"}
@@ -126,7 +132,7 @@ class _ValidatedCaptureParams:
 
 def _refuse(error_code: str, message: str, **extra: Any) -> ToolResult:
     text = message.strip()
-    if _FILE_LEFT_IN_PLACE_NOTE not in text:
+    if error_code != CAPTURE_FILE_NOT_FOUND and _FILE_LEFT_IN_PLACE_NOTE not in text:
         text = f"{text} {_FILE_LEFT_IN_PLACE_NOTE}"
     content: dict[str, Any] = {
         "error_code": error_code,
@@ -194,14 +200,20 @@ def _validate_identifier(
 ) -> str | ToolResult:
     if raw is None and default is not None:
         return default
-    if not isinstance(raw, str) or not CREDENTIAL_KEY_PATTERN.fullmatch(raw.strip()):
+    if (
+        not isinstance(raw, str)
+        or raw != raw.strip()
+        or not CREDENTIAL_KEY_PATTERN.fullmatch(raw)
+        or safe_key_component(raw, fallback="") != raw
+    ):
         return _refuse(
             CAPTURE_INVALID_PARAMS,
-            f"Parameter '{param_name}' must start with a letter or number and contain only "
-            "letters, numbers, '.', '_', or '-' (at most 120 characters).",
+            f"Parameter '{param_name}' must already be in normalized form: start and end with an "
+            "ASCII letter or number and contain only ASCII letters, numbers, '.', '_', or '-' "
+            "without leading or trailing whitespace or punctuation (at most 120 characters).",
             credential_key=credential_key,
         )
-    return raw.strip()
+    return raw
 
 
 def _validate_params(
@@ -323,7 +335,7 @@ def _check_folder_access(
             credential_key=credential_key,
             folder_id=located.folder_id,
         )
-    except RuntimeError as exc:
+    except Exception as exc:  # noqa: BLE001 - Cedar, SQLite, or driver failures return unavailable, not HTTP 500
         LOGGER.warning(
             "Folder access check could not run for credential.capture_file. "
             "event=credential_capture_folder_check_failed credential_key=%s person_id=%s folder_id=%s error=%s",
@@ -334,7 +346,7 @@ def _check_folder_access(
         )
         return _refuse(
             CAPTURE_FOLDER_CHECK_UNAVAILABLE,
-            f"The folder access check for {located.folder_id} could not run: {exc}.",
+            f"The folder access check for {located.folder_id} could not run ({type(exc).__name__}).",
             credential_key=credential_key,
             folder_id=located.folder_id,
         )
@@ -366,6 +378,28 @@ def _unsafe_path_code(reason: str) -> str:
     return CAPTURE_FILE_UNREADABLE
 
 
+def _unsafe_path_message(reason: str, folder_id: str, *, max_bytes: int) -> str:
+    """Format a safe refusal naming ``folder_id``, never the host filesystem path."""
+
+    if reason == safe_open.REASON_NOT_FOUND:
+        return f"Source file was not found: {folder_id}."
+    if reason == safe_open.REASON_LINK:
+        return f"Symbolic links are not followed for credential capture: {folder_id}."
+    if reason == safe_open.REASON_NOT_REGULAR_FILE:
+        return f"Source path is not a regular file: {folder_id}."
+    if reason == safe_open.REASON_NOT_DIRECTORY:
+        return f"A parent component on this path is not a folder: {folder_id}."
+    if reason == safe_open.REASON_SEVERAL_LINKS:
+        return f"Files with more than one hard link cannot be captured: {folder_id}."
+    if reason == safe_open.REASON_TOO_LARGE:
+        return f"The source file {folder_id} exceeds the maximum credential file size of {max_bytes} bytes."
+    if reason == safe_open.REASON_UNSAFE_NAME:
+        return f"The source file path contains an unsafe path component: {folder_id}."
+    if reason == safe_open.REASON_ROOT_UNAVAILABLE:
+        return f"The workspace folder for {folder_id} is unavailable."
+    return f"The source file could not be opened safely: {folder_id}."
+
+
 def _read_secret_file(
     located: LocatedTaskFile,
     *,
@@ -380,8 +414,9 @@ def _read_secret_file(
             if info.st_size > max_bytes:
                 return _refuse(
                     CAPTURE_FILE_TOO_LARGE,
-                    f"The source file exceeds the maximum credential file size of {max_bytes} bytes.",
+                    f"The source file {located.folder_id} exceeds the maximum credential file size of {max_bytes} bytes.",
                     credential_key=credential_key,
+                    folder_id=located.folder_id,
                     max_file_bytes=max_bytes,
                 )
             with os.fdopen(os.dup(descriptor), "rb") as reader:
@@ -389,14 +424,16 @@ def _read_secret_file(
     except UnsafePath as exc:
         return _refuse(
             _unsafe_path_code(exc.reason),
-            str(exc),
+            _unsafe_path_message(exc.reason, located.folder_id, max_bytes=max_bytes),
             credential_key=credential_key,
+            folder_id=located.folder_id,
         )
     except OSError as exc:
         return _refuse(
             CAPTURE_FILE_UNREADABLE,
-            f"The source file could not be read: {exc.strerror or type(exc).__name__}.",
+            f"The source file {located.folder_id} could not be read: {exc.strerror or type(exc).__name__}.",
             credential_key=credential_key,
+            folder_id=located.folder_id,
         )
 
     if len(raw_bytes) > max_bytes:
@@ -465,8 +502,14 @@ def _make_overwrite_guard(
     person_id: str,
     team_id: str | None,
 ) -> Callable[[CatalogCredential | None], ToolResult | None]:
+    team_checked = False
+
     def _guard(existing: CatalogCredential | None) -> ToolResult | None:
-        if team_id:
+        nonlocal team_checked
+        # Check the team catalog only before writing to Sealbox (it lives in a
+        # separate tenant and does not share Sealbox records with this person).
+        if team_id and not team_checked:
+            team_checked = True
             team_catalog = load_catalog(scope=CredentialOwnerScope.team(team_id))
             if credential_key in team_catalog.credentials:
                 return _refuse(
@@ -515,7 +558,7 @@ def _delete_source_file(
     expected_identity: tuple[int, int, int, int],
     credential_key: str,
     person_id: str,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str, str | None]:
     try:
         removed = safe_open.remove_file(
             located.root,
@@ -523,6 +566,15 @@ def _delete_source_file(
             expected_identity=expected_identity,
         )
     except UnsafePath as exc:
+        if exc.reason == safe_open.REASON_NOT_FOUND:
+            LOGGER.info(
+                "Captured credential was stored; its source file was already gone before deletion. "
+                "event=credential_capture_source_already_gone credential_key=%s person_id=%s folder_id=%s",
+                credential_key,
+                person_id,
+                located.folder_id,
+            )
+            return False, SOURCE_FILE_STATUS_ALREADY_GONE, "source_file_already_gone"
         LOGGER.warning(
             "Captured credential was stored, but its source file could not be removed safely. "
             "event=credential_capture_delete_failed credential_key=%s person_id=%s reason=%s",
@@ -530,7 +582,7 @@ def _delete_source_file(
             person_id,
             exc.reason,
         )
-        return False, exc.reason
+        return False, SOURCE_FILE_STATUS_LEFT_IN_PLACE, exc.reason
     except OSError as exc:
         LOGGER.warning(
             "Captured credential was stored, but its source file could not be removed. "
@@ -539,16 +591,17 @@ def _delete_source_file(
             person_id,
             type(exc).__name__,
         )
-        return False, "delete_failed"
+        return False, SOURCE_FILE_STATUS_LEFT_IN_PLACE, "delete_failed"
     if not removed:
         LOGGER.warning(
-            "Captured credential was stored, but its source file changed before deletion and was left in place. "
-            "event=credential_capture_delete_skipped_changed credential_key=%s person_id=%s",
+            "Captured credential was stored, but its source file changed after reading and was left in place. "
+            "event=credential_capture_delete_skipped_changed credential_key=%s person_id=%s folder_id=%s",
             credential_key,
             person_id,
+            located.folder_id,
         )
-        return False, "source_file_changed"
-    return True, None
+        return False, SOURCE_FILE_STATUS_CHANGED_AFTER_READ, "source_file_changed"
+    return True, SOURCE_FILE_STATUS_DELETED, None
 
 
 def _deliver_capture_notice(
@@ -631,11 +684,18 @@ def _store_captured_secret(
     agent_type: str,
     now: datetime,
 ) -> ToolResult:
+    # Every capture writes to a fresh Sealbox record name so a failed or
+    # refused re-capture never mutates the previous record's value or TTL in
+    # place, and re-capturing a transferred or renamed-instance capture works
+    # cleanly. collect_credential only allows dropping the old record when the
+    # existing row is this same person's own Sealbox-only agent capture.
+    fresh_item_id = f"agent-capture:{validated.credential_key}:{secrets.token_hex(8)}"
     request_payload = {
         "credential_key": validated.credential_key,
         "display_name": validated.display_name,
         "purpose": validated.purpose,
         "store_target": "sealbox",
+        "item_id": fresh_item_id,
         "fields": [
             {
                 "name": validated.field_name,
@@ -659,6 +719,7 @@ def _store_captured_secret(
         scope=CredentialOwnerScope.user(person_id),
         expires_at=validated.expires_at,
         allow_expiry_change=True,
+        allow_drop_captured_for_person=person_id,
         overwrite_guard=_make_overwrite_guard(
             credential_key=validated.credential_key,
             field_name=validated.field_name,
@@ -776,7 +837,7 @@ def capture_file_credential(
     if store_result.status != "success":
         return store_result
 
-    deleted, delete_reason = _delete_source_file(
+    deleted, source_file_status, delete_reason = _delete_source_file(
         located,
         expected_identity=file_identity,
         credential_key=validated.credential_key,
@@ -792,17 +853,20 @@ def capture_file_credential(
     LOGGER.info(
         "Stored captured file credential. event=credential_file_captured "
         "credential_key=%s field_name=%s person_id=%s agent_type=%s expires_at=%s "
-        "source_file_deleted=%s notice_sent=%s notice_status=%s",
+        "source_file_deleted=%s source_file_status=%s notice_sent=%s notice_status=%s",
         validated.credential_key,
         validated.field_name,
         person_id,
         agent_type,
         validated.expires_at_iso,
         deleted,
+        source_file_status,
         notice_sent,
         notice_status,
     )
 
+    already_gone = source_file_status == SOURCE_FILE_STATUS_ALREADY_GONE
+    changed_after_read = source_file_status == SOURCE_FILE_STATUS_CHANGED_AFTER_READ
     result_content: dict[str, Any] = {
         "status": "credential_captured",
         "credential_key": validated.credential_key,
@@ -813,6 +877,9 @@ def capture_file_credential(
         "stored_secret_fields": store_result.content.get("stored_secret_fields", [validated.field_name]),
         "metadata": store_result.content.get("metadata"),
         "source_file_deleted": deleted,
+        "source_file_status": source_file_status,
+        "source_file_already_gone": already_gone,
+        "source_file_changed_after_read": changed_after_read,
         "notice_sent": notice_sent,
         "notice_status": notice_status,
     }
@@ -849,6 +916,10 @@ __all__ = [
     "NOTICE_STATUS_FAILED",
     "NOTICE_STATUS_OFF",
     "NOTICE_STATUS_SENT",
+    "SOURCE_FILE_STATUS_ALREADY_GONE",
+    "SOURCE_FILE_STATUS_CHANGED_AFTER_READ",
+    "SOURCE_FILE_STATUS_DELETED",
+    "SOURCE_FILE_STATUS_LEFT_IN_PLACE",
     "capture_file_credential",
     "is_agent_captured_for_person",
 ]

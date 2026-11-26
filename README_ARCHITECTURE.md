@@ -3809,15 +3809,22 @@ or clear one, and non-Sealbox write sources refuse an expiry
   crossing a tool parameter, reply, log, or notice. Rationale for its
   invariants:
   - *File-only single read*: tool parameters are kept in the model's context,
-    transcripts, and logs, so passing a secret as a parameter would leak it
-    outside Sealbox; instead, parameters use a strict allowlist that rejects
-    secret-bearing keys (`capture_secret_param_rejected`), the broker locates
+    transcripts, and logs, so passing a secret as a broker parameter would leak
+    it outside Sealbox (the one owner-accepted exception is writing a temporary
+    password an agent already holds as text to the person's `scratch/` folder
+    with the file tool and capturing it immediately; no secret is ever passed
+    to `credential.capture_file`, `credential.collect`, or other broker tools).
+    Capture parameters use a strict allowlist that rejects secret-bearing keys
+    (`capture_secret_param_rejected`) and require `credential_key` and
+    `field_name` to already be in normalized Sealbox form; the broker locates
     the file via `secure_tool_broker.task_files.locate_task_file` (the person's
-    folder plus `team/` and `agents/`), requires a `BrokerAccessGate` and
-    checks folder write access (`access_gate.decide_folder_for_context`), then
-    reads the file once through `access_control.safe_open.opened_file` (no
-    symlinks, regular UTF-8 files only, non-empty, capped at the broker's
-    256 KiB credential file limit).
+    folder plus `team/` and `agents/`, naming refusals by `folder_id` only,
+    never host paths), requires a `BrokerAccessGate` and checks folder write
+    access (`access_gate.decide_folder_for_context`, returning
+    `capture_folder_check_unavailable` on backend/storage errors), then reads
+    the file once through `access_control.safe_open.opened_file` (no symlinks,
+    regular UTF-8 files only, non-empty, capped at the broker's 256 KiB
+    credential file limit).
   - *Required bounded expiry*: an agent-stored secret must not outlive its
     intended use (an explicit owner decision), so every capture requires a
     timezone-aware UTC `expires_at` between 5 minutes and 90 days ahead
@@ -3825,28 +3832,45 @@ or clear one, and non-Sealbox write sources refuse an expiry
     and catalog `expires_at` storage so immediate expiry checks, the janitor,
     link revocation, and team transfer apply identically to form-entered
     temporary credentials.
-  - *Strict person scope and overwrite protection*: an agent — or untrusted text
-    that steers it — must never be able to swap the secret behind a person's
-    existing account links or modify team-wide credentials, so captures work
-    only for a verified `user` task context (never system work, never team
-    scope), leave `allow_drop_stored_records=False`, and record capture
-    provenance in `CatalogCredential.approval` (`source="agent_file_capture"`,
-    `captured_by_agent_type`, `captured_for_person_id`). An overwrite guard
-    inside `credential_key_lock` and `_scope_catalog_lock` refuses team keys
-    (`capture_team_key_refused`), external non-Sealbox keys
-    (`capture_external_source_key_refused`), any key not created by
-    `agent_file_capture` for that same person
-    (`capture_person_credential_refused`), and changed `field_name`
-    (`capture_field_name_mismatch`), while post-write guard refusals route
-    through `collect_credential`'s rollback cleanup
-    (`_rollback_new_sealbox_writes` and `partial_store_write`).
-  - *Post-commit source deletion and Inbox notice*: the secret must not stay on
-    disk in a workspace folder that agents and sandboxed code can read, and the
-    person must know when an agent stores a credential for them; therefore,
-    after catalog commit, the broker removes the source file with
-    `safe_open.remove_file(..., expected_identity=...)` so a concurrently
-    swapped file is never deleted, leaves the source file untouched on every
-    refusal or storage failure, and sends the person one
+  - *Strict person scope, fresh-record re-capture, record locks, and agent
+    provenance*: an agent — or untrusted text that steers it — must never be
+    able to supply a secret to overwrite a person's existing credentials or
+    modify team-wide credentials. Captures work only for a verified `user` task
+    context (never system work, never team scope) and write each capture to a
+    fresh Sealbox record name (`agent-capture:<key>:<nonce>`). On re-capture of
+    the same person's own Sealbox-only `agent_file_capture` row (including
+    after team transfer or instance rename), `collect_credential` commits the
+    new catalog row and deletes the old record via
+    `allow_drop_captured_for_person=person_id` (queued under `agent_capture` if
+    deletion fails); `capture_file` never passes `allow_drop_stored_records=True`
+    and can never drop records of a person-entered, external-source, or team
+    credential. Inside `credential_key_lock`, Sealbox writes, janitor deletes,
+    and pending dropped-record retries acquire per-owner normalized Sealbox
+    record locks (`sealbox_record_locks`) in sorted order before entering
+    `_scope_catalog_lock` so aliased catalog keys cannot race. The team-key
+    check runs only pre-write, and any exception after
+    `write_credential_to_source` before catalog commit routes through
+    `_rollback_new_sealbox_writes` so a failed re-capture leaves the prior
+    record's value and TTL untouched. Agent-callable `credential.collect`
+    likewise refuses secret values in `submitted_fields`
+    (`allow_submitted_secrets=False`; only store-native secret generation on
+    the existing layout and non-secret metadata are accepted), and every agent
+    write (`credential.capture_file`, `credential.collect`,
+    `credential.register_existing_source`) records agent provenance (agent
+    type, person) rather than person approval, never rewriting a captured row
+    as person-approved.
+  - *Post-commit source deletion, timeout safety, and Inbox notice*: the secret
+    must not stay on disk in a workspace folder that agents and sandboxed code
+    can read, and the person must know when an agent stores a credential for
+    them; therefore, after catalog commit, the broker removes the source file
+    with `safe_open.remove_file(..., expected_identity=...)` so a concurrently
+    swapped file is never deleted — reporting `source_file_changed_after_read`
+    when rewritten after read (so the agent re-captures instead of deleting)
+    and `source_file_already_gone` when already removed by a concurrent capture
+    — leaves the source file untouched on refusals (dropping the "left in
+    place" note on `capture_file_not_found`), marks `credential.capture_file`
+    and `credential.collect` as `outcome_unknown` writes in `secure_cli` on
+    transport timeout/error, and sends the person one
     `AccessNoticeKind.CREDENTIAL_CAPTURED` Inbox notice naming the agent type,
     display name, and UTC deletion time unless
     `security_layer.credential_catalog.notify_on_agent_capture` is `false`.

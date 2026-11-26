@@ -129,16 +129,27 @@ file in your workspace (such as an auth file written during a sandbox sign-in or
 a temporary password written to your `scratch/` folder) directly into your
 Sealbox credential store through `credential.capture_file`:
 
-- The secret value is read from the file by the broker and never passes through
-  a tool parameter or reply.
+- The broker reads a secret already on disk (such as a sandbox sign-in auth
+  file) directly so its value never passes through a tool parameter or reply.
+  The one owner-accepted exception is a temporary password or token the agent
+  already holds as text: the agent may write it once to your `scratch/` folder
+  with the file tool and capture it immediately with `credential.capture_file`
+  (which deletes the file); agents still never pass secret values in
+  `credential.capture_file`, `credential.collect`, other broker tool
+  parameters, or replies.
 - Agent-captured credentials always expire (between 5 minutes and 3 months
   ahead) and obey the same immediate expiry checks and 6-hour janitor cleanup as
   form-entered temporary credentials.
-- The broker deletes the source file right after saving succeeds (and leaves it
-  in place if the save is refused or fails).
-- An agent can only save into your own personal credential store, never the
-  team's, and can never overwrite a credential you entered yourself, an
-  external-source credential, or a team credential.
+- The broker deletes the source file right after saving succeeds (leaving it in
+  place if the save is refused, fails, or the file changed after reading, and
+  reporting if it was already gone).
+- An agent can only capture into your own personal credential store, never the
+  team's, and `credential.capture_file` refuses to overwrite a credential you
+  entered yourself, an external-source credential, or a team credential.
+  Agent-callable `credential.collect` also refuses secret values from agents
+  (only your secure forms, account-link forms, `credential.capture_file`, and
+  store-native secret generation on an existing layout can store a secret), and
+  every agent write records agent provenance rather than your approval.
 - You receive one Inbox notice naming the agent type, credential display name,
   and deletion time (with no secret value). Operators can turn off capture
   notices with `security_layer.credential_catalog.notify_on_agent_capture: false`.

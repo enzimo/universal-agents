@@ -1735,9 +1735,13 @@ async def test_live_sealbox_capture_file_account_link_expiry_and_janitor(
     assert "Live Capture API" in capture_notices[0].summary
     assert secret_value not in capture_notices[0].summary
 
-    # Confirm the secret exists in live Sealbox with a real TTL.
+    # Confirm the secret exists in live Sealbox with a real TTL under a fresh capture record name.
     alice_tenant_env = live_sealbox["tenant_env"](person_id)
-    sealbox_key = "team-nats-agents:live-capture-cred:live_captured_api:api_token"
+    captured_row = credential_catalog.load_catalog(scope=scope).credentials["live_captured_api"]
+    sealbox_key = captured_row.fields["api_token"].resolution_order[0].item_id
+    assert sealbox_key is not None
+    assert sealbox_key.startswith("agent-capture:live_captured_api:")
+    assert sealbox_key.endswith(":api_token")
     direct_before = first_json_value(
         _run_cli(
             live_sealbox["cli"],
