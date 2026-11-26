@@ -75,8 +75,15 @@ only the remaining step. `apply_change` without agreement, a denied approval
 or a stale plan fails the call because that change was not applied.
 
 When a worker loses its launch lease it winds down: it returns unstarted and
-running tasks to you, keeps tasks waiting on a person, timed wait, or subtask for
-`agent.schedule_workers.lease_loss_wait_timeout_seconds`, then exits. Your runtime,
+running tasks to you, immediately fails any `WAITING` timed wait whose resume
+time is already after the wind-down deadline
+(`agent.schedule_workers.lease_loss_wait_timeout_seconds` after the wind-down
+starts, with no held answer, stopping its pending subtasks and notifying the
+requester instead of holding the old worker alive), keeps tasks waiting on a
+person, a subtask, or a timed wait due before that deadline until the deadline,
+then exits. A pool worker whose process runs another message contract than its
+installation winds down the same way once its running turns end; nothing
+failed there, so its handbacks do not count as interruptions. Your runtime,
 not you, sends returned tasks to another worker of the same type; an interrupted
 run arrives there with a note of the actions it had already sent. Interrupted
 scheduled runs are not rerun when the schedule already ran again, is paused or

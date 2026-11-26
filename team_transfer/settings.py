@@ -130,7 +130,8 @@ class SettingsSection:
     #     max_delegation_ttl_seconds and allow_password_bootstrap joined it.
     # 15: transport.nats.credential_lifetime_seconds joined it; not carried (_INSTALLATION_SETTINGS).
     # 16: agent.blob_retention_days and transport.queues.max_bytes.blobs joined it.
-    # 17: agent.max_wait_minutes_without_approval and agent.max_wait_minutes_with_approval joined it.
+    # 17: agent.max_wait_minutes_without_approval and agent.max_wait_minutes_with_approval joined it, and
+    # agent.schedule_workers.lease_loss_wait_timeout_seconds's description names timed waits and the contract drain.
     schema_version: ClassVar[int] = 17
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
