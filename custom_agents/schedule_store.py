@@ -1498,6 +1498,14 @@ class ScheduleStore:
         row = self._row(schedule_id)
         return _row_message(row, self._logger) if row is not None else None
 
+    def read_next_fire_schedule(self, schedule_id: str) -> tuple[Optional["ScheduledMessage"], bool]:
+        """Read one schedule and whether its final run is already finishing (raises on storage errors)."""
+
+        row = self._row(schedule_id)
+        if row is None:
+            return None, False
+        return _row_message(row, self._logger), is_finishing(row)
+
     def list_scheduled_messages(self, *, team_id: str) -> list["ScheduledMessage"]:
         """A read-only snapshot for one team's commands, without pruning or a second read per row.
 
