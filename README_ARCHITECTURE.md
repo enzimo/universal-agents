@@ -2602,7 +2602,14 @@ access store version is part of every key, every grant, revocation, or block
 applies to the next file. `request_access`, `restrict_access`, `/access`, and
 `assistant_cli access grant|block --folder` accept folders (and blocks accept
 file paths as well), and a worker's task gets a folder from TeamLead's access
-like a tool.
+like a tool. A folder-kind access grant on a file path links only
+`Folder::<id>`, so it never opens `File::<id>`; only blocks get the extra file
+link. `AccessService._prepare_hand_down` refuses to hand on a folder when the
+grantor holds a block on a path inside it (`access_control.folders.paths_inside`,
+the rule the sandbox uses), because the worker holds no such block and would
+reach the blocked path through the folder. A block added after a folder was
+already handed on to a running task does not take that task's grant back; the
+grant ends with the task.
 
 People share and send files through `assistant_gateway/file_sharing.py`
 (`/share`, `/unshare`, `/shares`, `/send`, and the workspace browser's Share

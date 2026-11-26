@@ -1,7 +1,8 @@
 """Folder decision cache isolation and reuse tests (custom_agents.folder_access, AccessService.reusable_folder_allowance).
 
 Verifies against the real Cedar evaluator and SQLite store that:
-- single-file read and write shares never open sibling files or parent folder listings (B1, B2);
+- single-file read and write shares never open sibling files or parent folder listings (B1, B2), and
+  re-reading a singly shared file reuses the answer kept under its own file key (F6);
 - folder crawls (direct, worker hand-on, and alongside a blocked sibling) reuse the kept folder answer (B3);
 - cached folder/file answers match a fresh AccessService.decide_folder across grant and block setups;
 - blocks added or removed while the cache is warm take effect immediately via the store version.
@@ -713,3 +714,34 @@ def test_folder_listing_with_person_side_one_time_grant_is_not_cached(
     assert second is not None and second.allowed
     assert calls[0] - before_second == 4
 
+
+
+# -- F6: a singly shared file is kept under its own file key -----------------
+
+
+def test_rereading_a_singly_shared_file_reuses_its_kept_file_answer(
+    layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = _authorized_agent(layout, "alice")
+    bob_dir = layout.person_dir("bob")
+    (bob_dir / "shared.txt").write_text("shared-content", encoding="utf-8")
+    service = runtime_access(agent).service
+    assert service is not None
+    service.grant_by_person(
+        BOB,
+        _grant(
+            subject=SubjectRefV1(kind=SubjectKind.USER, id="alice"),
+            target=TargetRefV1(kind=TargetKind.FILE, id=f"{person_folder_id('bob')}/shared.txt"),
+            level=AccessLevel.READ,
+            granted_by="bob",
+        ),
+    )
+    calls = _count_cedar_calls(service, monkeypatch)
+
+    assert file_read(path=str(bob_dir / "shared.txt"))["status"] == "success"
+    first = calls[0]
+    assert first > 0
+    # Re-reads within the window use the answer kept under the file's own key: no Cedar call.
+    for _ in range(3):
+        assert file_read(path=str(bob_dir / "shared.txt"))["status"] == "success"
+    assert calls[0] == first

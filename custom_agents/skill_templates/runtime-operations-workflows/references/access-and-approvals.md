@@ -188,7 +188,10 @@ operator).
 - A block on a folder or file path stops file tools from opening it and keeps
   the containing folder out of sandboxed code; sibling files stay readable and
   the blocked file's name still appears in its parent folder's listing. Blocks
-  match the exact spelling of a path.
+  match the exact spelling of a path. A folder holding a path TeamLead is
+  blocked from is not passed on to workers.
+- Access given on a file path does not open the file; ask for or give the
+  folder that holds it.
 
 ## Platform changes
 

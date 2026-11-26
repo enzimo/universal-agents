@@ -595,6 +595,9 @@ The request goes through the same steps as a request for a tool (see
 folder from TeamLead's access the same way as a tool, only a folder inside the
 one TeamLead holds, and TeamLead can block a worker from a folder or file path
 in the current request with `restrict_access(agent_type=..., folder=..., reason=...)`.
+TeamLead does not pass on a folder that holds a file or folder TeamLead itself
+is blocked from, because the worker would get the blocked path with it; the
+worker then asks with `request_access` and a person decides.
 People give and block folders (and block file paths) with `/access` and
 `assistant_cli access` (examples below).
 
@@ -1048,6 +1051,10 @@ Who may block and unblock:
   Python commands then do not get the folder that contains the blocked folder
   or file at all (see [Shell and Python code](#shell-and-python-code)). Blocks
   match the exact spelling of a path.
+- Access given on a file path does not open that file. Grants made with
+  `/access grant` or `assistant_cli access grant --folder`, and approved
+  requests that name a file, count only for folders, so give the folder that
+  holds the file.
 
 TeamLead's `restrict_access` creates the same kind of block on a worker, but
 only for the request TeamLead is working on: it counts in that request, ends

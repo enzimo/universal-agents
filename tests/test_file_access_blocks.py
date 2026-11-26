@@ -12,11 +12,16 @@ Verifies against the real Cedar evaluator and SQLite store that:
 - ``restrict_access(folder=<file path>)`` isolates to the request it was created
   in even when the folder cache is warmed in both requests (C05c, C08);
 - pre-blocking a non-existent file path refuses creating it while siblings write
-  normally (C05d).
+  normally (C05d);
+- a team lead blocked from a file or subfolder does not hand on the folder that
+  holds it to a worker, while folders without a block inside still hand on (F1);
+- the request (``work_id``) and the schedule (``schedule_id``) are each part of
+  the kept-answer key (F4).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +31,7 @@ from typing import Any
 import pytest
 
 from access_control.data_folders import DataFolderRegistry, protected_locations
+from access_control.decisions import HandDownRefused
 from access_control.entities import AgentPrincipal, PersonPrincipal
 from access_control.inbox import StoredAccessInbox
 from access_control.operator_commands import list_grants
@@ -533,8 +539,9 @@ def test_restrict_access_on_file_path_isolates_to_its_request_even_with_warm_cac
     lead_first = _make_agent(
         layout, "alice", agent_type="TeamArchitect", lead=True, signed_context=req_first, task_id="task-lead-1"
     )
-    # Same worker process (shared agent_id) serving two different requests sequentially so cache isolation
-    # depends on the request-identifying key fields (work_id / task_id), not on distinct agent ids.
+    # Same worker process (shared agent_id) serving two different requests sequentially. The two requests also
+    # use different task ids, so this test alone does not show which key field keeps them apart;
+    # test_kept_answers_are_keyed_by_work_id_with_one_agent_and_task_id covers work_id on its own.
     shared_worker_id = "agent-WebResearchAgent-shared"
     worker_first = _make_agent(
         layout,
@@ -603,7 +610,7 @@ def test_restrict_access_on_file_path_isolates_to_its_request_even_with_warm_cac
     assert "restricted-payroll" in _text(allowed_second)
 
     # Back in Request 1 on the same worker (same agent_id) with Request 2's unrestricted folder entry still warm ->
-    # still refused (proves the request-identifying key fields work_id/task_id keep the cache entries apart).
+    # still refused: the kept answers of the two requests stay apart.
     set_agent_ref(worker_first)
     still_blocked = file_read(path=str(payroll))
     assert (still_blocked["status"], still_blocked["reason_code"]) == ("error", file_access.ACCESS_DENIED)
@@ -703,3 +710,237 @@ def test_parent_folder_block_refusal_names_the_blocking_folder(layout: InstanceL
     assert "blocked from team/finance/q1/report.csv by a block on team/finance" in refused_person.reason
     assert "remove the block on team/finance for them" in refused_person.next_step
     assert "remove the block on team/finance/q1/report.csv" not in refused_person.next_step
+
+
+# -- F1: a team lead's block inside a folder stops handing that folder on -----
+
+
+def _reports_with_lead_hand_on(layout: InstanceLayout, tmp_path: Path) -> tuple[Any, Any, Path, AccessRequests]:
+    """A worker on Alice's task, data/reports with three files, Alice's read and the lead's automatic delegable read."""
+
+    worker_agent = _make_agent(layout, "alice", agent_type="WebResearchAgent", task_id="task-worker")
+    service = access_runtime.runtime_access(worker_agent).service
+    assert service is not None
+    reports_dir = tmp_path / "data_reports"
+    (reports_dir / "private").mkdir(parents=True, exist_ok=True)
+    (reports_dir / "other").mkdir(parents=True, exist_ok=True)
+    (reports_dir / "payroll.csv").write_text("restricted-payroll\n", encoding="utf-8")
+    (reports_dir / "public.csv").write_text("open-public\n", encoding="utf-8")
+    (reports_dir / "private" / "plan.txt").write_text("restricted-plan\n", encoding="utf-8")
+    (reports_dir / "other" / "notes.txt").write_text("open-notes\n", encoding="utf-8")
+    DataFolderRegistry(service.store, TEAM).register(
+        OWNER,
+        name="reports",
+        path=str(reports_dir),
+        writable=True,
+        reason="Test reports.",
+        protected=protected_locations(layout.root),
+        now=datetime.now(timezone.utc),
+    )
+    service.grant_by_person(
+        OWNER,
+        _grant(
+            subject=SubjectRefV1(kind=SubjectKind.USER, id="alice"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"),
+            level=AccessLevel.READ,
+        ),
+    )
+    service.grant_by_person(
+        OWNER,
+        _grant(
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"),
+            level=AccessLevel.READ,
+            for_person_id="alice",
+            delegation_depth=1,
+            delegation_mode=DelegationMode.AUTOMATIC,
+        ),
+    )
+    requests = AccessRequests(service=service, inbox=StoredAccessInbox(service.store), lead_agent_type="TeamArchitect")
+    set_agent_ref(worker_agent)
+    folder_access.forget_kept_answers()
+    return worker_agent, service, reports_dir, requests
+
+
+def _refused(result: dict[str, Any], secret: str) -> None:
+    assert (result["status"], result["reason_code"]) == ("error", file_access.ACCESS_DENIED)
+    assert secret not in _text(result)
+
+
+def _worker_task_grants(service: Any) -> list[GrantV1]:
+    worker_subject = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent")
+    return [grant for grant in service.store.for_subjects(TEAM, [worker_subject]) if grant.kind is GrantKind.ACCESS]
+
+
+@pytest.mark.parametrize("block_kind", [TargetKind.FOLDER, TargetKind.FILE])
+@pytest.mark.parametrize("sibling_first", [False, True])
+def test_lead_block_on_file_path_stops_worker_hand_on_of_its_folder(
+    layout: InstanceLayout, tmp_path: Path, block_kind: TargetKind, sibling_first: bool
+) -> None:
+    # FOLDER kind is what /access block and the operator CLI store for a file path.
+    worker_agent, service, reports_dir, requests = _reports_with_lead_hand_on(layout, tmp_path)
+    block = requests.block(
+        OWNER,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+        target=TargetRefV1(kind=block_kind, id="data/reports/payroll.csv"),
+        reason="Payroll stays with people.",
+    )
+
+    if sibling_first:
+        # The folder holding the blocked file is not handed on, so the sibling is refused too.
+        _refused(file_read(path=str(reports_dir / "public.csv")), "open-public")
+    _refused(file_read(path=str(reports_dir / "payroll.csv")), "restricted-payroll")
+    assert _worker_task_grants(service) == []
+
+    # The lead's own explicit hand-down of the folder is refused and names the block's path.
+    principal, person, _task_id = access_runtime.task_access(worker_agent, access_runtime.runtime_access(worker_agent))
+    lead = AgentPrincipal("TeamArchitect", "TeamArchitect", "team_lead", TEAM, work_id=principal.work_id)
+    spec = GrantV1(
+        grant_id="new",
+        team_id=TEAM,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+        target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"),
+        level=AccessLevel.READ,
+        lifetime=GrantLifetime.TASK,
+        task_id=principal.work_id,
+        granted_by=lead.type_subject(),
+        reason="Test hand-down.",
+        created_at_utc=datetime.now(timezone.utc),
+    )
+    with pytest.raises(HandDownRefused) as refused:
+        service.hand_down(lead, spec, task_id=principal.work_id, person_id="alice", automatic_only=True)
+    assert "blocked from data/reports/payroll.csv inside data/reports" in str(refused.value)
+    assert not service.may_hand_on_for_task(
+        principal, person, TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"), AccessLevel.READ, principal.work_id
+    )
+
+    # Removing the block hands the folder on again: the worker reads the file.
+    requests.unblock(OWNER, block.grant_id)
+    allowed = file_read(path=str(reports_dir / "payroll.csv"))
+    assert allowed["status"] == "success"
+    assert "restricted-payroll" in _text(allowed)
+
+
+def test_lead_block_on_subfolder_stops_worker_hand_on_of_parent_but_not_of_unblocked_sibling_folder(
+    layout: InstanceLayout, tmp_path: Path
+) -> None:
+    _worker_agent, service, reports_dir, requests = _reports_with_lead_hand_on(layout, tmp_path)
+    requests.block(
+        OWNER,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+        target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports/private"),
+        reason="Private plans stay with people.",
+    )
+
+    # Reading a file beside the blocked subfolder would hand on data/reports, which holds it: refused.
+    _refused(file_read(path=str(reports_dir / "public.csv")), "open-public")
+    _refused(file_read(path=str(reports_dir / "private" / "plan.txt")), "restricted-plan")
+    assert _worker_task_grants(service) == []
+
+    # A sibling folder with no block inside it is still handed on.
+    allowed = file_read(path=str(reports_dir / "other" / "notes.txt"))
+    assert allowed["status"] == "success"
+    assert "open-notes" in _text(allowed)
+    assert [grant.target.id for grant in _worker_task_grants(service)] == ["data/reports/other"]
+    _refused(file_read(path=str(reports_dir / "private" / "plan.txt")), "restricted-plan")
+
+
+# -- F4: the request (work_id) and the schedule (schedule_id) are in the kept-answer key
+
+
+def test_kept_answers_are_keyed_by_work_id_with_one_agent_and_task_id(
+    layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    finance_dir = layout.team_dir / "finance"
+    finance_dir.mkdir(parents=True, exist_ok=True)
+    (finance_dir / "payroll.csv").write_text("restricted-payroll\n", encoding="utf-8")
+    req_first = context_signer().issue(team_id=TEAM, person_id="alice", person_roles=("member",))
+    req_second = context_signer().issue(team_id=TEAM, person_id="alice", person_roles=("member",))
+    lead_first = _make_agent(
+        layout, "alice", agent_type="TeamArchitect", lead=True, signed_context=req_first, task_id="task-lead-1"
+    )
+    # One agent id and one task id; only the signed request (work_id) differs.
+    shared = {"agent_type": "WebResearchAgent", "task_id": "task-worker", "agent_id": "agent-WebResearchAgent-one"}
+    worker_first = _make_agent(layout, "alice", signed_context=req_first, **shared)
+    worker_second = _make_agent(layout, "alice", signed_context=req_second, **shared)
+    service = access_runtime.runtime_access(lead_first).service
+    assert service is not None
+    service.grant_by_person(
+        OWNER,
+        _grant(
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance"),
+            level=AccessLevel.WRITE,
+            for_person_id="alice",
+            delegation_depth=1,
+            delegation_mode=DelegationMode.AUTOMATIC,
+        ),
+    )
+    set_agent_ref(lead_first)
+    restricted = json.loads(
+        access_tools.restrict_access(
+            agent_type="WebResearchAgent", folder="team/finance/payroll.csv", reason="Not in request 1"
+        )
+    )
+    assert restricted["status"] == "restricted"
+    folder_access.forget_kept_answers()
+
+    # Request 2 keeps an allowed answer for the folder (the first decision hands it on and moves the store
+    # version, the second is kept under the new one, the third reuses it).
+    for _ in range(2):
+        decision = folder_access.decide_folder_use(
+            worker_second, "team/finance/payroll.csv", is_file=True, level=AccessLevel.READ
+        )
+        assert decision is not None and decision.allowed
+    calls = [0]
+    original = service.cedar.decide
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        calls[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service.cedar, "decide", counting)
+    kept = folder_access.decide_folder_use(worker_second, "team/finance/payroll.csv", is_file=True, level=AccessLevel.READ)
+    assert kept is not None and kept.allowed and calls[0] == 0
+
+    # Request 1 on the same agent and task id does not reuse it: the restriction still refuses the file.
+    refused = folder_access.decide_folder_use(
+        worker_first, "team/finance/payroll.csv", is_file=True, level=AccessLevel.READ
+    )
+    assert refused is not None and not refused.allowed
+    assert calls[0] > 0
+
+
+def test_kept_answers_are_keyed_by_schedule_id(layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch) -> None:
+    finance_dir = layout.team_dir / "finance"
+    finance_dir.mkdir(parents=True, exist_ok=True)
+    (finance_dir / "payroll.csv").write_text("restricted-payroll\n", encoding="utf-8")
+    worker = _make_agent(layout, "alice", agent_type="WebResearchAgent", task_id="task-run")
+    service = access_runtime.runtime_access(worker).service
+    assert service is not None
+    # A block that counts only in runs of schedule sched_b.
+    service.store.create(
+        _grant(
+            subject=SubjectRefV1(kind=SubjectKind.SCHEDULE, id=f"{TEAM}/sched_b"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance/payroll.csv"),
+            kind=GrantKind.BLOCK,
+        ).model_copy(update={"grant_id": "grant-sched-b-block"})
+    )
+    schedule = {"id": "sched_a"}
+    real_task_access = access_runtime.task_access
+
+    def task_access_in_schedule(agent: Any, access: Any) -> Any:
+        principal, person, task_id = real_task_access(agent, access)
+        return dataclasses.replace(principal, schedule_id=schedule["id"]), person, task_id
+
+    # Everything else (agent id, task id, request, person) stays the same; only the schedule differs.
+    monkeypatch.setattr(folder_access, "task_access", task_access_in_schedule)
+    set_agent_ref(worker)
+    folder_access.forget_kept_answers()
+    allowed = folder_access.decide_folder_use(worker, "team/finance/payroll.csv", is_file=True, level=AccessLevel.READ)
+    assert allowed is not None and allowed.allowed
+
+    schedule["id"] = "sched_b"
+    refused = folder_access.decide_folder_use(worker, "team/finance/payroll.csv", is_file=True, level=AccessLevel.READ)
+    assert refused is not None and not refused.allowed
+    assert refused.blocking_policy_ids == ("block:grant-sched-b-block",)

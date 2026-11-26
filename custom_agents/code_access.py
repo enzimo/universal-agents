@@ -53,7 +53,7 @@ from access_control.folders import (
     DataFolder,
     FolderIdError,
     FolderRoots,
-    covers,
+    paths_inside,
 )
 from access_control.decisions import AccessService
 from access_control.entities import AgentPrincipal, PersonPrincipal
@@ -269,10 +269,6 @@ def _candidate_folders(
     return list(candidates)
 
 
-def _blocked_inside(folder_id: str, blocked: list[str]) -> list[str]:
-    return sorted(block for block in blocked if block != folder_id and covers(folder_id, block))
-
-
 def _planner(agent: Any) -> _Planner:
     access = runtime_access(agent)
     assert access.service is not None
@@ -316,7 +312,7 @@ def code_access(
             path = roots.path_of(folder_id)
         except FolderIdError:
             continue  # a grant on a data folder the operator no longer registers
-        inner = _blocked_inside(folder_id, blocked)
+        inner = paths_inside(folder_id, blocked)
         if inner:
             notes.append(
                 f"{folder_id}/ is not available to code because {', '.join(inner)} inside it is blocked; "

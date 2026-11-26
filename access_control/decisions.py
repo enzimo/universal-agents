@@ -32,7 +32,15 @@ from typing import Any, Callable, Iterable
 
 from access_catalog.catalog import ToolCatalog
 from access_control.cedar import AccessEvaluationError, CedarAccessClient
-from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, covers, folder_chain, folder_owner, grantable_folder_id
+from access_control.folders import (
+    FOLDER_ROOT_USERS,
+    FolderIdError,
+    covers,
+    folder_chain,
+    folder_owner,
+    grantable_folder_id,
+    paths_inside,
+)
 from access_control.grant_entries import GrantPlan, entry_key, plan_grants
 from access_control.people import is_administrator
 from access_control.standard_grants import is_standard_grant, standard_grants
@@ -1517,6 +1525,7 @@ class AccessService:
             raise HandDownRefused(
                 f"{grantor.agent_type} holds no {spec.level.value} access to {spec.target.id} that it may hand on."
             )
+        _refuse_folder_with_block_inside(grantor, spec.target, grants)
         parents = check.grant_ids
         if automatic_only:
             # Only access that may be handed on without asking a person.
@@ -1868,6 +1877,54 @@ def _person_folder_refusal(
         f"The person this task works for does not have {level.value} access to {shown}, "
         "and agents never exceed their person.",
         f"Ask a team administrator to give them {level.value} access to {shown}.",
+    )
+
+
+def _refuse_folder_with_block_inside(grantor: AgentPrincipal, target: TargetRefV1, grants: Iterable[GrantV1]) -> None:
+    """Raise ``HandDownRefused`` when the grantor is blocked from a path inside the folder it would hand on.
+
+    Cedar refuses the hand-down of a folder the grantor is blocked from, or
+    one below such a folder, but a block on a file or subfolder inside it does
+    not stop the folder itself. The folder handed on would carry that path to
+    the worker, who holds no block on it, so a worker would get what its
+    grantor may not use (AGENTS.md: a worker gets what the team lead may hand
+    on). Same rule as the sandbox's (``access_control.folders.paths_inside``).
+    Fails closed: a block whose target id cannot be read refuses the hand-down.
+    """
+
+    if target.kind is not TargetKind.FOLDER:
+        return
+    blocks = [
+        grant
+        for grant in grants
+        if grant.kind is GrantKind.BLOCK and grant.target.kind in {TargetKind.FOLDER, TargetKind.FILE}
+    ]
+    try:
+        inside = paths_inside(target.id, [grant.target.id for grant in blocks])
+    except FolderIdError as exc:
+        logger.warning(
+            "A block's target is not a folder id, so a folder cannot be handed on. "
+            "event=hand_down_invalid_block_target grantor_type=%s target=%s why=%s",
+            grantor.agent_type,
+            target.id,
+            exc,
+        )
+        raise HandDownRefused(
+            f"{target.id} cannot be handed on: a block on {grantor.agent_type} names a path that cannot be read ({exc})."
+        ) from exc
+    if not inside:
+        return
+    logger.info(
+        "A folder holding a path the grantor is blocked from is not handed on. "
+        "event=hand_down_refused_block_inside grantor_type=%s target=%s blocked_paths=%s block_ids=%s",
+        grantor.agent_type,
+        target.id,
+        ",".join(inside),
+        ",".join(grant.grant_id for grant in blocks if grant.target.id in inside),
+    )
+    raise HandDownRefused(
+        f"{grantor.agent_type} is blocked from {', '.join(inside)} inside {target.id}, so it may not hand on "
+        f"{target.id}. Hand on a folder that does not contain the blocked path, or ask a person."
     )
 
 
