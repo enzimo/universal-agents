@@ -252,6 +252,11 @@ class MCPServerTools:
 
         return dict(self._failures)
 
+    def shows(self, tool_id: str) -> bool:
+        """Whether this agent shows the server, as of the last registry read (set by ``sync``)."""
+
+        return tool_id in self._shown
+
     def status(self, tool_id: str) -> str | None:
         """Why the server's tools are not loaded, in plain words; None when nothing failed."""
 

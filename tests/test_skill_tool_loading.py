@@ -28,13 +28,14 @@ from runtime_settings.tool_presentation_contract import TOOL_PRESENTATION_INDEX,
 from tests.task_work_support import set_agent_ref
 from tests.test_access_request_tools import TEAM, make_agent, owner_service
 from tests.test_call_tool import ScriptedStepsModel
-from tests.test_tool_loading import BINARY, CATALOG, OBJECTIVES, cap, lead_agent, model_view, next_model_call
+from tests.test_tool_loading import BINARY, CATALOG, OBJECTIVES, cap, lead_agent, model_view, next_model_call, use
 from tests.test_tool_loading import storage as loading_storage
 
 pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
 
 storage = loading_storage
 HEARTBEAT = "fn:heartbeat"
+SERVER = "mcp:tickets"
 INSTRUCTIONS = "Plan the work, then track it as an objective."
 
 
@@ -98,15 +99,34 @@ def test_in_the_index_setups_a_skills_catalog_groups_are_not_loaded_but_called_w
     assert next_model_call(hook, registry) == before, "no definitions added"
 
 
-def test_in_the_index_setups_a_declared_mcp_server_goes_through_the_use_tools_path(storage, tmp_path, monkeypatch) -> None:
+def installed_server(storage, tmp_path: Path, agent, *, held: bool) -> None:
+    """Install mcp:tickets in the agent's tool catalog; with ``held`` grant it to the team lead's type for the owner."""
+
     from custom_agents.access_runtime import runtime_access
+    from custom_messages.contracts.access_v2 import AccessLevel, DelegationMode, GrantV1, SubjectKind, SubjectRefV1, TargetKind, TargetRefV1
     from mcp_control.registry import MCPConnectionStore, resolve_mcp_connection_paths
+    from tests.test_access_request_tools import OWNER
     from tests.test_mcp_server_loading import install
 
+    record = install(MCPConnectionStore(resolve_mcp_connection_paths(tmp_path / "mcp")))
+    runtime_access(agent).catalog.add_mcp_tool(record)
+    if held:
+        service = owner_service(storage)
+        service.catalog.add_mcp_tool(record)  # the owner's service reads its own catalog
+        service.grant_by_person(OWNER, GrantV1(
+            grant_id="mcp", team_id=TEAM,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+            target=TargetRefV1(kind=TargetKind.TOOL, id=SERVER), level=AccessLevel.FULL,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=OWNER.person_id), created_at_utc=service.clock(),
+            for_person_id=OWNER.person_id, delegation_depth=1, delegation_mode=DelegationMode.AUTOMATIC,
+        ))
+
+
+def test_in_the_index_setups_a_declared_mcp_server_goes_through_the_use_tools_path(storage, tmp_path, monkeypatch) -> None:
     lead = lead_agent(storage, tmp_path)
     lead.tool_filter = {"tool_presentation": TOOL_PRESENTATION_INDEX}
     model_view(lead)
-    runtime_access(lead).catalog.add_mcp_tool(install(MCPConnectionStore(resolve_mcp_connection_paths(tmp_path))))
+    installed_server(storage, tmp_path, lead, held=False)
     handed: list[list[str]] = []
     real = tool_loading.load_tool_groups
 
@@ -116,11 +136,69 @@ def test_in_the_index_setups_a_declared_mcp_server_goes_through_the_use_tools_pa
 
     monkeypatch.setattr(tool_loading, "load_tool_groups", spy)
 
-    result = activate(skill(ua_tools=f"mcp:tickets {OBJECTIVES}"))
+    result = activate(skill(ua_tools=f"{SERVER} {OBJECTIVES}"))
 
-    assert handed == [["mcp:tickets"]], "only the MCP server goes to the loader; the catalog group is in the index"
+    assert handed == [[SERVER]], "only the MCP server goes to the loader; the catalog group is in the index"
     assert f"- In your tool index, nothing to load: {OBJECTIVES}." in result
-    assert "mcp:tickets" in result
+    assert f"- Not loaded, {SERVER}: You have no access to {SERVER}" in result and f"request_access(tool_id='{SERVER}'" in result
+
+
+@pytest.mark.parametrize("presentation", [TOOL_PRESENTATION_INDEX, "full_definitions"])
+def test_a_held_mcp_server_is_reported_as_loading_on_its_own_by_skills_and_use_tools(storage, tmp_path, presentation) -> None:
+    # Lead ruling (checkpoint 5): nothing loads an MCP server; its tools load before model calls from access.
+    lead = lead_agent(storage, tmp_path)
+    lead.tool_filter = {"tool_presentation": presentation}
+    model_view(lead)
+    installed_server(storage, tmp_path, lead, held=True)
+    version = owner_service(storage).store.version(TEAM)
+
+    note = activate(skill(ua_tools=SERVER))
+    [answer] = use(SERVER)["tools"]
+
+    assert f"- {SERVER}: {tool_loading.MCP_LOADS_ON_ITS_OWN}" in note
+    assert answer["status"] == tool_loading.STATUS_LOADS_ON_ITS_OWN and "load_status" not in answer
+    assert "does not load on request" not in note + answer["reason"]
+    assert loaded_tools(lead).loaded() == frozenset()
+    assert owner_service(storage).store.version(TEAM) == version, "reporting grants nothing"
+
+
+def test_a_held_mcp_server_that_has_not_answered_reports_its_load_status(storage, tmp_path, monkeypatch) -> None:
+    lead = lead_agent(storage, tmp_path)
+    model_view(lead)
+    installed_server(storage, tmp_path, lead, held=True)
+    monkeypatch.setattr("custom_agents.mcp_server_tools.server_status", lambda _agent, _tool_id: "Not loaded: the server has not answered.")
+
+    note = activate(skill(ua_tools=SERVER))
+    [answer] = use(SERVER)["tools"]
+
+    assert f"- {SERVER} has not loaded: Not loaded: the server has not answered." in note
+    assert answer["load_status"] == "Not loaded: the server has not answered."
+
+
+@pytest.mark.parametrize("shows", [True, False])
+def test_with_authorization_off_an_mcp_server_follows_the_agent_types_its_record_names(storage, tmp_path, monkeypatch, shows) -> None:
+    lead = lead_agent(storage, tmp_path, enabled=False)
+    model_view(lead)
+    installed_server(storage, tmp_path, lead, held=False)
+    monkeypatch.setattr("custom_agents.mcp_server_tools.server_loader", lambda _agent: SimpleNamespace(shows=lambda tool_id: shows and tool_id == SERVER, status=lambda _t: None))
+
+    [answer] = use(SERVER)["tools"]
+
+    if shows:
+        assert answer["status"] == tool_loading.STATUS_LOADS_ON_ITS_OWN
+    else:
+        assert answer == {"tool_id": SERVER, "status": "refused", "reason": f"{SERVER} is not set up for your agent type."}
+
+
+def test_in_the_index_setups_a_group_the_setting_withholds_is_not_called_in_the_index(storage, tmp_path) -> None:
+    lead = lead_agent(storage, tmp_path)
+    lead.tool_filter = {"tool_presentation": TOOL_PRESENTATION_INDEX}
+    model_view(lead)
+
+    result = activate(skill(ua_tools="fn:tool_scripts"))
+
+    assert f"- Not loaded, fn:tool_scripts: {tool_loading.WITHHELD_FUNCTION_ERROR}" in result
+    assert "In your tool index" not in result
 
 
 def test_groups_unloaded_to_make_room_are_named_in_the_skill_result(storage, tmp_path) -> None:
@@ -196,10 +274,13 @@ def test_a_failure_while_loading_still_returns_the_instructions_with_the_use_too
 
     # In the index setups the note sends catalog groups to call_tool and only MCP servers to use_tools.
     lead.tool_filter = {"tool_presentation": TOOL_PRESENTATION_INDEX}
-    indexed = activate(skill(name="indexed", ua_tools=f"{OBJECTIVES} mcp:tickets"))
+    indexed = activate(skill(name="indexed", ua_tools=f"{OBJECTIVES} {SERVER}"))
     assert f"Call the functions of {OBJECTIVES} from your tool index with call_tool(name='<function>', inputs={{...}})." in indexed
-    assert "use_tools(tool_ids=['mcp:tickets'])" in indexed
-    assert f"use_tools(tool_ids=['{OBJECTIVES}'" not in indexed
+    assert f"{SERVER}: {tool_loading.MCP_LOADS_ON_ITS_OWN}" in indexed
+    assert "use_tools" not in indexed, "neither catalog groups nor MCP servers are sent to use_tools here"
+    lead.tool_filter = {}
+    full = activate(skill(name="full", ua_tools=f"{OBJECTIVES} {SERVER}"))
+    assert f"use_tools(tool_ids=['{OBJECTIVES}'])" in full and f"{SERVER}: {tool_loading.MCP_LOADS_ON_ITS_OWN}" in full
 
 
 def test_a_skill_on_disk_declares_ua_tools_in_its_frontmatter_metadata(tmp_path: Path) -> None:
