@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from custom_agents import paused_wait_resume
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
     ANSWER_HELD_AT_KEY,
@@ -29,8 +32,8 @@ from custom_agents.task_human_interaction_blockers import (
 from custom_agents.task_manager import TaskManager
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType, ProgressState
+from custom_messages.contracts.task_v1 import Task, TaskSteering
+from custom_messages.enums import MessageMetaType, ProgressState, TaskSteeringStatus, TaskSteeringType
 
 TASK = "task-wait"
 AGENT_ID = "agent-worker"
@@ -185,3 +188,139 @@ def test_clear_answered_blocker_timed_wait_and_existing_rules(
     )
     assert removed is expected
     assert (get_human_interaction_blocker(manager, TASK) is None) is expected
+
+
+# -- shared paused_wait_resume helpers (Unit 9) ---------------------------------------------
+
+
+def _fake_agent(manager: TaskManager, *, interrupt_id: str | None = "i-wait") -> SimpleNamespace:
+    sessions = {}
+    if interrupt_id is not None:
+        sessions[TASK] = SimpleNamespace(
+            task_id=TASK,
+            interrupts=[SimpleNamespace(interrupt_id=interrupt_id)],
+            strands=SimpleNamespace(replace_before_next_turn=False),
+        )
+    return SimpleNamespace(
+        id=AGENT_ID,
+        task_manager=manager,
+        _interrupted_turn_sessions=sessions,
+        _pending_interrupt_responses={},
+    )
+
+
+def _timed_steering(interrupt_id: str = "i-wait") -> TaskSteering:
+    return TaskSteering(
+        steering_id=f"timed_wait_resume_{interrupt_id}",
+        steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
+        target_task_id=TASK,
+        target_agent_id=AGENT_ID,
+        interrupt_responses=[{"interrupt_id": interrupt_id, "response": {"kind": "timed_wait_resumed"}}],
+        status=TaskSteeringStatus.PENDING,
+    )
+
+
+@pytest.mark.asyncio
+async def test_hand_answer_to_paused_turn_refuses_to_overwrite_when_replace_pending_is_false(
+    manager: TaskManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C01: the timed-wait path never replaces an answer already pending for the task."""
+    woken: list = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    record_human_interaction_blocker(manager, TASK, _timed_record("i-wait"))
+    agent = _fake_agent(manager, interrupt_id="i-wait")
+    existing = TaskSteering(
+        steering_id="existing-answer",
+        steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
+        target_task_id=TASK,
+        guidance_text="already pending",
+        status=TaskSteeringStatus.PENDING,
+    )
+    agent._pending_interrupt_responses[TASK] = existing
+
+    held = await paused_wait_resume.hand_answer_to_paused_turn(
+        agent,
+        task_id=TASK,
+        kind=TIMED_WAIT_BLOCKER,
+        wait_id="i-wait",
+        steering=_timed_steering("i-wait"),
+        replace_pending=False,
+    )
+
+    assert held is False
+    assert agent._pending_interrupt_responses[TASK] is existing
+    assert not answer_held(get_human_interaction_blocker(manager, TASK))
+    assert not woken
+
+
+@pytest.mark.asyncio
+async def test_hand_answer_to_paused_turn_marks_and_wakes_for_timed_wait(
+    manager: TaskManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    woken: list = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    record_human_interaction_blocker(manager, TASK, _timed_record("i-wait"))
+    agent = _fake_agent(manager, interrupt_id="i-wait")
+    steering = _timed_steering("i-wait")
+
+    assert paused_wait_resume.paused_turn_waits(agent, TASK, "i-wait")
+    assert not paused_wait_resume.paused_turn_waits(agent, TASK, "")
+    assert not paused_wait_resume.paused_turn_waits(agent, TASK, "i-other")
+
+    held = await paused_wait_resume.hand_answer_to_paused_turn(
+        agent,
+        task_id=TASK,
+        kind=TIMED_WAIT_BLOCKER,
+        wait_id="i-wait",
+        steering=steering,
+        replace_pending=False,
+    )
+
+    assert held is True
+    assert agent._pending_interrupt_responses[TASK] is steering
+    assert answer_held(get_human_interaction_blocker(manager, TASK), AGENT_ID)
+    assert woken == [agent]
+
+
+@pytest.mark.asyncio
+async def test_drop_paused_turn_and_resume_from_note_for_timed_wait(
+    manager: TaskManager, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    woken: list = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    log_spec = paused_wait_resume.WaitLogSpec(
+        label="timed-wait",
+        wait_id_key="interrupt_id",
+        dropped_event="timed_wait_paused_turn_dropped",
+        restored_event="timed_wait_record_restored",
+        restore_failed_event="timed_wait_record_restore_failed",
+    )
+    record_human_interaction_blocker(manager, TASK, _timed_record("i-wait", held_by=AGENT_ID))
+    agent = _fake_agent(manager, interrupt_id="i-wait")
+    session = agent._interrupted_turn_sessions[TASK]
+
+    with caplog.at_level(logging.WARNING):
+        dropped = paused_wait_resume.drop_paused_turn(agent, TASK, "i-wait", why="paused_turn_gone", log=log_spec)
+    assert dropped is True
+    assert TASK not in agent._interrupted_turn_sessions
+    assert session.strands.replace_before_next_turn is True
+    assert "event=timed_wait_paused_turn_dropped" in caplog.text
+
+    resumed = await paused_wait_resume.resume_from_note(
+        agent,
+        task_id=TASK,
+        kind=TIMED_WAIT_BLOCKER,
+        wait_id="i-wait",
+        note="The 10-minute wait ended at 2026-11-26T06:00:00Z.",
+        history="Timed wait ended; the task resumes.",
+        history_details={"event": "timed_wait_ended", "interrupt_id": "i-wait", "how": "note"},
+        log=log_spec,
+        wake=True,
+    )
+
+    assert resumed is True
+    assert get_human_interaction_blocker(manager, TASK) is None
+    assert manager.get_task_info(TASK).state == ProgressState.ACCEPTED
+    assert list(manager.task_state.task_queue) == [TASK]
+    assert "10-minute wait ended" in manager.read_runtime_resume_directive(TASK)
+    assert woken == [agent]

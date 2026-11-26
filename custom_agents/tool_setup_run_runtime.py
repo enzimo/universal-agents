@@ -89,18 +89,22 @@ from functools import partial
 from typing import Any
 
 from custom_agents.access_workflow_setup_hooks import link_setup_request, record_setup_result
-from custom_agents.pending_work_runtime import schedule_pending_work
+from custom_agents.paused_wait_resume import (
+    WaitLogSpec,
+    append_wait_history,
+    drop_paused_turn,
+    hand_answer_to_paused_turn,
+    paused_turn_waits,
+    resume_from_note,
+)
 from custom_agents.task_human_interaction_blockers import (
     SETUP_RUN_BLOCKER,
     answer_held,
     clear_answer_marks,
-    clear_wait_record,
     get_human_interaction_blocker,
     is_setup_run_blocker,
-    mark_answer_held,
     record_human_interaction_blocker,
     remove_answer_mark,
-    restore_wait_record,
 )
 from custom_agents.tool_setup_runs import (
     ACCESS_APPROVED_CODE,
@@ -136,9 +140,6 @@ from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import TaskSteering
 from custom_messages.enums import (
-    ProgressState,
-    TaskHistoryImportance,
-    TaskHistoryType,
     TaskSteeringStatus,
     TaskSteeringType,
 )
@@ -148,6 +149,13 @@ from storage.tool_setup_run_repository import ToolSetupRunRepository
 logger = logging.getLogger(__name__)
 # The UserNotification reason of the setup workflow's notice (audit and delivery routing).
 WORKFLOW_NOTICE_REASON = "tool_setup_workflow"
+_SETUP_WAIT_LOG = WaitLogSpec(
+    label="setup-run",
+    wait_id_key="run_id",
+    dropped_event="tool_setup_paused_turn_dropped",
+    restored_event="tool_setup_run_record_restored",
+    restore_failed_event="tool_setup_run_record_restore_failed",
+)
 
 
 # -- storage and locking ------------------------------------------------------------------
@@ -191,17 +199,6 @@ def _names(agent: Any, run: ToolSetupRunV1) -> dict[str, str]:
         tool = catalog.tools.get(tool_id)
         names[tool_id] = service_name(tool_id, tool.display_name if tool else "")
     return names
-
-
-async def _history(agent: Any, task_id: str, text: str, details: dict[str, Any]) -> None:
-    await agent.task_manager.operations_runtime.run(
-        agent.task_manager.append_history_entry,
-        task_id,
-        text,
-        entry_type=TaskHistoryType.QUERY_EVENT,
-        importance=TaskHistoryImportance.HIGH,
-        details=details,
-    )
 
 
 # -- begin ------------------------------------------------------------------------------
@@ -364,7 +361,7 @@ async def _open_page(agent: Any, run: ToolSetupRunV1, piece: RunPieceV1, task_in
         failed = opened.model_copy(update={"status": FAILED, "note": "the page could not be sent to the chat"})
         return await _save(agent, run.with_piece(failed))
     await asyncio.to_thread(link_setup_request, agent, request, task_info.meta)
-    await _history(
+    await append_wait_history(
         agent,
         run.task_id,
         f"Setup page ({piece.kind}) opened for {piece.tool_id}.",
@@ -518,7 +515,7 @@ async def continue_after_page_result(
     task_info = await agent.task_manager.operations_runtime.run(agent.task_manager.get_task_info, result.parent_task_id)
     if task_info is not None:
         await asyncio.to_thread(record_setup_result, agent, result, task_info.meta)
-    await _history(
+    await append_wait_history(
         agent,
         result.parent_task_id,
         f"Setup page ({result.kind}) for {result.tool_id}: {result.status}"
@@ -633,17 +630,6 @@ RUN_ENDED_NOTE = (
 )
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _paused_turn_waits(agent: Any, run: ToolSetupRunV1) -> bool:
-    """The task's paused turn is still in memory and waits on this run's interrupt."""
-
-    session = getattr(agent, "_interrupted_turn_sessions", {}).get(run.task_id)
-    return session is not None and any(item.interrupt_id == run.interrupt_id for item in session.interrupts)
-
-
 async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any, *, wake: bool = True) -> bool:
     """Answer the paused turn, or resume the task from a note (module docstring).
 
@@ -665,14 +651,21 @@ async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any, *, wa
         if not is_setup_run_blocker(blocker, run.run_id):
             logger.info("No task waits on this setup run. event=tool_setup_run_not_waited run_id=%s", run.run_id)
             return False
-        if _paused_turn_waits(agent, run):
+        if paused_turn_waits(agent, run.task_id, run.interrupt_id):
             if answer_held(blocker):
                 return False  # answered already: the answer waits for the lane, or the lane is resuming it
             return await _answer_paused_turn(agent, run)
         result = await asyncio.to_thread(outcome_for, agent, run)
-        resumed = await _resume_from_note(
-            agent, run.task_id, run.run_id, RUN_ENDED_NOTE + json.dumps(result, sort_keys=True),
-            history="Tool setup ended; the task resumes.", event="tool_setup_run_resume", wake=wake,
+        resumed = await resume_from_note(
+            agent,
+            task_id=run.task_id,
+            kind=SETUP_RUN_BLOCKER,
+            wait_id=run.run_id,
+            note=RUN_ENDED_NOTE + json.dumps(result, sort_keys=True),
+            history="Tool setup ended; the task resumes.",
+            history_details={"event": "tool_setup_run_resume", "run_id": run.run_id},
+            log=_SETUP_WAIT_LOG,
+            wake=wake,
         )
     if resumed:
         logger.info(
@@ -692,20 +685,7 @@ async def _answer_paused_turn(agent: Any, run: ToolSetupRunV1) -> bool:
     (``task_steering_runtime``). The turn reads the stored run.
     """
 
-    manager = agent.task_manager
-    marked = await manager.operations_runtime.run(
-        partial(mark_answer_held, manager),
-        run.task_id,
-        SETUP_RUN_BLOCKER,
-        run.run_id,
-        holder_id=str(agent.id),
-        at=_now(),
-    )
-    if not marked:
-        return False
-    # The live turn resumes with its interrupt answered, as the steering
-    # runtime does for a live session (``task_steering_runtime``).
-    agent._pending_interrupt_responses[run.task_id] = TaskSteering(
+    steering = TaskSteering(
         steering_id=f"tool_setup_resume_{run.run_id}",
         steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
         target_task_id=run.task_id,
@@ -716,6 +696,15 @@ async def _answer_paused_turn(agent: Any, run: ToolSetupRunV1) -> bool:
         status=TaskSteeringStatus.PENDING,
         idempotency_key=f"tool_setup_resume:{run.interrupt_id}",
     )
+    held = await hand_answer_to_paused_turn(
+        agent,
+        task_id=run.task_id,
+        kind=SETUP_RUN_BLOCKER,
+        wait_id=run.run_id,
+        steering=steering,
+    )
+    if not held:
+        return False
     logger.info(
         "A setup run ended; its answer waits for the task's lane. event=tool_setup_answer_held run_id=%s task_id=%s "
         "status=%s",
@@ -723,7 +712,6 @@ async def _answer_paused_turn(agent: Any, run: ToolSetupRunV1) -> bool:
         run.task_id,
         run.status,
     )
-    schedule_pending_work(agent)
     return True
 
 
@@ -743,29 +731,6 @@ def _setup_answer(steering: TaskSteering) -> tuple[str, str] | None:
         if isinstance(response, dict) and response.get("kind") == TOOL_SETUP_RUN_RESPONSE_KIND and response.get("run_id"):
             return str(item.get("interrupt_id") or ""), str(response["run_id"])
     return None
-
-
-def _drop_paused_turn(agent: Any, task_id: str, interrupt_id: str, *, why: str) -> None:
-    """Forget the task's paused turn when it waits on ``interrupt_id`` but can never take its answer (logged).
-
-    Its Strands agent is not reused (``replace_before_next_turn``); the task's
-    next turn starts afresh from its note. Left in place, a later answer
-    would be handed to it again.
-    """
-
-    sessions = getattr(agent, "_interrupted_turn_sessions", {})
-    session = sessions.get(task_id)
-    if session is None or not any(item.interrupt_id == interrupt_id for item in session.interrupts):
-        return
-    sessions.pop(task_id, None)
-    session.strands.replace_before_next_turn = True
-    logger.warning(
-        "Dropped a paused turn that cannot take its setup answer. event=tool_setup_paused_turn_dropped "
-        "task_id=%s interrupt_id=%s why=%s",
-        task_id,
-        interrupt_id,
-        why,
-    )
 
 
 async def resume_without_paused_turn(agent: Any, task_id: str, steering: TaskSteering, *, why: str) -> bool:
@@ -792,7 +757,7 @@ async def resume_without_paused_turn(agent: Any, task_id: str, steering: TaskSte
         run_id,
         why,
     )
-    _drop_paused_turn(agent, task_id, interrupt_id, why=why)
+    drop_paused_turn(agent, task_id, interrupt_id, why=why, log=_SETUP_WAIT_LOG)
     manager = agent.task_manager
     try:
         # No paused turn waits for the answer any more, so the record must not
@@ -829,10 +794,19 @@ async def _resume_missing_run(agent: Any, task_id: str, run_id: str, *, wake: bo
         blocker = await manager.operations_runtime.run(partial(get_human_interaction_blocker, manager), task_id)
         if blocker is None or not is_setup_run_blocker(blocker, run_id):
             return False
-        _drop_paused_turn(agent, task_id, str(blocker.get("interrupt_id") or ""), why="setup_run_not_found")
-        resumed = await _resume_from_note(
-            agent, task_id, run_id, RUN_NOT_FOUND_NOTE,
-            history="The tool setup was not found; the task resumes.", event="tool_setup_run_not_found", wake=wake,
+        drop_paused_turn(
+            agent, task_id, str(blocker.get("interrupt_id") or ""), why="setup_run_not_found", log=_SETUP_WAIT_LOG
+        )
+        resumed = await resume_from_note(
+            agent,
+            task_id=task_id,
+            kind=SETUP_RUN_BLOCKER,
+            wait_id=run_id,
+            note=RUN_NOT_FOUND_NOTE,
+            history="The tool setup was not found; the task resumes.",
+            history_details={"event": "tool_setup_run_not_found", "run_id": run_id},
+            log=_SETUP_WAIT_LOG,
+            wake=wake,
         )
     if resumed:
         logger.warning(
@@ -842,67 +816,6 @@ async def _resume_missing_run(agent: Any, task_id: str, run_id: str, *, wake: bo
             task_id,
         )
     return resumed
-
-
-async def _resume_from_note(
-    agent: Any, task_id: str, run_id: str, note: str, *, history: str, event: str, wake: bool = True
-) -> bool:
-    """Queue the task at the front with a note its next turn reads; True when this call removed the record.
-
-    The caller holds the run's lock. No paused turn waits on the run here, so
-    the record loses any mark first: should this fail, the task must not look
-    as if its answer were held. The note is saved before the record is
-    removed: a restart between the two finds the record and saves the same
-    note again, which is not added twice (``append_runtime_resume_directive``).
-    The record goes before the task is queued, because the queue refuses a
-    task with a record (``task_queue_safety.is_ready``); if anything after the
-    removal fails, the record is put back and the error raised, so recovery
-    tries again. Repeating is safe: the note is not added twice and the state
-    may be set again; only a second history line is added.
-    """
-
-    manager = agent.task_manager
-    run_ops = manager.operations_runtime.run
-    record = await run_ops(partial(remove_answer_mark, manager), task_id, SETUP_RUN_BLOCKER, run_id)
-    if record is None:
-        return False  # read under the lock; only the task ending removes it meanwhile
-    await run_ops(manager.append_runtime_resume_directive, task_id, note)
-    try:
-        if not await run_ops(partial(clear_wait_record, manager), task_id, SETUP_RUN_BLOCKER, run_id):
-            return False
-        await _history(agent, task_id, history, {"event": event, "run_id": run_id})
-        await run_ops(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, _now())
-        await run_ops(manager.enqueue_task, task_id, front=True)
-    except Exception:
-        await _put_record_back(agent, task_id, record)
-        raise
-    if wake:
-        schedule_pending_work(agent)
-    return True
-
-
-async def _put_record_back(agent: Any, task_id: str, record: dict[str, Any]) -> None:
-    """After a failed resume from a note, the record goes back so recovery finds the task again (logged)."""
-
-    manager = agent.task_manager
-    try:
-        restored = await manager.operations_runtime.run(partial(restore_wait_record, manager), task_id, record)
-    except Exception as exc:  # noqa: BLE001 - the record is back in memory; the next save writes it
-        logger.warning(
-            "Could not save the setup-run record put back after a failed resume. "
-            "event=tool_setup_run_record_restore_failed task_id=%s run_id=%s error_type=%s",
-            task_id,
-            record.get("run_id"),
-            type(exc).__name__,
-        )
-        return
-    logger.warning(
-        "A resume from a note failed after the task's setup-run record was removed; the record is back. "
-        "event=tool_setup_run_record_restored task_id=%s run_id=%s restored=%s",
-        task_id,
-        record.get("run_id"),
-        restored,
-    )
 
 
 # -- recovery ------------------------------------------------------------------------------
@@ -940,7 +853,7 @@ def _recovery_step(agent: Any, blocker: dict[str, Any], run: ToolSetupRunV1) -> 
 
     if run.status == RUN_WAITING:
         return None if still_waits(run) else RECOVER_ADVANCE
-    if answer_held(blocker) and _paused_turn_waits(agent, run):
+    if answer_held(blocker) and paused_turn_waits(agent, run.task_id, run.interrupt_id):
         return None  # the answer waits for the task's lane
     return RECOVER_RESUME
 

@@ -45,7 +45,7 @@ from custom_agents.task_steering_runtime import (
     INTERRUPT_RESUMED_EVENT,
     INTERRUPT_WAITS_ON_REQUESTER_KEY,
 )
-from custom_agents import tool_setup_run_runtime
+from custom_agents import paused_wait_resume, tool_setup_run_runtime
 from custom_agents.task_wait_reasons import SavedWork, WaitReason, saved_wait_reason
 from custom_agents.tool_setup_runs import DONE, RUN_FINISHED, RUN_WAITING, TOOL_SETUP_RUN_KIND, RunPieceV1, ToolSetupRunV1
 from custom_messages.contracts.access_v2 import (
@@ -622,7 +622,7 @@ def finish_setup_with_a_live_turn(lead, monkeypatch):
     lead._pending_interrupt_responses = {}
     woken = []
     # The lane is busy (or the agent paused): the drain does not run the resume yet.
-    monkeypatch.setattr(tool_setup_run_runtime, "schedule_pending_work", woken.append)
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
     return woken
 
 

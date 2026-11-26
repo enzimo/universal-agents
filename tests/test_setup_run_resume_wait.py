@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from custom_agents import task_steering_runtime, tool_setup_run_runtime
+from custom_agents import paused_wait_resume, task_steering_runtime, tool_setup_run_runtime
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
     clear_answered_blocker,
@@ -57,7 +57,7 @@ def woken(monkeypatch: pytest.MonkeyPatch) -> list:
     """Wake-ups of the drain; none runs, as when the task's lane is busy."""
 
     calls: list = []
-    monkeypatch.setattr(tool_setup_run_runtime, "schedule_pending_work", calls.append)
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", calls.append)
     return calls
 
 
@@ -600,7 +600,7 @@ async def test_a_stop_between_saving_the_note_and_removing_the_record_resumes_on
     pause_on_setup(lead)
     ended(lead)
     lead._interrupted_turn_sessions.clear()
-    original = tool_setup_run_runtime.clear_wait_record
+    original = paused_wait_resume.clear_wait_record
     failures = [RuntimeError("the agent stopped")]
 
     def stops_once(host, task_id, kind, wait_id):
@@ -608,7 +608,7 @@ async def test_a_stop_between_saving_the_note_and_removing_the_record_resumes_on
             raise failures.pop()
         return original(host, task_id, kind, wait_id)
 
-    monkeypatch.setattr(tool_setup_run_runtime, "clear_wait_record", stops_once)
+    monkeypatch.setattr(paused_wait_resume, "clear_wait_record", stops_once)
 
     with caplog.at_level(logging.WARNING):
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
@@ -768,7 +768,7 @@ async def test_a_failure_after_the_record_is_removed_puts_it_back_and_the_next_p
     manager = lead.task_manager
     failures = [RuntimeError("database is locked")]
     if step == "the removal's save":
-        original = tool_setup_run_runtime.clear_wait_record
+        original = paused_wait_resume.clear_wait_record
 
         def removal(host, task_id, kind, wait_id):
             if failures:
@@ -776,16 +776,16 @@ async def test_a_failure_after_the_record_is_removed_puts_it_back_and_the_next_p
                 failures.pop()
             return original(host, task_id, kind, wait_id)
 
-        monkeypatch.setattr(tool_setup_run_runtime, "clear_wait_record", removal)
+        monkeypatch.setattr(paused_wait_resume, "clear_wait_record", removal)
     elif step == "the history save":
-        original_history = tool_setup_run_runtime._history
+        original_history = paused_wait_resume.append_wait_history
 
         async def history(*args, **kwargs):
             if failures:
                 raise failures.pop()
             return await original_history(*args, **kwargs)
 
-        monkeypatch.setattr(tool_setup_run_runtime, "_history", history)
+        monkeypatch.setattr(paused_wait_resume, "append_wait_history", history)
     else:
         original_state = manager.update_main_task_state
 
