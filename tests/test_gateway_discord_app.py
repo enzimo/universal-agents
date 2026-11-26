@@ -1043,6 +1043,7 @@ def _build_real_discord_interaction(
 @pytest.mark.parametrize("users_enabled", [False, True])
 async def test_discord_slash_commands_real_interaction_dm_and_channel_rules(
     tmp_path: Path,
+    caplog,
     users_enabled: bool,
 ) -> None:
     import discord as real_discord
@@ -1215,7 +1216,20 @@ async def test_discord_slash_commands_real_interaction_dm_and_channel_rules(
             assert discord_module._is_direct_interaction(inter) is expected_direct, case_name
             assert app._is_allowed_interaction(inter) is expected_allowed, case_name
 
-            await app._handle_slash_command(inter, "/list_sessions")
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                await app._handle_slash_command(inter, "/list_sessions")
+            missing_ctx_warnings = [
+                record
+                for record in caplog.records
+                if record.levelno == logging.WARNING
+                and "event=discord_interaction_context_missing" in record.getMessage()
+            ]
+            if case_name == "bot_dm_missing_context":
+                assert len(missing_ctx_warnings) == 1, case_name
+                assert "user_id=300" in missing_ctx_warnings[0].getMessage(), case_name
+            else:
+                assert missing_ctx_warnings == [], case_name
             if expected_allowed:
                 expected_calls += 1
                 assert len(application.command_calls) == expected_calls, case_name

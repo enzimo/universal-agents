@@ -41,9 +41,11 @@ onboarding.
 
 Inbound Signal attachments are fetched only by attachment id from
 `signal-cli-rest-api` (without following HTTP redirects) or decoded from inline
-base64. Attachment payloads referencing host paths (`path`, `localPath`,
-`storedFilename`, `stored_filename`, absolute `filename`, or bare string
-entries) are never read from disk and are refused.
+base64. Host-path keys (`path`, `localPath`, `storedFilename`,
+`stored_filename`) are ignored and never read from disk. Entries without an
+attachment id or inline base64 data (including bare strings or path-only
+objects), invalid attachment ids, and filenames containing path separators or
+absolute paths are refused.
 
 Attachment sizes are checked against the configured upload limit before reading
 or decoding bytes. If any attachment in a message is refused, none of that

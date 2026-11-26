@@ -894,12 +894,23 @@ class DiscordInteractiveApp(BaseInteractiveApp):
             "type",
             type(channel).__name__ if channel is not None else "unknown",
         )
+        is_direct = _is_direct_interaction(interaction)
+        if not is_direct and _is_interaction_context_missing(interaction):
+            logger.warning(
+                "Discord slash command has no server id and neither bot-DM nor private-channel "
+                "context; failing closed as non-DM: event=discord_interaction_context_missing "
+                "user_id=%s channel_id=%s chat_id=%s channel_type=%s.",
+                user_id,
+                channel_id,
+                chat_id,
+                channel_type,
+            )
         return self._is_allowed_source(
             user_id=user_id,
             channel_id=channel_id,
             chat_id=chat_id,
             channel_type=channel_type,
-            is_direct_message=_is_direct_interaction(interaction),
+            is_direct_message=is_direct,
             event_kind="slash command",
         )
 
@@ -1457,5 +1468,17 @@ def _is_direct_interaction(interaction: object) -> bool:
     context = getattr(interaction, "context", None)
     return (
         getattr(context, "dm_channel", False) is True
+        and getattr(context, "private_channel", False) is not True
+    )
+
+
+def _is_interaction_context_missing(interaction: object) -> bool:
+    """True when a non-guild interaction reports neither bot-DM nor private-channel context."""
+
+    if getattr(interaction, "guild_id", _UNKNOWN) is not None:
+        return False
+    context = getattr(interaction, "context", None)
+    return (
+        getattr(context, "dm_channel", False) is not True
         and getattr(context, "private_channel", False) is not True
     )
