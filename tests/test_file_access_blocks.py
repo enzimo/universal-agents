@@ -579,6 +579,12 @@ def test_restrict_access_on_file_path_isolates_to_its_request_even_with_warm_cac
     assert restricted["status"] == "restricted"
     assert "the path team/finance/payroll.csv" in restricted["message"]
     assert "payroll.csv/ folder" not in restricted["message"]
+    # The worker's own listing words the restriction the same way (C13).
+    set_agent_ref(worker_first)
+    restrictions = json.loads(access_tools.list_my_access())["restrictions"]
+    assert [row["name"] for row in restrictions if row["target"] == "team/finance/payroll.csv"] == [
+        "the path team/finance/payroll.csv"
+    ]
 
     folder_access.forget_kept_answers()
 

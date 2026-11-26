@@ -138,7 +138,8 @@ def _grant_view(requests: AccessRequests, grant: GrantV1) -> dict[str, Any]:
     return {
         "grant_id": grant.grant_id,
         "target": grant.target.id,
-        "name": requests.target_name(grant.target),
+        # A block on a folder target may name one file, so restrictions say "the path <id>".
+        "name": requests.target_name(grant.target, for_block=grant.kind is GrantKind.BLOCK),
         "level": grant.level.value,
         "lifetime": grant.lifetime.value,
         "expires_at_utc": grant.expires_at_utc,

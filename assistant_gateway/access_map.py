@@ -141,6 +141,10 @@ TARGET_KIND_WORDS = {
     TargetKind.CREDENTIAL: "credential",
     TargetKind.FOLDER: "folder",
 }
+# A block on a folder target may name a single file inside it (a block covers the
+# path and everything below it), so the block's kind word claims no folder; it
+# matches ``AccessRequests.target_name(..., for_block=True)``, "the path <id>".
+BLOCKED_PATH_KIND_WORDS = "path"
 TOOL_KIND_WORDS = {
     ToolKind.FN: "Built-in tool",
     ToolKind.CLI: "Command-line tool",
@@ -325,7 +329,11 @@ class _MapRead:
         return {
             "target": target.id,
             "target_kind": target.kind.value,
-            "target_kind_words": TARGET_KIND_WORDS[target.kind],
+            "target_kind_words": (
+                BLOCKED_PATH_KIND_WORDS
+                if for_block and target.kind is TargetKind.FOLDER
+                else TARGET_KIND_WORDS[target.kind]
+            ),
             "target_name": self.requests.target_name(target, for_block=for_block),
         }
 
