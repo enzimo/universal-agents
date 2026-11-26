@@ -19,6 +19,7 @@ from custom_agents import commit_flushes
 from custom_transport import send_barrier
 from custom_transport.base import TransportPublishOptions
 from storage import sqlite_connection
+from tests.commit_flush_support import reset_flush_state
 from tests.test_nats_pull_delivery import _adapter, _valid_envelope_json
 
 
@@ -187,10 +188,7 @@ def test_a_second_different_barrier_is_refused(monkeypatch):
 
 @pytest.fixture
 def fresh_process(monkeypatch):
-    monkeypatch.setattr(send_barrier, "_BEFORE_SEND", None)
-    monkeypatch.setattr(sqlite_connection, "_FLUSHES_DEFERRED", False)
-    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", {})
-    monkeypatch.setattr(commit_flushes, "_FAILED", None)
+    reset_flush_state(monkeypatch)
 
 
 def test_an_agent_process_flushes_before_sending(fresh_process):

@@ -75,6 +75,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from strands.hooks import BeforeToolCallEvent, HookRegistry
 
+from custom_agents.commit_flushes import flush_local_pause_commits
 from custom_agents.conversation_attachments import (
     TaskAttachments,
     kept_message_files,
@@ -1628,6 +1629,17 @@ def _is_local_wait(record: TaskSteeringInterruptRecord) -> bool:
     return isinstance(record.reason, dict) and record.reason.get("kind") in _LOCAL_WAIT_KINDS
 
 
+def _local_pause_kinds(records: list[TaskSteeringInterruptRecord]) -> str:
+    """The local wait kinds a pause holds, for logs (``access_request,timed_wait``)."""
+
+    kinds = {
+        str(record.reason.get("kind"))
+        for record in records
+        if isinstance(record.reason, dict) and _is_local_wait(record)
+    }
+    return ",".join(sorted(kinds)) or "-"
+
+
 def _is_access_request(record: TaskSteeringInterruptRecord) -> bool:
     return isinstance(record.reason, dict) and record.reason.get("kind") == ACCESS_REQUEST_INTERRUPT_KIND
 
@@ -1813,6 +1825,17 @@ async def send_interrupt_request_for_result(
         ProgressState.WAITING,
         datetime.now(timezone.utc).isoformat(),
     )
+    if routing_key is None:
+        # Every interrupt waits here (access request, setup run, timed wait) and
+        # no requester message follows, so the send barrier may not flush the
+        # deferred SQLite commits (decision 82) for hours. Flush once now so the
+        # saved pause and WAITING survive a power loss.
+        await flush_local_pause_commits(
+            logger,
+            agent_id=str(agent.id),
+            task_id=task.task_id,
+            pause_kind=_local_pause_kinds(interrupt_records),
+        )
     for run_id in staged_setup_run_ids:
         # set_up_tools paused the turn (now waiting); trusted code announces the workflow and opens its pages.
         from custom_agents.tool_setup_run_runtime import start_run
