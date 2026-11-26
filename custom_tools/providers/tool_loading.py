@@ -22,12 +22,13 @@ from typing import Any
 
 from strands import tool
 
-from access_catalog.tool_functions import functions_of_tools, mcp_function_names
+from access_catalog.catalog import mcp_tool_id
+from access_catalog.tool_functions import functions_of_tools, mcp_function_names, mcp_tool_ids
 from custom_messages.contracts.access_v2 import AccessLevel, TargetKind, TargetRefV1
 from custom_tools.provider_contract import ToolProvider, tool_name
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.tool_search import document, rank
-from custom_agents.tool_presentation import on_request_groups, withheld_functions
+from custom_agents.tool_presentation import CALL_TOOL_NAME, on_request_groups, withheld_functions
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,10 @@ STATUS_LOADED = "loaded"
 STATUS_REFUSED = "refused"
 # A tool that never waits to be loaded and whose functions the agent has now.
 STATUS_ALREADY_SHOWN = "already_in_your_tool_list"
+# A skill's declared group in the index setups: listed in the tool index and reached with call_tool.
+STATUS_IN_INDEX = "in_your_tool_index"
+# Every installed MCP server's catalog id starts with this (access_catalog.catalog.mcp_tool_id).
+MCP_TOOL_ID_PREFIX = mcp_tool_id("")
 
 
 def _json(payload: dict[str, Any]) -> str:
@@ -422,28 +427,82 @@ def load_tool_groups(agent: Any, catalog: Any, tool_ids: list[str]) -> list[dict
         return [_load_one(agent, catalog, tool_id, set(tool_ids)) for tool_id in tool_ids]
 
 
+CALL_TOOL_HINT = f"{CALL_TOOL_NAME}(name='<function>', inputs={{...}})"
+
+
 def _skill_note(skill_name: str, results: list[dict[str, Any]]) -> str:
     """What the skill result tells the model about the groups the skill declares."""
 
-    loaded = [item["tool_id"] for item in results if item["status"] == STATUS_LOADED]
-    shown = [item["tool_id"] for item in results if item["status"] == STATUS_ALREADY_SHOWN]
+    def ids(status: str) -> list[str]:
+        return [item["tool_id"] for item in results if item["status"] == status]
+
     lines = [f"Tool groups the skill {skill_name} uses (ua-tools):"]
-    if loaded:
+    if loaded := ids(STATUS_LOADED):
         lines.append(f"- Loaded for this task: {', '.join(loaded)}. Their functions are in your tool list from your next step.")
-    if shown:
+    if in_index := ids(STATUS_IN_INDEX):
+        lines.append(
+            f"- In your tool index, nothing to load: {', '.join(in_index)}. "
+            f"Call their functions in one step with {CALL_TOOL_HINT}."
+        )
+    if shown := ids(STATUS_ALREADY_SHOWN):
         lines.append(f"- Already in your tool list: {', '.join(shown)}.")
     lines.extend(f"- Not loaded, {item['tool_id']}: {item['reason']}" for item in results if item["status"] == STATUS_REFUSED)
+    if unloaded := sorted({tool_id for item in results for tool_id in item.get("unloaded_to_make_room", ())}):
+        lines.append(f"- Unloaded to make room: {', '.join(unloaded)}. Call one of their functions to load it again.")
     return "\n".join(lines)
+
+
+def _index_group(agent: Any, catalog: Any, tool_id: str) -> dict[str, Any]:
+    """A declared catalog function group in the index setups: reported, never loaded.
+
+    The index already lists the group's held, offered functions with their
+    signatures and call_tool reaches them in one step, so loading their full
+    definitions would put back the tokens the index saves (lead ruling at turn
+    4 of the round-two run). A group the agent lacks gets use_tools' own
+    refusal, with the request_access call.
+    """
+
+    from custom_agents.tool_loading import group_functions
+
+    refusal = _may_load(agent, catalog, tool_id)
+    if refusal:
+        return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": refusal}
+    functions = group_functions(agent, catalog, tool_id)
+    if not functions:
+        return {"tool_id": tool_id, "status": STATUS_REFUSED, "reason": "Your tool settings offer no functions from this group."}
+    if functions <= set(_shown_functions(agent, catalog, tool_id)):
+        return {"tool_id": tool_id, "status": STATUS_ALREADY_SHOWN, "functions": sorted(functions)}
+    return {"tool_id": tool_id, "status": STATUS_IN_INDEX, "functions": sorted(functions)}
+
+
+def _skill_group_results(agent: Any, catalog: Any, tool_ids: list[str]) -> list[dict[str, Any]]:
+    """One result per declared group, in declared order.
+
+    In full_definitions every group goes through use_tools' path. In the
+    index setups only MCP server groups do (the index cannot list their
+    tools); catalog function groups are reported by ``_index_group``.
+    """
+
+    from custom_agents.tool_presentation import index_enabled
+
+    if not index_enabled(agent):
+        return load_tool_groups(agent, catalog, tool_ids)
+    servers = mcp_tool_ids(catalog, tool_ids)
+    by_id = {item["tool_id"]: item for item in load_tool_groups(agent, catalog, [t for t in tool_ids if t in servers])}
+    by_id.update({tool_id: _index_group(agent, catalog, tool_id) for tool_id in tool_ids if tool_id not in servers})
+    return [by_id[tool_id] for tool_id in tool_ids]
 
 
 def load_skill_tool_groups(agent: Any, skill_name: str, metadata: Any) -> str:
     """Load the groups a skill declares under ``ua-tools`` when it is activated; the note for the skill result.
 
     The same per-group path as ``use_tools``: only groups the agent holds and
-    is offered load, within the model's tool cap, and nothing is granted. An
-    id that is no catalog tool is skipped with a warning (the skill is wrong,
-    not the agent; ``scripts/check_skill_tool_names.py`` finds these).
-    Returns empty when the skill declares no known group.
+    is offered load, within the model's tool cap, and nothing is granted. In
+    the index setups catalog function groups are not loaded but reported as
+    in the index (``_skill_group_results``). An id that is no catalog tool is
+    skipped with a warning (the skill is wrong, not the agent;
+    ``scripts/check_skill_tool_names.py`` finds these). Returns empty when the
+    skill declares no known group.
     """
 
     from custom_agents.access_runtime import runtime_access
@@ -465,16 +524,43 @@ def load_skill_tool_groups(agent: Any, skill_name: str, metadata: Any) -> str:
     known = [tool_id for tool_id in declared if tool_id in catalog.tools]
     if not known:
         return ""
-    results = load_tool_groups(agent, catalog, known)
+    results = _skill_group_results(agent, catalog, known)
     logger.info(
-        "Activating a skill loaded the tool groups it declares. event=skill_tool_groups_loaded agent_id=%s "
-        "skill_name=%s loaded=%s refused=%s",
+        "Activating a skill handled the tool groups it declares. event=skill_tool_groups_loaded agent_id=%s "
+        "skill_name=%s loaded=%s in_index=%s refused=%s",
         getattr(agent, "id", None),
         skill_name,
         ",".join(item["tool_id"] for item in results if item["status"] == STATUS_LOADED),
+        ",".join(item["tool_id"] for item in results if item["status"] == STATUS_IN_INDEX),
         ",".join(item["tool_id"] for item in results if item["status"] == STATUS_REFUSED),
     )
     return _skill_note(skill_name, results)
+
+
+def skill_tools_fallback_note(agent: Any, tool_ids: list[str]) -> str:
+    """What a skill result says when loading its declared groups failed: how to reach them without the loader.
+
+    In the index setups catalog function groups are called through call_tool;
+    only MCP server groups (ids from ``mcp_tool_id``) and full_definitions
+    use use_tools. Needs no catalog, because the catalog may be what failed.
+    """
+
+    from custom_agents.tool_presentation import index_enabled
+
+    if not index_enabled(agent):
+        return f"The tool groups this skill uses could not be loaded automatically; load them with {_use_tools_ids(tool_ids)} if the procedure needs them."
+    servers = [tool_id for tool_id in tool_ids if tool_id.startswith(MCP_TOOL_ID_PREFIX)]
+    groups = [tool_id for tool_id in tool_ids if tool_id not in servers]
+    parts = ["The tool groups this skill uses could not be checked automatically."]
+    if groups:
+        parts.append(f"Call the functions of {', '.join(groups)} from your tool index with {CALL_TOOL_HINT}.")
+    if servers:
+        parts.append(f"Load MCP servers with {_use_tools_ids(servers)} if the procedure needs them.")
+    return " ".join(parts)
+
+
+def _use_tools_ids(tool_ids: list[str]) -> str:
+    return f"use_tools(tool_ids={tool_ids!r})"
 
 
 @tool
@@ -604,5 +690,6 @@ __all__ = [
     "find_tools",
     "load_skill_tool_groups",
     "load_tool_groups",
+    "skill_tools_fallback_note",
     "use_tools",
 ]

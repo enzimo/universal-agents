@@ -240,7 +240,8 @@ async def _load_declared_tool_groups(runtime_agent: Any, skill: Any) -> str:
 
     Runs in a thread like ``use_tools``: the access decisions read stores.
     A failure never stops the skill: its instructions still return, with a
-    note naming the groups to load with ``use_tools``.
+    note saying how to reach the groups (call_tool in the index setups,
+    use_tools otherwise).
     """
 
     from custom_agents.tool_loading import declared_skill_tool_ids
@@ -248,7 +249,7 @@ async def _load_declared_tool_groups(runtime_agent: Any, skill: Any) -> str:
     metadata = getattr(skill, "metadata", None)
     if runtime_agent is None or not declared_skill_tool_ids(metadata, skill_name=skill.name):
         return ""
-    from custom_tools.providers.tool_loading import load_skill_tool_groups
+    from custom_tools.providers.tool_loading import load_skill_tool_groups, skill_tools_fallback_note
 
     try:
         return await asyncio.to_thread(load_skill_tool_groups, runtime_agent, skill.name, metadata)
@@ -258,11 +259,7 @@ async def _load_declared_tool_groups(runtime_agent: Any, skill: Any) -> str:
             getattr(runtime_agent, "id", None),
             skill.name,
         )
-        tool_ids = declared_skill_tool_ids(metadata, skill_name=skill.name)
-        return (
-            f"The tool groups this skill uses could not be loaded automatically; load them with "
-            f"use_tools(tool_ids={tool_ids!r}) if the procedure needs them."
-        )
+        return skill_tools_fallback_note(runtime_agent, declared_skill_tool_ids(metadata, skill_name=skill.name))
 
 
 async def _record_objective_work_skill_activation(
