@@ -709,7 +709,12 @@ Decision classes:
   authorization on, a team administrator approves the plan.
 - `user_authorized`: settings that belong to one person, such as their
   proactive delivery target or context-debug dumps. That person (or an
-  administrator) approves the plan.
+  administrator) may approve the plan only when every setting in the plan is
+  `user_authorized`. A plan that mixes a `user_authorized` setting with any
+  `lead_managed` setting takes the stricter `lead_managed` class and waits for
+  an administrator; stage a person's own settings in a separate plan when they
+  should be able to approve them, and tell a member when an administrator must
+  decide.
 - `operator_only`: security, access, credential, storage, transport, listener,
   instance-root, and tool allow/block settings. Agents cannot stage them.
 

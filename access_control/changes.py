@@ -14,8 +14,15 @@ platform changes. Instead:
    administrator-only ones, such as a model choice for an administrator's
    work, ``custom_agents.model_choice``); otherwise a person reviews the
    exact effect in the Inbox;
-3. after approval, trusted code in the agent's process re-checks the digest,
-   claims the approval once, and applies the plan (``ChangeApproval``).
+3. after approval, trusted code in the agent's process re-checks the stored
+   request's change id, plan digest, owner and change kind against a fresh
+   description, claims the approval once, and applies the plan
+   (``ChangeApproval``). When the same change's digest, owner or kind no
+   longer matches (for example after an upgrade that tightened who may
+   approve it, or if the plan file changed), trusted code uses up the
+   approval and records why so a stale approval cannot be retried or reused.
+   If a request belongs to a different change id, it is refused without
+   using up that other change's approval.
 
 With authorization off there is no review: the person's conversational
 agreement applies the change (decision D8).
@@ -75,6 +82,12 @@ class ChangeAdapter(Protocol):
 
     def apply(self, agent: Any, change_id: str, approval: ChangeApproval) -> dict[str, Any]:
         """Apply the plan; only trusted code with an approval calls this.
+
+        ``approval.plan_digest`` is the exact plan digest that was described or
+        approved (across person approval, held access, and agreement). A service
+        that reloads its plan from disk compares ``approval.plan_digest`` with
+        the loaded plan's digest and refuses when it is missing or differs;
+        ``RuntimeSettingsService`` enforces this check.
 
         An adapter may also define ``async after_apply(agent, result)`` for
         follow-up work that must not undo the change (refreshing running

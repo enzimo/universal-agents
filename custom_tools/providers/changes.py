@@ -186,31 +186,98 @@ def _waiting_request(
     return outcome.request
 
 
+def _approval_mismatch(
+    stored: ChangeProposalV1,
+    current: ChangeProposalV1,
+) -> tuple[str, str] | None:
+    """Describe why a stored approval for the same change_id no longer matches."""
+
+    if stored.plan_digest != current.plan_digest:
+        return (
+            "The plan changed after it was approved. Stage it again and call apply_change for the new change_id.",
+            f"mismatch=plan_digest stored_plan_digest={stored.plan_digest} current_plan_digest={current.plan_digest}",
+        )
+    owner_diff = stored.owner_person_id != current.owner_person_id
+    kind_diff = stored.kind != current.kind
+    if owner_diff and kind_diff:
+        return (
+            "Who may approve this change and its kind no longer match the approved request. "
+            "Stage it again and call apply_change for the new change_id.",
+            f"mismatch=owner,kind stored_owner={stored.owner_person_id} current_owner={current.owner_person_id} "
+            f"stored_kind={stored.kind} current_kind={current.kind}",
+        )
+    if owner_diff:
+        return (
+            "Who may approve this change no longer matches the approved request. "
+            "Stage it again and call apply_change for the new change_id.",
+            f"mismatch=owner stored_owner={stored.owner_person_id} current_owner={current.owner_person_id}",
+        )
+    if kind_diff:
+        return (
+            "This change's kind no longer matches the approved request. "
+            "Stage it again and call apply_change for the new change_id.",
+            f"mismatch=kind stored_kind={stored.kind} current_kind={current.kind}",
+        )
+    return None
+
+
+def _consume_stale_approval(
+    requests: AccessRequests,
+    request: AccessRequestV1,
+    why: str,
+    *,
+    event: str,
+    log_message: str,
+    log_details: str,
+) -> None:
+    """Use up an approved request that can no longer apply and record why."""
+
+    if request.applied_at_utc is None:
+        requests.claim_change(request.request_id)
+        requests.service.store.record_change_error(request.request_id, why)
+    logger.warning(
+        "%s event=%s request_id=%s %s",
+        log_message,
+        event,
+        request.request_id,
+        log_details,
+    )
+
+
 def _apply_approved(
     agent: Any, adapter: ChangeAdapter, requests: AccessRequests, request: AccessRequestV1, proposal: ChangeProposalV1
 ) -> dict[str, Any] | _Applied:
     change = request.change
     assert change is not None
     note = request.decision_note or None
-    mismatch_reason: str | None = None
-    if change.change_id != proposal.change_id or change.plan_digest != proposal.plan_digest:
+    if change.change_id != proposal.change_id:
         mismatch_reason = (
             "The plan changed after it was approved. Stage it again and call apply_change for the new change_id."
         )
-    elif change.owner_person_id != proposal.owner_person_id or change.kind != proposal.kind:
-        mismatch_reason = (
-            "Who may approve this change or its kind no longer matches the approved request. "
-            "Stage it again and call apply_change for the new change_id."
-        )
-    if mismatch_reason is not None:
-        if request.applied_at_utc is None:
-            requests.claim_change(request.request_id)
-            requests.service.store.record_change_error(request.request_id, mismatch_reason)
+        # This request belongs to a different change_id whose approval may still
+        # be valid, so refuse without consuming or modifying it.
         logger.warning(
-            "An approved change no longer matched its stored proposal. event=change_approval_mismatch "
-            "request_id=%s change_id=%s",
+            "An approved change request belonged to another change. event=change_approval_mismatch "
+            "request_id=%s mismatch=change_id stored_change_id=%s current_change_id=%s",
             request.request_id,
+            change.change_id,
             proposal.change_id,
+        )
+        return {
+            "status": "refused",
+            "reason": mismatch_reason,
+            "note": note,
+        }
+    mismatch = _approval_mismatch(change, proposal)
+    if mismatch is not None:
+        mismatch_reason, mismatch_detail = mismatch
+        _consume_stale_approval(
+            requests,
+            request,
+            mismatch_reason,
+            event="change_approval_mismatch",
+            log_message="An approved change no longer matched its stored proposal.",
+            log_details=f"change_id={proposal.change_id} {mismatch_detail}",
         )
         return {
             "status": "refused",
@@ -289,14 +356,21 @@ def _close_stale_request(agent: Any, tool_context: ToolContext, change_id: str, 
                 team_id=requests.service.team_id, agent_id=agent_id, task_id=task_id, change_id=change_id
             )
             request = batch[-1] if batch else None
-        if request is None or request.status is not AccessRequestStatus.GRANTED or request.applied_at_utc is not None:
+        if (
+            request is None
+            or request.status is not AccessRequestStatus.GRANTED
+            or request.applied_at_utc is not None
+            or request.change is None
+            or request.change.change_id != change_id
+        ):
             return None
-        requests.claim_change(request.request_id)
-        requests.service.store.record_change_error(request.request_id, why)
-        logger.warning(
-            "An approved change could no longer apply. event=change_stale_after_approval request_id=%s reason=%s",
-            request.request_id,
+        _consume_stale_approval(
+            requests,
+            request,
             why,
+            event="change_stale_after_approval",
+            log_message="An approved change could no longer apply.",
+            log_details=f"change_id={change_id} reason={why}",
         )
         return request.decision_note or None
     except Exception:

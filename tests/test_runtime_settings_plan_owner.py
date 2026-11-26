@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from custom_agents.runtime_settings_service import (
     RuntimeSettingChange,
     RuntimeSettingsChangePlan,
     RuntimeSettingsService,
+    runtime_settings_options_payload,
 )
 from custom_messages.contracts.access_v2 import (
     AccessRequestStatus,
@@ -361,7 +363,7 @@ def test_load_plan_refuses_empty_or_unregistered_changes(
 
 @needs_cedar
 @pytest.mark.parametrize(
-    ("case", "changes", "stored_kind", "stored_owner"),
+    ("case", "changes", "stored_kind", "stored_owner", "expected_reason", "expected_log"),
     [
         (
             "owner_mismatch",
@@ -371,26 +373,32 @@ def test_load_plan_refuses_empty_or_unregistered_changes(
             ],
             RUNTIME_SETTINGS_CHANGE_KIND,
             "member_1",
+            "Who may approve this change no longer matches",
+            "mismatch=owner stored_owner=member_1 current_owner=None",
         ),
         (
             "kind_mismatch",
             [{"path": "agent.debug.context_dump.mode", "value": "always"}],
             MODEL_CHOICE_CHANGE_KIND,
             "member_1",
+            "This change's kind no longer matches",
+            "mismatch=kind stored_kind=model_choice current_kind=runtime_settings",
         ),
     ],
     ids=["owner_mismatch", "kind_mismatch"],
 )
 def test_approved_request_with_mismatched_owner_or_kind_is_refused_on_resume(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
     case: str,
     changes: list[RuntimeSettingChange],
     stored_kind: str,
     stored_owner: str,
+    expected_reason: str,
+    expected_log: str,
 ) -> None:
     """_apply_approved refuses when a stored request's owner or kind differs from describe()."""
 
-    _ = case
     config, config_path = _make_config(tmp_path)
     agent = _member_agent(config, config_path)
     member = PersonPrincipal("member_1", config.gateway.team_id, ("member",))
@@ -426,20 +434,81 @@ def test_approved_request_with_mismatched_owner_or_kind_is_refused_on_resume(
     assert decided.status is AccessRequestStatus.GRANTED
     call.response = {"kind": "access_request_decision", "status": decided.status.value}
 
-    first = run_apply_change(agent, staged["change_id"], call, reason="Resume mismatched proposal")
+    with caplog.at_level(logging.WARNING, logger="custom_tools.providers.changes"):
+        first = run_apply_change(agent, staged["change_id"], call, reason="Resume mismatched proposal")
     assert first["status"] == "refused", first
-    assert "Who may approve this change or its kind no longer matches" in first["reason"]
+    assert expected_reason in first["reason"]
     assert config_path.read_bytes() == before_bytes
+    assert any(expected_log in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
 
     after = requests.service.store.get_request(waiting_request.request_id)
     assert after is not None
     assert after.applied_at_utc is not None
     assert after.apply_error is not None
-    assert "Who may approve this change or its kind no longer matches" in after.apply_error
+    assert expected_reason in after.apply_error
 
     second = run_apply_change(agent, staged["change_id"], call, reason="Resume mismatched proposal again")
     assert second["status"] == "refused", second
     assert config_path.read_bytes() == before_bytes
+
+
+@needs_cedar
+def test_approved_request_for_different_change_id_is_refused_without_claiming(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A request for another change_id found by tool_use_id is refused without consuming it."""
+
+    config, config_path = _make_config(tmp_path)
+    agent = _member_agent(config, config_path)
+    member = PersonPrincipal("member_1", config.gateway.team_id, ("member",))
+
+    first_plan = RuntimeSettingsService(agent).stage(
+        [{"path": "agent.debug.context_dump.mode", "value": "always"}],
+        reason="First user-authorized plan.",
+    )
+    second_plan = RuntimeSettingsService(agent).stage(
+        [{"path": "agent.debug.context_dump.enabled", "value": True}],
+        reason="Second user-authorized plan.",
+    )
+
+    call = ToolCall(tool_use_id="tooluse_reused_id")
+    with pytest.raises(InterruptException):
+        run_apply_change(agent, first_plan["change_id"], call, reason="Apply first plan")
+
+    request = stored_request(agent, call)
+    requests = access_runtime.runtime_requests(agent)
+    decided = requests.decide(request.request_id, member, AccessReviewChoice.APPROVE)
+    assert decided.status is AccessRequestStatus.GRANTED
+    call.response = {"kind": "access_request_decision", "status": decided.status.value}
+
+    before_bytes = config_path.read_bytes()
+    with caplog.at_level(logging.WARNING, logger="custom_tools.providers.changes"):
+        refused = run_apply_change(agent, second_plan["change_id"], call, reason="Apply second plan with reused toolUseId")
+
+    assert refused["status"] == "refused", refused
+    assert "plan changed after it was approved" in refused["reason"].lower()
+    assert config_path.read_bytes() == before_bytes
+    expected_log = (
+        f"mismatch=change_id stored_change_id={first_plan['change_id']} "
+        f"current_change_id={second_plan['change_id']}"
+    )
+    assert any(expected_log in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
+
+    # The first change's approval must remain intact, unclaimed, and still usable.
+    still_valid = requests.service.store.get_request(request.request_id)
+    assert still_valid is not None
+    assert still_valid.status is AccessRequestStatus.GRANTED
+    assert still_valid.applied_at_utc is None
+    assert still_valid.apply_error == ""
+
+    applied = run_apply_change(agent, first_plan["change_id"], call, reason="Apply first plan")
+    assert applied["status"] == "applied", applied
+    assert GatewayInstanceConfig.load(config_path).agent.debug["context_dump"]["mode"] == "always"
 
 
 @needs_cedar
@@ -692,4 +761,40 @@ def test_runtime_settings_apply_requires_matching_plan_digest_for_all_modes(
     with pytest.raises(PermissionError, match="plan digest is missing or no longer matches"):
         service.apply(staged["change_id"], approval)
     assert config_path.read_bytes() == before_bytes
+
+
+def test_options_payload_and_plan_instructions_reflect_all_user_authorized_rule(tmp_path: Path) -> None:
+    """Options metadata and staged instructions state who approves pure vs mixed plans."""
+
+    payload = runtime_settings_options_payload()
+    by_path = {entry["path"]: entry for entry in payload["agent_controllable"]}
+
+    context_dump = by_path["agent.debug.context_dump.mode"]
+    heartbeat = by_path["heartbeat.enabled"]
+    assert context_dump["approver_when_authorization_enabled"] == "requester_or_administrator"
+    assert heartbeat["approver_when_authorization_enabled"] == "administrator"
+    for entry in (context_dump, heartbeat):
+        assert "requires_authorization" not in entry
+        assert "requires_authenticated_authorization_when_enabled" not in entry
+    assert "only when every setting in the plan is user_authorized" in payload["decision_classes"]["user_authorized"]
+
+    config, config_path = _make_config(tmp_path)
+    agent = _member_agent(config, config_path)
+    service = RuntimeSettingsService(agent)
+    mixed = service.stage(
+        [
+            {"path": "agent.debug.context_dump.mode", "value": "always"},
+            {"path": "heartbeat.enabled", "value": True},
+        ],
+        reason="Mixed plan instructions check.",
+    )
+    assert "separate plan" in mixed["instructions"]
+    assert "team administrator" in mixed["instructions"]
+
+    user_only = service.stage(
+        [{"path": "agent.debug.context_dump.mode", "value": "always"}],
+        reason="User-only plan instructions check.",
+    )
+    assert "Every setting in this plan is user_authorized" in user_only["instructions"]
+
 

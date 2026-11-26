@@ -1,14 +1,19 @@
 """Typed, staged TeamArchitect self-configuration boundary.
 
 TeamArchitect stages an exact, digest-checked plan; trusted code applies it
-through ``apply_change`` (``access_control.changes``). With authorization on a
-person approves the exact plan in the Inbox (administrators; a setting owned by
-one person, such as their delivery target, may also be approved by that
-person), except a plan of model-choice settings only (``custom_agents.model_choice``),
-which applies at once when TeamLead and its person hold model choice, and the
-person gets a notice. With authorization off, the person's conversational
-agreement applies it. The service never decides authority itself: ``apply`` receives the
-``ChangeApproval`` the change mechanism verified and records it.
+through ``apply_change`` (``access_control.changes``). A plan's decision class
+is the strictest class of its changes (``operator_only`` > ``lead_managed`` >
+``user_authorized``). With authorization on, a team administrator approves the
+exact plan in the Inbox; the requesting person may also approve it only when
+every change in the plan is ``user_authorized`` (a plan mixing a
+``user_authorized`` setting with any ``lead_managed`` setting has no owner and
+waits for an administrator). The one exception is a plan of model-choice
+settings only (``custom_agents.model_choice``), which applies at once when
+TeamLead and its person hold model choice, and the person gets a notice. With
+authorization off, the person's conversational agreement applies it. The
+service never decides authority itself: ``apply`` verifies that
+``approval.plan_digest`` matches the loaded plan's digest and records the
+``ChangeApproval`` the change mechanism verified.
 """
 
 from __future__ import annotations
@@ -222,13 +227,18 @@ def runtime_settings_options_payload() -> dict[str, Any]:
         ],
         "decision_classes": {
             SettingDecisionClass.LEAD_MANAGED.value: (
-                "TeamArchitect may apply the bounded change after conversational user agreement. "
-                "Agreement is an interaction requirement, not an authorization credential."
+                "Bounded behavioral or operational team settings. With authorization enabled, "
+                "a team administrator approves the plan in the Inbox (except a model-choice-only "
+                "plan when TeamLead holds model choice for an administrator). With authorization "
+                "disabled, explicit conversational agreement applies it."
             ),
             SettingDecisionClass.USER_AUTHORIZED.value: (
-                "With authorization enabled, the plan needs an authenticated one-time gateway "
-                "decision. With authorization disabled, the same bounded change uses explicit "
-                "conversational agreement and records no authorization provenance."
+                "Settings that belong to one person, such as their proactive delivery target or "
+                "context-debug dumps. With authorization enabled, the requesting person (or an "
+                "administrator) may approve the plan only when every setting in the plan is "
+                "user_authorized; mixing in any lead_managed setting makes the whole plan wait "
+                "for an administrator. With authorization disabled, explicit conversational "
+                "agreement applies it."
             ),
             SettingDecisionClass.OPERATOR_ONLY.value: (
                 "Agents cannot stage or apply the setting. Change it through operator-owned configuration."
@@ -252,9 +262,9 @@ def runtime_settings_options_payload() -> dict[str, Any]:
             },
         ],
         "workflow": [
-            "Stage one or more changes and review old/new values, target scope, digest, and expiry.",
-            "For lead_managed changes, ask for conversational user agreement before apply.",
-            "Follow the plan's immutable authority_mode: authenticated gateway decision when enabled, conversational agreement when disabled.",
+            "Stage one or more changes targeting the same persisted source and review old/new values, target scope, digest, and expiry.",
+            "With authorization enabled, a team administrator approves the plan in the Inbox; the requesting person may also approve it only when every setting in the plan is user_authorized. Stage a person's own user_authorized settings in a separate plan when they should be able to approve them themselves, and tell a member when an administrator must decide.",
+            "With authorization disabled, ask for explicit conversational agreement and pass confirmed=true to apply_change.",
             "Apply before expiry. Model-affecting baseline and workspace changes are tested at staging and again before any write; failed tests preserve both live and persisted profiles.",
             "Model settings stored in LLM_OVERRIDES.yaml need no restart. A change explicitly targeting the applying agent's own type switches that agent at once. Workspace-default changes and changes for other types reach affected running agents at their next turn, including the applying agent when it inherits the default. Until then their status shows the previous values; the apply result's running_agents says so. Check saved values with get_runtime_configuration_context(agent_types=[...]).",
             "A stale source snapshot, modified plan, replay, or changed actor is rejected.",
@@ -1270,6 +1280,28 @@ class RuntimeSettingsService:
         return dict(loaded)
 
     @staticmethod
+    def _person_approval_instructions(plan: RuntimeSettingsChangePlan, answered: str) -> str:
+        if plan.decision_class == SettingDecisionClass.USER_AUTHORIZED:
+            return (
+                f"{answered}Explain the old and new values and why, then call apply_change(change_id, reason). "
+                "Every setting in this plan is user_authorized, so the person you work for (or an administrator) "
+                "approves the exact plan in the Inbox and your task waits until they decide."
+            )
+        if any(change.decision_class == SettingDecisionClass.USER_AUTHORIZED for change in plan.changes):
+            return (
+                f"{answered}Explain the old and new values and why, then call apply_change(change_id, reason). "
+                "This plan includes administrator-managed settings, so a team administrator must approve the "
+                "exact plan in the Inbox and your task waits until they decide. Tell a member that an "
+                "administrator must decide; stage a person's own user_authorized settings in a separate plan "
+                "when they should be able to approve them themselves."
+            )
+        return (
+            f"{answered}Explain the old and new values and why, then call apply_change(change_id, reason). "
+            "A team administrator approves the exact plan in the Inbox and your task waits until they decide; "
+            "if you are working for a member, tell them an administrator must decide."
+        )
+
+    @staticmethod
     def _plan_instructions(plan: RuntimeSettingsChangePlan, model_test: dict[str, Any] | None = None) -> str:
         tools_sent = (model_test or {}).get("tools_sent")
         tested = bool(model_test and (model_test.get("tested_before_write") or tools_sent))
@@ -1294,11 +1326,7 @@ class RuntimeSettingsService:
                 "person the result's message."
             )
         if plan.authority_mode == AUTHORITY_MODE_PERSON_APPROVAL:
-            return (
-                f"{answered}Explain the old and new values and why, then call apply_change(change_id, reason). "
-                "A person approves the exact plan in the Inbox and the change is applied then; "
-                "your task waits until they decide."
-            )
+            return RuntimeSettingsService._person_approval_instructions(plan, answered)
         if tested:
             return (
                 f"Authorization is off. {answered}Tell the person it works, show the old and new values, and "

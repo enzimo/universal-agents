@@ -304,9 +304,10 @@ as "Switch TeamArchitect to deepseek/deepseek-v4.1-flash (images on). Takes
 effect now.": only values that change are named, and it says when the change
 takes effect (now, or after a restart). Approving
 applies that plan once; if the file or the running work changed meanwhile,
-TeamLead must stage it again. Administrators approve these changes; a setting
-that belongs to one person, such as their own delivery target, can also be
-approved by that person. Team skills are the team's own: an administrator can
+TeamLead must stage it again. Administrators approve these changes; a settings
+plan where every setting belongs to one person, such as their own delivery
+target, can also be approved by that person. A plan that mixes a person's own
+setting with any team or administrator setting waits for an administrator. Team skills are the team's own: an administrator can
 let TeamLead install and remove them itself (full access to `fn:team_skills`),
 and then every change sends administrators a notice; without that, you approve
 each change the same way. With authorization off, TeamLead asks for your

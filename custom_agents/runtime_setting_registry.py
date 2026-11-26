@@ -83,10 +83,10 @@ class RuntimeSettingDefinition:
             ],
             "decision_class": self.decision_class.value,
             "requires_agreement": self.agreement_required,
-            "requires_authorization": self.decision_class
-            == SettingDecisionClass.USER_AUTHORIZED,
-            "requires_authenticated_authorization_when_enabled": (
-                self.decision_class == SettingDecisionClass.USER_AUTHORIZED
+            "approver_when_authorization_enabled": (
+                "requester_or_administrator"
+                if self.decision_class == SettingDecisionClass.USER_AUTHORIZED
+                else "administrator"
             ),
             "available_when_authorization_disabled": True,
             "restart_scope": self.restart_scope,

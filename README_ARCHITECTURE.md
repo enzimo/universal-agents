@@ -2964,9 +2964,23 @@ staged as exact, digest-checked plans and applied with one tool,
 `apply_change` (`access_control/changes.py`, `custom_agents/change_approvals.py`).
 Agents never hold `full` access to platform tools (a standard Cedar guardrail),
 so with authorization on a person approves the exact plan in the Inbox; the
-resumed call then claims the approval once and applies the plan in the agent's
-process. With authorization off the person's conversational agreement applies
-it. One narrow class applies at once instead: a settings plan that only
+resumed call re-checks the stored request's change id, plan digest, owner and
+change kind against a fresh description, claims the approval once and applies
+the plan in the agent's process. When the same change's digest, owner or kind
+no longer matches (for example after an upgrade that tightened who may approve
+it, or if the plan file changed), trusted code uses up the approval and records
+why so a stale approval cannot be reused; a request for a different change id
+is refused without consuming that other change's approval. `ChangeApproval`
+carries the described or approved `plan_digest` across all three approval modes
+so services that reload their plan from disk (starting with
+`RuntimeSettingsService`) refuse when it is missing or differs. For runtime
+settings (`custom_agents/runtime_settings_service.py`), a plan's decision class
+is the most restrictive class of its changes (`operator_only` > `lead_managed`
+> `user_authorized`), `describe` sets `owner_person_id` to the requester only
+when every change in the plan is `user_authorized` (mixed plans wait for an
+administrator), and `load_plan` refuses stored plans whose class no longer
+matches their changes or the setting registry. With authorization off the
+person's conversational agreement applies it. One narrow class applies at once instead: a settings plan that only
 switches an agent type's model (provider, model, reasoning, context window
 and input settings; `custom_agents/model_choice.py`) is the `model_choice` change on
 `fn:model_choice`, a tool only administrators hold (Cedar

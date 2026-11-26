@@ -597,10 +597,13 @@ def list_runtime_settings_options() -> str:
     List typed TeamArchitect self/team settings and their decision classes.
 
     Stage a change with a plan tool and apply it with apply_change: with
-    authorization on a person approves the exact plan (a `user_authorized`
-    setting may also be approved by the person it belongs to); with it off,
-    the person's conversational agreement applies it. `operator_only`
-    settings cannot be staged. For models, `llm.*` is the instance baseline,
+    authorization on, a team administrator approves the exact plan in the
+    Inbox; the requesting person may also approve it only when every setting
+    in the plan is `user_authorized` (a plan mixing in any `lead_managed`
+    setting waits for an administrator, so stage a person's own settings
+    separately when they should approve them). With authorization off, the
+    person's conversational agreement applies it. `operator_only` settings
+    cannot be staged. For models, `llm.*` is the instance baseline,
     `workspace_default.llm.*` is `LLM_OVERRIDES.yaml`'s workspace-wide
     `default:` entry, and `current_agent.llm.*` is one flat
     `agent_types.<AgentType>:` entry.
