@@ -30,6 +30,7 @@ from custom_agents.task_human_interaction_blockers import (
     restore_wait_record,
 )
 from custom_agents.task_manager import TaskManager
+from custom_agents.timed_waits import TIMED_WAIT_RESPONSE_KIND
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task, TaskSteering
@@ -144,7 +145,7 @@ def test_clear_answer_marks_clears_both_setup_and_timed_wait_marks(manager: Task
     [
         # Unmarked timed wait cleared by any answer to its interrupt id (including stray text answers).
         (_timed_record("i1"), [], ["i1"], ["i1"], True),
-        (_timed_record("i1"), [("i1", {"kind": "timed_wait_resumed"})], [], [], True),
+        (_timed_record("i1"), [("i1", {"kind": TIMED_WAIT_RESPONSE_KIND})], [], [], True),
         # Unmarked timed wait NOT cleared when another interrupt in the same step is answered.
         (_timed_record("i1"), [("i2", {"access_request_id": "req-1"})], ["i1", "i2"], ["i2"], False),
         # Marked timed wait cleared when its session resumes, even if another answer replaced the held one (C01).
@@ -215,7 +216,7 @@ def _timed_steering(interrupt_id: str = "i-wait") -> TaskSteering:
         steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
         target_task_id=TASK,
         target_agent_id=AGENT_ID,
-        interrupt_responses=[{"interrupt_id": interrupt_id, "response": {"kind": "timed_wait_resumed"}}],
+        interrupt_responses=[{"interrupt_id": interrupt_id, "response": {"kind": TIMED_WAIT_RESPONSE_KIND}}],
         status=TaskSteeringStatus.PENDING,
     )
 
@@ -249,6 +250,51 @@ async def test_hand_answer_to_paused_turn_refuses_to_overwrite_when_replace_pend
 
     assert held is False
     assert agent._pending_interrupt_responses[TASK] is existing
+    assert not answer_held(get_human_interaction_blocker(manager, TASK))
+    assert not woken
+
+
+@pytest.mark.asyncio
+async def test_hand_answer_to_paused_turn_unmarks_if_other_answer_arrives_during_save(
+    manager: TaskManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C11: if another answer arrives while mark_answer_held is saving, undo the mark and leave it."""
+    woken: list = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    record_human_interaction_blocker(manager, TASK, _timed_record("i-wait"))
+    agent = _fake_agent(manager, interrupt_id="i-wait")
+    arrived = TaskSteering(
+        steering_id="person-answer-mid-save",
+        steering_type=TaskSteeringType.INTERRUPT_RESPONSE,
+        target_task_id=TASK,
+        guidance_text="arrived while marking",
+        status=TaskSteeringStatus.PENDING,
+    )
+    original_run = manager.operations_runtime.run
+    placed = False
+
+    async def racing_run(fn, *args, **kwargs):
+        nonlocal placed
+        result = await original_run(fn, *args, **kwargs)
+        if not placed and result is True:
+            placed = True
+            agent._pending_interrupt_responses[TASK] = arrived
+        return result
+
+    monkeypatch.setattr(manager.operations_runtime, "run", racing_run)
+
+    held = await paused_wait_resume.hand_answer_to_paused_turn(
+        agent,
+        task_id=TASK,
+        kind=TIMED_WAIT_BLOCKER,
+        wait_id="i-wait",
+        steering=_timed_steering("i-wait"),
+        replace_pending=False,
+    )
+
+    assert placed is True
+    assert held is False
+    assert agent._pending_interrupt_responses[TASK] is arrived
     assert not answer_held(get_human_interaction_blocker(manager, TASK))
     assert not woken
 
@@ -290,7 +336,6 @@ async def test_drop_paused_turn_and_resume_from_note_for_timed_wait(
     monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
     log_spec = paused_wait_resume.WaitLogSpec(
         label="timed-wait",
-        wait_id_key="interrupt_id",
         dropped_event="timed_wait_paused_turn_dropped",
         restored_event="timed_wait_record_restored",
         restore_failed_event="timed_wait_record_restore_failed",

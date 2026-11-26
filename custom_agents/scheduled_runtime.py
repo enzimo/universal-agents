@@ -73,7 +73,7 @@ from custom_agents.schedule_management import (
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
-from custom_messages.contracts.schedule_v1 import ScheduledMessage
+from custom_messages.contracts.schedule_v1 import ScheduledMessage, is_recurring_schedule
 from custom_messages.contracts.task_v1 import Task, TaskQuery
 from custom_messages.enums import (
     MessageMetaType,
@@ -1292,15 +1292,6 @@ async def _enqueue_runtime_schedule(
     return None
 
 
-def _is_recurring(scheduled_message: ScheduledMessage) -> bool:
-    return (
-        scheduled_message.repeat_count is None
-        or (scheduled_message.repeat_count or 0) > 1
-        or scheduled_message.interval_ms is not None
-        or scheduled_message.cron_expression is not None
-    )
-
-
 def _fired_task(
     scheduled_message: ScheduledMessage, schedule_admission: ScheduleOccurrenceV1 | None
 ) -> Task:
@@ -1311,7 +1302,7 @@ def _fired_task(
     task.problem_statement = _append_schedule_memory_context(
         task.problem_statement, scheduled_message
     )
-    if _is_recurring(scheduled_message) and task.parent_task_id is None:
+    if is_recurring_schedule(scheduled_message) and task.parent_task_id is None:
         task.task_id = new_id("task_id")
     if schedule_admission is not None:
         task.task_id = schedule_admission.task_id

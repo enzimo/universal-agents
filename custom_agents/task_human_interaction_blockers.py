@@ -42,6 +42,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
 from custom_agents.task_runtime_state import TaskRuntimeState
+from custom_agents.timed_waits import TIMED_WAIT_KIND
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND, TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_messages.contracts.task_v1 import (
     ACCESS_REQUEST_ID_KEY,
@@ -52,13 +53,19 @@ from custom_messages.contracts.task_v1 import (
 # A task blocked on a wait records the same kind as its interrupt.
 ACCESS_REQUEST_BLOCKER = ACCESS_REQUEST_INTERRUPT_KIND
 SETUP_RUN_BLOCKER = TOOL_SETUP_RUN_KIND
-TIMED_WAIT_BLOCKER = "timed_wait"
+TIMED_WAIT_BLOCKER = TIMED_WAIT_KIND
 # Waits trusted code ends in this process, mapped to the record field that
 # identifies one wait of that kind.
 _WAIT_ID_KEYS: Mapping[str, str] = {
     SETUP_RUN_BLOCKER: "run_id",
     TIMED_WAIT_BLOCKER: "interrupt_id",
 }
+
+
+def wait_id_key(kind: str) -> str:
+    """The record and log field that identifies one locally-ended wait of ``kind``."""
+
+    return _WAIT_ID_KEYS[kind]
 # The mark of a record whose answer waits in memory for the task's lane: when
 # (UTC, ISO 8601) and which agent process holds the answer. Agent ids are new
 # for each process, so a mark from another id is left over from before a

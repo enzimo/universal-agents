@@ -151,7 +151,6 @@ logger = logging.getLogger(__name__)
 WORKFLOW_NOTICE_REASON = "tool_setup_workflow"
 _SETUP_WAIT_LOG = WaitLogSpec(
     label="setup-run",
-    wait_id_key="run_id",
     dropped_event="tool_setup_paused_turn_dropped",
     restored_event="tool_setup_run_record_restored",
     restore_failed_event="tool_setup_run_record_restore_failed",

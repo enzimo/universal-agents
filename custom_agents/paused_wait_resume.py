@@ -32,6 +32,7 @@ from custom_agents.task_human_interaction_blockers import (
     mark_answer_held,
     remove_answer_mark,
     restore_wait_record,
+    wait_id_key,
 )
 from custom_messages.contracts.task_v1 import TaskSteering
 from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
@@ -44,7 +45,6 @@ class WaitLogSpec:
     """Logging names for one kind of locally-ended wait (setup run or timed wait)."""
 
     label: str
-    wait_id_key: str
     dropped_event: str
     restored_event: str
     restore_failed_event: str
@@ -190,7 +190,7 @@ async def resume_from_note(
         await run_ops(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, at or utc_now_iso())
         await run_ops(manager.enqueue_task, task_id, front=True)
     except Exception:
-        await _put_record_back(agent, task_id, record, wait_id=wait_id, log=log)
+        await _put_record_back(agent, task_id, record, kind=kind, wait_id=wait_id, log=log)
         raise
     if wake:
         schedule_pending_work(agent)
@@ -202,12 +202,14 @@ async def _put_record_back(
     task_id: str,
     record: dict[str, Any],
     *,
+    kind: str,
     wait_id: str,
     log: WaitLogSpec,
 ) -> None:
     """After a failed resume from a note, the record goes back so recovery finds the task again (logged)."""
 
     manager = agent.task_manager
+    id_key = wait_id_key(kind)
     try:
         restored = await manager.operations_runtime.run(partial(restore_wait_record, manager), task_id, record)
     except Exception as exc:  # noqa: BLE001 - the record is back in memory; the next save writes it
@@ -217,7 +219,7 @@ async def _put_record_back(
             log.label,
             log.restore_failed_event,
             task_id,
-            log.wait_id_key,
+            id_key,
             wait_id,
             type(exc).__name__,
         )
@@ -228,7 +230,7 @@ async def _put_record_back(
         log.label,
         log.restored_event,
         task_id,
-        log.wait_id_key,
+        id_key,
         wait_id,
         restored,
     )
