@@ -40,7 +40,8 @@ def test_defaults_allow_twenty_minutes_without_approval_and_a_day_with_it() -> N
 @pytest.mark.parametrize(
     ("without", "with_", "message"),
     [
-        (20, 1441, "a task may wait at most 1440 minutes (24 hours) in total"),
+        (20, 1441, "less than or equal to 1440"),
+        (1441, 1440, "less than or equal to 1440"),
         (30, 25, "must be at least agent.max_wait_minutes_without_approval (30)"),
         (0, 1440, "greater than or equal to 1"),
     ],
@@ -54,6 +55,11 @@ def test_a_configuration_that_breaks_the_rules_refuses_to_load(tmp_path: Path, w
     data["agent"].update(max_wait_minutes_without_approval=without, max_wait_minutes_with_approval=with_)
     with pytest.raises(ValidationError):
         GatewayInstanceConfig.model_validate(data)
+
+
+def test_timed_wait_limits_enforces_the_24_hour_ceiling_directly() -> None:
+    with pytest.raises(ValidationError, match=r"a task may wait at most 1440 minutes \(24 hours\) in total"):
+        TimedWaitLimits(without_approval=20, with_approval=WAIT_MINUTES_CEILING + 1)
 
 
 def test_the_instance_limits_reach_every_agent_type(tmp_path: Path) -> None:

@@ -12,7 +12,11 @@ from runtime_settings.worker_pools import WorkerPoolsConfig
 from runtime_settings.review_cleanup import ReviewCleanupSettings
 from runtime_settings.stale_schedules import StaleScheduleSettings
 from runtime_settings.stuck_tasks import StuckTaskSettings
-from runtime_settings.timed_waits import TimedWaitLimits, refuse_per_type_wait_limits
+from runtime_settings.timed_waits import (
+    WAIT_MINUTES_CEILING,
+    TimedWaitLimits,
+    refuse_per_type_wait_limits,
+)
 from default_values import AGENT_DEFAULTS, MAX_BLOB_RETENTION_DAYS, MIN_BLOB_RETENTION_DAYS
 from runtime_settings.common import (
     _default_conversation_compactor_config,
@@ -113,10 +117,14 @@ class AgentRuntimeDefaultsSettings(BaseModel):
     # (AgentRuntimeOverrideSettings and config_loader.resolve_agent_type_settings),
     # and agents cannot stage it (OPERATOR_ONLY_RUNTIME_SETTINGS).
     max_wait_minutes_without_approval: int = Field(
-        default=AGENT_DEFAULTS.max_wait_minutes_without_approval.value, ge=1
+        default=AGENT_DEFAULTS.max_wait_minutes_without_approval.value,
+        ge=1,
+        le=WAIT_MINUTES_CEILING,
     )
     max_wait_minutes_with_approval: int = Field(
-        default=AGENT_DEFAULTS.max_wait_minutes_with_approval.value, ge=1
+        default=AGENT_DEFAULTS.max_wait_minutes_with_approval.value,
+        ge=1,
+        le=WAIT_MINUTES_CEILING,
     )
     runtime_budget_policy: Dict[str, Any] = Field(
         default_factory=lambda: copy.deepcopy(
