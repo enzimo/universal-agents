@@ -137,10 +137,12 @@ TeamLead (TeamArchitect) makes setup effortless, in one call, without asking
 the person whether to start (owner's decision 2026-09-28): the approval cards
 and setup pages are where the person agrees, so asking first is a wasted round
 trip. A question about what TeamLead can access ("What repos can you see in
-GitHub?") counts as a request to set up and answer. - For a tool listed as needing setup or unknown, or not listed, and whenever a
-  call is refused for a missing or expired sign-in or account (`auth_required`,
-  `account_link_missing`, `account_link_credential_expired`,
-  `x_account_missing`, `google_oauth_client_missing`):
+GitHub?") counts as a request to set up and answer.
+
+For a tool listed as needing setup or unknown, or not listed, and whenever a
+call is refused for a missing or expired sign-in or account (`auth_required`,
+`account_link_missing`, `account_link_credential_expired`,
+`x_account_missing`, `google_oauth_client_missing`):
 
 1. A specialist does not ask the person itself. It escalates to TeamLead with
    `manager_escalation`, quoting the tool id from the error. Keep the existing

@@ -929,3 +929,145 @@ def test_transfer_import_skips_expired_credential_revokes_destination_link_and_n
     assert rerun.imported is False
     assert rerun.reason == EXPIRED_BEFORE_IMPORT_REASON
     assert len(access_store.notices_for(TEST_TEAM, person_id="usr_ana", roles=())) == 1
+
+
+def test_transfer_import_expired_credential_is_retryable_when_link_revocation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C26: a failed link revocation on an expired import marks the outcome retryable; retrying finishes revocation with one notice."""
+
+    from dataclasses import replace
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from typing import Any
+    from access_catalog.catalog import CatalogSource
+    from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessNoticeKind,
+        AccountLinkStatus,
+        AccountLinkV1,
+        AccountMode,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog import collect_credential
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_transfer import (
+        EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON,
+        EXPIRED_BEFORE_IMPORT_REASON,
+        export_credentials,
+        import_credentials,
+    )
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    short_expiry = (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "old", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "expiring_retry_link",
+            "display_name": "Expiring Retry API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "soon-expired-secret"},
+        scope=scope,
+        expires_at=short_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success", saved.error
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+
+    _use_store(tmp_path / "new", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    access_store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "new" / "access.db")}})
+    )
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:transfer_retry_demo",
+        kind=ToolKind.HTTP,
+        display_name="Transfer Retry Demo",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("transfer-retry.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization",
+                field="api_key",
+                template="Bearer {value}",
+            ),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    custom_catalog = replace(base_catalog, tools={**base_catalog.tools, demo_tool.tool_id: demo_tool})
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=access_store,
+    )
+    access_store.create_link(
+        AccountLinkV1(
+            link_id="link-transfer-retry",
+            team_id=TEST_TEAM,
+            tool_id="http:transfer_retry_demo",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="usr_ana",
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="expiring_retry_link",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="usr_ana"),
+            created_at_utc=now - timedelta(hours=1),
+        )
+    )
+
+    real_revoke = access_store.revoke_link
+    attempts = {"count": 0}
+
+    def flaky_revoke(*args: Any, **kwargs: Any) -> Any:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("transient access store outage")
+        return real_revoke(*args, **kwargs)
+
+    monkeypatch.setattr(access_store, "revoke_link", flaky_revoke)
+
+    after_expiry = now + timedelta(minutes=20)
+    [first] = import_credentials(records, team_id=TEST_TEAM, access_gate=gate, now=after_expiry)
+    assert first.imported is False
+    assert first.retryable is True
+    assert first.reason == EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON
+    still_active = access_store.get_link("link-transfer-retry")
+    assert still_active is not None
+    assert still_active.status is AccountLinkStatus.ACTIVE
+
+    [second] = import_credentials(records, team_id=TEST_TEAM, access_gate=gate, now=after_expiry)
+    assert second.imported is False
+    assert second.retryable is False
+    assert second.reason == EXPIRED_BEFORE_IMPORT_REASON
+
+    expected_actor = SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEST_TEAM, AGENT_ROLE_SYSTEM))
+    revoked = access_store.get_link("link-transfer-retry")
+    assert revoked is not None
+    assert revoked.status is AccountLinkStatus.REVOKED
+    assert revoked.revoked_by == expected_actor
+
+    notices = [n for n, _read in access_store.notices_for(TEST_TEAM, person_id="usr_ana", roles=())]
+    assert len(notices) == 1
+    assert notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert "/link http:transfer_retry_demo" in notices[0].summary

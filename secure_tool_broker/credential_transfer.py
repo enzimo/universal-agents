@@ -51,6 +51,9 @@ logger = logging.getLogger(__name__)
 TEAM_OWNER = "team"
 PERSON_OWNER = "person"
 EXPIRED_BEFORE_IMPORT_REASON = "expired before import"
+EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON = (
+    "expired before import; its account link could not be removed, import it again"
+)
 # Sources whose values live inside this instance; others are external stores.
 _INTERNAL_SOURCES = frozenset({"sealbox"})
 # Password-manager sessions in an owner's private folder (credential_state.credential_owner_environment).
@@ -394,16 +397,43 @@ def _revoke_expired_import_links(
     credential_key: str,
     *,
     now: datetime,
-) -> None:
+) -> int:
     if access_gate is None:
-        return
+        return 0
     from secure_tool_broker.janitor import revoke_links_for_expired_credential
 
-    revoke_links_for_expired_credential(
+    _revoked, _noticed, link_failures = revoke_links_for_expired_credential(
         access_gate,
         _catalog_scope(owner),
         credential_key,
         now=now,
+    )
+    return link_failures
+
+
+def _expired_import_outcome(
+    key: str,
+    owner: CredentialOwnerV1,
+    credential_key: str,
+    *,
+    access_gate: Any,
+    now: datetime,
+) -> CredentialOutcomeV1:
+    link_failures = _revoke_expired_import_links(access_gate, owner, credential_key, now=now)
+    if link_failures > 0:
+        return CredentialOutcomeV1(
+            key=key,
+            owner=owner,
+            imported=False,
+            reason=EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON,
+            retryable=True,
+        )
+    return CredentialOutcomeV1(
+        key=key,
+        owner=owner,
+        imported=False,
+        reason=EXPIRED_BEFORE_IMPORT_REASON,
+        retryable=False,
     )
 
 
@@ -428,25 +458,15 @@ def _import_record(
 
             raw_expires = record.credential.get("expires_at")
             if raw_expires is not None and is_expired(raw_expires, now=moment):
-                _revoke_expired_import_links(access_gate, owner, record.credential_key, now=moment)
-                return CredentialOutcomeV1(
-                    key=key,
-                    owner=owner,
-                    imported=False,
-                    reason=EXPIRED_BEFORE_IMPORT_REASON,
-                    retryable=False,
+                return _expired_import_outcome(
+                    key, owner, record.credential_key, access_gate=access_gate, now=moment
                 )
             _import_catalog_entry(record, now=moment)
         else:
             _IMPORTERS[record.kind](record)
     except _ExpiredBeforeImport:
-        _revoke_expired_import_links(access_gate, owner, record.credential_key, now=moment)
-        return CredentialOutcomeV1(
-            key=key,
-            owner=owner,
-            imported=False,
-            reason=EXPIRED_BEFORE_IMPORT_REASON,
-            retryable=False,
+        return _expired_import_outcome(
+            key, owner, record.credential_key, access_gate=access_gate, now=moment
         )
     except Exception as exc:  # each store reports in its own way; no value is in these messages
         logger.error(
@@ -730,6 +750,7 @@ __all__ = [
     "CatalogEntryV1",
     "CredentialOutcomeV1",
     "CredentialOwnerV1",
+    "EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON",
     "EXPIRED_BEFORE_IMPORT_REASON",
     "ModelKeyV1",
     "OwnerFileV1",

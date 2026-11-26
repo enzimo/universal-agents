@@ -1,24 +1,30 @@
 """The broker's single periodic background janitor.
 
 Runs once about 10 minutes after broker start and then every 6 hours, executing
-four isolated maintenance jobs:
+three isolated maintenance jobs:
 
-1. **Expired temporary credentials** across all owner scopes: compare-and-delete
-   through ``credential_catalog.delete_credential`` so a credential renewed or
-   replaced concurrently is never deleted, removing all Sealbox versions and
-   the catalog row.
-2. **Revocation of account and gate links** referencing each deleted credential,
-   using the team's system role actor (never a fake person), with one Inbox
-   notice per revoked link naming the tool, whether a shared team account now
-   applies or no linked account remains, and the exact ``/link`` command. Team
-   and gate links notify team administrators (``recipient_roles=(PERSON_ROLE_ADMIN,)``).
-   No notice is sent when no active link used the credential.
-3. **Per-tenant Sealbox expired-secret cleanup**: runs
-   ``sealbox-cli secret cleanup-expired --output json`` for each recorded tenant
-   mapping using an isolated tenant environment built exclusively by
+1. **Expired temporary credentials and link revocation** across all owner
+   scopes: under the catalog key lock, ``credential_catalog.delete_credential``
+   runs the ``before_delete`` hook (``revoke_links_for_expired_credential``,
+   also called by team transfer import when a transferred temporary credential
+   expired before import) before removing anything. For each active account or
+   gate link referencing the credential, it creates one deterministic Inbox
+   notice first (naming the tool, whether a shared team account still applies
+   or no linked account remains, and the exact ``/link`` command; team and gate
+   links notify team administrators via ``recipient_roles=(PERSON_ROLE_ADMIN,)``),
+   then revokes the link with the team's system role actor (never a fake
+   person). No notice is sent when no active link used the credential. Only
+   after all link notices and revocations succeed does ``delete_credential``
+   remove all Sealbox versions and compare-and-delete the catalog row (so a
+   concurrently renewed or replaced credential is never deleted, and any
+   failure leaves the catalog row for the next run to finish with one notice).
+2. **Per-tenant Sealbox expired-secret cleanup**: runs
+   ``sealbox-cli secret cleanup-expired --output json`` with a 90-second
+   timeout (counting timeouts separately as unknown outcomes) for each recorded
+   tenant mapping using an isolated tenant environment built exclusively by
    ``sealbox_tenants.tenant_environment_for_mapping`` (never inheriting the
    broker's root token, ``SEALBOX_TOKEN``, or ``HOME`` config).
-4. **Periodic tool setup re-check**: runs ``tool_setup_recheck.recheck_due``
+3. **Periodic tool setup re-check**: runs ``tool_setup_recheck.recheck_due``
    unchanged (``security_layer.tool_setup_recheck_days == 0`` still turns it off).
 """
 

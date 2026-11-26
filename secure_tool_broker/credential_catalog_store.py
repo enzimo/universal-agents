@@ -262,18 +262,6 @@ class CredentialCatalogStore:
                 )
         return decoded, unreadable
 
-    def list_all_credentials(self) -> list[CatalogEntryRow]:
-        """List every catalog entry across all owner scopes."""
-
-        decoded, unreadable = self.scan_all_credentials()
-        if unreadable:
-            first = unreadable[0]
-            raise ValueError(
-                f"Unreadable credential catalog row ({first.scope_kind}/{first.owner_id}/{first.credential_key}): "
-                f"{first.error}"
-            )
-        return decoded
-
     def delete_credential(self, scope: CredentialOwnerScope, credential_key: str) -> bool:
         """Atomically delete one credential without touching sibling keys."""
         with self._connect() as conn:

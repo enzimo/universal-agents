@@ -1386,6 +1386,7 @@ def test_live_sealbox_temporary_credential_expiry_overwrite_fallback_and_janitor
     from secure_tool_broker import janitor
     from secure_tool_broker.access_gate import BrokerAccessGate
     from secure_tool_broker.credential_diagnostics import CREDENTIAL_EXPIRED
+    from secure_tool_broker.sealbox_cli import first_json_value
     from storage.access_repository import AccessRepository
     from storage.config import resolve_storage_settings
     from tests.broker_access_support import context_verify_keys
@@ -1482,6 +1483,19 @@ def test_live_sealbox_temporary_credential_expiry_overwrite_fallback_and_janitor
 
     # Also write one standalone short-TTL secret in Alice's Sealbox tenant so cleanup-expired deletes it.
     alice_tenant_env = live_sealbox["tenant_env"](person_id)
+    sealbox_key = "team-nats-agents:live-temp-cred:live_temp_api:api_token"
+    direct_before = first_json_value(
+        _run_cli(
+            live_sealbox["cli"],
+            ["secret", "get", sealbox_key, "--output", "json"],
+            env=alice_tenant_env,
+        ).stdout
+    )
+    assert isinstance(direct_before, dict)
+    assert direct_before["version"] == 2
+    assert direct_before["value"] == "temporary-v2-secret"
+    sealbox_v2_expires_at = int(direct_before["expires_at"])
+
     _run_cli(
         live_sealbox["cli"],
         ["secret", "set", "standalone-expiring-secret", "--ttl", "1", "--output", "json"],
@@ -1489,12 +1503,25 @@ def test_live_sealbox_temporary_credential_expiry_overwrite_fallback_and_janitor
         input_text="ephemeral-standalone-value",
     )
 
-    # 3. Wait until after expiry.
-    wait_seconds = (short_expiry - datetime.now(timezone.utc)).total_seconds() + 0.6
+    # 3. Wait until after both the catalog expires_at and Sealbox's integer-second expires_at pass.
+    wait_until = max(short_expiry.timestamp(), float(sealbox_v2_expires_at)) + 1.1
+    wait_seconds = wait_until - time.time()
     if wait_seconds > 0:
         time.sleep(wait_seconds)
 
-    # 4. Before any janitor run: lookups MUST refuse with credential_expired (never fall back to v1).
+    # 4. Before any janitor run: Sealbox itself falls back to v1 once v2's TTL passes,
+    # while every broker read path MUST refuse with credential_expired (never serve v1).
+    direct_after = first_json_value(
+        _run_cli(
+            live_sealbox["cli"],
+            ["secret", "get", sealbox_key, "--output", "json"],
+            env=alice_tenant_env,
+        ).stdout
+    )
+    assert isinstance(direct_after, dict)
+    assert direct_after["version"] == 1
+    assert direct_after["value"] == "lasting-v1-secret"
+
     meta = credential_catalog.get_credential_metadata("live_temp_api", scope=scope)
     assert meta.status == "error"
     assert meta.content["error_code"] == CREDENTIAL_EXPIRED
@@ -1539,7 +1566,6 @@ def test_live_sealbox_temporary_credential_expiry_overwrite_fallback_and_janitor
 
     # 6. Confirm catalog entry, ALL Sealbox versions (v1 and v2), and the account link are gone, and 1 notice exists.
     assert "live_temp_api" not in credential_catalog.load_catalog(scope=scope).credentials
-    sealbox_key = "team-nats-agents:live-temp-cred:live_temp_api:api_token"
     for args in (
         ["secret", "get", sealbox_key],
         ["secret", "get", sealbox_key, "--version", "1"],
