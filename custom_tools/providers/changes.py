@@ -177,7 +177,12 @@ def _waiting_request(
         tool_use_id=tool_use_id,
     )
     if outcome.already_held or outcome.request is None:
-        return ChangeApproval(ChangeApprovalMode.HELD_ACCESS, principal.agent_type, datetime.now(timezone.utc))
+        return ChangeApproval(
+            ChangeApprovalMode.HELD_ACCESS,
+            principal.agent_type,
+            datetime.now(timezone.utc),
+            plan_digest=proposal.plan_digest,
+        )
     return outcome.request
 
 
@@ -187,19 +192,40 @@ def _apply_approved(
     change = request.change
     assert change is not None
     note = request.decision_note or None
+    mismatch_reason: str | None = None
     if change.change_id != proposal.change_id or change.plan_digest != proposal.plan_digest:
+        mismatch_reason = (
+            "The plan changed after it was approved. Stage it again and call apply_change for the new change_id."
+        )
+    elif change.owner_person_id != proposal.owner_person_id or change.kind != proposal.kind:
+        mismatch_reason = (
+            "Who may approve this change or its kind no longer matches the approved request. "
+            "Stage it again and call apply_change for the new change_id."
+        )
+    if mismatch_reason is not None:
+        if request.applied_at_utc is None:
+            requests.claim_change(request.request_id)
+            requests.service.store.record_change_error(request.request_id, mismatch_reason)
+        logger.warning(
+            "An approved change no longer matched its stored proposal. event=change_approval_mismatch "
+            "request_id=%s change_id=%s",
+            request.request_id,
+            proposal.change_id,
+        )
         return {
             "status": "refused",
-            "reason": "The plan changed after it was approved. Stage it again and call apply_change for the new change_id.",
+            "reason": mismatch_reason,
             "note": note,
         }
     claimed = requests.claim_change(request.request_id)
+    assert claimed.change is not None
     approval = ChangeApproval(
         ChangeApprovalMode.PERSON_APPROVAL,
         claimed.decided_by.id if claimed.decided_by else "unknown",
         claimed.decided_at_utc or datetime.now(timezone.utc),
         request_id=claimed.request_id,
         note=claimed.decision_note,
+        plan_digest=claimed.change.plan_digest,
     )
     try:
         result = adapter.apply(agent, proposal.change_id, approval)
@@ -300,7 +326,12 @@ def _decide_and_apply(
     if not runtime_access(agent).enabled:
         if proposal.agreement_required and not confirmed:
             return _agreement_needed(proposal)
-        approval = ChangeApproval(ChangeApprovalMode.AGREEMENT, "agreement", datetime.now(timezone.utc))
+        approval = ChangeApproval(
+            ChangeApprovalMode.AGREEMENT,
+            "agreement",
+            datetime.now(timezone.utc),
+            plan_digest=proposal.plan_digest,
+        )
         return _Applied(agent, adapter, approval, adapter.apply(agent, change_id, approval))
     requests = runtime_requests(agent)
     found = _waiting_request(agent, requests, proposal, str(reason or "").strip() or proposal.title, tool_context)

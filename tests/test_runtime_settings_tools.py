@@ -84,10 +84,15 @@ class _ToolCall:
         raise AssertionError(f"unexpected pause for approval: {reason}")
 
 
-def _agreement() -> ChangeApproval:
+def _agreement(plan_digest: str) -> ChangeApproval:
     """What apply_change passes to the service when authorization is off."""
 
-    return ChangeApproval(ChangeApprovalMode.AGREEMENT, "agreement", datetime.now(timezone.utc))
+    return ChangeApproval(
+        ChangeApprovalMode.AGREEMENT,
+        "agreement",
+        datetime.now(timezone.utc),
+        plan_digest=plan_digest,
+    )
 
 
 def _apply_settings_change(change_id: str, confirmed: bool = False) -> str:
@@ -318,7 +323,7 @@ def test_worker_eligibility_rechecks_before_apply(tmp_path, change_after_plan, r
         config.save(path)
     original = path.read_bytes()
     with pytest.raises((ValueError, PermissionError), match=reason):
-        service.apply(plan["change_id"], _agreement())
+        service.apply(plan["change_id"], _agreement(plan["plan_digest"]))
     assert path.read_bytes() == original
 
 
@@ -332,7 +337,7 @@ def test_worker_eligibility_can_remove_stale_or_denied_entries(tmp_path):
     plan = service.stage([{
         "path": "agent.schedule_workers.eligible_agent_types", "value": [],
     }])
-    assert service.apply(plan["change_id"], _agreement())["status"] == "applied"
+    assert service.apply(plan["change_id"], _agreement(plan["plan_digest"]))["status"] == "applied"
     assert GatewayInstanceConfig.load(path).agent.schedule_workers.eligible_agent_types == []
 
 
@@ -1675,7 +1680,7 @@ def test_runtime_settings_refuses_an_update_between_plan_check_and_backup(tmp_pa
 
     monkeypatch.setattr(service, "_apply_instance_config", independent_update_then_apply)
     with pytest.raises(ConfigFileConflict):
-        service.apply(staged["change_id"], _agreement())
+        service.apply(staged["change_id"], _agreement(staged["plan_digest"]))
     after = GatewayInstanceConfig.load(path)
     assert after.instance_name == "another writer"
     assert after.heartbeat.enabled is False
@@ -1700,7 +1705,7 @@ def test_runtime_settings_receipt_failure_keeps_later_writer_and_original_error(
 
     monkeypatch.setattr(module, "atomic_write_bytes", change_then_fail_receipt)
     with pytest.raises(OSError, match="receipt storage failed"):
-        service.apply(staged["change_id"], _agreement())
+        service.apply(staged["change_id"], _agreement(staged["plan_digest"]))
     assert GatewayInstanceConfig.load(path).instance_name == "later writer"
     assert "event=runtime_settings_rollback_conflict" in caplog.text
 

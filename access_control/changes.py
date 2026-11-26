@@ -41,6 +41,10 @@ class ChangeApproval:
     # The approver's note from the Inbox, returned to the agent with the result.
     # Not part of ``to_record``: configuration keeps who approved, not why.
     note: str = ""
+    # The exact staged plan digest that was described or approved; checked by
+    # services on apply so a plan swapped after describe/approval cannot apply.
+    # Not part of ``to_record``: saved receipts keep plan_digest on their own.
+    plan_digest: str | None = None
 
     def to_record(self) -> ChangeApprovalRecordV1:
         """The approval as saved with the configuration it created."""

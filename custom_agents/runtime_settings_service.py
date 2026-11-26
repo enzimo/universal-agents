@@ -206,17 +206,6 @@ def _plan_decision_class(
     )
 
 
-def _all_changes_user_authorized(
-    changes: list[RuntimeSettingPlanChange],
-) -> bool:
-    return bool(changes) and all(
-        change.decision_class == SettingDecisionClass.USER_AUTHORIZED
-        and (definition := RUNTIME_SETTING_REGISTRY.get(change.path)) is not None
-        and definition.decision_class == SettingDecisionClass.USER_AUTHORIZED
-        for change in changes
-    )
-
-
 def runtime_settings_options_payload() -> dict[str, Any]:
     return {
         "agent_controllable": [
@@ -673,12 +662,12 @@ class RuntimeSettingsService:
             title=f"Change runtime settings: {paths}"[:400],
             summary=summary,
             effect=tuple(line[:1000] for line in effect[:40]),
+            # load_plan already verified non-empty changes, current registry
+            # classes, and plan.decision_class == _plan_decision_class(plan.changes),
+            # so USER_AUTHORIZED here means every change in the plan is user_authorized.
             owner_person_id=(
                 plan.owner_canonical_user_id
-                if (
-                    plan.decision_class == SettingDecisionClass.USER_AUTHORIZED
-                    and _all_changes_user_authorized(plan.changes)
-                )
+                if plan.decision_class == SettingDecisionClass.USER_AUTHORIZED
                 else None
             ),
             agreement_required=plan.agreement_required,
@@ -703,6 +692,11 @@ class RuntimeSettingsService:
         agreement = approval.mode is ChangeApprovalMode.AGREEMENT
         if agreement != (plan.authority_mode == AUTHORITY_MODE_AUTHORIZATION_DISABLED):
             raise PermissionError("This plan needs a person's approval, not agreement (or the reverse).")
+        if not approval.plan_digest or approval.plan_digest != plan.plan_digest:
+            raise PermissionError(
+                "The approved runtime settings plan digest is missing or no longer matches the stored plan. "
+                "Stage a fresh plan."
+            )
         actor = acting_agent(self.agent)
         self._verify_current(config, plan)
         result = self._apply_plan(config, plan)

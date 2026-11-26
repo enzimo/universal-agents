@@ -274,7 +274,12 @@ async def test_inspection_repairs_custom_eligibility_through_real_settings_and_b
     bind_task("request")
     settings = RuntimeSettingsService(lead)
     plan = settings.stage([change])
-    agreement = ChangeApproval(ChangeApprovalMode.AGREEMENT, "agreement", datetime.now(timezone.utc))
+    agreement = ChangeApproval(
+        ChangeApprovalMode.AGREEMENT,
+        "agreement",
+        datetime.now(timezone.utc),
+        plan_digest=plan["plan_digest"],
+    )
     assert settings.apply(plan["change_id"], agreement)["status"] == "applied"
     access_runtime._runtime_access.cache_clear()
     after = inspect_schedule_worker(lead, "job")
