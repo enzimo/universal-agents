@@ -25,6 +25,11 @@ from custom_messages.contracts.attachments_v1 import AttachmentOrigin
 class InteractiveAppAttachmentStore(Protocol):
     """Validate/store bytes without exposing a repository or aggregate config."""
 
+    @property
+    def max_file_bytes(self) -> int:
+        """Normalized byte limit matching ``check_bytes`` and ``store_bytes``."""
+        ...
+
     def check_bytes(self, *, data: bytes, filename: str, content_type: str) -> None:
         """Refuse an upload ``store_bytes`` would refuse, without saving anything."""
         ...
@@ -55,6 +60,10 @@ class LocalInteractiveAppAttachmentStore:
         self._policy = policy
         self._application = application
         self._register_with_application = register_with_application
+
+    @property
+    def max_file_bytes(self) -> int:
+        return max(1, int(self._policy.max_file_bytes))
 
     def check_bytes(self, *, data: bytes, filename: str, content_type: str) -> None:
         check_inbound_attachment_bytes(
