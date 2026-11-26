@@ -1747,9 +1747,12 @@ async def test_live_sealbox_capture_file_account_link_expiry_and_janitor(
     )
     assert isinstance(direct_before, dict)
     assert direct_before["value"] == secret_value
-    assert int(direct_before["expires_at"]) > 0
+    sealbox_expires_at = int(direct_before["expires_at"])
+    expected_expiry_ts = int(expiry.timestamp())
+    assert expected_expiry_ts <= sealbox_expires_at <= expected_expiry_ts + 10
 
-    # 2. Link the captured credential to the web API tool and read it through the account link.
+    # 2. Link the captured credential to the web API tool and send a real broker API request
+    # through credential_catalog.api_request to a local echo server to verify live header injection.
     access_store.create_link(
         AccountLinkV1(
             link_id="link-live-capture",
@@ -1779,15 +1782,41 @@ async def test_live_sealbox_capture_file_account_link_expiry_and_janitor(
     )
     assert gate_res.allowed is True
     assert gate_res.account_link is not None
-    injection = gate_res.account_link.injections[0]
-    resolved_via_link = credential_catalog.resolve_secret_field(
-        gate_res.account_link.credential_key,
-        injection.field,
-        scope=scope,
-    )
-    assert not hasattr(resolved_via_link, "status")
-    assert resolved_via_link.source == "sealbox"
-    assert injection.template.format(value=resolved_via_link.value) == f"Bearer {secret_value}"
+    received_auth: list[str] = []
+
+    class CaptureEchoHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            received_auth.append(self.headers.get("Authorization", ""))
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    echo = ThreadingHTTPServer(("127.0.0.1", 0), CaptureEchoHandler)
+    thread = threading.Thread(target=echo.serve_forever, daemon=True)
+    thread.start()
+    try:
+        api_context = ToolContext(
+            canonical_user_id=person_id,
+            principal_type="user",
+            account_link=gate_res.account_link,
+        )
+        api_result = credential_catalog.api_request(
+            {"method": "GET", "url": f"http://127.0.0.1:{echo.server_address[1]}/v1/status"},
+            context=api_context,
+        )
+        assert api_result.status == "success", api_result
+        assert secret_value not in json.dumps(api_result.content or {}, sort_keys=True)
+    finally:
+        echo.shutdown()
+        echo.server_close()
+        thread.join(timeout=3)
+    assert received_auth == [f"Bearer {secret_value}"]
 
     # 3. Past expiry: immediate read and link checks refuse before the janitor runs.
     after_expiry = expiry + timedelta(seconds=2)

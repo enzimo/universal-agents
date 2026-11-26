@@ -331,19 +331,24 @@ When a workflow needs a new named credential:
   `credential.capture_file` — never pass a secret value in a tool parameter or
   your reply.
   - Required `params`: `path` (regular UTF-8 file in the person's folder or
-    shared `team/` / `agents/`, no symbolic links), `credential_key`,
-    `display_name`, `purpose`, and `expires_at` (required timezone-aware UTC
-    ISO-8601 timestamp, 5 minutes to 90 days ahead; because the 5-minute floor
-    moves with the clock, pick a time comfortably past it). Optional
-    `field_name` defaults to `"secret"` (pass the specific field name an
-    account link expects, such as `token` or `api_token`).
+    shared `team/` / `agents/`, no symbolic links; relative paths start in the
+    person's folder), `credential_key`, `display_name`, `purpose`, and
+    `expires_at` (required timezone-aware UTC ISO-8601 timestamp, 5 minutes to
+    90 days ahead; because the 5-minute floor moves with the clock, pick a time
+    comfortably past it). Optional `field_name` defaults to `"secret"` (pass
+    the specific field name an account link expects, such as `token` or
+    `api_token`).
   - `credential.capture_file` works only for a verified person's task (never
     system work, never team scope) and refuses to replace a credential the
-    person entered, an external-source key, or a team key. After a successful
+    person entered, an external-source key, or a team key. Capturing a
+    credential does not link it to a tool; when a tool needs it, TeamArchitect
+    requests an account link afterwards (see Tool Setup). After a successful
     save, the broker deletes the source file (check `source_file_deleted`) and
     sends the person one Inbox notice unless the operator turned it off (check
     `notice_status`: `sent`, `off`, or `failed` beside `notice_sent`).
-  - On any refusal the source file stays in place. Treat
+  - On any refusal the source file stays in place. If `source_file_deleted` is
+    `false`, or after a refusal you will not retry, delete the secret file you
+    wrote with the file tool so it does not linger in `scratch/`. Treat
     `capture_access_gate_required` as a broker fault to stop and report; treat
     `capture_folder_check_unavailable` as a transient check error worth one
     retry. Tell the person in plain language that the temporary credential was

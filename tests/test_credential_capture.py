@@ -80,6 +80,7 @@ from secure_tool_broker.credential_expiry import (
     CREDENTIAL_EXPIRY_SHARED_RECORD,
     CREDENTIAL_EXPIRY_TOO_FAR,
     CREDENTIAL_EXPIRY_TOO_SOON,
+    CREDENTIAL_REPLACEMENT_FORM_ONLY,
     format_expiry_label,
     format_utc_timestamp,
 )
@@ -1133,18 +1134,19 @@ def test_captured_credential_obeys_immediate_expiry_janitor_and_team_transfer(
     source = layout.person_dir(PERSON_ID) / "scratch" / "lifecycle.txt"
     source.write_text("lifecycle-secret-value", encoding="utf-8")
 
-    expiry = BASE_NOW + timedelta(minutes=10)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    expiry = now + timedelta(minutes=10)
     res = capture_file_credential(
         _valid_params(
             path="scratch/lifecycle.txt",
             credential_key="lifecycle_key",
             field_name="api_key",
             expires_at=format_utc_timestamp(expiry),
-            now=BASE_NOW,
+            now=now,
         ),
         context=_person_context(),
         access_gate=gate,
-        now=BASE_NOW,
+        now=now,
     )
     assert res.status == "success", res.error
     assert not source.exists()
@@ -1160,7 +1162,7 @@ def test_captured_credential_obeys_immediate_expiry_janitor_and_team_transfer(
     dest_db = tmp_path / "dest_catalog.db"
     orig_db = os.environ["SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH"]
     monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(dest_db))
-    outcomes = import_credentials(exported, team_id=TEST_TEAM, now=BASE_NOW)
+    outcomes = import_credentials(exported, team_id=TEST_TEAM, now=now)
     assert any(o.key.endswith("/catalog_entry/lifecycle_key") and o.imported for o in outcomes)
     imported_cred = load_catalog(scope=alice_scope).credentials["lifecycle_key"]
     assert imported_cred.expires_at == format_utc_timestamp(expiry)
@@ -1169,7 +1171,7 @@ def test_captured_credential_obeys_immediate_expiry_janitor_and_team_transfer(
 
     # Link the captured credential to an account tool, then advance past expiry.
     link = store_account_link(store, "http:tavily", "lifecycle_key", owner_id=PERSON_ID)
-    assert linked_credential_expired(link, now=BASE_NOW + timedelta(minutes=5)) is False
+    assert linked_credential_expired(link, now=now + timedelta(minutes=5)) is False
     assert linked_credential_expired(link, now=expiry + timedelta(seconds=1)) is True
 
     # Immediate expiry check refuses metadata and resolution after expires_at.
@@ -1241,12 +1243,69 @@ def test_capture_without_access_gate_refuses_and_leaves_file_in_place(
 def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_file_and_catalog_row(
     env_setup,
 ) -> None:
-    """C11: a conflicting team key created mid-write triggers the second guard call and keeps the file."""
+    """C11 + C15: a conflicting team key created mid-write routes through collect_credential's
+    post_write_conflict cleanup: brand-new Sealbox writes are rolled back, while an existing
+    captured key reports partial_store_write and notes that the stored value may have changed."""
 
     layout, sealbox, _store, gate = env_setup
     alice_scope = CredentialOwnerScope.user(PERSON_ID)
     team_scope = CredentialOwnerScope.team(TEST_TEAM)
 
+    def _team_cred(item_id: str) -> CatalogCredential:
+        return CatalogCredential(
+            display_name="Team Key Added Mid-Write",
+            purpose="Concurrent team key",
+            fields={
+                "secret": CatalogCredentialField(
+                    kind="token",
+                    visibility="secret",
+                    value_source="user_input",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id=item_id, field_ref="value")
+                    ],
+                )
+            },
+        )
+
+    # 1. Brand-new key refused at second guard call: Sealbox record must be rolled back (deleted).
+    new_src = layout.person_dir(PERSON_ID) / "scratch" / "guard_new.txt"
+    new_src.write_text("brand-new-secret", encoding="utf-8")
+    injected_new = {"done": False, "written_key": ""}
+
+    def inject_team_key_for_new(_cmd: list[str], key: str, _val: str | None) -> None:
+        if injected_new["done"]:
+            return
+        injected_new["done"] = True
+        injected_new["written_key"] = key
+        credential_catalog._save_catalog_credential(
+            "guard_new_race_key", _team_cred("team-guard-new:secret"), scope=team_scope
+        )
+
+    sealbox.on_set_hook = inject_team_key_for_new
+    new_refused = capture_file_credential(
+        _valid_params(
+            path="scratch/guard_new.txt",
+            credential_key="guard_new_race_key",
+            expires_at=format_utc_timestamp(BASE_NOW + timedelta(days=30)),
+            now=BASE_NOW,
+        ),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    sealbox.on_set_hook = None
+    assert injected_new["done"] is True
+    assert new_refused.status == "error"
+    assert new_refused.content["error_code"] == CAPTURE_TEAM_KEY_REFUSED
+    assert new_refused.content["source_file_deleted"] is False
+    assert not new_refused.content.get("partial_store_write")
+    assert new_src.exists()
+    assert "guard_new_race_key" not in load_catalog(scope=alice_scope).credentials
+    # The newly written Sealbox record was rolled back and deleted.
+    assert injected_new["written_key"] not in sealbox.secrets
+
+    # 2. Existing captured key refused at second guard call: existing Sealbox key cannot be deleted
+    # without destroying prior versions, so partial_store_write=True and error text warns clearly.
     first_src = layout.person_dir(PERSON_ID) / "scratch" / "guard_first.txt"
     first_src.write_text("initial-secret", encoding="utf-8")
     first_expiry = format_utc_timestamp(BASE_NOW + timedelta(hours=1))
@@ -1272,21 +1331,9 @@ def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_fi
         if injected["done"]:
             return
         injected["done"] = True
-        team_cred = CatalogCredential(
-            display_name="Team Key Added Mid-Write",
-            purpose="Concurrent team key",
-            fields={
-                "secret": CatalogCredentialField(
-                    kind="token",
-                    visibility="secret",
-                    value_source="user_input",
-                    resolution_order=[
-                        CatalogSourceRef(source="sealbox", item_id="team-guard:secret", field_ref="value")
-                    ],
-                )
-            },
+        credential_catalog._save_catalog_credential(
+            "guard_race_key", _team_cred("team-guard:secret"), scope=team_scope
         )
-        credential_catalog._save_catalog_credential("guard_race_key", team_cred, scope=team_scope)
 
     sealbox.on_set_hook = inject_team_key_during_write
     second = capture_file_credential(
@@ -1300,13 +1347,76 @@ def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_fi
         access_gate=gate,
         now=BASE_NOW,
     )
+    sealbox.on_set_hook = None
     assert injected["done"] is True
     assert second.status == "error"
     assert second.content["error_code"] == CAPTURE_TEAM_KEY_REFUSED
     assert second.content["source_file_deleted"] is False
+    assert second.content.get("partial_store_write") is True
+    assert "stored value may have changed" in (second.error or "").lower()
     assert second_src.exists()
     # The person's catalog row kept its original 1-hour expiry.
     assert load_catalog(scope=alice_scope).credentials["guard_race_key"].expires_at == first_expiry
+
+
+def test_capture_file_never_passes_allow_drop_stored_records_when_layout_differs(
+    env_setup,
+) -> None:
+    """Lead ruling (PR #199 merge): capture_file must not pass allow_drop_stored_records=True,
+    so even an agent-captured key whose stored Sealbox record key differs from the new planned
+    record key is refused with credential_replacement_form_only before any Sealbox write."""
+
+    layout, sealbox, _store, gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    legacy_item_key = "legacy-captured-layout:secret"
+    sealbox.secrets[legacy_item_key] = "legacy-value"
+    existing_captured = CatalogCredential(
+        display_name="Legacy Captured Layout",
+        purpose="Captured under an earlier Sealbox item key",
+        expires_at=format_utc_timestamp(BASE_NOW + timedelta(hours=2)),
+        approval={
+            "status": "captured",
+            "source": CAPTURE_APPROVAL_SOURCE,
+            "captured_by_agent_type": TEST_AGENT_TYPE,
+            "captured_for_person_id": PERSON_ID,
+            "captured_at": format_utc_timestamp(BASE_NOW - timedelta(minutes=10)),
+        },
+        fields={
+            "secret": CatalogCredentialField(
+                kind="credential_file",
+                visibility="secret",
+                value_source=CAPTURE_APPROVAL_SOURCE,
+                resolution_order=[
+                    CatalogSourceRef(source="sealbox", item_id=legacy_item_key, field_ref="value")
+                ],
+            )
+        },
+    )
+    credential_catalog._save_catalog_credential("layout_diff_key", existing_captured, scope=alice_scope)
+
+    src = layout.person_dir(PERSON_ID) / "scratch" / "layout_diff.txt"
+    src.write_text("new-secret-value", encoding="utf-8")
+    commands_before = len(sealbox.commands)
+
+    res = capture_file_credential(
+        _valid_params(
+            path="scratch/layout_diff.txt",
+            credential_key="layout_diff_key",
+            field_name="secret",
+            expires_at=format_utc_timestamp(BASE_NOW + timedelta(hours=4)),
+            now=BASE_NOW,
+        ),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert res.status == "error"
+    assert res.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert res.content["source_file_deleted"] is False
+    assert src.exists()
+    # Refused pre-write: no Sealbox write or delete occurred and existing record is untouched.
+    assert len(sealbox.commands) == commands_before
+    assert sealbox.secrets[legacy_item_key] == "legacy-value"
 
 
 def test_operability_messages_folder_check_runtime_error_and_notice_status(

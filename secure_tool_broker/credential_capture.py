@@ -673,6 +673,11 @@ def _store_captured_secret(
     content = dict(result.content or {})
     content["source_file_deleted"] = False
     error_text = str(result.error or "Failed to store captured credential.").strip()
+    if content.get("partial_store_write") and "stored value may have changed" not in error_text.lower():
+        error_text = (
+            f"{error_text} Note: Sealbox was written before the conflict was detected, so the "
+            "stored value may have changed even though the catalog entry was not updated."
+        )
     if _FILE_LEFT_IN_PLACE_NOTE not in error_text:
         error_text = f"{error_text} {_FILE_LEFT_IN_PLACE_NOTE}"
     return ToolResult(status="error", error=error_text, content=content)
