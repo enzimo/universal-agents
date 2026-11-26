@@ -34,7 +34,7 @@ Read from the agent's saved work (``RuntimeSnapshotV3``):
   paused turn was live, and the answer waits in memory for the task's lane,
   which can be busy with another turn or paused (``execution_lanes_runtime``).
   The run's record stays, marked with the agent process that holds the answer
-  (``mark_setup_answer_held``), until the turn resumes. The runtime keeps a
+  (``mark_answer_held``), until the turn resumes. The runtime keeps a
   mark only while a paused turn of that process waits for the answer
   (``task_human_interaction_blockers``); agent start removes every mark. A
   mark also counts only when that process owns the saved work, so one left
@@ -101,7 +101,7 @@ from custom_agents.task_steering_runtime import (
     INTERRUPT_REQUEST_EVENT,
     INTERRUPT_WAITS_ON_REQUESTER_KEY,
 )
-from custom_agents.task_human_interaction_blockers import is_setup_run_blocker, setup_answer_held
+from custom_agents.task_human_interaction_blockers import answer_held, is_setup_run_blocker
 from custom_agents.tool_setup_runs import ToolSetupRunV1, still_waits
 from custom_messages.contracts.runtime_snapshot_v3 import (
     BATCH_WAITING_EXTERNAL_RESULT,
@@ -204,7 +204,7 @@ class SavedWork:
         blockers = snapshot.human_interaction_blockers
         setup_records = {task_id: blocker for task_id, blocker in blockers.items() if is_setup_run_blocker(blocker)}
         held = frozenset(
-            task_id for task_id, blocker in setup_records.items() if setup_answer_held(blocker, owner_agent_id)
+            task_id for task_id, blocker in setup_records.items() if answer_held(blocker, owner_agent_id)
         )
 
         def is_open(task_id: str) -> bool:

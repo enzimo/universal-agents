@@ -26,7 +26,7 @@ from custom_agents.task_human_interaction_blockers import (
     clear_answered_blocker,
     get_human_interaction_blocker,
     record_human_interaction_blocker,
-    setup_answer_held,
+    answer_held,
 )
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_steering_runtime import resume_interrupted_task_turn
@@ -149,7 +149,7 @@ async def test_a_run_ending_with_a_live_turn_marks_the_record_and_holds_the_answ
     await tool_setup_run_runtime.advance(lead, "run-1")
 
     record = record_of(lead)
-    assert record["run_id"] == "run-1" and setup_answer_held(record, AGENT_ID)
+    assert record["run_id"] == "run-1" and answer_held(record, AGENT_ID)
     [held] = lead._pending_interrupt_responses[TASK].interrupt_responses
     assert held == {"interrupt_id": "i1", "response": {"kind": TOOL_SETUP_RUN_RESPONSE_KIND, "run_id": "run-1"}}
     assert woken == [lead]
@@ -199,7 +199,7 @@ async def test_a_new_pause_in_the_resumed_turn_keeps_its_own_record(lead, woken,
 
     assert seen == [None]
     record = record_of(lead)
-    assert record["run_id"] == "run-2" and not setup_answer_held(record)
+    assert record["run_id"] == "run-2" and not answer_held(record)
 
 
 ACCESS_RECORD = {"kind": ACCESS_REQUEST_BLOCKER, "access_request_id": "req-1", "access_request_ids": ["req-1"], "interrupt_id": "i1"}
@@ -248,7 +248,7 @@ async def test_a_run_seen_ending_twice_at_once_answers_the_paused_turn_once(lead
 
     assert sorted(results) == [False, True]
     assert woken == [lead]
-    assert setup_answer_held(record_of(lead), AGENT_ID)
+    assert answer_held(record_of(lead), AGENT_ID)
 
 
 @pytest.mark.asyncio
@@ -411,7 +411,7 @@ async def test_a_failure_while_resuming_from_a_note_leaves_the_record_for_recove
     # The record stays for recovery, without its mark: no paused turn waits for
     # the answer any more (review F1/F3), so the stuck check may report the task.
     record = record_of(lead)
-    assert record["run_id"] == "run-1" and not setup_answer_held(record)
+    assert record["run_id"] == "run-1" and not answer_held(record)
     assert not lead.task_manager.task_state.task_queue
     assert "event=tool_setup_answer_not_taken_failed" in caplog.text and "error_type=RuntimeError" in caplog.text
 
@@ -450,7 +450,7 @@ async def test_a_pass_answers_a_live_turn_whose_run_ended_without_resuming_it(le
     with caplog.at_level(logging.WARNING):
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
 
-    assert setup_answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
+    assert answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
     assert woken == [lead]
     assert "event=tool_setup_run_recovered" in caplog.text and "why=not_resumed" in caplog.text
 
@@ -505,7 +505,7 @@ async def test_a_pass_leaves_an_answer_held_for_a_busy_lane_alone(lead, woken) -
 
     assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
 
-    assert setup_answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
+    assert answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
     assert not woken and not lead.task_manager.task_state.task_queue
 
 
@@ -518,7 +518,7 @@ async def test_a_pass_finishes_a_run_whose_advance_was_lost(lead, woken, caplog)
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
 
     assert run_repository(lead).get("run-1").status == RUN_FINISHED
-    assert setup_answer_held(record_of(lead), AGENT_ID) and woken == [lead]
+    assert answer_held(record_of(lead), AGENT_ID) and woken == [lead]
     assert "event=tool_setup_run_advanced_on_recovery" in caplog.text
 
 
@@ -600,15 +600,15 @@ async def test_a_stop_between_saving_the_note_and_removing_the_record_resumes_on
     pause_on_setup(lead)
     ended(lead)
     lead._interrupted_turn_sessions.clear()
-    original = tool_setup_run_runtime.clear_setup_run_blocker
+    original = tool_setup_run_runtime.clear_wait_record
     failures = [RuntimeError("the agent stopped")]
 
-    def stops_once(host, task_id, run_id):
+    def stops_once(host, task_id, kind, wait_id):
         if failures:
             raise failures.pop()
-        return original(host, task_id, run_id)
+        return original(host, task_id, kind, wait_id)
 
-    monkeypatch.setattr(tool_setup_run_runtime, "clear_setup_run_blocker", stops_once)
+    monkeypatch.setattr(tool_setup_run_runtime, "clear_wait_record", stops_once)
 
     with caplog.at_level(logging.WARNING):
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
@@ -751,7 +751,7 @@ async def test_a_failed_save_of_the_mark_leaves_the_record_unmarked_for_recovery
     assert TASK not in lead._pending_interrupt_responses and not woken
     # The next pass answers the paused turn, once.
     assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 1
-    assert setup_answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
+    assert answer_held(record_of(lead), AGENT_ID) and TASK in lead._pending_interrupt_responses
     assert woken == [lead]
     assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 0
 
@@ -768,15 +768,15 @@ async def test_a_failure_after_the_record_is_removed_puts_it_back_and_the_next_p
     manager = lead.task_manager
     failures = [RuntimeError("database is locked")]
     if step == "the removal's save":
-        original = tool_setup_run_runtime.clear_setup_run_blocker
+        original = tool_setup_run_runtime.clear_wait_record
 
-        def removal(host, task_id, run_id):
+        def removal(host, task_id, kind, wait_id):
             if failures:
                 persist_fails_once(monkeypatch, host)
                 failures.pop()
-            return original(host, task_id, run_id)
+            return original(host, task_id, kind, wait_id)
 
-        monkeypatch.setattr(tool_setup_run_runtime, "clear_setup_run_blocker", removal)
+        monkeypatch.setattr(tool_setup_run_runtime, "clear_wait_record", removal)
     elif step == "the history save":
         original_history = tool_setup_run_runtime._history
 
@@ -825,7 +825,7 @@ async def test_a_dropped_turn_takes_the_mark_with_it_even_when_the_resume_then_f
     assert await resume_interrupted_task_turn(lead, TASK) is None
 
     record = record_of(lead)
-    assert record["run_id"] == "run-1" and not setup_answer_held(record)
+    assert record["run_id"] == "run-1" and not answer_held(record)
 
 
 @pytest.mark.asyncio
@@ -844,7 +844,7 @@ async def test_start_recovery_removes_every_mark_even_when_it_cannot_resume_the_
     with caplog.at_level(logging.INFO):
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS, at_start=True) == 0
 
-    assert not setup_answer_held(record_of(lead)), "the stuck check can report it if recovery keeps failing"
+    assert not answer_held(record_of(lead)), "the stuck check can report it if recovery keeps failing"
     assert "event=tool_setup_answer_marks_cleared" in caplog.text
 
 

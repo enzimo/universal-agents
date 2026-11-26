@@ -46,7 +46,7 @@ code:
   saved record of it, so it stays until the wait really ends. A live turn's
   answer waits in memory until the task's lane is free and the agent is not
   paused (``execution_lanes_runtime``), so the record is first marked as
-  holding the answer (``mark_setup_answer_held``), and the resumed turn
+  holding the answer (``mark_answer_held``), and the resumed turn
   removes it just before it runs (``task_steering_runtime``). Until
   2026-11-19 the record was deleted when the run ended, and a task whose
   answer waited for a busy lane was reported as stuck. A note is saved
@@ -91,15 +91,16 @@ from typing import Any
 from custom_agents.access_workflow_setup_hooks import link_setup_request, record_setup_result
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_human_interaction_blockers import (
-    clear_setup_answer_marks,
-    clear_setup_run_blocker,
+    SETUP_RUN_BLOCKER,
+    answer_held,
+    clear_answer_marks,
+    clear_wait_record,
     get_human_interaction_blocker,
     is_setup_run_blocker,
-    mark_setup_answer_held,
+    mark_answer_held,
     record_human_interaction_blocker,
-    remove_setup_answer_mark,
-    restore_setup_run_blocker,
-    setup_answer_held,
+    remove_answer_mark,
+    restore_wait_record,
 )
 from custom_agents.tool_setup_runs import (
     ACCESS_APPROVED_CODE,
@@ -665,7 +666,7 @@ async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any, *, wa
             logger.info("No task waits on this setup run. event=tool_setup_run_not_waited run_id=%s", run.run_id)
             return False
         if _paused_turn_waits(agent, run):
-            if setup_answer_held(blocker):
+            if answer_held(blocker):
                 return False  # answered already: the answer waits for the lane, or the lane is resuming it
             return await _answer_paused_turn(agent, run)
         result = await asyncio.to_thread(outcome_for, agent, run)
@@ -693,7 +694,12 @@ async def _answer_paused_turn(agent: Any, run: ToolSetupRunV1) -> bool:
 
     manager = agent.task_manager
     marked = await manager.operations_runtime.run(
-        partial(mark_setup_answer_held, manager), run.task_id, run.run_id, holder_id=str(agent.id), at=_now()
+        partial(mark_answer_held, manager),
+        run.task_id,
+        SETUP_RUN_BLOCKER,
+        run.run_id,
+        holder_id=str(agent.id),
+        at=_now(),
     )
     if not marked:
         return False
@@ -791,7 +797,9 @@ async def resume_without_paused_turn(agent: Any, task_id: str, steering: TaskSte
     try:
         # No paused turn waits for the answer any more, so the record must not
         # claim one is held: if the resume below fails, the task can be reported.
-        await manager.operations_runtime.run(partial(remove_setup_answer_mark, manager), task_id, run_id)
+        await manager.operations_runtime.run(
+            partial(remove_answer_mark, manager), task_id, SETUP_RUN_BLOCKER, run_id
+        )
         run = await _load(agent, run_id)
         if run is None or run.task_id != task_id:
             return await _resume_missing_run(agent, task_id, run_id)
@@ -855,12 +863,12 @@ async def _resume_from_note(
 
     manager = agent.task_manager
     run_ops = manager.operations_runtime.run
-    record = await run_ops(partial(remove_setup_answer_mark, manager), task_id, run_id)
+    record = await run_ops(partial(remove_answer_mark, manager), task_id, SETUP_RUN_BLOCKER, run_id)
     if record is None:
         return False  # read under the lock; only the task ending removes it meanwhile
     await run_ops(manager.append_runtime_resume_directive, task_id, note)
     try:
-        if not await run_ops(partial(clear_setup_run_blocker, manager), task_id, run_id):
+        if not await run_ops(partial(clear_wait_record, manager), task_id, SETUP_RUN_BLOCKER, run_id):
             return False
         await _history(agent, task_id, history, {"event": event, "run_id": run_id})
         await run_ops(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, _now())
@@ -878,7 +886,7 @@ async def _put_record_back(agent: Any, task_id: str, record: dict[str, Any]) -> 
 
     manager = agent.task_manager
     try:
-        restored = await manager.operations_runtime.run(partial(restore_setup_run_blocker, manager), task_id, record)
+        restored = await manager.operations_runtime.run(partial(restore_wait_record, manager), task_id, record)
     except Exception as exc:  # noqa: BLE001 - the record is back in memory; the next save writes it
         logger.warning(
             "Could not save the setup-run record put back after a failed resume. "
@@ -932,7 +940,7 @@ def _recovery_step(agent: Any, blocker: dict[str, Any], run: ToolSetupRunV1) -> 
 
     if run.status == RUN_WAITING:
         return None if still_waits(run) else RECOVER_ADVANCE
-    if setup_answer_held(blocker) and _paused_turn_waits(agent, run):
+    if answer_held(blocker) and _paused_turn_waits(agent, run):
         return None  # the answer waits for the task's lane
     return RECOVER_RESUME
 
@@ -964,7 +972,7 @@ async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, at_st
         # removing them also covers an agent whose id is fixed in its
         # configuration, whose old marks would otherwise still name it.
         cleared = await agent.task_manager.operations_runtime.run(
-            partial(clear_setup_answer_marks, agent.task_manager)
+            partial(clear_answer_marks, agent.task_manager)
         )
         if cleared:
             logger.info(
@@ -1029,7 +1037,7 @@ async def _recover_task(agent: Any, task_id: str, blocker: dict[str, Any], *, at
             run_id,
             task_id,
             run.status,
-            "answer_mark_stale" if setup_answer_held(blocker) else "not_resumed",
+            "answer_mark_stale" if answer_held(blocker) else "not_resumed",
         )
     return int(resumed)
 
