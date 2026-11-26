@@ -212,9 +212,18 @@ async def _start_first_agent_process(tmp_path: Path, args: dict[str, str], env: 
     finally:
         log_handle.close()
     assert process.stdout is not None
+    # The caller holds the process only once this returns, so any other way out
+    # (timeout, early exit, a bad READY line, cancellation) kills and reaps it here;
+    # the child never exits by itself.
     try:
         while True:
-            line = await asyncio.wait_for(process.stdout.readline(), timeout=60.0)
+            try:
+                line = await asyncio.wait_for(process.stdout.readline(), timeout=60.0)
+            except asyncio.TimeoutError:
+                pytest.fail(
+                    "First agent process did not report a WAITING task within 60s:\n"
+                    + log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+                )
             if not line:
                 await process.wait()
                 pytest.fail(
@@ -224,12 +233,9 @@ async def _start_first_agent_process(tmp_path: Path, args: dict[str, str], env: 
             text = line.decode("utf-8", errors="replace").strip()
             if text.startswith("READY "):
                 return process, str(json.loads(text[len("READY "):])["process_identity"])
-    except asyncio.TimeoutError:
-        await _sigkill_process(process)
-        pytest.fail(
-            "First agent process did not report a WAITING task within 60s:\n"
-            + log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-        )
+    except BaseException:
+        await asyncio.shield(_sigkill_process(process))
+        raise
 
 
 async def _sigkill_process(process: Any) -> None:
