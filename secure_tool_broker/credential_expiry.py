@@ -54,6 +54,7 @@ EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
 CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE = "credential_expiry_unsupported_source"
 CREDENTIAL_EXPIRY_FORM_ONLY = "credential_expiry_form_only"
 CREDENTIAL_REPLACEMENT_FORM_ONLY = "credential_replacement_form_only"
+CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED = "credential_sealbox_key_not_allowed"
 CREDENTIAL_EXPIRY_SHARED_RECORD = "credential_expiry_shared_record"
 CREDENTIAL_EXPIRY_REQUIRED = "credential_expiry_required"
 CREDENTIAL_DROPPED_CLEANUP_PENDING = "credential_dropped_cleanup_pending"
@@ -405,6 +406,7 @@ __all__ = [
     "CREDENTIAL_EXPIRY_TOO_SOON",
     "CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE",
     "CREDENTIAL_REPLACEMENT_FORM_ONLY",
+    "CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED",
     "CUSTOM_EXPIRY_OPTION",
     "CredentialExpiryError",
     "EXPIRY_PRESET_OPTIONS",

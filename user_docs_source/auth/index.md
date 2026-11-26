@@ -146,13 +146,20 @@ Sealbox credential store through `credential.capture_file`:
 - An agent can only capture into your own personal credential store, never the
   team's, and `credential.capture_file` refuses to overwrite a credential you
   entered yourself, an external-source credential, or a team credential.
-  Agent-callable `credential.collect` also refuses secret values from agents
-  and requires any update to an existing key to keep the exact same field
-  names, secret/non-secret status, and stored record references (allowing only
-  store-native rotation of existing secret fields and updates to existing
-  non-secret metadata; only your secure forms, account-link forms,
-  `credential.capture_file`, and store-native secret generation can store a
-  secret), and every agent write records agent provenance rather than your
+  Agent-callable `credential.collect` and `credential.register_existing_source`
+  also enforce the same rule over existing keys: no field may be added,
+  removed, or changed between secret and metadata, only existing non-secret
+  metadata values may change, and every existing secret field either stays
+  untouched (agents may omit it from the request, or in
+  `credential.register_existing_source` repeat its exact existing source
+  reference) or, in `credential.collect` only, rotates to a store-generated
+  value on its existing stored record. Agent-callable saves refuse
+  agent-submitted secret values, refuse agent-chosen Sealbox record names
+  (`item_id` and `sealbox_key` on `credential.collect`, `sealbox_key` on
+  `credential.register_existing_source`), and refuse any Sealbox record already
+  referenced by another saved credential (only your secure forms, account-link
+  forms, `credential.capture_file`, and store-native secret generation can
+  store a secret). Every agent write records agent provenance rather than your
   approval.
 - You receive one Inbox notice naming the agent type, credential display name,
   and deletion time (with no secret value). Operators can turn off capture

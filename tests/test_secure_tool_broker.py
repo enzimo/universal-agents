@@ -2080,7 +2080,7 @@ def test_github_login_with_credential_fetches_secret_without_returning_it(
     assert "ghp_secret_token" not in json.dumps(result.content)
 
 
-def test_register_existing_source_rebinds_bitwarden_item(
+def test_register_existing_source_registers_new_bitwarden_and_refuses_rebinding_existing_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2090,6 +2090,7 @@ def test_register_existing_source_rebinds_bitwarden_item(
         resolve_secret_field,
     )
     from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_expiry import CREDENTIAL_REPLACEMENT_FORM_ONLY
 
     owner = CredentialOwnerScope.user("person-1")
 
@@ -2124,6 +2125,9 @@ def test_register_existing_source_rebinds_bitwarden_item(
         },
         scope=owner,
     )
+    # Changing an existing key's stored secret source reference through
+    # register_existing_source is refused; replacing a credential requires the
+    # secure broker form.
     rebound = register_existing_source(
         {
             "credential_key": "home_assistant_token",
@@ -2135,20 +2139,45 @@ def test_register_existing_source_rebinds_bitwarden_item(
         },
         scope=owner,
     )
+    # First registration of a new key against Bitwarden still works.
+    fresh_bitwarden = register_existing_source(
+        {
+            "credential_key": "home_assistant_bitwarden",
+            "field_name": "token",
+            "kind": "token",
+            "source": "bitwarden",
+            "item_name": "team-nats-agents :: default :: home_assistant_token",
+            "field_ref": "password",
+        },
+        scope=owner,
+    )
     catalog = load_catalog(scope=owner)
-    source_ref = (
+    existing_ref = (
         catalog.credentials["home_assistant_token"].fields["token"].resolution_order[0]
     )
-    resolved = resolve_secret_field("home_assistant_token", "token", scope=owner)
+    fresh_ref = (
+        catalog.credentials["home_assistant_bitwarden"]
+        .fields["token"]
+        .resolution_order[0]
+    )
+    resolved_existing = resolve_secret_field("home_assistant_token", "token", scope=owner)
+    resolved_fresh = resolve_secret_field("home_assistant_bitwarden", "token", scope=owner)
 
     assert initial.status == "success"
-    assert rebound.status == "success"
-    assert source_ref.source == "bitwarden"
-    assert source_ref.item_name == "team-nats-agents :: default :: home_assistant_token"
-    assert source_ref.field_ref == "password"
-    assert not isinstance(resolved, ToolResult)
-    assert resolved.value == "new-ha-token"
-    assert "new-ha-token" not in json.dumps(rebound.content)
+    assert rebound.status == "error"
+    assert rebound.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert existing_ref.source == "env"
+    assert existing_ref.env_var == "OLD_HA_TOKEN"
+    assert not isinstance(resolved_existing, ToolResult)
+    assert resolved_existing.value == "old-ha-token"
+
+    assert fresh_bitwarden.status == "success"
+    assert fresh_ref.source == "bitwarden"
+    assert fresh_ref.item_name == "team-nats-agents :: default :: home_assistant_token"
+    assert fresh_ref.field_ref == "password"
+    assert not isinstance(resolved_fresh, ToolResult)
+    assert resolved_fresh.value == "new-ha-token"
+    assert "new-ha-token" not in json.dumps(fresh_bitwarden.content)
 
 
 def test_register_existing_source_rejects_empty_field_registration(

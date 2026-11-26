@@ -3851,18 +3851,27 @@ or clear one, and non-Sealbox write sources refuse an expiry
     check runs only pre-write, and any exception after
     `write_credential_to_source` before catalog commit routes through
     `_rollback_new_sealbox_writes` so a failed re-capture leaves the prior
-    record's value and TTL untouched. Agent-callable `credential.collect`
-    likewise refuses secret values (`allow_submitted_secrets=False`) and, when
-    updating an existing key, requires the exact existing layout — identical
-    field names, identical secret/non-secret status per field, and identical
-    stored record references (refusing any layout change before writing with
-    `credential_replacement_form_only`); within that layout only store-native
-    secret generation (`store_generated_secret`) and updates to existing
-    non-secret metadata fields are allowed. Every agent write
-    (`credential.capture_file`, `credential.collect`,
-    `credential.register_existing_source`) records agent provenance (agent
-    type, person) rather than person approval, never rewriting a captured row
-    as person-approved.
+    record's value and TTL untouched. Both agent-callable catalog saves
+    (`credential.collect` and `credential.register_existing_source`) enforce
+    the same existing-key layout rule: over an existing key, field names and
+    secret/non-secret status per field must stay identical (no field added,
+    removed, or reclassified), only existing non-secret metadata values may
+    change, and every existing secret field either stays untouched (by omitting
+    it from the request or, in `credential.register_existing_source`, naming
+    its exact current stored source references) or, in `credential.collect`
+    only, rotates to a store-generated value (`store_generated_secret`) on its
+    existing stored record; any other change is refused before writing with
+    `credential_replacement_form_only`. `credential.collect` also refuses
+    secret values (`allow_submitted_secrets=False`) and agent-chosen Sealbox
+    record names (`item_id` and `sealbox_key`, refused with
+    `credential_sealbox_key_not_allowed`), `credential.register_existing_source`
+    refuses `sealbox_key` and secret-field inline values, and both actions
+    refuse any Sealbox record already referenced by another catalog key
+    (`temporary_only=False`), while first registration of a new key keeps
+    working. Every agent write (`credential.capture_file`,
+    `credential.collect`, `credential.register_existing_source`) records agent
+    provenance (agent type, person) rather than person approval, never
+    rewriting a captured row as person-approved.
   - *Post-commit source deletion, timeout safety, and Inbox notice*: the secret
     must not stay on disk in a workspace folder that agents and sandboxed code
     can read, and the person must know when an agent stores a credential for

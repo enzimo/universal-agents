@@ -196,11 +196,16 @@ def env_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sealbox = FakeSealbox()
     monkeypatch.setattr(credential_catalog, "sealbox_tenant_environment", lambda **_kwargs: {})
     monkeypatch.setattr(credential_catalog, "run_sealbox", sealbox.run)
-    # Also resolve through fake sealbox when reading via resolve_credential / transfer export.
+    # Also resolve through fake sealbox (and real env vars) when reading via resolve_credential / transfer export.
+    real_resolve_source_ref = credential_catalog._resolve_source_ref
     monkeypatch.setattr(
         credential_catalog,
         "_resolve_source_ref",
-        lambda ref, **_kwargs: sealbox.secrets.get(ref.item_id or "") if ref.source == "sealbox" else None,
+        lambda ref, **kwargs: (
+            sealbox.secrets.get(ref.item_id or "")
+            if ref.source == "sealbox"
+            else (real_resolve_source_ref(ref, **kwargs) if ref.source == "env" else None)
+        ),
     )
     credential_catalog._SECRET_CACHE.clear()
 
@@ -2380,10 +2385,13 @@ def test_f4_agent_collect_refuses_submitted_secrets_stamps_agent_provenance_and_
     assert gen_row.approval.get("for_person_id") == PERSON_ID
     assert gen_row.approval.get("approved_by") != "user"
 
-    # 5. Store-generated rotation over a captured row preserves expiry and stamps agent provenance
-    # (never rewrites as person-approved).
+    # 5. Passing item_id on agent credential.collect is refused (C27), while store-generated
+    # rotation over a captured row WITHOUT item_id writes to its existing Sealbox record,
+    # preserves expiry, and stamps agent provenance (never rewrites as person-approved).
+    from secure_tool_broker.credential_expiry import CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+
     cap_item_id = cap_rec.rsplit(":", 1)[0]
-    rotated_cap = execute_credential_catalog_action(
+    refused_with_item_id = execute_credential_catalog_action(
         ValidatedAction(
             provider="credential_catalog",
             action="credential.collect",
@@ -2402,9 +2410,31 @@ def test_f4_agent_collect_refuses_submitted_secrets_stamps_agent_provenance_and_
         ),
         ctx,
     )
+    assert refused_with_item_id.status == "error"
+    assert refused_with_item_id.content["error_code"] == CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+
+    rotated_cap = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "f4_captured_key",
+                    "display_name": "Rotated Captured",
+                    "purpose": "Rotate captured secret via store generation",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {"name": "secret", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"},
+                    ],
+                },
+            },
+        ),
+        ctx,
+    )
     assert rotated_cap.status == "success", rotated_cap.error
     rotated_cap_row = load_catalog(scope=alice_scope).credentials["f4_captured_key"]
     assert rotated_cap_row.expires_at == cap_expiry
+    assert rotated_cap_row.fields["secret"].resolution_order[0].item_id == cap_rec
     assert rotated_cap_row.approval.get("recorded_by") == "agent"
     assert rotated_cap_row.approval.get("approved_by") != "user"
 
@@ -3269,7 +3299,7 @@ def test_c19_agent_collect_requires_exact_layout_and_refuses_secret_as_metadata_
     assert added_field.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
     assert writes_seen == []
 
-    # 2b. Removed field (dropping api_token or dropping username) is refused before writing.
+    # 2b. Removed non-secret metadata field (dropping username) is refused before writing.
     removed_field = execute_credential_catalog_action(
         ValidatedAction(
             provider="credential_catalog",
@@ -3278,11 +3308,11 @@ def test_c19_agent_collect_requires_exact_layout_and_refuses_secret_as_metadata_
                 "request": {
                     "credential_key": "c19_multi_key",
                     "display_name": "Multi Field Service",
-                    "purpose": "Remove api_token",
+                    "purpose": "Remove username",
                     "store_target": "sealbox",
                     "fields": [
-                        {"name": "username", "kind": "username", "visibility": "metadata_visible", "value_source": "agent_supplied_metadata", "value": "alice-new"},
                         {"name": "password", "kind": "password", "visibility": "secret", "value_source": "store_generated_secret"},
+                        {"name": "api_token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"},
                     ],
                 },
             },
@@ -3631,5 +3661,766 @@ def test_c23_sealbox_record_locks_evict_idle_entries_and_preserve_concurrent_wai
     assert second_done.is_set()
     assert active["max_active"] == 1
     assert _SEALBOX_RECORD_LOCKS == {}
+
+
+def test_c25_register_existing_source_enforces_exact_layout_and_allows_new_key_and_metadata_only(
+    env_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C25 (lead ruling): credential.register_existing_source enforces the same existing-key
+    layout rule as credential.collect: critic's Runs 1, 2, and 3 (reclassifying secret as
+    metadata with a keep field on Sealbox, over an env-backed key, and re-pointing a field at
+    another credential's Sealbox record) are all refused pre-save with rows, approvals, and
+    Sealbox values unchanged; first registration of a new key and omitting existing secret
+    fields during a metadata update keep working."""
+
+    from secure_tool_broker.credential_catalog import execute_credential_catalog_action
+    from secure_tool_broker.credential_expiry import CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+    from secure_tools.providers import ValidatedAction
+
+    _layout, sealbox, _store, _gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    ctx = _person_context(agent_type="ResearchAgent")
+
+    # Seed person-entered Sealbox credentials: person_key, service_a, and bank.
+    for key_name, secret_val in (
+        ("c25_person_key", "PERSON-REAL-SECRET-1"),
+        ("c25_service_a", "SERVICE-A-SECRET"),
+        ("c25_bank", "BANK-VAULT-SECRET"),
+    ):
+        saved = collect_credential(
+            {
+                "credential_key": key_name,
+                "display_name": key_name,
+                "purpose": "Person form credential",
+                "store_target": "sealbox",
+                "fields": [
+                    {"name": "token", "kind": "token", "visibility": "secret", "value_source": "user_input"},
+                ],
+            },
+            {"token": secret_val},
+            scope=alice_scope,
+            allow_expiry_change=True,
+            allow_drop_stored_records=True,
+            now=BASE_NOW,
+        )
+        assert saved.status == "success", saved.error
+
+    person_rec = (
+        load_catalog(scope=alice_scope).credentials["c25_person_key"].fields["token"].resolution_order[0].item_id
+    )
+    service_a_rec = (
+        load_catalog(scope=alice_scope).credentials["c25_service_a"].fields["token"].resolution_order[0].item_id
+    )
+    bank_rec = (
+        load_catalog(scope=alice_scope).credentials["c25_bank"].fields["token"].resolution_order[0].item_id
+    )
+    assert person_rec and service_a_rec and bank_rec
+
+    # Critic Run 1a (wrapped request) & 1b (flat params): reclassify person's secret `token`
+    # as metadata_visible with ATTACKER-TOKEN + add `keep` pointing at person_rec.
+    run1_fields = [
+        {
+            "name": "token",
+            "kind": "custom",
+            "visibility": "metadata_visible",
+            "value": "ATTACKER-TOKEN",
+        },
+        {
+            "name": "keep",
+            "kind": "token",
+            "visibility": "secret",
+            "source_ref": {"source": "sealbox", "item_id": person_rec, "field_ref": "value"},
+        },
+    ]
+    for params in (
+        {"request": {"credential_key": "c25_person_key", "fields": run1_fields}},
+        {"credential_key": "c25_person_key", "fields": run1_fields},
+    ):
+        res = execute_credential_catalog_action(
+            ValidatedAction(
+                provider="credential_catalog",
+                action="credential.register_existing_source",
+                params=params,
+            ),
+            ctx,
+        )
+        assert res.status == "error"
+        assert res.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+        assert res.content["form_creation_action"] == "secure_credential_collection_request"
+        assert "ATTACKER-TOKEN" not in (res.error or "") + json.dumps(dict(res.content))
+    row_person = load_catalog(scope=alice_scope).credentials["c25_person_key"]
+    assert row_person.approval.get("approved_by") == "user"
+    assert set(row_person.fields) == {"token"}
+    assert row_person.fields["token"].is_secret() is True
+    assert sealbox.secrets[person_rec] == "PERSON-REAL-SECRET-1"
+    resolved_person = resolve_secret_field("c25_person_key", "token", scope=alice_scope)
+    assert not isinstance(resolved_person, ToolResult)
+    assert resolved_person.value == "PERSON-REAL-SECRET-1"
+    assert resolved_person.secret is True
+
+    # Critic Run 2: over a person's env-backed credential, reclassifying `token` as metadata
+    # with one field is refused and leaves row and approval unchanged.
+    monkeypatch.setenv("C25_PERSON_ENV_TOKEN", "ENV-REAL-SECRET")
+    credential_catalog._save_catalog_credential(
+        "c25_env_key",
+        CatalogCredential(
+            display_name="Env Key",
+            purpose="Env credential",
+            approval={"status": "approved", "approved_by": "user", "approved_at": format_utc_timestamp(BASE_NOW)},
+            fields={
+                "token": CatalogCredentialField(
+                    kind="token",
+                    visibility="secret",
+                    value_source="existing_source",
+                    resolution_order=[CatalogSourceRef(source="env", env_var="C25_PERSON_ENV_TOKEN")],
+                ),
+            },
+        ),
+        scope=alice_scope,
+    )
+    run2 = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "c25_env_key",
+                "fields": [
+                    {
+                        "name": "token",
+                        "kind": "custom",
+                        "visibility": "metadata_visible",
+                        "value": "ATTACKER-ENV-TOKEN",
+                    }
+                ],
+            },
+        ),
+        ctx,
+    )
+    assert run2.status == "error"
+    assert run2.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    row_env = load_catalog(scope=alice_scope).credentials["c25_env_key"]
+    assert row_env.approval.get("approved_by") == "user"
+    assert row_env.fields["token"].is_secret() is True
+    assert row_env.fields["token"].resolution_order[0].env_var == "C25_PERSON_ENV_TOKEN"
+
+    # Critic Run 3: re-pointing service_a's token at bank's Sealbox record (both with and
+    # without a keep field) is refused; service_a and bank rows, approvals, and values stay intact.
+    for fields in (
+        [
+            {
+                "name": "token",
+                "kind": "token",
+                "visibility": "secret",
+                "source_ref": {"source": "sealbox", "item_id": bank_rec, "field_ref": "value"},
+            },
+            {
+                "name": "keep",
+                "kind": "token",
+                "visibility": "secret",
+                "source_ref": {"source": "sealbox", "item_id": service_a_rec, "field_ref": "value"},
+            },
+        ],
+        [
+            {
+                "name": "token",
+                "kind": "token",
+                "visibility": "secret",
+                "source_ref": {"source": "sealbox", "item_id": bank_rec, "field_ref": "value"},
+            },
+        ],
+    ):
+        run3 = execute_credential_catalog_action(
+            ValidatedAction(
+                provider="credential_catalog",
+                action="credential.register_existing_source",
+                params={"credential_key": "c25_service_a", "fields": fields},
+            ),
+            ctx,
+        )
+        assert run3.status == "error"
+        assert run3.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    row_a = load_catalog(scope=alice_scope).credentials["c25_service_a"]
+    assert row_a.approval.get("approved_by") == "user"
+    assert row_a.fields["token"].resolution_order[0].item_id == service_a_rec
+    assert sealbox.secrets[service_a_rec] == "SERVICE-A-SECRET"
+    assert sealbox.secrets[bank_rec] == "BANK-VAULT-SECRET"
+
+    # Inline value on a secret field and sealbox_key are also refused.
+    secret_val_refused = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "c25_new_bad",
+                "fields": [
+                    {
+                        "name": "token",
+                        "kind": "token",
+                        "visibility": "secret",
+                        "env_var": "C25_PERSON_ENV_TOKEN",
+                        "value": "SMUGGLED-SECRET",
+                    }
+                ],
+            },
+        ),
+        ctx,
+    )
+    assert secret_val_refused.status == "error"
+    assert secret_val_refused.content["error_code"] == "secret_value_in_request_rejected"
+
+    sb_key_refused = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "c25_new_bad2",
+                "sealbox_key": "attacker-chosen",
+                "field_name": "token",
+                "env_var": "C25_PERSON_ENV_TOKEN",
+            },
+        ),
+        ctx,
+    )
+    assert sb_key_refused.status == "error"
+    assert sb_key_refused.content["error_code"] == CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+
+    # First registration of a new key (env AND uncataloged Sealbox record) keeps working.
+    new_env = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "c25_first_env",
+                "field_name": "token",
+                "env_var": "C25_PERSON_ENV_TOKEN",
+            },
+        ),
+        ctx,
+    )
+    assert new_env.status == "success", new_env.error
+    assert load_catalog(scope=alice_scope).credentials["c25_first_env"].approval.get("recorded_by") == "agent"
+
+    sealbox.secrets["c25-uncataloged:token"] = "UNCATALOGED-SECRET"
+    new_sb = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "c25_first_sealbox",
+                "field_name": "token",
+                "source": "sealbox",
+                "item_id": "c25-uncataloged:token",
+                "field_ref": "value",
+            },
+        ),
+        ctx,
+    )
+    assert new_sb.status == "success", new_sb.error
+    resolved_sb = resolve_secret_field("c25_first_sealbox", "token", scope=alice_scope)
+    assert not isinstance(resolved_sb, ToolResult)
+    assert resolved_sb.value == "UNCATALOGED-SECRET"
+
+    # Metadata update over an existing key via register_existing_source omitting the secret field
+    # updates metadata and keeps the secret field untouched.
+    meta_seed = collect_credential(
+        {
+            "credential_key": "c25_meta_and_secret",
+            "display_name": "Service Login",
+            "purpose": "Seed login",
+            "store_target": "sealbox",
+            "fields": [
+                {"name": "username", "kind": "username", "visibility": "metadata_visible", "value_source": "user_input"},
+                {"name": "password", "kind": "password", "visibility": "secret", "value_source": "user_input"},
+            ],
+        },
+        {"username": "old-user", "password": "KEEP-THIS-PASSWORD"},
+        scope=alice_scope,
+        allow_expiry_change=True,
+        allow_drop_stored_records=True,
+        now=BASE_NOW,
+    )
+    assert meta_seed.status == "success", meta_seed.error
+    reg_meta_only = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "c25_meta_and_secret",
+                "fields": [
+                    {"name": "username", "kind": "username", "visibility": "metadata_visible", "value": "new-user"},
+                ],
+            },
+        ),
+        ctx,
+    )
+    assert reg_meta_only.status == "success", reg_meta_only.error
+    updated_row = load_catalog(scope=alice_scope).credentials["c25_meta_and_secret"]
+    assert updated_row.fields["username"].value == "new-user"
+    resolved_pw = resolve_secret_field("c25_meta_and_secret", "password", scope=alice_scope)
+    assert not isinstance(resolved_pw, ToolResult)
+    assert resolved_pw.value == "KEEP-THIS-PASSWORD"
+
+
+def test_c26_agent_metadata_update_keeps_omitted_secret_untouched_while_rotation_and_form_rules_hold(
+    env_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C26 (lead ruling): agent-callable credential.collect may omit existing secret fields
+    to update existing non-secret metadata without touching Sealbox or replacing the person's
+    secrets; optional blank secret fields and adding fields (even on an agent-created key) are
+    refused with clear guidance; partial and full store-generated rotation still work."""
+
+    from secure_tool_broker.credential_catalog import execute_credential_catalog_action
+    from secure_tools.providers import ValidatedAction
+
+    _layout, sealbox, _store, _gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    ctx = _person_context(agent_type="ResearchAgent")
+
+    # Seed person-entered credential with username + password + api_token.
+    saved = collect_credential(
+        {
+            "credential_key": "c26_login",
+            "display_name": "Service Login",
+            "purpose": "Person login",
+            "store_target": "sealbox",
+            "fields": [
+                {"name": "username", "kind": "username", "visibility": "metadata_visible", "value_source": "user_input"},
+                {"name": "password", "kind": "password", "visibility": "secret", "value_source": "user_input"},
+                {"name": "api_token", "kind": "token", "visibility": "secret", "value_source": "user_input"},
+            ],
+        },
+        {"username": "alice-old", "password": "PERSON-PW-ORIGINAL", "api_token": "PERSON-TOKEN-ORIGINAL"},
+        scope=alice_scope,
+        allow_expiry_change=True,
+        allow_drop_stored_records=True,
+        now=BASE_NOW,
+    )
+    assert saved.status == "success", saved.error
+    before_row = load_catalog(scope=alice_scope).credentials["c26_login"]
+    pw_rec = before_row.fields["password"].resolution_order[0].item_id
+    tok_rec = before_row.fields["api_token"].resolution_order[0].item_id
+    assert pw_rec and tok_rec
+
+    writes_seen: list[str] = []
+    sealbox.on_set_hook = lambda _cmd, key, _val: writes_seen.append(key)
+
+    # 1. Updating username ONLY (omitting both password and api_token) succeeds with ZERO
+    # Sealbox writes and leaves both secrets completely untouched.
+    meta_only = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "c26_login",
+                    "display_name": "Service Login",
+                    "purpose": "Correct username only",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {
+                            "name": "username",
+                            "kind": "username",
+                            "visibility": "metadata_visible",
+                            "value_source": "agent_supplied_metadata",
+                            "value": "alice-corrected",
+                        }
+                    ],
+                }
+            },
+        ),
+        ctx,
+    )
+    assert meta_only.status == "success", meta_only.error
+    assert writes_seen == []
+    assert meta_only.content["stored_secret_fields"] == []
+    after_meta = load_catalog(scope=alice_scope).credentials["c26_login"]
+    assert after_meta.fields["username"].value == "alice-corrected"
+    assert after_meta.fields["password"].resolution_order == before_row.fields["password"].resolution_order
+    assert after_meta.fields["api_token"].resolution_order == before_row.fields["api_token"].resolution_order
+    resolved_pw = resolve_secret_field("c26_login", "password", scope=alice_scope)
+    resolved_tok = resolve_secret_field("c26_login", "api_token", scope=alice_scope)
+    assert not isinstance(resolved_pw, ToolResult) and resolved_pw.value == "PERSON-PW-ORIGINAL"
+    assert not isinstance(resolved_tok, ToolResult) and resolved_tok.value == "PERSON-TOKEN-ORIGINAL"
+
+    # 2. Sending an existing secret field as an optional blank field is still refused (must omit
+    # to leave untouched, or use store_generated_secret to rotate).
+    blank_opt = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "c26_login",
+                    "display_name": "Service Login",
+                    "purpose": "Blank optional password",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {
+                            "name": "username",
+                            "kind": "username",
+                            "visibility": "metadata_visible",
+                            "value_source": "agent_supplied_metadata",
+                            "value": "alice-blank",
+                        },
+                        {
+                            "name": "password",
+                            "kind": "password",
+                            "visibility": "secret",
+                            "required": False,
+                            "value_source": "user_input",
+                        },
+                    ],
+                }
+            },
+        ),
+        ctx,
+    )
+    assert blank_opt.status == "error"
+    assert blank_opt.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert "omitting existing secret fields to leave them untouched" in (blank_opt.error or "")
+    assert writes_seen == []
+    assert load_catalog(scope=alice_scope).credentials["c26_login"].fields["username"].value == "alice-corrected"
+
+    # 3. Rotating ONLY api_token while omitting password writes ONLY api_token to Sealbox and
+    # keeps password's original person-entered value untouched.
+    partial_rotate = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "c26_login",
+                    "display_name": "Service Login",
+                    "purpose": "Rotate api_token only",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {
+                            "name": "username",
+                            "kind": "username",
+                            "visibility": "metadata_visible",
+                            "value_source": "agent_supplied_metadata",
+                            "value": "alice-corrected",
+                        },
+                        {
+                            "name": "api_token",
+                            "kind": "token",
+                            "visibility": "secret",
+                            "value_source": "store_generated_secret",
+                        },
+                    ],
+                }
+            },
+        ),
+        ctx,
+    )
+    assert partial_rotate.status == "success", partial_rotate.error
+    assert writes_seen == [tok_rec]
+    assert partial_rotate.content["stored_secret_fields"] == ["api_token"]
+    resolved_pw_after = resolve_secret_field("c26_login", "password", scope=alice_scope)
+    resolved_tok_after = resolve_secret_field("c26_login", "api_token", scope=alice_scope)
+    assert not isinstance(resolved_pw_after, ToolResult) and resolved_pw_after.value == "PERSON-PW-ORIGINAL"
+    assert not isinstance(resolved_tok_after, ToolResult) and resolved_tok_after.value != "PERSON-TOKEN-ORIGINAL"
+
+    # 4. Metadata update on an env-backed credential while omitting its secret field succeeds
+    # without needing Sealbox writes.
+    writes_seen.clear()
+    monkeypatch.setenv("C26_ENV_SECRET", "ENV-SECRET-VALUE")
+    credential_catalog._save_catalog_credential(
+        "c26_env_cred",
+        CatalogCredential(
+            display_name="Env Login",
+            purpose="Env credential",
+            approval={"status": "approved", "approved_by": "user", "approved_at": format_utc_timestamp(BASE_NOW)},
+            fields={
+                "username": CatalogCredentialField(
+                    kind="username",
+                    visibility="metadata_visible",
+                    value_source="user_input",
+                    value="env-old",
+                ),
+                "token": CatalogCredentialField(
+                    kind="token",
+                    visibility="secret",
+                    value_source="existing_source",
+                    resolution_order=[CatalogSourceRef(source="env", env_var="C26_ENV_SECRET")],
+                ),
+            },
+        ),
+        scope=alice_scope,
+    )
+    env_meta = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "c26_env_cred",
+                    "display_name": "Env Login",
+                    "purpose": "Update env username",
+                    "fields": [
+                        {
+                            "name": "username",
+                            "kind": "username",
+                            "visibility": "metadata_visible",
+                            "value_source": "agent_supplied_metadata",
+                            "value": "env-new",
+                        }
+                    ],
+                }
+            },
+        ),
+        ctx,
+    )
+    assert env_meta.status == "success", env_meta.error
+    assert writes_seen == []
+    assert load_catalog(scope=alice_scope).credentials["c26_env_cred"].fields["username"].value == "env-new"
+    resolved_env = resolve_secret_field("c26_env_cred", "token", scope=alice_scope)
+    assert not isinstance(resolved_env, ToolResult) and resolved_env.value == "ENV-SECRET-VALUE"
+
+    # 5. Critic's test_e: adding a new field to an agent-created credential is still refused
+    # (adding a field always needs the secure form).
+    sealbox.on_set_hook = None
+    created = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "c26_agent_made",
+                    "display_name": "Agent Service",
+                    "purpose": "Agent generated login",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {"name": "username", "kind": "username", "visibility": "metadata_visible", "value_source": "agent_supplied_metadata", "value": "bot-1"},
+                        {"name": "password", "kind": "password", "visibility": "secret", "value_source": "store_generated_secret"},
+                    ],
+                }
+            },
+        ),
+        ctx,
+    )
+    assert created.status == "success", created.error
+    writes_seen.clear()
+    sealbox.on_set_hook = lambda _cmd, key, _val: writes_seen.append(key)
+    add_field = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "c26_agent_made",
+                    "display_name": "Agent Service",
+                    "purpose": "Try to add account_id",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {"name": "username", "kind": "username", "visibility": "metadata_visible", "value_source": "agent_supplied_metadata", "value": "bot-1"},
+                        {"name": "account_id", "kind": "account_id", "visibility": "metadata_visible", "value_source": "agent_supplied_metadata", "value": "acct-9"},
+                    ],
+                }
+            },
+        ),
+        ctx,
+    )
+    assert add_field.status == "error"
+    assert add_field.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert writes_seen == []
+
+
+def test_c27_agent_saves_refuse_record_name_choice_and_shared_sealbox_records(
+    env_setup,
+) -> None:
+    """C27 (lead ruling): agent-callable saves never choose Sealbox record names (item_id and
+    sealbox_key in agent credential.collect are refused) and refuse any Sealbox record already
+    referenced by another catalog key (temporary_only=False) in both credential.collect and
+    credential.register_existing_source."""
+
+    from secure_tool_broker.credential_catalog import execute_credential_catalog_action
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_EXPIRY_SHARED_RECORD,
+        CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED,
+    )
+    from secure_tools.providers import ValidatedAction
+
+    _layout, sealbox, _store, _gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    ctx = _person_context(agent_type="ResearchAgent")
+
+    # Seed permanent person-entered credential `c27_person_key`.
+    saved = collect_credential(
+        {
+            "credential_key": "c27_person_key",
+            "display_name": "Person Key",
+            "purpose": "Permanent person credential",
+            "store_target": "sealbox",
+            "fields": [
+                {"name": "token", "kind": "token", "visibility": "secret", "value_source": "user_input"},
+            ],
+        },
+        {"token": "PERSON-PERMANENT-SECRET"},
+        scope=alice_scope,
+        allow_expiry_change=True,
+        allow_drop_stored_records=True,
+        now=BASE_NOW,
+    )
+    assert saved.status == "success", saved.error
+    person_row_before = load_catalog(scope=alice_scope).credentials["c27_person_key"]
+    person_rec = person_row_before.fields["token"].resolution_order[0].item_id
+    assert person_rec is not None
+    person_prefix = person_rec.rsplit(":", 1)[0]
+
+    writes_seen: list[str] = []
+    sealbox.on_set_hook = lambda _cmd, key, _val: writes_seen.append(key)
+
+    # 1. Critic's test_f: new key `other_key` with sealbox_key or item_id targeting person_key's
+    # record prefix is refused before any Sealbox write (in request, top-level params, or field spec).
+    for bad_params in (
+        {
+            "request": {
+                "credential_key": "c27_other_key",
+                "display_name": "Other",
+                "purpose": "Hijack via sealbox_key",
+                "store_target": "sealbox",
+                "sealbox_key": person_prefix,
+                "fields": [
+                    {"name": "token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"}
+                ],
+            }
+        },
+        {
+            "request": {
+                "credential_key": "c27_other_key",
+                "display_name": "Other",
+                "purpose": "Hijack via item_id",
+                "store_target": "sealbox",
+                "item_id": person_prefix,
+                "fields": [
+                    {"name": "token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"}
+                ],
+            }
+        },
+        {
+            "item_id": person_prefix,
+            "request": {
+                "credential_key": "c27_other_key",
+                "display_name": "Other",
+                "purpose": "Hijack via top-level item_id",
+                "store_target": "sealbox",
+                "fields": [
+                    {"name": "token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"}
+                ],
+            },
+        },
+        {
+            "request": {
+                "credential_key": "c27_other_key",
+                "display_name": "Other",
+                "purpose": "Hijack via field item_id",
+                "store_target": "sealbox",
+                "fields": [
+                    {
+                        "name": "token",
+                        "kind": "token",
+                        "visibility": "secret",
+                        "value_source": "store_generated_secret",
+                        "item_id": person_prefix,
+                    }
+                ],
+            }
+        },
+    ):
+        res = execute_credential_catalog_action(
+            ValidatedAction(
+                provider="credential_catalog",
+                action="credential.collect",
+                params=bad_params,
+            ),
+            ctx,
+        )
+        assert res.status == "error"
+        assert res.content["error_code"] == CREDENTIAL_SEALBOX_KEY_NOT_ALLOWED
+    assert writes_seen == []
+    assert "c27_other_key" not in load_catalog(scope=alice_scope).credentials
+    person_row_after = load_catalog(scope=alice_scope).credentials["c27_person_key"]
+    assert person_row_after.updated_at == person_row_before.updated_at
+    assert person_row_after.approval == person_row_before.approval
+    assert sealbox.secrets[person_rec] == "PERSON-PERMANENT-SECRET"
+
+    # 2. Shared-record guard (temporary_only=False) even WITHOUT item_id/sealbox_key:
+    # person saves `c27_holder` on the default Sealbox record prefix of `c27_collide`, then
+    # agent calls credential.collect for new key `c27_collide` with no item_id/sealbox_key.
+    sealbox.on_set_hook = None
+    collide_prefix = credential_catalog._sealbox_catalog_key("c27_collide", {})
+    holder_save = collect_credential(
+        {
+            "credential_key": "c27_holder",
+            "display_name": "Holder",
+            "purpose": "Permanent holder",
+            "store_target": "sealbox",
+            "item_id": collide_prefix,
+            "fields": [
+                {"name": "token", "kind": "token", "visibility": "secret", "value_source": "user_input"},
+            ],
+        },
+        {"token": "HOLDER-SECRET"},
+        scope=alice_scope,
+        allow_expiry_change=True,
+        allow_drop_stored_records=True,
+        now=BASE_NOW,
+    )
+    assert holder_save.status == "success", holder_save.error
+    holder_rec = load_catalog(scope=alice_scope).credentials["c27_holder"].fields["token"].resolution_order[0].item_id
+    assert holder_rec is not None
+
+    writes_seen.clear()
+    sealbox.on_set_hook = lambda _cmd, key, _val: writes_seen.append(key)
+    colliding_collect = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.collect",
+            params={
+                "request": {
+                    "credential_key": "c27_collide",
+                    "display_name": "Colliding Key",
+                    "purpose": "Should refuse shared Sealbox record",
+                    "store_target": "sealbox",
+                    "fields": [
+                        {"name": "token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"}
+                    ],
+                }
+            },
+        ),
+        ctx,
+    )
+    assert colliding_collect.status == "error"
+    assert colliding_collect.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert colliding_collect.content["conflicting_credential_key"] == "c27_holder"
+    assert writes_seen == []
+    assert "c27_collide" not in load_catalog(scope=alice_scope).credentials
+    assert sealbox.secrets[holder_rec] == "HOLDER-SECRET"
+
+    # 3. register_existing_source for a new key referencing permanent c27_person_key's Sealbox
+    # record is also refused with CREDENTIAL_EXPIRY_SHARED_RECORD (temporary_only=False).
+    aliasing_reg = execute_credential_catalog_action(
+        ValidatedAction(
+            provider="credential_catalog",
+            action="credential.register_existing_source",
+            params={
+                "credential_key": "c27_alias_reg",
+                "field_name": "token",
+                "source": "sealbox",
+                "item_id": person_rec,
+                "field_ref": "value",
+            },
+        ),
+        ctx,
+    )
+    assert aliasing_reg.status == "error"
+    assert aliasing_reg.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert aliasing_reg.content["conflicting_credential_key"] == "c27_person_key"
+    assert "c27_alias_reg" not in load_catalog(scope=alice_scope).credentials
+    assert sealbox.secrets[person_rec] == "PERSON-PERMANENT-SECRET"
+
 
 

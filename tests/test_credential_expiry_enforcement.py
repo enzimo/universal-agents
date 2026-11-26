@@ -1391,15 +1391,20 @@ def test_c33_register_existing_source_refuses_dropping_sealbox_records_and_allow
     assert (refused_other_item.content or {}).get("error_code") == CREDENTIAL_REPLACEMENT_FORM_ONLY
     assert deleted_items == []
 
-    # 3. Re-registering over the SAME Sealbox record (no dropped records) still succeeds.
+    # 3. Re-registering over the SAME layout and Sealbox record (no dropped records or fields) still succeeds.
     same_layout = register_existing_source(
         {
             "credential_key": "svc",
             "display_name": "Service Renamed",
-            "field_name": "api_token",
-            "source": "sealbox",
-            "item_id": r1_key,
-            "field_ref": "value",
+            "fields": [
+                {"name": "username", "kind": "username", "visibility": "metadata_visible", "value": "alice"},
+                {
+                    "name": "api_token",
+                    "kind": "token",
+                    "visibility": "secret",
+                    "source_ref": {"source": "sealbox", "item_id": r1_key, "field_ref": "value"},
+                },
+            ],
         },
         scope=USER_SCOPE,
     )
