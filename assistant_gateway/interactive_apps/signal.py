@@ -18,6 +18,7 @@ from assistant_gateway.application.gateway_application import GatewayDeliveryEve
 from runtime_settings.interactive_apps import SignalAppSettings
 from assistant_gateway.inbound_attachments import (
     AttachmentValidationError,
+    StoredInboundAttachment,
     validate_raw_attachment_filename,
 )
 from assistant_gateway.interactive_apps.base import ActivityContext, BaseInteractiveApp
@@ -51,6 +52,9 @@ SIGNAL_HELP_TEXT = build_interactive_session_help(
 MAX_DEDUPED_MESSAGE_KEYS = 1024
 MAX_RECEIVE_BACKOFF_SECONDS = 30.0
 ATTACHMENT_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+# How much of a failed attachment response is read for the error message; the
+# rest is never read so a huge error body cannot exhaust memory.
+ATTACHMENT_ERROR_BODY_PREVIEW_BYTES = 1000
 MAX_SIGNAL_ATTACHMENT_ID_LENGTH = 256
 # Signal attachment ids are numeric or base64url keys plus an optional extension.
 _SIGNAL_ATTACHMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_=-][A-Za-z0-9._=-]{0,255}")
@@ -295,9 +299,13 @@ class SignalRestClient:
             method, url, params=params, timeout=timeout, allow_redirects=False
         ) as response:
             if response.status < 200 or response.status >= 300:
-                body = await response.text()
+                preview = await response.content.read(
+                    ATTACHMENT_ERROR_BODY_PREVIEW_BYTES
+                )
+                response.close()
+                body = preview.decode("utf-8", errors="replace")
                 raise SignalRestError(
-                    f"signal-cli-rest-api returned HTTP {response.status}: {body[:1000]}"
+                    f"signal-cli-rest-api returned HTTP {response.status}: {body}"
                 )
             content_length = _parse_content_length(
                 response.headers.get("Content-Length")
@@ -600,6 +608,12 @@ class SignalInteractiveApp(BaseInteractiveApp):
                 chat_id,
             )
             return
+        if attachments and text.startswith("/"):
+            # Refuse before fetching so a refused command downloads nothing.
+            await self._send_text(
+                chat_id=chat_id, text="Slash commands cannot include attachments."
+            )
+            return
 
         activity_context = ActivityContext(
             chat_id=chat_id,
@@ -634,11 +648,6 @@ class SignalInteractiveApp(BaseInteractiveApp):
                 chat_id=chat_id, text="Attachment download failed."
             )
             return
-        if stored_attachments and text.startswith("/"):
-            await self._send_text(
-                chat_id=chat_id, text="Slash commands cannot include attachments."
-            )
-            return
         try:
             handled = (
                 await self.run_with_activity_indicator(
@@ -651,7 +660,7 @@ class SignalInteractiveApp(BaseInteractiveApp):
                         private_chat=not is_group,
                     ),
                 )
-                if text.startswith("/") and not stored_attachments
+                if text.startswith("/")
                 else await self._handle_gateway_command(
                     raw_text=text,
                     user_id=user_id,
@@ -870,6 +879,7 @@ class SignalInteractiveApp(BaseInteractiveApp):
         compact_base64: str | None,
         max_bytes: int,
         sender_id: str,
+        position: int,
     ) -> tuple[bytes, str]:
         if compact_base64 is not None:
             try:
@@ -910,6 +920,17 @@ class SignalInteractiveApp(BaseInteractiveApp):
                 size_bytes=exc.observed_bytes,
                 max_bytes=max_bytes,
             ) from exc
+        except Exception as exc:
+            logger.warning(
+                "Signal attachment download failed: "
+                "event=signal_attachment_download_failed attachment_id=%s "
+                "position=%d error_type=%s sender=%s.",
+                _log_safe_attachment_id(item.attachment_id),
+                position,
+                type(exc).__name__,
+                sender_id or "-",
+            )
+            raise
         if len(data) > max_bytes:
             raise self._attachment_refusal(
                 reason="download_size_exceeds_limit",
@@ -945,48 +966,96 @@ class SignalInteractiveApp(BaseInteractiveApp):
             )
             for item in items
         ]
-        # Fetch and policy-check each payload before moving to the next so a
-        # policy refusal stops further downloads immediately. Holding checked
-        # payloads of one message in memory until all pass matches
-        # adapter_host/gateway_application.py so a refused attachment leaves no
-        # partial uploads on disk (bounded per attachment by max_file_bytes).
-        fetched: list[tuple[_SignalInboundAttachment, bytes, str]] = []
-        for item, compact_base64 in validated:
-            data, content_type = await self._attachment_bytes(
-                item,
-                compact_base64=compact_base64,
-                max_bytes=max_bytes,
-                sender_id=sender_id,
-            )
-            resolved_content_type = content_type or item.content_type
-            try:
-                self.attachments.check_bytes(
-                    data=data,
-                    filename=item.filename,
-                    content_type=resolved_content_type,
+        # Fetch, check and save one attachment at a time so a message never holds
+        # more than one payload in memory, and stop at the first refusal. Files
+        # are saved unregistered and registered only after every attachment of
+        # the message passed, so a refused or failed attachment leaves none of
+        # the message's files behind (all or nothing, like
+        # adapter_host/gateway_application.py).
+        staged: list[StoredInboundAttachment] = []
+        registered: list[Any] = []
+        fetched_ids: set[str] = set()
+        try:
+            for position, (item, compact_base64) in enumerate(validated):
+                if compact_base64 is None and item.attachment_id is not None:
+                    if item.attachment_id in fetched_ids:
+                        # A repeated id names the same file; fetching it again
+                        # would only multiply downloads and disk use.
+                        logger.info(
+                            "Skipping repeated Signal attachment: "
+                            "event=signal_attachment_duplicate_skipped "
+                            "attachment_id=%s position=%d sender=%s.",
+                            _log_safe_attachment_id(item.attachment_id),
+                            position,
+                            sender_id or "-",
+                        )
+                        continue
+                    fetched_ids.add(item.attachment_id)
+                staged.append(
+                    await self._fetch_and_stage_attachment(
+                        item,
+                        compact_base64=compact_base64,
+                        max_bytes=max_bytes,
+                        sender_id=sender_id,
+                        position=position,
+                        session_key=session_key,
+                        caption=caption,
+                    )
                 )
-            except AttachmentValidationError:
-                self._log_attachment_refusal(
-                    reason="policy_rejected",
-                    attachment_id=item.attachment_id,
-                    sender_id=sender_id,
-                    size_bytes=len(data),
-                    max_bytes=max_bytes,
+            while staged:
+                self.attachments.register_staged(
+                    staged[0],
+                    session_key=session_key,
+                    conversation_id=conversation_id,
                 )
-                raise
-            fetched.append((item, data, resolved_content_type))
-        return [
-            self.attachments.store_bytes(
+                registered.append(staged.pop(0).attachment)
+        finally:
+            for leftover in staged:
+                self.attachments.discard_staged(leftover)
+        return registered
+
+    async def _fetch_and_stage_attachment(
+        self,
+        item: _SignalInboundAttachment,
+        *,
+        compact_base64: str | None,
+        max_bytes: int,
+        sender_id: str,
+        position: int,
+        session_key: str,
+        caption: Optional[str],
+    ) -> StoredInboundAttachment:
+        data, content_type = await self._attachment_bytes(
+            item,
+            compact_base64=compact_base64,
+            max_bytes=max_bytes,
+            sender_id=sender_id,
+            position=position,
+        )
+        resolved_content_type = content_type or item.content_type
+        try:
+            self.attachments.check_bytes(
                 data=data,
                 filename=item.filename,
-                content_type=content_type,
-                session_key=session_key,
-                conversation_id=conversation_id,
-                origin="signal",
-                caption=caption,
-            ).attachment
-            for item, data, content_type in fetched
-        ]
+                content_type=resolved_content_type,
+            )
+        except AttachmentValidationError:
+            self._log_attachment_refusal(
+                reason="policy_rejected",
+                attachment_id=item.attachment_id,
+                sender_id=sender_id,
+                size_bytes=len(data),
+                max_bytes=max_bytes,
+            )
+            raise
+        return self.attachments.stage_bytes(
+            data=data,
+            filename=item.filename,
+            content_type=resolved_content_type,
+            session_key=session_key,
+            origin="signal",
+            caption=caption,
+        )
 
     def _is_duplicate_message(
         self, *, chat_id: str, user_id: str, message_id: str

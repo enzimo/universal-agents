@@ -48,10 +48,14 @@ objects), invalid attachment ids, and filenames containing path separators or
 absolute paths are refused.
 
 Attachment sizes are checked against the configured upload limit before reading
-or decoding bytes. If any attachment in a message is refused, none of that
-message's attachments are saved. Unexpected `signal-cli-rest-api` download
-errors reply with a fixed `Attachment download failed.` message while recording
-full details in the gateway warning log.
+or decoding bytes. Attachments are downloaded and saved one at a time, and an
+attachment id repeated within one message is downloaded only once. If any
+attachment in a message is refused or fails to download, the files already
+saved for that message are deleted, so none of its attachments are kept. A
+slash command sent with attachments is refused before anything is downloaded.
+Unexpected `signal-cli-rest-api` download errors reply with a fixed
+`Attachment download failed.` message; the gateway warning log records the
+attachment id, its position in the message and the error type.
 
 ## Proactive Delivery
 

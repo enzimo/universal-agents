@@ -351,14 +351,7 @@ async def test_signal_app_attachment_only_message_routes_stored_attachment(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case_name",
-    [
-        "id_and_absolute_filename",
-        "path",
-        "localPath",
-        "storedFilename",
-        "stored_filename",
-        "bare_string",
-    ],
+    ["id_and_absolute_filename", "bare_string"],
 )
 async def test_signal_app_refuses_host_disk_attachment_variants(
     tmp_path, caplog, case_name: str
@@ -373,26 +366,6 @@ async def test_signal_app_refuses_host_disk_attachment_variants(
             "filename": str(sentinel_file),
             "contentType": "text/plain",
             "size": len(sentinel_bytes),
-        },
-        "path": {
-            "path": str(sentinel_file),
-            "filename": "note.txt",
-            "contentType": "text/plain",
-        },
-        "localPath": {
-            "localPath": str(sentinel_file),
-            "filename": "note.txt",
-            "contentType": "text/plain",
-        },
-        "storedFilename": {
-            "storedFilename": str(sentinel_file),
-            "filename": "note.txt",
-            "contentType": "text/plain",
-        },
-        "stored_filename": {
-            "stored_filename": str(sentinel_file),
-            "filename": "note.txt",
-            "contentType": "text/plain",
         },
         "bare_string": str(sentinel_file),
     }
@@ -436,6 +409,201 @@ async def test_signal_app_refuses_host_disk_attachment_variants(
         for uploaded in uploads_dir.rglob("*"):
             if uploaded.is_file():
                 assert sentinel_bytes not in uploaded.read_bytes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path_key", ["path", "localPath", "storedFilename", "stored_filename"]
+)
+async def test_signal_app_ignores_path_keys_next_to_valid_attachment_id(
+    tmp_path, path_key: str
+) -> None:
+    sentinel_bytes = b"HOST_SENTINEL_SECRET_BYTES_12345"
+    sentinel_file = tmp_path / "sentinel.txt"
+    sentinel_file.write_bytes(sentinel_bytes)
+    config = _config(tmp_path)
+    store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    bridge = _FakeBridge()
+    app = SignalInteractiveApp(
+        config,
+        application=GatewayApplicationFacade(_FakeGateway(config, store)),
+        bridge=bridge,
+    )
+    fake_client = _FakeSignalClient()
+    fake_client.served_attachments["att-probe"] = (b"from-signal-cli", "text/plain")
+    app._client = fake_client
+
+    payload = _direct_payload(message="")
+    payload["envelope"]["dataMessage"]["attachments"] = [
+        {
+            "id": "att-probe",
+            path_key: str(sentinel_file),
+            "filename": "note.txt",
+            "contentType": "text/plain",
+        }
+    ]
+    await app._process_inbound_payload(payload)
+
+    assert fake_client.serve_calls == [("att-probe", app.attachments.max_file_bytes)]
+    attachments = bridge.inbound_messages[0].attachments
+    assert len(attachments) == 1
+    assert Path(attachments[0].local_path()).read_bytes() == b"from-signal-cli"
+    uploads_dir = tmp_path / "instance" / "state" / "uploads"
+    for uploaded in uploads_dir.rglob("*"):
+        if uploaded.is_file():
+            assert sentinel_bytes not in uploaded.read_bytes()
+
+
+class _OrderedSignalClient(_FakeSignalClient):
+    """Fake client that records each fetch in a shared event list."""
+
+    def __init__(self, events: list[str], failures: dict[str, Exception]) -> None:
+        super().__init__()
+        self._events = events
+        self._failures = failures
+
+    async def serve_attachment(self, attachment: str, *, max_bytes: int):
+        self._events.append(f"fetch:{attachment}")
+        if attachment in self._failures:
+            self.serve_calls.append((attachment, max_bytes))
+            raise self._failures[attachment]
+        return await super().serve_attachment(attachment, max_bytes=max_bytes)
+
+
+def _ordered_signal_app(tmp_path, failures: dict[str, Exception]):
+    config = _config(tmp_path)
+    config.interactive_apps.internal_website.attachments.max_file_bytes = 32
+    store = GatewayStateStore(str(tmp_path / "gateway.db"))
+    bridge = _FakeBridge()
+    app = SignalInteractiveApp(
+        config,
+        application=GatewayApplicationFacade(_FakeGateway(config, store)),
+        bridge=bridge,
+    )
+    events: list[str] = []
+    fake_client = _OrderedSignalClient(events, failures)
+    fake_client.served_attachments["att-1"] = (b"first-payload", "text/plain")
+    fake_client.served_attachments["att-2"] = (b"second-payload", "text/plain")
+    fake_client.served_attachments["att-empty"] = (b"", "text/plain")
+    app._client = fake_client
+    original_stage_bytes = app.attachments.stage_bytes
+
+    def _spy_stage_bytes(**kwargs):
+        events.append(f"stage:{kwargs['filename']}")
+        return original_stage_bytes(**kwargs)
+
+    app.attachments.stage_bytes = _spy_stage_bytes  # type: ignore[method-assign]
+    return app, fake_client, bridge, store, events
+
+
+def _uploaded_files(tmp_path) -> list[Path]:
+    uploads_dir = tmp_path / "instance" / "state" / "uploads"
+    if not uploads_dir.exists():
+        return []
+    return [path for path in uploads_dir.rglob("*") if path.is_file()]
+
+
+@pytest.mark.asyncio
+async def test_signal_app_saves_each_attachment_before_fetching_the_next(
+    tmp_path,
+) -> None:
+    app, _client, bridge, store, events = _ordered_signal_app(tmp_path, {})
+    payload = _direct_payload(message="", timestamp=401)
+    payload["envelope"]["dataMessage"]["attachments"] = [
+        {"id": "att-1", "filename": "one.txt", "contentType": "text/plain"},
+        {"id": "att-2", "filename": "two.txt", "contentType": "text/plain"},
+    ]
+    await app._process_inbound_payload(payload)
+
+    # Only one payload is held at a time: the first is saved before the second
+    # is fetched.
+    assert events == ["fetch:att-1", "stage:one.txt", "fetch:att-2", "stage:two.txt"]
+    attachments = bridge.inbound_messages[0].attachments
+    assert [Path(a.local_path()).read_bytes() for a in attachments] == [
+        b"first-payload",
+        b"second-payload",
+    ]
+    assert all(
+        store.delivery_repository.get_attachment(a.attachment_id) is not None
+        for a in attachments
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_id", ["att-empty", "att-broken"])
+async def test_signal_app_later_refusal_or_failure_removes_saved_attachments(
+    tmp_path, caplog, second_id: str
+) -> None:
+    app, fake_client, bridge, store, events = _ordered_signal_app(
+        tmp_path, {"att-broken": signal_module.SignalRestError("HTTP 404")}
+    )
+    registered: list[str] = []
+    original_register = app.attachments.register_staged
+
+    def _spy_register(stored, **kwargs):
+        registered.append(stored.attachment.attachment_id)
+        return original_register(stored, **kwargs)
+
+    app.attachments.register_staged = _spy_register  # type: ignore[method-assign]
+    payload = _direct_payload(message="", timestamp=402)
+    payload["envelope"]["dataMessage"]["attachments"] = [
+        {"id": "att-1", "filename": "one.txt", "contentType": "text/plain"},
+        {"id": second_id, "filename": "two.txt", "contentType": "text/plain"},
+    ]
+    with caplog.at_level(logging.WARNING):
+        await app._process_inbound_payload(payload)
+
+    # The first file was saved, then removed when the second was refused.
+    assert events[:3] == ["fetch:att-1", "stage:one.txt", f"fetch:{second_id}"]
+    assert bridge.inbound_messages == []
+    assert registered == []
+    assert _uploaded_files(tmp_path) == []
+    assert len(fake_client.sent) == 1
+    if second_id == "att-broken":
+        assert fake_client.sent[0]["message"] == "Attachment download failed."
+        assert "event=signal_attachment_download_failed" in caplog.text
+        assert "attachment_id=att-broken position=1 error_type=SignalRestError" in (
+            caplog.text
+        )
+
+
+@pytest.mark.asyncio
+async def test_signal_app_fetches_a_repeated_attachment_id_once(tmp_path, caplog) -> None:
+    app, fake_client, bridge, _store, _events = _ordered_signal_app(tmp_path, {})
+    payload = _direct_payload(message="", timestamp=403)
+    payload["envelope"]["dataMessage"]["attachments"] = [
+        {"id": "att-1", "filename": "one.txt", "contentType": "text/plain"},
+        {"id": "att-1", "filename": "copy.txt", "contentType": "text/plain"},
+    ]
+    with caplog.at_level(logging.INFO):
+        await app._process_inbound_payload(payload)
+
+    assert fake_client.serve_calls == [("att-1", 32)]
+    assert len(bridge.inbound_messages[0].attachments) == 1
+    assert len(_uploaded_files(tmp_path)) == 1
+    assert "event=signal_attachment_duplicate_skipped attachment_id=att-1 position=1" in (
+        caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_signal_app_refuses_slash_command_with_attachments_before_fetching(
+    tmp_path,
+) -> None:
+    app, fake_client, bridge, _store, events = _ordered_signal_app(tmp_path, {})
+    payload = _direct_payload(message="/status", timestamp=404)
+    payload["envelope"]["dataMessage"]["attachments"] = [
+        {"id": "att-1", "filename": "one.txt", "contentType": "text/plain"},
+    ]
+    await app._process_inbound_payload(payload)
+
+    assert events == []
+    assert fake_client.serve_calls == []
+    assert bridge.inbound_messages == []
+    assert _uploaded_files(tmp_path) == []
+    assert [sent["message"] for sent in fake_client.sent] == [
+        "Slash commands cannot include attachments."
+    ]
 
 
 @pytest.mark.asyncio
@@ -679,6 +847,8 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
                 },
                 status=500,
             )
+        if att_id == "huge-500":
+            return web.Response(status=500, body=b"H" * 1_000_000)
         if att_id == "too-big-cl":
             resp = web.StreamResponse(
                 status=200,
@@ -737,6 +907,14 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
             with pytest.raises(signal_module.SignalRestError):
                 await client.serve_attachment("redirect-me", max_bytes=64)
             assert list_route_hits == 0
+
+            # A huge error body is read only up to the preview limit.
+            with pytest.raises(signal_module.SignalRestError) as err_exc:
+                await client.serve_attachment("huge-500", max_bytes=64)
+            assert (
+                len(str(err_exc.value))
+                < signal_module.ATTACHMENT_ERROR_BODY_PREVIEW_BYTES + 100
+            )
 
             # Content-Length over limit is refused immediately with declared length.
             try:
@@ -816,6 +994,10 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
                 assert secret_marker not in reply_text
                 assert "/var/lib/signal-cli" not in reply_text
                 assert "Signal attachment download failed" in caplog.text
+                assert (
+                    f"attachment_id={att_id} position=0 error_type=SignalRestError"
+                    in caplog.text
+                )
     finally:
         await server.close()
 
