@@ -1864,3 +1864,75 @@ async def test_f3_resumed_live_turn_releases_live_wait_note_when_decision_keeps_
     ]
     assert len(ended_events) == 1
     assert ended_events[0]["how"] == "live_turn"
+
+
+@pytest.mark.asyncio
+async def test_c07_timed_wait_pause_flushes_deferred_sqlite_commits_and_keeps_pause_on_flush_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C07 (0.10): with flush deferral enabled, finish_timed_wait flushes charge+record+WAITING; flush error logs and keeps pause."""
+
+    from custom_agents import commit_flushes
+    from custom_transport import send_barrier
+    from storage import sqlite_connection
+
+    monkeypatch.setattr(send_barrier, "_BEFORE_SEND", None)
+    monkeypatch.setattr(sqlite_connection, "_FLUSHES_DEFERRED", False)
+    monkeypatch.setattr(sqlite_connection, "_UNFLUSHED", {})
+    monkeypatch.setattr(commit_flushes, "_FAILED", None)
+    commit_flushes.flush_commits_before_sending()
+
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    agent = _make_runtime_agent(tmp_path / "c07_wait.db")
+    sqlite_connection.flush_unflushed_commits()
+    assert not sqlite_connection.has_unflushed_commits()
+
+    reason = {
+        "kind": TIMED_WAIT_KIND,
+        "call_id": "call-c07-1",
+        "tool": WAIT_TOOL_NAME,
+        "tool_use_id": "tu-c07-1",
+        "minutes": 10,
+        "reason": "power-loss durability check",
+    }
+    decision = await stage_timed_wait(
+        agent, task_id=TASK_ID, interrupt_id="int-c07-1", reason=reason, msg_meta=MessageMeta()
+    )
+    agent.task_manager.update_main_task_state(TASK_ID, ProgressState.WAITING, BASE_TIME.isoformat())
+    # Before finish_timed_wait, the deferred runtime-state commits are still unflushed.
+    assert sqlite_connection.has_unflushed_commits()
+
+    assert await finish_timed_wait(agent, decision) is True
+    assert not sqlite_connection.has_unflushed_commits()
+    assert agent.task_manager.get_task_info(TASK_ID).state == ProgressState.WAITING
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is not None
+
+    # Failure case: a failing disk flush logs with identifiers, does NOT undo the pause, and stops future sends.
+    agent2 = _make_runtime_agent(tmp_path / "c07_wait_fail.db")
+    sqlite_connection.flush_unflushed_commits()
+
+    def failing_flush(**_kwargs: Any) -> None:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(sqlite_connection, "flush_unflushed_commits", failing_flush)
+    decision2 = await stage_timed_wait(
+        agent2,
+        task_id=TASK_ID,
+        interrupt_id="int-c07-2",
+        reason={**reason, "call_id": "call-c07-2", "tool_use_id": "tu-c07-2"},
+        msg_meta=MessageMeta(),
+    )
+    agent2.task_manager.update_main_task_state(TASK_ID, ProgressState.WAITING, BASE_TIME.isoformat())
+    assert sqlite_connection.has_unflushed_commits()
+
+    with caplog.at_level(logging.WARNING):
+        assert await finish_timed_wait(agent2, decision2) is True
+    assert "event=local_pause_commit_flush_failed" in caplog.text
+    assert f"agent_id={AGENT_ID}" in caplog.text
+    assert f"task_id={TASK_ID}" in caplog.text
+    assert "pause_kind=timed_wait" in caplog.text
+    assert agent2.task_manager.get_task_info(TASK_ID).state == ProgressState.WAITING
+    assert get_human_interaction_blocker(agent2.task_manager, TASK_ID) is not None
+    with pytest.raises(commit_flushes.CommitFlushFailed):
+        await send_barrier.before_send()

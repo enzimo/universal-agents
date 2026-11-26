@@ -250,13 +250,21 @@ def _workflow_announce_attempted(agent: Any) -> set[str]:
 
 
 async def start_run(agent: Any, *, task_id: str, run_id: str) -> None:
-    """Post-``WAITING`` step for a staged setup run: announce its workflow, then open pieces.
+    """Post-``WAITING`` step for a staged setup run: flush commits, announce its workflow, then open pieces.
 
     If a concurrent decision already settled the run during ``stage_run`` (before
     ``WAITING`` was saved), resume the task directly instead of leaving it for a
     later recovery pass.
     """
 
+    from custom_agents.commit_flushes import flush_local_pause_commits
+
+    await flush_local_pause_commits(
+        logger,
+        agent_id=str(getattr(agent, "id", "-")),
+        task_id=task_id,
+        pause_kind="tool_setup_run",
+    )
     settled_run: ToolSetupRunV1 | None = None
     async with _lock(agent, run_id):
         run = await _load(agent, run_id)

@@ -52,6 +52,7 @@ from typing import Any, Literal
 
 from access_control.identity import ISSUER_SCHEDULER
 from custom_agents import timed_waits as timed_waits_rules
+from custom_agents.commit_flushes import flush_local_pause_commits
 from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS
 from custom_agents.paused_wait_resume import (
     WaitLogSpec,
@@ -557,9 +558,15 @@ async def stage_timed_wait(
 
 
 async def finish_timed_wait(agent: Any, decision: TimedWaitDecision) -> bool:
-    """Run post-``WAITING`` effects for a staged timed wait (wake scheduler or hand start-time refusal)."""
+    """Run post-``WAITING`` effects for a staged timed wait (flush commits, wake scheduler, or hand start-time refusal)."""
 
     if decision.action in {"record", "restore"}:
+        await flush_local_pause_commits(
+            logger,
+            agent_id=str(getattr(agent, "id", "-")),
+            task_id=decision.task_id,
+            pause_kind="timed_wait",
+        )
         _wake_scheduler(agent)
         return True
     if decision.action == "refuse":

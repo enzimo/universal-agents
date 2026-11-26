@@ -68,7 +68,12 @@ behaviors made that pattern block callers for seconds:
   ``NORMAL`` and note their file; its transport calls
   ``flush_unflushed_commits`` before every NATS publish and every
   acknowledgement or ending of a message (``custom_transport.send_barrier``),
-  and the agent flushes once more when it exits. Flushing a database's WAL file
+  and the agent flushes once more when it exits. A local pause that moves a
+  task to ``WAITING`` without necessarily sending a NATS message (a timed wait
+  or a staged tool setup run) is the one non-sending state that also flushes
+  through the send barrier (``custom_agents.commit_flushes.flush_local_pause_commits``),
+  so its saved charge, wait record and ``WAITING`` state survive an immediate
+  power loss. Flushing a database's WAL file
   makes every commit written to it so far durable, whichever connection or
   process wrote it, so a power loss leaves the state the agent had when it last
   sent something: the state a crash at that moment leaves, which recovery
