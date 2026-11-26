@@ -155,8 +155,6 @@ WORKFLOW_NOTICE_REASON = "tool_setup_workflow"
 _SETUP_WAIT_LOG = WaitLogSpec(
     label="setup-run",
     dropped_event="tool_setup_paused_turn_dropped",
-    restored_event="tool_setup_run_record_restored",
-    restore_failed_event="tool_setup_run_record_restore_failed",
 )
 
 
@@ -699,7 +697,6 @@ async def _resume(agent: Any, run: ToolSetupRunV1, header: Any, meta: Any, *, wa
             note=RUN_ENDED_NOTE + json.dumps(result, sort_keys=True),
             history="Tool setup ended; the task resumes.",
             history_details={"event": "tool_setup_run_resume", "run_id": current.run_id},
-            log=_SETUP_WAIT_LOG,
             wake=wake,
         )
     if resumed:
@@ -841,7 +838,6 @@ async def _resume_missing_run(agent: Any, task_id: str, run_id: str, *, wake: bo
             note=RUN_NOT_FOUND_NOTE,
             history="The tool setup was not found; the task resumes.",
             history_details={"event": "tool_setup_run_not_found", "run_id": run_id},
-            log=_SETUP_WAIT_LOG,
             wake=wake,
         )
     if resumed:

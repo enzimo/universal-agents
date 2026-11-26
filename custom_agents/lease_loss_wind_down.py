@@ -549,7 +549,7 @@ async def _fail_hopeless_timed_waits(
             outcome.resume_at,
             state.deadline.isoformat(),
         )
-        await _stop_pending_subtasks(agent, task_id, reason=outcome.message)
+        await _stop_subtasks(agent, task_id, outcome.pending_subtasks, reason=outcome.message)
         await _send_wind_down_error_response(agent, state, outcome.task_info, outcome.message)
     return handled
 
@@ -653,6 +653,12 @@ async def _stop_pending_subtasks(agent: Any, task_id: str, *, reason: str) -> No
     subtasks = await agent.task_manager.operations_runtime.run(
         agent.task_manager.get_pending_subtasks, task_id
     )
+    await _stop_subtasks(agent, task_id, subtasks, reason=reason)
+
+
+async def _stop_subtasks(
+    agent: Any, task_id: str, subtasks: Sequence[TaskInfo], *, reason: str
+) -> None:
     for subtask_info in subtasks:
         try:
             await request_subtask_stop(

@@ -424,31 +424,40 @@ def wait_result(
     }
 
 
-def resume_note(record: Mapping[str, Any]) -> str:
-    """Durable resume directive saved when a timed wait resumes without a live paused turn.
+def resume_note(record: Mapping[str, Any], *, now: datetime) -> str:
+    """Durable resume directive saved when a timed wait ends and may need a fresh turn.
 
-    Built solely from the saved wait record (duration, reason, and scheduled
-    ``resume_at``) so retrying a failed resume produces the exact same note and
-    ``TaskManager.append_runtime_resume_directive`` never appends a duplicate.
-    Every model turn already receives the current UTC time in its prompt.
+    Worded as a past fact ("the task was resumed at ...") rather than claiming
+    ``now`` is the current time, because the task may sit queued before the next
+    model turn reads the note. Includes the real elapsed time since
+    ``requested_at`` and the scheduled ``resume_at`` when known.
     """
 
     minutes = record.get("minutes")
-    duration = (
-        f"{minutes}-minute"
-        if isinstance(minutes, int) and not isinstance(minutes, bool) and minutes >= 1
-        else "timed"
-    )
+    if isinstance(minutes, int) and not isinstance(minutes, bool) and minutes >= 1:
+        duration = f"{minutes}-minute"
+        fallback_minutes = minutes
+    else:
+        duration = "timed"
+        fallback_minutes = 0
     reason = str(record.get("reason") or "").strip()
     reason_clause = f" ({reason})" if reason else ""
+    resumed_utc = now.astimezone(timezone.utc)
+    elapsed = waited_minutes(record.get("requested_at"), resumed_utc, fallback_minutes)
+    elapsed_phrase = "1 minute" if elapsed == 1.0 else f"{elapsed:g} minutes"
     scheduled = resume_at_of(record)
     if scheduled is not None:
         return (
-            f"Your {duration} wait{reason_clause} ended "
+            f"Your {duration} wait{reason_clause} ended; the task was resumed at "
+            f"{format_utc_display(resumed_utc)} ({resumed_utc.isoformat()}) after {elapsed_phrase} "
             f"(scheduled for {format_utc_display(scheduled)}, {scheduled.isoformat()}). "
             "Continue the task from where you left off."
         )
-    return f"Your {duration} wait{reason_clause} ended. Continue the task from where you left off."
+    return (
+        f"Your {duration} wait{reason_clause} ended; the task was resumed at "
+        f"{format_utc_display(resumed_utc)} ({resumed_utc.isoformat()}) after {elapsed_phrase}. "
+        "Continue the task from where you left off."
+    )
 
 
 __all__ = [

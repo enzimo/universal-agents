@@ -65,13 +65,12 @@ from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_human_interaction_blockers import (
     TIMED_WAIT_BLOCKER,
     answer_held,
-    clear_human_interaction_blocker,
     get_human_interaction_blocker,
     is_timed_wait_blocker,
-    record_blocker_with_history,
     record_human_interaction_blocker,
     remove_answer_mark,
 )
+from custom_agents.task_state_transitions import record_blocker_with_history
 from custom_agents.timed_waits import (
     TIMED_WAIT_ENDED_EVENT,
     TIMED_WAIT_REFUSED_RESPONSE_KIND,
@@ -95,8 +94,6 @@ logger = logging.getLogger(__name__)
 _TIMED_WAIT_LOG = WaitLogSpec(
     label="timed-wait",
     dropped_event="timed_wait_paused_turn_dropped",
-    restored_event="timed_wait_record_restored",
-    restore_failed_event="timed_wait_record_restore_failed",
 )
 
 
@@ -690,7 +687,7 @@ async def _resume_task_from_note(
         task_id=task_id,
         kind=TIMED_WAIT_BLOCKER,
         wait_id=interrupt_id,
-        note=resume_note(blocker),
+        note=resume_note(blocker, now=now),
         history=f"Timed wait ended after {elapsed} minutes; task resumed from saved note.",
         history_details={
             "event": TIMED_WAIT_ENDED_EVENT,
@@ -703,7 +700,6 @@ async def _resume_task_from_note(
             "resumed_at": now_iso,
             "how": "note",
         },
-        log=_TIMED_WAIT_LOG,
         wake=wake,
         at=now_iso,
     )
@@ -967,6 +963,7 @@ class HopelessTimedWaitFailure:
     task_info: Any
     resume_at: str
     message: str
+    pending_subtasks: tuple[Any, ...] = ()
 
 
 def _hopeless_timed_wait_snapshot(
@@ -974,8 +971,8 @@ def _hopeless_timed_wait_snapshot(
     manager: Any,
     task_id: str,
     deadline_utc: datetime,
-) -> tuple[Any, dict[str, Any]] | None:
-    """Return ``(task_info, blocker)`` if ``task_id`` is an unheld WAITING timed wait past ``deadline_utc``."""
+) -> tuple[Any, dict[str, Any], tuple[Any, ...]] | None:
+    """Return ``(task_info, blocker, pending_subtasks)`` if ``task_id`` is an unheld WAITING wait past ``deadline_utc``."""
 
     task_info = manager.get_task_info(task_id)
     if task_info is None or task_info.state != ProgressState.WAITING:
@@ -992,7 +989,8 @@ def _hopeless_timed_wait_snapshot(
         return None
     if task_id in (getattr(agent, "_pending_interrupt_responses", None) or {}):
         return None
-    return task_info, blocker
+    pending_subtasks = tuple(manager.get_pending_subtasks(task_id))
+    return task_info, blocker, pending_subtasks
 
 
 async def fail_timed_wait_outlasting_deadline(
@@ -1001,13 +999,15 @@ async def fail_timed_wait_outlasting_deadline(
     *,
     deadline: datetime,
     message_for_blocker: Callable[[Mapping[str, Any]], str],
-    discard_steering: Callable[..., Awaitable[Any]] | None = None,
+    discard_steering: Callable[..., Awaitable[Any]],
 ) -> HopelessTimedWaitFailure | None:
     """Fail ``task_id`` under its timed-wait lock if it is an unheld WAITING wait past ``deadline``.
 
-    Holds the per-task lock only across the re-check, ``fail_task``, and local
-    steering/blocker cleanup; callers perform network notifications (stopping
-    subtasks, sending the requester error response) after this returns.
+    Holds the per-task lock only across the re-check (including capturing any
+    pending delegated subtasks before ``fail_task`` archives and forgets them),
+    ``fail_task``, and ``discard_steering`` cleanup; callers send network
+    notifications (stopping subtasks, sending the requester error response)
+    after this returns.
     """
 
     manager = getattr(agent, "task_manager", None)
@@ -1019,24 +1019,22 @@ async def fail_timed_wait_outlasting_deadline(
         found = await run_ops(partial(_hopeless_timed_wait_snapshot, agent, manager), task_id, deadline_utc)
         if found is None:
             return None
-        task_info, blocker = found
+        task_info, blocker, pending_subtasks = found
         message = message_for_blocker(blocker)
         now_iso = timed_waits_rules.utc_now().isoformat()
         failed = bool(await run_ops(manager.fail_task, task_id, message, now_iso))
         if not failed:
             return None
-        if discard_steering is not None:
-            await discard_steering(
-                agent,
-                task_id=task_id,
-                reason="wind_down_timed_wait_outlasts_deadline",
-            )
-        else:
-            await run_ops(partial(clear_human_interaction_blocker, manager), task_id)
+        await discard_steering(
+            agent,
+            task_id=task_id,
+            reason="wind_down_timed_wait_outlasts_deadline",
+        )
         return HopelessTimedWaitFailure(
             task_info=task_info,
             resume_at=str(blocker.get("resume_at") or ""),
             message=message,
+            pending_subtasks=pending_subtasks,
         )
 
 

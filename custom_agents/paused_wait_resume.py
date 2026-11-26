@@ -11,11 +11,12 @@ When the wait ends, the task resumes in one of two ways:
   resumed turn removes the record just before it runs
   (``task_steering_runtime``).
 - **No live turn** (``resume_from_note``): after a restart, a dropped turn, or
-  takeover, remove any held-answer mark, save a durable resume directive,
-  conditionally remove the wait record, append a history entry, move the task
-  to ``ACCEPTED``, enqueue it at the front, and wake the drain. If anything
-  after removing the record fails, the record is put back so recovery tries
-  again.
+  takeover, strip any held-answer mark if present, then atomically save the
+  durable resume directive, remove the wait record, append wait and state-change
+  history, move the task to ``ACCEPTED``, and enqueue it at the front in one
+  persisted write (``task_state_transitions.resume_wait_from_note``), waking the
+  drain on success. A failed write rolls back completely so recovery tries again
+  without duplicating notes or stranding the task.
 """
 
 from __future__ import annotations
@@ -28,14 +29,12 @@ from typing import Any
 
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_human_interaction_blockers import (
-    clear_wait_record,
     mark_answer_held,
     remove_answer_mark,
-    restore_wait_record,
-    wait_id_key,
 )
+from custom_agents.task_state_transitions import resume_wait_from_note
 from custom_messages.contracts.task_v1 import TaskSteering
-from custom_messages.enums import ProgressState, TaskHistoryImportance, TaskHistoryType
+from custom_messages.enums import TaskHistoryImportance, TaskHistoryType
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +45,6 @@ class WaitLogSpec:
 
     label: str
     dropped_event: str
-    restored_event: str
-    restore_failed_event: str
 
 
 def utc_now_iso() -> str:
@@ -178,22 +175,17 @@ async def resume_from_note(
     note: str,
     history: str,
     history_details: dict[str, Any],
-    log: WaitLogSpec,
     wake: bool = True,
     at: str | None = None,
 ) -> bool:
     """Queue the task at the front with a note its next turn reads; True when this call removed the record.
 
     The caller holds the wait's lock. No paused turn waits on this wait here, so
-    the record loses any mark first: should this fail, the task must not look
-    as if its answer were held. The note is saved before the record is
-    removed: a restart between the two finds the record and saves the same
-    note again, which is not added twice (``append_runtime_resume_directive``).
-    The record goes before the task is queued, because the queue refuses a
-    task with a record (``task_queue_safety.is_ready``); if anything after the
-    removal fails, the record is put back and the error raised, so recovery
-    tries again. Repeating is safe: the note is not added twice and the state
-    may be set again; only a second history line is added.
+    if the record still carries a held-answer mark it is stripped first (a zero-write
+    no-op when already unmarked) so a failed resume never leaves the task looking
+    as if its answer were held. Then ``resume_wait_from_note`` commits the note,
+    blocker removal, history entries, ``ACCEPTED`` transition, and front-of-queue
+    enqueue in a single persisted write, rolling back cleanly on failure.
     """
 
     manager = agent.task_manager
@@ -201,58 +193,22 @@ async def resume_from_note(
     record = await run_ops(partial(remove_answer_mark, manager), task_id, kind, wait_id)
     if record is None:
         return False  # read under the lock; only the task ending removes it meanwhile
-    await run_ops(manager.append_runtime_resume_directive, task_id, note)
-    try:
-        if not await run_ops(partial(clear_wait_record, manager), task_id, kind, wait_id):
-            return False
-        await append_wait_history(agent, task_id, history, history_details)
-        await run_ops(manager.update_main_task_state, task_id, ProgressState.ACCEPTED, at or utc_now_iso())
-        await run_ops(manager.enqueue_task, task_id, front=True)
-    except Exception:
-        await _put_record_back(agent, task_id, record, kind=kind, wait_id=wait_id, log=log)
-        raise
-    if wake:
-        schedule_pending_work(agent)
-    return True
-
-
-async def _put_record_back(
-    agent: Any,
-    task_id: str,
-    record: dict[str, Any],
-    *,
-    kind: str,
-    wait_id: str,
-    log: WaitLogSpec,
-) -> None:
-    """After a failed resume from a note, the record goes back so recovery finds the task again (logged)."""
-
-    manager = agent.task_manager
-    id_key = wait_id_key(kind)
-    try:
-        restored = await manager.operations_runtime.run(partial(restore_wait_record, manager), task_id, record)
-    except Exception as exc:  # noqa: BLE001 - the record is back in memory; the next save writes it
-        logger.warning(
-            "Could not save the %s record put back after a failed resume. "
-            "event=%s task_id=%s %s=%s error_type=%s",
-            log.label,
-            log.restore_failed_event,
+    resumed = bool(
+        await run_ops(
+            partial(resume_wait_from_note, manager),
             task_id,
-            id_key,
-            wait_id,
-            type(exc).__name__,
+            kind=kind,
+            wait_id=wait_id,
+            note=note,
+            history=history,
+            history_details=history_details,
+            timestamp=at or utc_now_iso(),
+            front=True,
         )
-        return
-    logger.warning(
-        "A resume from a note failed after the task's %s record was removed; the record is back. "
-        "event=%s task_id=%s %s=%s restored=%s",
-        log.label,
-        log.restored_event,
-        task_id,
-        id_key,
-        wait_id,
-        restored,
     )
+    if resumed and wake:
+        schedule_pending_work(agent)
+    return resumed
 
 
 __all__ = [

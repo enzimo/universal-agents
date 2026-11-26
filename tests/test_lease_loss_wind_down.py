@@ -1011,3 +1011,61 @@ async def test_wind_down_isolates_hopeless_timed_wait_error_from_handbacks_and_r
     agent._send_task_error_response.assert_awaited_once()
     archived = manager.get_task_from_db("waiting")
     assert archived is not None and archived["status"] == ProgressState.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_wind_down_early_failure_stops_pending_subtasks(manager, monkeypatch):
+    """C13: failing a hopeless timed wait early still sends stop requests for its pending delegated subtasks."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "parent", ProgressState.IN_PROGRESS)
+    subtask = Task(
+        task_id="child",
+        parent_task_id="parent",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Do child work",
+    )
+    manager.add_subtask(
+        "parent",
+        subtask,
+        MessageHeader(from_agent_id="worker_1", to_routing_path="specialist_1"),
+        MessageMeta(),
+    )
+    manager.update_main_task_state("parent", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "parent",
+        timed_wait_record(
+            interrupt_id="int-parent",
+            call_id="call-parent",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-parent",
+            minutes=120,
+            reason="long redeploy",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+
+    stop_requests: list[tuple[str, str, str]] = []
+
+    async def record_stop(_agent, *, parent_task_id, subtask_info, reason):
+        stop_requests.append((parent_task_id, subtask_info.task.task_id, reason))
+
+    monkeypatch.setattr(wind_down, "request_subtask_stop", record_stop)
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    await _wait_for_exit(agent, timeout=2.0)
+
+    assert agent.exited
+    archived = manager.get_task_from_db("parent")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+    expected_message = (
+        "This task paused for 120 minutes, but its worker is shutting down before the wait ends, "
+        "so the task was stopped. Ask again to rerun it."
+    )
+    assert stop_requests == [("parent", "child", expected_message)]
+    agent._send_task_error_response.assert_awaited_once()
+    assert agent._send_task_error_response.await_args.args[3] == expected_message

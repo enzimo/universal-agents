@@ -1296,7 +1296,7 @@ async def test_crash_between_record_and_waiting_recovers_waits_and_delivers_note
     assert restarted_mgr.get_task_info(TASK_ID).state == ProgressState.ACCEPTED
     assert list(restarted_mgr.task_state.task_queue) == [TASK_ID]
     assert get_human_interaction_blocker(restarted_mgr, TASK_ID) is None
-    expected_note = timed_waits_rules.resume_note(saved_blocker)
+    expected_note = timed_waits_rules.resume_note(saved_blocker, now=now_box[0])
     assert restarted_mgr.read_runtime_resume_directive(TASK_ID) == expected_note
 
     # Drain the queue and run the real turn owner to prove the saved note reaches the model prompt.
@@ -1359,28 +1359,30 @@ async def test_retried_resume_from_note_adds_only_one_note(
     )
     record_human_interaction_blocker(agent.task_manager, TASK_ID, rec)
 
-    # First attempt fails after saving the note and clearing the blocker, restoring the blocker.
-    orig_enqueue = agent.task_manager.enqueue_task
+    # First attempt fails during the single atomic persistence write: rolls back cleanly with no saved note.
+    orig_persist = agent.task_manager._persist_runtime_state
     fail_once = [True]
 
-    def flaky_enqueue(task_id: str, *, front: bool = False) -> bool:
+    def flaky_persist(*args: Any, **kwargs: Any) -> None:
         if fail_once[0]:
             fail_once[0] = False
             raise RuntimeError("transient sqlite failure")
-        return orig_enqueue(task_id, front=front)
+        orig_persist(*args, **kwargs)
 
-    monkeypatch.setattr(agent.task_manager, "enqueue_task", flaky_enqueue)
+    monkeypatch.setattr(agent.task_manager, "_persist_runtime_state", flaky_persist)
     assert await resume_due_timed_waits(agent) == 0
     assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is not None
+    assert agent.task_manager.read_runtime_resume_directive(TASK_ID) is None
+    assert list(agent.task_manager.task_state.task_queue) == []
 
-    # Retry 2 minutes later succeeds without appending a second, different note.
+    # Retry 2 minutes later succeeds in one write with the actual resume time and elapsed minutes.
     now_box[0] = BASE_TIME + timedelta(minutes=12, seconds=5)
     assert await resume_due_timed_waits(agent) == 1
     assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is None
     assert list(agent.task_manager.task_state.task_queue) == [TASK_ID]
 
     directive = agent.task_manager.read_runtime_resume_directive(TASK_ID) or ""
-    assert directive == timed_waits_rules.resume_note(rec)
+    assert directive == timed_waits_rules.resume_note(rec, now=now_box[0])
     assert directive.count("Portainer redeploy") == 1
 
 

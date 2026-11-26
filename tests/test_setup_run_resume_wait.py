@@ -593,33 +593,28 @@ async def test_one_task_that_fails_does_not_stop_recovery_for_the_others(lead, w
 
 
 @pytest.mark.asyncio
-async def test_a_stop_between_saving_the_note_and_removing_the_record_resumes_once(
+async def test_a_failed_atomic_note_resume_rolls_back_and_next_pass_resumes_once(
     lead, woken, results, monkeypatch, caplog
 ) -> None:
-    """Review C05: the note is saved, then the agent stops (here: the removal fails) before the record goes."""
+    """Review C05 / C02: a persistence failure during atomic note-resume rolls back completely; next pass resumes once."""
     pause_on_setup(lead)
     ended(lead)
     lead._interrupted_turn_sessions.clear()
-    original = paused_wait_resume.clear_wait_record
-    failures = [RuntimeError("the agent stopped")]
-
-    def stops_once(host, task_id, kind, wait_id):
-        if failures:
-            raise failures.pop()
-        return original(host, task_id, kind, wait_id)
-
-    monkeypatch.setattr(paused_wait_resume, "clear_wait_record", stops_once)
+    manager = lead.task_manager
+    persist_fails_once(monkeypatch, manager)
 
     with caplog.at_level(logging.WARNING):
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
-    manager = lead.task_manager
-    assert record_of(lead) is not None and manager.read_runtime_resume_directive(TASK)
+    assert record_of(lead) == {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"}
+    assert manager.read_runtime_resume_directive(TASK) is None
+    assert list(manager.task_state.task_queue) == []
     assert "event=tool_setup_run_recovery_failed" in caplog.text
 
     assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 1
 
     assert record_of(lead) is None
     assert list(manager.task_state.task_queue) == [TASK]
+    assert manager.get_task_info(TASK).state == ProgressState.ACCEPTED
     assert manager.read_runtime_resume_directive(TASK).count(tool_setup_run_runtime.RUN_ENDED_NOTE) == 1
     resumes = [entry for entry in manager.get_task_history_entries(TASK, limit=None)
                if (entry.details or {}).get("event") == "tool_setup_run_resume"]
@@ -756,52 +751,24 @@ async def test_a_failed_save_of_the_mark_leaves_the_record_unmarked_for_recovery
     assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 0
 
 
-@pytest.mark.parametrize("step", ["the removal's save", "the history save", "the state change"])
 @pytest.mark.asyncio
-async def test_a_failure_after_the_record_is_removed_puts_it_back_and_the_next_pass_resumes_once(
-    lead, woken, results, monkeypatch, caplog, step
+async def test_a_failure_during_atomic_note_resume_keeps_the_record_and_the_next_pass_resumes_once(
+    lead, woken, results, monkeypatch, caplog
 ) -> None:
-    """Review F2 (FAIL-02): the record is what lets recovery try again."""
+    """Review F2 / C02: a single-write failure keeps the record intact on disk so recovery tries again cleanly."""
     pause_on_setup(lead)
     ended(lead)
     lead._interrupted_turn_sessions.clear()
     manager = lead.task_manager
-    failures = [RuntimeError("database is locked")]
-    if step == "the removal's save":
-        original = paused_wait_resume.clear_wait_record
-
-        def removal(host, task_id, kind, wait_id):
-            if failures:
-                persist_fails_once(monkeypatch, host)
-                failures.pop()
-            return original(host, task_id, kind, wait_id)
-
-        monkeypatch.setattr(paused_wait_resume, "clear_wait_record", removal)
-    elif step == "the history save":
-        original_history = paused_wait_resume.append_wait_history
-
-        async def history(*args, **kwargs):
-            if failures:
-                raise failures.pop()
-            return await original_history(*args, **kwargs)
-
-        monkeypatch.setattr(paused_wait_resume, "append_wait_history", history)
-    else:
-        original_state = manager.update_main_task_state
-
-        def update_state(*args, **kwargs):
-            if failures:
-                raise failures.pop()
-            return original_state(*args, **kwargs)
-
-        monkeypatch.setattr(manager, "update_main_task_state", update_state)
+    persist_fails_once(monkeypatch, manager)
 
     with caplog.at_level(logging.WARNING):
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS) == 0
 
-    assert record_of(lead) == {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"}, "put back"
+    assert record_of(lead) == {"kind": TOOL_SETUP_RUN_KIND, "run_id": "run-1", "interrupt_id": "i1"}
     assert not manager.task_state.task_queue
-    assert "event=tool_setup_run_recovery_failed" in caplog.text and "event=tool_setup_run_record_restored" in caplog.text
+    assert manager.get_task_info(TASK).state == ProgressState.WAITING
+    assert "event=tool_setup_run_recovery_failed" in caplog.text
 
     assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS + 61) == 1
 

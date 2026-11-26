@@ -49,7 +49,6 @@ from custom_messages.contracts.task_v1 import (
     ACCESS_REQUEST_INTERRUPT_KIND,
     access_interrupt_request_ids,
 )
-from custom_messages.enums import TaskHistoryImportance, TaskHistoryType
 
 # A task blocked on a wait records the same kind as its interrupt.
 ACCESS_REQUEST_BLOCKER = ACCESS_REQUEST_INTERRUPT_KIND
@@ -131,57 +130,6 @@ def record_human_interaction_blocker(
         raise KeyError(f"Task {task_id} is not tracked")
     host.task_state.human_interaction_blockers[task_id] = dict(blocker)
     host._persist_runtime_state()
-
-
-def record_blocker_with_history(
-    host: Any,
-    task_id: str,
-    blocker: dict[str, Any],
-    *,
-    history_summary: str,
-    history_details: dict[str, Any],
-    entry_type: TaskHistoryType = TaskHistoryType.QUERY_EVENT,
-    importance: TaskHistoryImportance = TaskHistoryImportance.HIGH,
-) -> bool:
-    """Persist a task history entry and blocker record together in one runtime-state write.
-
-    Rolls back both in-memory mutations if persistence raises (while this agent
-    still holds the same ``TaskInfo``), and returns ``False`` if custody of this
-    task was released during the write (``TaskCustodyTakenOver``).
-    """
-
-    from custom_agents.task_state_transitions import build_task_history_entry
-
-    task_info = host.get_task_info(task_id)
-    if task_info is None:
-        raise KeyError(f"Task {task_id} is not tracked")
-    entry = build_task_history_entry(
-        host,
-        task_id,
-        history_summary,
-        entry_type=entry_type,
-        importance=importance,
-        details=history_details,
-    )
-    if entry is None:
-        raise KeyError(f"Task {task_id} is not tracked")
-
-    had_blocker = task_id in host.task_state.human_interaction_blockers
-    previous_blocker = host.task_state.human_interaction_blockers.get(task_id)
-    task_info.task.execution_history.append(entry)
-    host.task_state.human_interaction_blockers[task_id] = dict(blocker)
-    try:
-        host._persist_runtime_state()
-    except Exception:
-        if host.get_task_info(task_id) is task_info:
-            if entry in task_info.task.execution_history:
-                task_info.task.execution_history.remove(entry)
-            if had_blocker and previous_blocker is not None:
-                host.task_state.human_interaction_blockers[task_id] = previous_blocker
-            else:
-                host.task_state.human_interaction_blockers.pop(task_id, None)
-        raise
-    return bool(host.get_task_info(task_id) is task_info)
 
 
 def clear_human_interaction_blocker(
@@ -266,20 +214,6 @@ def clear_answer_marks(host: TaskHumanInteractionBlockerHost) -> list[str]:
     return marked
 
 
-def restore_wait_record(
-    host: TaskHumanInteractionBlockerHost,
-    task_id: str,
-    blocker: dict[str, Any],
-) -> bool:
-    """Put back a wait record whose removal could not be completed, unless the task has a record again."""
-
-    if task_id not in host.task_state.tasks or task_id in host.task_state.human_interaction_blockers:
-        return False
-    host.task_state.human_interaction_blockers[task_id] = dict(blocker)
-    host._persist_runtime_state()
-    return True
-
-
 def clear_wait_record(
     host: TaskHumanInteractionBlockerHost,
     task_id: str,
@@ -303,6 +237,27 @@ def _answers(blocker: Mapping[str, Any], response: Mapping[str, Any]) -> bool:
     if kind == SETUP_RUN_BLOCKER:
         return response.get("kind") == TOOL_SETUP_RUN_RESPONSE_KIND and response.get("run_id") == blocker.get("run_id")
     return False
+
+
+def should_clear_answered_blocker(
+    blocker: Mapping[str, Any] | None,
+    answers: Iterable[tuple[str, Mapping[str, Any]]],
+    *,
+    resumed_interrupt_ids: Iterable[str] = (),
+    answered_interrupt_ids: Iterable[str] = (),
+) -> bool:
+    """Whether ``blocker`` is consumed by the answers resuming the paused turn."""
+
+    interrupt_id = blocker.get("interrupt_id") if blocker else None
+    if blocker is None or not interrupt_id:
+        return False
+    answer_list = list(answers)
+    answered = any(answered_id == interrupt_id and _answers(blocker, response) for answered_id, response in answer_list)
+    if not answered and is_timed_wait_blocker(blocker):
+        answered = interrupt_id in set(answered_interrupt_ids) or any(
+            answered_id == interrupt_id for answered_id, _ in answer_list
+        )
+    return answered or (answer_held(blocker) and interrupt_id in set(resumed_interrupt_ids))
 
 
 def clear_answered_blocker(
@@ -329,16 +284,12 @@ def clear_answered_blocker(
     deleting it.
     """
     blocker = host.task_state.human_interaction_blockers.get(task_id)
-    interrupt_id = blocker.get("interrupt_id") if blocker else None
-    if blocker is None or not interrupt_id:
-        return False
-    answer_list = list(answers)
-    answered = any(answered_id == interrupt_id and _answers(blocker, response) for answered_id, response in answer_list)
-    if not answered and is_timed_wait_blocker(blocker):
-        answered = interrupt_id in set(answered_interrupt_ids) or any(
-            answered_id == interrupt_id for answered_id, _ in answer_list
-        )
-    if not answered and not (answer_held(blocker) and interrupt_id in set(resumed_interrupt_ids)):
+    if not should_clear_answered_blocker(
+        blocker,
+        answers,
+        resumed_interrupt_ids=resumed_interrupt_ids,
+        answered_interrupt_ids=answered_interrupt_ids,
+    ):
         return False
     return clear_human_interaction_blocker(host, task_id)
 
