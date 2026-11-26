@@ -1111,8 +1111,9 @@ class ChangeProposalV1(AccessContractModel):
     # Inbox keeps ``effect`` as the full detail. Build it with ``summary_line``.
     summary: str = Field(min_length=1, max_length=CHANGE_SUMMARY_MAX_CHARS)
     effect: tuple[str, ...] = Field(min_length=1, max_length=40)
-    # A person who owns what the change affects (such as their own delivery
-    # target) may decide it besides those who could give its level.
+    # The person who may decide the change besides those who could give its
+    # level: the requester of a settings plan made only of settings marked
+    # user_authorized, or the person whose own records the change affects.
     owner_person_id: str | None = Field(default=None, max_length=240)
     # With authorization off: whether the person must agree in conversation
     # first (some bounded settings, such as adding a registered worker type to

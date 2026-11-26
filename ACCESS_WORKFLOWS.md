@@ -48,8 +48,10 @@ saved.
 A request that only someone else can decide is shown without choices. Access
 for the work of a person who holds it is decided only by that person. Access
 the person lacks, proposals and platform changes are decided by an
-administrator; a change to one person's own setting can also be decided by
-that person.
+administrator. A settings plan made only of the settings marked so that the
+person who asked may approve them (today the proactive delivery target and the
+context-debug dump settings) can also be decided by the person who asked; a
+plan that mixes in any other setting waits for an administrator.
 
 When you deny a request, its step is closed: it is marked **Denied: it will
 not be asked for again**, and the agent cannot ask for anything that step
