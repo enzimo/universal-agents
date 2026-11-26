@@ -1086,6 +1086,11 @@ def test_gh_api_writes_read_bodies_and_graphql_classify_full(catalog, argv, expe
         ["api", "repos/o/r", "-f"],
         ["api", "repos/o/r", "--input"],
         ["api", "repos/o/r", "--paginate=maybe"],
+        # Endpoint addresses urlsplit cannot read are refused, not raised as ValueError.
+        ["api", "https://[::1/graphql", "-X", "GET"],
+        ["api", "http://[x]/repos/o/r"],
+        ["api", "x://["],
+        ["api", "https://a\u2100b/repos/o/r"],
     ],
 )
 def test_gh_api_rejects_unknown_or_malformed_flags(catalog, argv) -> None:

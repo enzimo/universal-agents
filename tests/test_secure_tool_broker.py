@@ -4840,6 +4840,8 @@ def test_github_provider_maps_bitwarden_login_alias_to_credential_login() -> Non
         (["api", "repos/o/r", "--method=", "-f", "title=x"], "cli_command_line_rejected"),
         (["api", "repos/o/r", "--unknown-flag"], "cli_command_line_rejected"),
         (["api", "repos/o/r", "--template"], "cli_command_line_rejected"),
+        (["api", "http://[x]/repos/o/r"], "cli_command_line_rejected"),
+        (["api", "https://[::1/graphql", "-X", "GET"], "cli_command_line_rejected"),
         # Value flags consume method-like tokens, so the real non-GET/POST method is blocked.
         (["api", "repos/o/r/issues", "--template", "--method=GET", "-X", "DELETE"], "cli_command_blocked"),
         (["api", "repos/o/r", "-X", "HEAD"], "cli_command_blocked"),

@@ -822,18 +822,25 @@ async def test_broker_http_refuses_unparsed_gh_api_without_running_subprocess(
     monkeypatch.setattr("secure_tool_broker.executors.shutil.which", lambda _name: "/usr/local/bin/gh")
     monkeypatch.setattr("secure_tool_broker.executors.subprocess.run", fake_run)
 
+    refused_lines = (
+        (["api", "repos/o/r", "-X", "GET", "-X", "DELETE"], "only be specified once"),
+        # An endpoint address urlsplit cannot read is refused, not answered with HTTP 500.
+        (["api", "http://[x]/repos/o/r"], "not a valid address"),
+    )
     for target_gate in (gate, open_gate()):
         broker = SecureToolBrokerService(token=BROKER_ROOT, access_gate=target_gate)
-        body = {
-            "provider": "github",
-            "action": "gh.exec",
-            "params": {"argv": ["api", "repos/o/r", "-X", "GET", "-X", "DELETE"]},
-            "reason": "probe repeated method flags",
-            "context": agent_context(roles=("owner",), task_id="task-1"),
-        }
-        async with TestClient(TestServer(broker.build_app())) as client:
-            response = await client.post("/v1/tools/github", headers=caller_headers(), json=body)
-            payload = json.loads(await response.text())
-        assert response.status == 403
-        assert payload["reason_code"] == REASON_COMMAND_LINE_REJECTED
-        assert "next_step" not in payload
+        for argv, reason in refused_lines:
+            body = {
+                "provider": "github",
+                "action": "gh.exec",
+                "params": {"argv": argv},
+                "reason": "probe a refused gh api line",
+                "context": agent_context(roles=("owner",), task_id="task-1"),
+            }
+            async with TestClient(TestServer(broker.build_app())) as client:
+                response = await client.post("/v1/tools/github", headers=caller_headers(), json=body)
+                payload = json.loads(await response.text())
+            assert response.status == 403, argv
+            assert payload["reason_code"] == REASON_COMMAND_LINE_REJECTED, argv
+            assert reason in payload["error"], argv
+            assert "next_step" not in payload, argv

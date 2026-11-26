@@ -245,10 +245,19 @@ def _is_gh_api_graphql_endpoint(endpoint: str) -> bool:
     strips query string, fragment, percent-encoding, and leading slashes,
     resolves dot segments, and checks whether the path targets ``graphql`` or
     ``api/graphql`` (case-insensitive).
+
+    ``urlsplit`` raises ``ValueError`` for hosts it cannot read (unbalanced or
+    non-numeric square brackets, characters that change under NFKC
+    normalization). Such a line is refused as ``CommandLineRejected`` so both
+    the catalog (``command:unparsed``) and the broker (``cli_command_line_rejected``)
+    give the caller a plain reason instead of an uncaught error.
     """
 
     if "://" in endpoint:
-        raw_path = urlsplit(endpoint).path
+        try:
+            raw_path = urlsplit(endpoint).path
+        except ValueError as exc:
+            raise CommandLineRejected("gh api: the endpoint is not a valid address.") from exc
     else:
         raw_path = endpoint.split("?", 1)[0].split("#", 1)[0]
     unquoted = unquote(raw_path)
