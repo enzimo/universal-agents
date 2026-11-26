@@ -41,6 +41,8 @@ from access_control.entities import (
     AGENT_ROLE_SYSTEM,
     AGENT_ROLE_TEAM_LEAD,
     AGENT_ROLE_WORKER,
+    BLOCK_POLICY_PREFIX,
+    FILE_BLOCK_POLICY_PREFIX,
     agent_role_resolver,
     AgentPrincipal,
     PersonPrincipal,
@@ -309,12 +311,15 @@ class AccessService:
         except AccessEvaluationError as exc:
             logger.error("Access evaluation failed; denying. event=access_evaluation_failed error=%s", exc)
             return _SideResult(False, (), (), error=str(exc))
+        policy_ids = _normalize_policy_ids(decision.determining_policy_ids)
         grant_ids = tuple(
-            item.split(":", 1)[1] for item in decision.determining_policy_ids if item.startswith(("grant:", "deleg:", "cred:"))
+            item.split(":", 1)[1] for item in policy_ids if item.startswith(("grant:", "deleg:", "cred:"))
         )
         blocking = tuple(
-            item for item in decision.determining_policy_ids
-            if not decision.allowed and (item.startswith("block:") or item.startswith(("guard:", "std:team")))
+            item
+            for item in policy_ids
+            if not decision.allowed
+            and (item.startswith(BLOCK_POLICY_PREFIX) or item.startswith(("guard:", "std:team")))
         )
         if decision.errors:
             logger.error(
@@ -786,8 +791,10 @@ class AccessService:
                     AccessDecisionV1(
                         allowed=False,
                         **base,
-                        reason=_folder_refusal(agent.agent_type, level, folder_id, agent_result, other_person),
-                        next_step=_folder_next_step(agent.agent_type, level, folder_id, agent_result, other_person),
+                        reason=_folder_refusal(agent.agent_type, level, folder_id, chain[0], agent_result, other_person),
+                        next_step=_folder_next_step(
+                            agent.agent_type, level, folder_id, chain[0], agent_result, other_person
+                        ),
                         blocking_policy_ids=agent_result.blocking,
                     ),
                     agent,
@@ -808,22 +815,15 @@ class AccessService:
             )
         )
         if not person_result.allowed:
-            blocked = bool(_blocks(person_result.blocking))
+            reason, next_step = _person_folder_refusal(
+                level, folder_id, chain[0], bool(_blocks(person_result.blocking)), other_person
+            )
             return self._finish(
                 AccessDecisionV1(
                     allowed=False,
                     **base,
-                    reason=(
-                        f"The person this task works for is blocked from {folder_id}, and agents never exceed their person."
-                        if blocked
-                        else f"The person this task works for does not have {level.value} access to {folder_id}, "
-                        "and agents never exceed their person."
-                    ),
-                    next_step=(
-                        f"Ask a team administrator to remove the block on {folder_id} for them."
-                        if blocked
-                        else f"Ask a team administrator to give them {level.value} access to {folder_id}."
-                    ),
+                    reason=reason,
+                    next_step=next_step,
                     agent_grant_ids=agent_result.grant_ids if agent_result else (),
                     blocking_policy_ids=person_result.blocking,
                 ),
@@ -995,6 +995,18 @@ class AccessService:
             task_id=task_id,
         )
 
+    def _folder_side_grants(
+        self,
+        *,
+        agent: AgentPrincipal,
+        person: PersonPrincipal | None,
+        task_id: str | None,
+    ) -> tuple[list[GrantV1], list[GrantV1]]:
+        person_id = person.person_id if person else None
+        agent_grants = self._principal_grants(agent, task_id=task_id, person_id=person_id)
+        person_grants = self.valid_grants(person.subjects(), task_id=task_id) if person is not None else []
+        return agent_grants, person_grants
+
     def _folder_allowance_sides(
         self,
         *,
@@ -1019,8 +1031,7 @@ class AccessService:
         resource, entities = folder_entities(
             self.team_id, chain[0], is_file=False, owner=folder_owner(chain[0], person_id)
         )
-        agent_grants = self._principal_grants(agent, task_id=task_id, person_id=person_id)
-        person_grants = self.valid_grants(person.subjects(), task_id=task_id) if person is not None else []
+        agent_grants, person_grants = self._folder_side_grants(agent=agent, person=person, task_id=task_id)
         shared = self._shared_grants_for_agent(agent, person_grants)
         sides: list[tuple[dict[str, str], list[dict[str, Any]], list[GrantV1], str | None]] = [
             (agent.uid(), agent_entities(agent), agent_grants + shared, person_id)
@@ -1072,20 +1083,36 @@ class AccessService:
         folder_id: str,
         level: AccessLevel,
         task_id: str | None,
+        folder_decision: AccessDecisionV1 | None = None,
     ) -> frozenset[str] | None:
         """Direct-child paths blocked inside ``folder_id`` when a folder answer is reusable, or ``None``.
 
         A folder-level allowance covers direct file children ``File::<child>`` of
         ``Folder::<folder_id>`` at ``level`` (excluding one-time grants) except
-        for children targeted by an active block on either side. Returns
-        ``None`` when either side denies ``Folder::<folder_id>`` or any folder
-        id cannot be normalized.
+        for children targeted by an active block on either side. When the caller
+        just received an allowed folder-level decision for ``folder_id`` and
+        ``level`` that consumed no grant, passing ``folder_decision`` skips the
+        redundant Cedar pair whenever neither side holds a one-time grant.
+        Returns ``None`` when either side denies ``Folder::<folder_id>`` or any
+        folder id cannot be normalized.
         """
 
         try:
             canonical_folder = folder_chain(folder_id)[0]
         except FolderIdError:
             return None
+        if (
+            folder_decision is not None
+            and folder_decision.allowed
+            and not folder_decision.consumed_grant_ids
+            and folder_decision.folder_id == canonical_folder
+            and folder_decision.operation == f"folder.{level.value}"
+            and folder_decision.level is level
+            and (person is not None or agent.role == AGENT_ROLE_SYSTEM)
+        ):
+            agent_grants, person_grants = self._folder_side_grants(agent=agent, person=person, task_id=task_id)
+            if not any(grant.uses_remaining is not None for grant in (*agent_grants, *person_grants)):
+                return _blocked_direct_children(canonical_folder, agent_grants + person_grants)
         grants = self._folder_allowance_sides(
             agent=agent, person=person, folder_id=canonical_folder, level=level, task_id=task_id
         )
@@ -1729,18 +1756,33 @@ def _recipient_allowed(
     return any(subject in covering for subject in allowed)
 
 
-def _folder_refusal(agent_type: str, level: AccessLevel, folder_id: str, result: _SideResult, other_person: bool) -> str:
+def _folder_refusal(
+    agent_type: str,
+    level: AccessLevel,
+    folder_id: str,
+    target_id: str,
+    result: _SideResult,
+    other_person: bool,
+) -> str:
     if other_person:
-        return f"{folder_id} is in another person's private folder, and its owner has not shared it at this level."
-    text = f"{agent_type} needs {level.value} access to the folder {folder_id}."
+        return f"{target_id} is in another person's private folder, and its owner has not shared it at this level."
     if _blocks(result.blocking):
-        text += " It is blocked."
+        text = f"{agent_type} needs {level.value} access to {target_id}. It is blocked."
+    else:
+        text = f"{agent_type} needs {level.value} access to the folder {folder_id}."
     if result.error:
         text += " The access check could not run."
     return text
 
 
-def _folder_next_step(agent_type: str, level: AccessLevel, folder_id: str, result: _SideResult, other_person: bool) -> str:
+def _folder_next_step(
+    agent_type: str,
+    level: AccessLevel,
+    folder_id: str,
+    target_id: str,
+    result: _SideResult,
+    other_person: bool,
+) -> str:
     if other_person:
         return (
             "Only its owner can share it, with the person you work for (/share in chat or the workspace "
@@ -1748,12 +1790,28 @@ def _folder_next_step(agent_type: str, level: AccessLevel, folder_id: str, resul
         )
     if _blocks(result.blocking):
         return (
-            f"A block stops {agent_type} from using {folder_id}; asking for access will not change that. "
+            f"A block stops {agent_type} from using {target_id}; asking for access will not change that. "
             "Tell the person you work for; only a person can remove the block."
         )
     return (
         f"Call request_access with folder={folder_id!r} and level={level.value!r}, saying why you need it; "
         f"TeamLead or a person who can give {level.value} access to it decides."
+    )
+
+
+def _person_folder_refusal(
+    level: AccessLevel, folder_id: str, target_id: str, blocked: bool, other_person: bool
+) -> tuple[str, str]:
+    shown = target_id if blocked or other_person else folder_id
+    if blocked:
+        return (
+            f"The person this task works for is blocked from {shown}, and agents never exceed their person.",
+            f"Ask a team administrator to remove the block on {shown} for them.",
+        )
+    return (
+        f"The person this task works for does not have {level.value} access to {shown}, "
+        "and agents never exceed their person.",
+        f"Ask a team administrator to give them {level.value} access to {shown}.",
     )
 
 
@@ -1779,10 +1837,24 @@ def _blocked_direct_children(folder_id: str, grants: Iterable[GrantV1]) -> froze
     return frozenset(blocked)
 
 
+def _normalize_policy_ids(policy_ids: Iterable[str]) -> tuple[str, ...]:
+    """Map secondary ``block-file:<id>`` links onto ``block:<id>`` and deduplicate in order."""
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in policy_ids:
+        if item.startswith(FILE_BLOCK_POLICY_PREFIX):
+            item = f"{BLOCK_POLICY_PREFIX}{item[len(FILE_BLOCK_POLICY_PREFIX):]}"
+        if item not in seen:
+            seen.add(item)
+            normalized.append(item)
+    return tuple(normalized)
+
+
 def _blocks(policy_ids: tuple[str, ...]) -> tuple[str, ...]:
     """The block grant ids among the policies that denied a request."""
 
-    return tuple(item.split(":", 1)[1] for item in policy_ids if item.startswith("block:"))
+    return tuple(item.split(":", 1)[1] for item in policy_ids if item.startswith(BLOCK_POLICY_PREFIX))
 
 
 def _merge_entities(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:

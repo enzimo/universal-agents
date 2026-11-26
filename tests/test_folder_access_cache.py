@@ -326,11 +326,12 @@ def test_crawl_beside_blocked_sibling_reuses_folder_answer_and_refuses_blocked_f
     assert per_file[0] == 4
     assert all(count == 0 for count in per_file[1:])
 
-    # Listing the folder itself (READ level) stays allowed, warms the READ folder entry with the
-    # same blocked-child exclusion, and subsequent listings / sibling reads hit it with zero Cedar calls.
+    # Listing the folder itself (READ level) stays allowed, skips redundant Cedar calls
+    # in reusable_folder_allowance (C09), warms the READ folder entry with the same
+    # blocked-child exclusion, and subsequent listings / sibling reads hit it with zero Cedar calls.
     before_list = calls[0]
     _loc, entries = file_access.list_directory(crawl_dir)
-    assert calls[0] - before_list == 4
+    assert calls[0] - before_list == 2
     assert any(name == "item_0.txt" for name, _stat in entries)
 
     before_second = calls[0]
@@ -374,6 +375,7 @@ def test_folder_access_cache_matches_fresh_decide_folder(
     alice_subject = SubjectRefV1(kind=SubjectKind.USER, id="alice")
 
     level = AccessLevel.READ
+    warm_expected = True
     if scenario == "folder_grant":
         _register_data_folder(layout, tmp_path, service, "reports")
         service.grant_by_person(
@@ -392,10 +394,10 @@ def test_folder_access_cache_matches_fresh_decide_folder(
         )
         warm = ("data/reports/a.txt", True)
         probes = [
-            ("data/reports/a.txt", True),
-            ("data/reports/b.txt", True),
-            ("data/reports", False),
-            ("data/reports/sub/c.txt", True),
+            ("data/reports/a.txt", True, True),
+            ("data/reports/b.txt", True, True),
+            ("data/reports", False, True),
+            ("data/reports/sub/c.txt", True, True),
         ]
     elif scenario == "single_file_read_share":
         service.grant_by_person(
@@ -409,9 +411,9 @@ def test_folder_access_cache_matches_fresh_decide_folder(
         )
         warm = (f"{bob_folder}/shared.txt", True)
         probes = [
-            (f"{bob_folder}/shared.txt", True),
-            (f"{bob_folder}/secret.txt", True),
-            (bob_folder, False),
+            (f"{bob_folder}/shared.txt", True, True),
+            (f"{bob_folder}/secret.txt", True, False),
+            (bob_folder, False, False),
         ]
     elif scenario == "single_file_write_share":
         level = AccessLevel.WRITE
@@ -426,9 +428,9 @@ def test_folder_access_cache_matches_fresh_decide_folder(
         )
         warm = (f"{bob_folder}/shared.txt", True)
         probes = [
-            (f"{bob_folder}/shared.txt", True),
-            (f"{bob_folder}/sibling.txt", True),
-            (bob_folder, False),
+            (f"{bob_folder}/shared.txt", True, True),
+            (f"{bob_folder}/sibling.txt", True, False),
+            (bob_folder, False, False),
         ]
     elif scenario == "folder_block_on_child_file":
         service.grant_by_person(
@@ -442,10 +444,10 @@ def test_folder_access_cache_matches_fresh_decide_folder(
         )
         warm = ("team/work/allowed.txt", True)
         probes = [
-            ("team/work/allowed.txt", True),
-            ("team/work/other.txt", True),
-            ("team/work/blocked.txt", True),
-            ("team/work", False),
+            ("team/work/allowed.txt", True, True),
+            ("team/work/other.txt", True, True),
+            ("team/work/blocked.txt", True, False),
+            ("team/work", False, True),
         ]
     elif scenario == "file_block_on_child":
         service.grant_by_person(
@@ -459,10 +461,10 @@ def test_folder_access_cache_matches_fresh_decide_folder(
         )
         warm = ("team/work/allowed.txt", True)
         probes = [
-            ("team/work/allowed.txt", True),
-            ("team/work/other.txt", True),
-            ("team/work/blocked.txt", True),
-            ("team/work", False),
+            ("team/work/allowed.txt", True, True),
+            ("team/work/other.txt", True, True),
+            ("team/work/blocked.txt", True, False),
+            ("team/work", False, True),
         ]
     elif scenario == "block_on_child_subfolder":
         service.grant_by_person(
@@ -476,11 +478,11 @@ def test_folder_access_cache_matches_fresh_decide_folder(
         )
         warm = ("team/work/allowed.txt", True)
         probes = [
-            ("team/work/allowed.txt", True),
-            ("team/work/other.txt", True),
-            ("team/work", False),
-            ("team/work/sub", False),
-            ("team/work/sub/secret.txt", True),
+            ("team/work/allowed.txt", True, True),
+            ("team/work/other.txt", True, True),
+            ("team/work", False, True),
+            ("team/work/sub", False, False),
+            ("team/work/sub/secret.txt", True, False),
         ]
     elif scenario == "block_on_folder":
         service.grant_by_person(
@@ -492,11 +494,12 @@ def test_folder_access_cache_matches_fresh_decide_folder(
                 kind=GrantKind.BLOCK,
             ),
         )
+        warm_expected = False
         warm = ("team/work/a.txt", True)
         probes = [
-            ("team/work/a.txt", True),
-            ("team/work/b.txt", True),
-            ("team/work", False),
+            ("team/work/a.txt", True, False),
+            ("team/work/b.txt", True, False),
+            ("team/work", False, False),
         ]
     elif scenario == "one_time_grant":
         _register_data_folder(layout, tmp_path, service, "once")
@@ -517,9 +520,9 @@ def test_folder_access_cache_matches_fresh_decide_folder(
         )
         warm = ("data/once/a.txt", True)
         probes = [
-            ("data/once/a.txt", True),
-            ("data/once/b.txt", True),
-            ("data/once", False),
+            ("data/once/a.txt", True, False),
+            ("data/once/b.txt", True, False),
+            ("data/once", False, False),
         ]
     elif scenario == "person_side_block":
         service.grant_by_person(
@@ -533,22 +536,23 @@ def test_folder_access_cache_matches_fresh_decide_folder(
         )
         warm = ("team/work/allowed.txt", True)
         probes = [
-            ("team/work/allowed.txt", True),
-            ("team/work/other.txt", True),
-            ("team/work/blocked.txt", True),
-            ("team/work", False),
+            ("team/work/allowed.txt", True, True),
+            ("team/work/other.txt", True, True),
+            ("team/work/blocked.txt", True, False),
+            ("team/work", False, True),
         ]
     else:
         raise AssertionError(f"Unknown scenario: {scenario}")
 
-    # Warm the cache with one call.
+    # Warm the cache with one call and verify the setup actually produced the expected warm verdict.
     warm_decision = folder_access.decide_folder_use(agent, warm[0], is_file=warm[1], level=level)
     assert warm_decision is not None
-    if scenario == "one_time_grant":
-        assert warm_decision.allowed is True
+    assert warm_decision.allowed is warm_expected, (
+        f"scenario={scenario} warm={warm}: expected allowed={warm_expected}, got {warm_decision.allowed}"
+    )
 
-    # Every probe through the warm cache must match a fresh AccessService.decide_folder verdict.
-    for target_id, is_file in probes:
+    # Every probe through the warm cache must match both the scenario expectation and fresh decide_folder.
+    for target_id, is_file, expected_allowed in probes:
         cached = folder_access.decide_folder_use(agent, target_id, is_file=is_file, level=level)
         fresh = service.decide_folder(
             agent=principal,
@@ -561,6 +565,10 @@ def test_folder_access_cache_matches_fresh_decide_folder(
             hand_on_for_task=False,
         )
         assert cached is not None
+        assert cached.allowed is expected_allowed, (
+            f"scenario={scenario} target={target_id} is_file={is_file}: "
+            f"cached.allowed={cached.allowed} != expected={expected_allowed}"
+        )
         assert cached.allowed == fresh.allowed, (
             f"scenario={scenario} target={target_id} is_file={is_file}: "
             f"cached.allowed={cached.allowed} != fresh.allowed={fresh.allowed}"
@@ -654,3 +662,54 @@ def test_reusable_folder_allowance_fails_closed_on_invalid_ids(
             is None
         )
     assert "event=folder_allowance_invalid_block_target" in caplog.text
+
+
+def test_folder_listing_with_person_side_one_time_grant_is_not_cached(
+    layout: InstanceLayout, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C09: skipping re-evaluation for listings must never cache a person-side one-time grant."""
+
+    agent = _authorized_agent(layout, "alice")
+    access = runtime_access(agent)
+    service = access.service
+    assert service is not None
+    principal, _person, _task_id = task_access(agent, access)
+    once_dir = _register_data_folder(layout, tmp_path, service, "once_list")
+    (once_dir / "note.txt").write_text("hi", encoding="utf-8")
+
+    # Alice holds only a one-time grant on data/once_list; worker holds a normal task grant.
+    service.grant_by_person(
+        OWNER,
+        _grant(
+            subject=SubjectRefV1(kind=SubjectKind.USER, id="alice"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/once_list"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.ONE_TIME,
+            uses_remaining=1,
+            task_id=principal.work_id,
+        ),
+    )
+    service.grant_by_person(
+        OWNER,
+        _grant(
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/once_list"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.TASK,
+            task_id=principal.work_id,
+            for_person_id="alice",
+        ),
+    )
+
+    calls = _count_cedar_calls(service, monkeypatch)
+    first = folder_access.decide_folder_use(agent, "data/once_list", is_file=False, level=AccessLevel.READ)
+    assert first is not None and first.allowed
+    # Because a person-side one-time grant exists, reusable_folder_allowance falls back to Cedar
+    # (filtering out one-time grants), denies reusability, and stores nothing in the folder cache.
+    assert calls[0] == 4
+
+    before_second = calls[0]
+    second = folder_access.decide_folder_use(agent, "data/once_list", is_file=False, level=AccessLevel.READ)
+    assert second is not None and second.allowed
+    assert calls[0] - before_second == 4
+

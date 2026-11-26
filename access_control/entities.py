@@ -35,6 +35,8 @@ AGENT_ROLE_TEAM_LEAD = "team_lead"
 AGENT_ROLE_WORKER = "worker"
 AGENT_ROLE_SYSTEM = "system"
 ADMIN_ROLE = PERSON_ROLE_ADMIN
+BLOCK_POLICY_PREFIX = "block:"
+FILE_BLOCK_POLICY_PREFIX = "block-file:"
 
 
 def agent_role_resolver(lead_agent_type: str) -> Callable[[str], str]:
@@ -318,12 +320,40 @@ def target_uid(target: TargetRefV1) -> dict[str, str]:
 
 
 def grant_links(grant: GrantV1) -> list[dict[str, Any]]:
-    """The Cedar template links for one currently valid grant."""
+    """The Cedar template links for one currently valid grant.
+
+    Invariant: ``AccessService.reusable_folder_allowance`` (and the equivalence
+    matrix in ``tests/test_folder_access_cache.py``) relies on blocks naming a
+    direct child being the only forbid rule that can deny a file whose parent
+    folder is allowed. Mirror any new forbid rule or folder/file link there.
+    """
 
     principal = subject_uid(grant.subject)
     resource = target_uid(grant.target)
     if grant.kind is GrantKind.BLOCK:
-        return [{"template": "tpl:block", "id": f"block:{grant.grant_id}", "principal": principal, "resource": resource}]
+        links = [
+            {
+                "template": "tpl:block",
+                "id": f"{BLOCK_POLICY_PREFIX}{grant.grant_id}",
+                "principal": principal,
+                "resource": resource,
+            }
+        ]
+        if grant.target.kind is TargetKind.FOLDER:
+            # Chat, CLI and restrict_access parse path strings without inspecting
+            # the filesystem, so a block on a file path is stored as
+            # TargetKind.FOLDER. Linking File::<id> alongside Folder::<id> makes
+            # that block stop file tools (which evaluate File::<id>) without
+            # blocking sibling files or the parent folder's listing.
+            links.append(
+                {
+                    "template": "tpl:block",
+                    "id": f"{FILE_BLOCK_POLICY_PREFIX}{grant.grant_id}",
+                    "principal": principal,
+                    "resource": uid("File", grant.target.id),
+                }
+            )
+        return links
     if grant.kind is GrantKind.CREDENTIAL_USE:
         return [
             {"template": "tpl:credential.use", "id": f"cred:{grant.grant_id}", "principal": principal, "resource": resource}
@@ -354,6 +384,8 @@ __all__ = [
     "AGENT_ROLE_TEAM_LEAD",
     "AGENT_ROLE_WORKER",
     "AgentPrincipal",
+    "BLOCK_POLICY_PREFIX",
+    "FILE_BLOCK_POLICY_PREFIX",
     "PersonPrincipal",
     "agent_entities",
     "folder_entities",

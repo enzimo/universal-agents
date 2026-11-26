@@ -109,6 +109,7 @@ def _store_allowed(
     *,
     is_file: bool,
     level: AccessLevel,
+    decision: AccessDecisionV1,
 ) -> None:
     if is_file and len(chain) == 1:
         _keep((*key_prefix, _SCOPE_FILE, chain[0]))
@@ -120,6 +121,7 @@ def _store_allowed(
         folder_id=folder_target,
         level=level,
         task_id=principal.work_id,
+        folder_decision=None if is_file else decision,
     )
     if blocked is not None:
         _keep((*key_prefix, _SCOPE_FOLDER, folder_target), blocked)
@@ -178,7 +180,16 @@ def decide_folder_use(agent: Any, target_id: str, *, is_file: bool, level: Acces
         hand_on_for_task=True,
     )
     if decision.allowed and not decision.consumed_grant_ids:
-        _store_allowed(access.service, key_prefix, principal, person, chain, is_file=is_file, level=level)
+        _store_allowed(
+            access.service,
+            key_prefix,
+            principal,
+            person,
+            chain,
+            is_file=is_file,
+            level=level,
+            decision=decision,
+        )
     return decision
 
 
