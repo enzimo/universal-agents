@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,18 @@ from types import SimpleNamespace
 import pytest
 
 import assistant_gateway.interactive_apps.discord as discord_module
+from assistant_gateway.application.identity_service import (
+    GatewayIdentityService,
+    GatewayIdentitySettings,
+)
+from assistant_gateway.application.request_context import (
+    GatewayRequestContextService,
+    GatewayRequestContextSettings,
+)
+from assistant_gateway.application.runtime_application import (
+    GatewayRuntimeApplication,
+    GatewayRuntimeApplicationSettings,
+)
 from assistant_gateway.config import GatewayInstanceConfig
 from assistant_gateway.command_composition import build_gateway_command_application
 from tests.application_test_doubles import (
@@ -18,7 +31,10 @@ from assistant_gateway.gateway import GatewayDeliveryEvent
 from assistant_gateway.interactive_apps.discord import (
     DiscordInteractiveApp as _DiscordInteractiveApp,
 )
-from assistant_gateway.runtime_ports import OwnershipPrivateResourceAuthorizer
+from assistant_gateway.runtime_ports import (
+    OwnershipPrivateResourceAuthorizer,
+    SystemGatewayClock,
+)
 from assistant_gateway.store import GatewayStateStore
 from assistant_gateway.voice import SpeechResponse, TranscriptionResponse
 from tests.staged_attachment_helpers import staged_attachment
@@ -208,9 +224,13 @@ class _RegisteredUserGateway:
         return None
 
 
+_UNSET = object()
+
+
 class _FakeInteractionResponse:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.message_calls: list[dict[str, object]] = []
         self.defer_calls: list[dict] = []
         self._done = False
 
@@ -221,25 +241,53 @@ class _FakeInteractionResponse:
         self.defer_calls.append(kwargs)
         self._done = True
 
-    async def send_message(self, text: str) -> None:
+    async def send_message(self, text: str, **kwargs) -> None:
         self.messages.append(text)
+        self.message_calls.append({"text": text, **kwargs})
         self._done = True
 
 
 class _FakeInteractionFollowup:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.message_calls: list[dict[str, object]] = []
 
-    async def send(self, text: str) -> None:
+    async def send(self, text: str, **kwargs) -> None:
         self.messages.append(text)
+        self.message_calls.append({"text": text, **kwargs})
 
 
 class _FakeInteraction:
-    def __init__(self, *, user_id: int, channel) -> None:
+    def __init__(
+        self,
+        *,
+        user_id: int,
+        channel,
+        guild_id: object = _UNSET,
+        channel_id: int | None = None,
+        user_integration: bool = False,
+    ) -> None:
         self.user = SimpleNamespace(id=user_id)
         self.channel = channel
+        if guild_id is _UNSET:
+            self.guild_id = (
+                None
+                if channel is not None and getattr(channel, "guild", None) is None
+                else 999
+            )
+        else:
+            self.guild_id = guild_id
+        self.channel_id = (
+            channel_id
+            if channel_id is not None
+            else (getattr(channel, "id", None) if channel is not None else None)
+        )
+        self._user_integration = user_integration
         self.response = _FakeInteractionResponse()
         self.followup = _FakeInteractionFollowup()
+
+    def is_user_integration(self) -> bool:
+        return self._user_integration
 
 
 class _FakeAuthor:
@@ -673,3 +721,366 @@ async def test_discord_app_reply_command_is_cli_only(tmp_path) -> None:
     assert interaction.followup.messages == [
         "The /reply command is available only in the local CLI."
     ]
+
+
+class _SlashCommandOperations(_FakeGateway):
+    """Operations adapter backed by real GatewayRequestContextService."""
+
+    def __init__(
+        self,
+        state_store: GatewayStateStore,
+        request_context: GatewayRequestContextService,
+    ) -> None:
+        super().__init__(state_store)
+        self._request_context = request_context
+        self.stop_calls: list[object] = []
+
+    def gateway_users_enabled(self) -> bool:
+        return self._request_context.users_enabled
+
+    def canonical_user_id_for_context(
+        self,
+        *,
+        channel_name: str | None = None,
+        user_id: str | None = None,
+        chat_id: str | None = None,
+        thread_id: str | None = None,
+        canonical_user_id: str | None = None,
+    ) -> str | None:
+        from assistant_gateway.application.request_context import GatewayRequestRoute
+
+        return self._request_context.canonical_user_id(
+            GatewayRequestRoute(
+                channel_name=channel_name,
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                canonical_user_id=canonical_user_id,
+            )
+        )
+
+    def team_roles_for_person(self, _person_id: str) -> tuple[str, ...]:
+        return ()
+
+    async def stop(self, request):
+        self.stop_calls.append(request)
+        return SimpleNamespace(text="Stopped active work.")
+
+
+class _SpyGatewayRuntimeApplication(GatewayRuntimeApplication):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.command_calls: list[dict[str, object]] = []
+
+    async def execute_interactive_command(self, **kwargs):
+        self.command_calls.append(kwargs)
+        return await super().execute_interactive_command(**kwargs)
+
+
+def _build_slash_allowlist_app(
+    tmp_path: Path,
+    *,
+    users_enabled: bool,
+) -> tuple[DiscordInteractiveApp, _SpyGatewayRuntimeApplication, _SlashCommandOperations]:
+    config = _config(tmp_path)
+    config.gateway.users.enabled = users_enabled
+    config.interactive_apps.discord.allowed_user_ids = ["100"]
+    config.interactive_apps.discord.allowed_channel_ids = ["200"]
+
+    store = GatewayStateStore(str(tmp_path / f"gateway_{users_enabled}.db"))
+    with store.identity_unit_of_work() as uow:
+        uow.identity.create_gateway_user(
+            canonical_user_id="owner_1",
+            display_name="Owner",
+            timezone="UTC",
+        )
+        uow.identity.create_team_membership(
+            canonical_user_id="owner_1",
+            team_id="team_303",
+            role="owner",
+        )
+        uow.identity.create_channel_binding(
+            canonical_user_id="owner_1",
+            channel_name="discord",
+            external_user_id="100",
+        )
+        uow.identity.create_gateway_user(
+            canonical_user_id="registered_1",
+            display_name="Registered Member",
+            timezone="UTC",
+        )
+        uow.identity.create_team_membership(
+            canonical_user_id="registered_1",
+            team_id="team_303",
+            role="member",
+        )
+        uow.identity.create_channel_binding(
+            canonical_user_id="registered_1",
+            channel_name="discord",
+            external_user_id="300",
+        )
+        uow.commit()
+
+    store.create_session(
+        session_key="session_owner",
+        conversation_id="conv_owner",
+        manager_agent_id="manager_1",
+        channel_name="discord",
+        user_id="100",
+        chat_id="200",
+        owner_canonical_user_id="owner_1",
+    )
+    store.record_request(
+        correlation_id="corr_owner",
+        session_key="session_owner",
+        request_kind="user_message",
+        request_text="SECRET_OWNER_PROMPT",
+        conversation_id="conv_owner",
+        followup_to_task_id=None,
+        status="completed",
+        owner_canonical_user_id="owner_1",
+    )
+
+    identity_service = GatewayIdentityService(
+        repository=store.identity_repository,
+        unit_of_work_factory=store,
+        authorizer=SimpleNamespace(),  # type: ignore[arg-type]
+        secrets=SimpleNamespace(hash_secret=lambda raw: f"hash:{raw}"),  # type: ignore[arg-type]
+        clock=SystemGatewayClock(),
+        people_directory=SimpleNamespace(),  # type: ignore[arg-type]
+        settings=GatewayIdentitySettings(
+            enabled=users_enabled,
+            allow_newuser_registration=True,
+            web_user_tokens_enabled=False,
+            web_user_token_ttl_days=7,
+            web_user_invite_ttl_seconds=900,
+            link_code_ttl_seconds=600,
+            default_timezone="UTC",
+            team_id="team_303",
+            web_chat_url="https://agents.example.test/webchat",
+        ),
+    )
+    request_context = GatewayRequestContextService(
+        settings=GatewayRequestContextSettings(
+            instance_name="mybot",
+            team_id="team_303",
+            default_canonical_user_id="owner_1",
+            default_display_name="Owner",
+            default_timezone="UTC",
+            heartbeat_source_id=None,
+            users_enabled=users_enabled,
+        ),
+        identity=identity_service,
+    )
+    operations = _SlashCommandOperations(store, request_context)
+    commands = build_gateway_command_application(
+        config=config,
+        operations=operations,
+        session_repository=store.session_repository,
+        request_repository=store.request_repository,
+        private_authorizer=OwnershipPrivateResourceAuthorizer(),
+        operational_controls=operations,
+        link_results=RecordingLinkResults(),
+    )
+    application = _SpyGatewayRuntimeApplication(
+        settings=GatewayRuntimeApplicationSettings(
+            default_session_key="session_owner",
+            default_owner_canonical_user_id="owner_1",
+        ),
+        sessions=SimpleNamespace(),  # type: ignore[arg-type]
+        session_repository=store.session_repository,
+        delivery_repository=store.delivery_repository,
+        request_context=request_context,
+        manager=SimpleNamespace(),  # type: ignore[arg-type]
+        commands=commands,
+        progress=SimpleNamespace(),  # type: ignore[arg-type]
+        clarification=SimpleNamespace(),  # type: ignore[arg-type]
+        schedules=SimpleNamespace(),  # type: ignore[arg-type]
+        deferred_delivery=SimpleNamespace(),  # type: ignore[arg-type]
+        submission=SimpleNamespace(),  # type: ignore[arg-type]
+        access_reviews=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    app = DiscordInteractiveApp(config, application=application, bridge=_FakeBridge())
+    return app, application, operations
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("users_enabled", [False, True])
+@pytest.mark.parametrize(
+    "command_text",
+    ["/list_sessions", "/preview_session session_owner", "/stop"],
+)
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        "non_allowed_user_in_allowed_channel",
+        "allowed_user_in_non_allowed_channel",
+        "registered_user_in_non_allowed_guild_channel",
+    ],
+)
+async def test_discord_slash_commands_refuse_non_allowed_user_or_channel(
+    tmp_path: Path,
+    caplog,
+    users_enabled: bool,
+    command_text: str,
+    case_name: str,
+) -> None:
+    app, application, operations = _build_slash_allowlist_app(
+        tmp_path, users_enabled=users_enabled
+    )
+    cases = {
+        "non_allowed_user_in_allowed_channel": (999, _FakeTextChannel(200), 555),
+        "allowed_user_in_non_allowed_channel": (100, _FakeTextChannel(999), 555),
+        "registered_user_in_non_allowed_guild_channel": (
+            300,
+            _FakeTextChannel(999),
+            555,
+        ),
+    }
+    user_id, channel, guild_id = cases[case_name]
+    interaction = _FakeInteraction(user_id=user_id, channel=channel, guild_id=guild_id)
+
+    with caplog.at_level(logging.INFO):
+        await app._handle_slash_command(interaction, command_text)
+
+    assert application.command_calls == []
+    assert operations.stop_calls == []
+    assert interaction.response.defer_calls == []
+    assert interaction.followup.messages == []
+    assert len(interaction.response.message_calls) == 1
+    assert interaction.response.message_calls[0]["ephemeral"] is True
+    reply_text = str(interaction.response.message_calls[0]["text"])
+    assert "session_owner" not in reply_text
+    assert "SECRET_OWNER" not in reply_text
+    assert f"newuser_target={user_id}" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("users_enabled", [False, True])
+async def test_discord_slash_commands_allow_allowlisted_user_and_thread_parent(
+    tmp_path: Path,
+    monkeypatch,
+    users_enabled: bool,
+) -> None:
+    monkeypatch.setattr(discord_module, "discord", SimpleNamespace(Thread=_FakeThread))
+    app, application, operations = _build_slash_allowlist_app(
+        tmp_path, users_enabled=users_enabled
+    )
+
+    for command_text in ("/list_sessions", "/preview_session session_owner", "/stop"):
+        interaction = _FakeInteraction(
+            user_id=100, channel=_FakeTextChannel(200), guild_id=555
+        )
+        await app._handle_slash_command(interaction, command_text)
+        assert interaction.response.defer_calls == [{"thinking": True}]
+        assert len(interaction.followup.messages) == 1
+        assert interaction.followup.message_calls[0].get("ephemeral") is not True
+
+    assert len(application.command_calls) == 3
+    assert len(operations.stop_calls) == 1
+
+    # Thread under an allowed parent channel passes.
+    parent = _FakeTextChannel(200)
+    thread = _FakeThread(201, parent=parent)
+    thread_interaction = _FakeInteraction(user_id=100, channel=thread, guild_id=555)
+    await app._handle_slash_command(thread_interaction, "/list_sessions")
+    assert len(application.command_calls) == 4
+    assert "session_owner" in thread_interaction.followup.messages[0]
+
+    # Partial interaction with channel=None falls back to interaction.channel_id.
+    partial_denied = _FakeInteraction(
+        user_id=100, channel=None, guild_id=555, channel_id=999
+    )
+    await app._handle_slash_command(partial_denied, "/list_sessions")
+    assert len(application.command_calls) == 4
+    assert partial_denied.response.message_calls[0]["ephemeral"] is True
+
+    partial_allowed = _FakeInteraction(
+        user_id=100, channel=None, guild_id=555, channel_id=200
+    )
+    await app._handle_slash_command(partial_allowed, "/list_sessions")
+    assert len(application.command_calls) == 5
+
+
+@pytest.mark.asyncio
+async def test_discord_slash_commands_dm_registered_user_and_user_install_rules(
+    tmp_path: Path,
+) -> None:
+    # With users.enabled=True, a registered person in a bot DM passes even if not in allowlists.
+    app_enabled, app_calls_enabled, ops_enabled = _build_slash_allowlist_app(
+        tmp_path, users_enabled=True
+    )
+    dm_channel = _FakeTextChannel(900, guild=None)
+    dm_interaction = _FakeInteraction(
+        user_id=300, channel=dm_channel, guild_id=None, user_integration=False
+    )
+    await app_enabled._handle_slash_command(dm_interaction, "/stop")
+    assert len(app_calls_enabled.command_calls) == 1
+    assert len(ops_enabled.stop_calls) == 1
+    assert dm_interaction.followup.messages == ["Stopped active work."]
+
+    # A user-installed interaction with guild_id=None is NOT treated as a bot DM (fails closed).
+    user_install_interaction = _FakeInteraction(
+        user_id=300, channel=dm_channel, guild_id=None, user_integration=True
+    )
+    await app_enabled._handle_slash_command(user_install_interaction, "/list_sessions")
+    assert len(app_calls_enabled.command_calls) == 1
+    assert user_install_interaction.response.defer_calls == []
+    assert user_install_interaction.response.message_calls[0]["ephemeral"] is True
+
+    # With users.enabled=False, the same Discord id is NOT registered and is refused in DM.
+    app_disabled, app_calls_disabled, ops_disabled = _build_slash_allowlist_app(
+        tmp_path, users_enabled=False
+    )
+    dm_disabled = _FakeInteraction(
+        user_id=300, channel=dm_channel, guild_id=None, user_integration=False
+    )
+    await app_disabled._handle_slash_command(dm_disabled, "/list_sessions")
+    assert app_calls_disabled.command_calls == []
+    assert ops_disabled.stop_calls == []
+    assert dm_disabled.response.defer_calls == []
+    assert dm_disabled.response.message_calls[0]["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_discord_every_registered_slash_command_enforces_allowlist(
+    tmp_path: Path,
+) -> None:
+    app, application, operations = _build_slash_allowlist_app(
+        tmp_path, users_enabled=False
+    )
+    assert discord_module.app_commands is not None
+
+    registered: list[object] = []
+
+    class _FakeTree:
+        def command(self, *, name: str, description: str):
+            def _decorator(func):
+                registered.append((name, func))
+                return func
+
+            return _decorator
+
+        def add_command(self, group) -> None:
+            for sub in group.commands:
+                registered.append((f"{group.name} {sub.name}", sub.callback))
+
+    await app._register_slash_commands(SimpleNamespace(tree=_FakeTree()))  # type: ignore[arg-type]
+    assert len(registered) == len(discord_module.DISCORD_COMMAND_SPECS)
+
+    for _name, callback in registered:
+        interaction = _FakeInteraction(
+            user_id=999, channel=_FakeTextChannel(200), guild_id=555
+        )
+        sig = inspect.signature(callback)
+        kwargs = {}
+        for param_name, param in list(sig.parameters.items())[1:]:
+            if param.default is inspect.Parameter.empty:
+                kwargs[param_name] = "session_owner"
+        await callback(interaction, **kwargs)
+        assert interaction.response.defer_calls == []
+        assert len(interaction.response.message_calls) == 1
+        assert interaction.response.message_calls[0]["ephemeral"] is True
+
+    assert application.command_calls == []
+    assert operations.stop_calls == []
