@@ -37,6 +37,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from access_control.authority_verifier import IdentityRejected
 from custom_messages.contracts.access_v2 import (
     SchedulePermitV1,
     SignedSchedulePermitV1,
@@ -57,10 +58,6 @@ DEFAULT_CONTEXT_LIFETIME = timedelta(days=7)
 SCHEDULE_PERMIT_LIFETIME = timedelta(days=30)
 _DOMAIN = b"ua-task-context-v1\x00"
 _PERMIT_DOMAIN = b"ua-schedule-permit-v1\x00"
-
-
-class IdentityRejected(PermissionError):
-    """A task context is missing, forged, expired, or from an unknown issuer."""
 
 
 def _canonical_json(record: TaskContextV1 | SchedulePermitV1) -> bytes:

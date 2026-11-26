@@ -117,6 +117,7 @@ TASK_DATABASE_FILENAME = "task_history.db"
 TRUST_DIRNAME = "trust"
 TRUST_AUTHORITY_DIRNAME = "authority"
 TRUST_HOSTS_DIRNAME = "hosts"
+TRUST_READERS_DIRNAME = "readers"
 TRUST_BOOTSTRAP_FILENAME = "bootstrap.json"
 TRUST_EXPECTED_HOSTS_FILENAME = "expected-hosts.json"
 TRUST_DELIVERY_REF_KEY_FILENAME = "delivery-ref.key.json"
@@ -501,6 +502,13 @@ class InstanceLayout:
         if not _RUNTIME_ID.fullmatch(runtime) or runtime.startswith(("x-", "_")):
             raise ValueError(f"Not a host runtime id: {runtime!r}")
         return self.trust_dir / TRUST_HOSTS_DIRNAME / runtime
+
+    def reader_trust_dir(self, reader: str) -> Path:
+        """One read-only trust reader's persisted revocations state (no private key)."""
+
+        if not _RUNTIME_ID.fullmatch(reader) or reader.startswith(("x-", "_")):
+            raise ValueError(f"Not a trust reader id: {reader!r}")
+        return self.trust_dir / TRUST_READERS_DIRNAME / reader
 
     @property
     def environment_overrides_path(self) -> Path:
