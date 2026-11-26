@@ -12,7 +12,9 @@ from custom_agents.skill_repository import (
     SkillScanRejected,
     SkillSelectionRequired,
     build_skill_tree_manifest,
+    build_skill_tree_manifest_from_files,
     discover_skill_candidates,
+    is_valid_skill_name,
     scan_skill_with_skillspector,
     select_skill_candidate,
     validate_github_repository_url,
@@ -162,6 +164,71 @@ def test_tree_manifest_binds_every_file_and_rejects_symlinks_and_lfs(tmp_path: P
     )
     with pytest.raises(SkillRepositoryError, match="LFS pointer"):
         build_skill_tree_manifest(skill)
+
+
+def test_is_valid_skill_name_matches_repository_rule() -> None:
+    assert is_valid_skill_name("approved-skill")
+    assert is_valid_skill_name("Skill_1.2")
+    for invalid in (
+        "",
+        ".",
+        "..",
+        ".hidden",
+        ".incoming-chg1-abc",
+        "a/b",
+        "a\\b",
+        "bad name",
+        "a" * 129,
+    ):
+        assert not is_valid_skill_name(invalid), invalid
+
+
+def test_tree_manifest_from_files_matches_disk_and_enforces_limits(tmp_path: Path) -> None:
+    skill = _write_skill(tmp_path, "skills/example")
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "run.py").write_bytes(b"print('ok')\n")
+    disk_manifest = build_skill_tree_manifest(skill)
+
+    # Deliberately supply files in reverse order to confirm canonical sorting matches disk.
+    in_memory_manifest = build_skill_tree_manifest_from_files(
+        [
+            ("scripts/run.py", b"print('ok')\n"),
+            ("SKILL.md", (skill / "SKILL.md").read_bytes()),
+        ]
+    )
+    assert in_memory_manifest == disk_manifest
+
+    with pytest.raises(SkillRepositoryError, match="SKILL.md"):
+        build_skill_tree_manifest_from_files([("scripts/run.py", b"print('ok')\n")])
+    with pytest.raises(SkillRepositoryError, match="case-colliding"):
+        build_skill_tree_manifest_from_files([("SKILL.md", b"a"), ("skill.md", b"b")])
+    with pytest.raises(SkillRepositoryError, match="control characters"):
+        build_skill_tree_manifest_from_files([("SKILL.md", b"a"), ("bad\tname.txt", b"b")])
+    for unsafe_path in ("", "/etc/passwd", "../SKILL.md", "./SKILL.md", "a//b", "a\\b", "dir/"):
+        with pytest.raises(SkillRepositoryError, match="normalized relative POSIX path"):
+            build_skill_tree_manifest_from_files([(unsafe_path, b"x")])
+    with pytest.raises(SkillRepositoryError, match="LFS pointer"):
+        build_skill_tree_manifest_from_files(
+            [
+                ("SKILL.md", b"a"),
+                ("big.bin", b"version https://git-lfs.github.com/spec/v1\noid sha256:0\n"),
+            ]
+        )
+    with pytest.raises(SkillRepositoryError, match="5-byte limit"):
+        build_skill_tree_manifest_from_files(
+            [("SKILL.md", b"123456")],
+            max_single_file_bytes=5,
+        )
+    with pytest.raises(SkillRepositoryError, match="7-byte aggregate limit"):
+        build_skill_tree_manifest_from_files(
+            [("SKILL.md", b"1234"), ("a.txt", b"5678")],
+            max_total_bytes=7,
+        )
+    with pytest.raises(SkillRepositoryError, match="1-file limit"):
+        build_skill_tree_manifest_from_files(
+            [("SKILL.md", b"a"), ("extra.txt", b"b")],
+            max_files=1,
+        )
 
 
 def test_skillspector_static_scan_accepts_only_complete_safe_report(

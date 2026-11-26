@@ -18,7 +18,7 @@ import re
 import shutil
 import stat
 import subprocess
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import urlparse
 
 import yaml
@@ -310,11 +310,17 @@ def _frontmatter_name(skill_file: Path) -> str:
     if not isinstance(metadata, Mapping):
         raise SkillRepositoryError(f"Skill frontmatter must be a mapping: {skill_file}")
     name = str(metadata.get("name") or "").strip()
-    if not _SKILL_NAME_PATTERN.fullmatch(name):
+    if not is_valid_skill_name(name):
         raise SkillRepositoryError(
             f"Skill name must match {_SKILL_NAME_PATTERN.pattern!r}: {skill_file}"
         )
     return name
+
+
+def is_valid_skill_name(name: str) -> bool:
+    """Whether ``name`` matches the canonical managed skill name pattern."""
+
+    return isinstance(name, str) and bool(_SKILL_NAME_PATTERN.fullmatch(name))
 
 
 def _is_below_skills_directory(relative: PurePosixPath) -> bool:
@@ -395,20 +401,72 @@ def select_skill_candidate(
     )
 
 
-def build_skill_tree_manifest(
-    skill_root: Path,
+def _validate_skill_tree_path(relative: str) -> str:
+    if any(ord(character) < 32 for character in relative):
+        raise SkillRepositoryError("Skill paths must not contain control characters.")
+    pure = PurePosixPath(relative)
+    if (
+        not relative
+        or relative.endswith("/")
+        or pure.is_absolute()
+        or "\\" in relative
+        or any(part in {"", ".", ".."} for part in relative.split("/"))
+        or str(pure) != relative
+    ):
+        raise SkillRepositoryError(
+            f"Skill path must be a normalized relative POSIX path: {relative!r}"
+        )
+    return relative
+
+
+def build_skill_tree_manifest_from_files(
+    files: Iterable[tuple[str, bytes]],
     *,
     max_files: int = MAX_SKILL_FILES,
     max_total_bytes: int = MAX_SKILL_BYTES,
     max_single_file_bytes: int = MAX_SINGLE_FILE_BYTES,
 ) -> SkillTreeManifest:
-    """Validate and digest every regular file in one selected skill tree."""
+    """Validate and digest one skill tree from ``(relative_posix_path, bytes)`` pairs."""
 
-    if skill_root.is_symlink() or not skill_root.is_dir():
-        raise SkillRepositoryError("Selected skill root must be a regular directory.")
     entries: list[SkillTreeEntry] = []
     casefold_paths: set[str] = set()
     total_bytes = 0
+    for relative, data in files:
+        _validate_skill_tree_path(relative)
+        casefolded = relative.casefold()
+        if casefolded in casefold_paths:
+            raise SkillRepositoryError(f"Skill contains case-colliding paths: {relative}")
+        casefold_paths.add(casefolded)
+        if data.startswith(_LFS_POINTER_PREFIX):
+            raise SkillRepositoryError(f"Git LFS pointer was not materialized: {relative}")
+        if len(data) > max_single_file_bytes:
+            raise SkillRepositoryError(
+                f"Skill file exceeds the {max_single_file_bytes}-byte limit: {relative}"
+            )
+        total_bytes += len(data)
+        if total_bytes > max_total_bytes:
+            raise SkillRepositoryError(
+                f"Skill exceeds the {max_total_bytes}-byte aggregate limit."
+            )
+        entries.append(
+            SkillTreeEntry(path=relative, size_bytes=len(data), sha256=_sha256_bytes(data))
+        )
+        if len(entries) > max_files:
+            raise SkillRepositoryError(f"Skill exceeds the {max_files}-file limit.")
+    entries.sort(key=lambda item: item.path)
+    if not any(entry.path.casefold() == "skill.md" for entry in entries):
+        raise SkillRepositoryError("Selected skill tree does not contain SKILL.md.")
+    manifest_payload = [entry.as_dict() for entry in entries]
+    return SkillTreeManifest(
+        entries=tuple(entries),
+        total_bytes=total_bytes,
+        tree_sha256=_sha256_bytes(_canonical_json(manifest_payload).encode("utf-8")),
+    )
+
+
+def _iter_skill_tree_files(skill_root: Path) -> Iterator[tuple[str, bytes]]:
+    if skill_root.is_symlink() or not skill_root.is_dir():
+        raise SkillRepositoryError("Selected skill root must be a regular directory.")
     for current_root, directories, files in os.walk(skill_root, followlinks=False):
         current = Path(current_root)
         for name in list(directories):
@@ -430,37 +488,24 @@ def build_skill_tree_manifest(
                 raise SkillRepositoryError(f"Skill contains a symbolic link: {relative}")
             if not stat.S_ISREG(mode):
                 raise SkillRepositoryError(f"Skill contains a non-regular file: {relative}")
-            if any(ord(character) < 32 for character in relative):
-                raise SkillRepositoryError("Skill paths must not contain control characters.")
-            casefolded = relative.casefold()
-            if casefolded in casefold_paths:
-                raise SkillRepositoryError(f"Skill contains case-colliding paths: {relative}")
-            casefold_paths.add(casefolded)
-            data = path.read_bytes()
-            if data.startswith(_LFS_POINTER_PREFIX):
-                raise SkillRepositoryError(f"Git LFS pointer was not materialized: {relative}")
-            if len(data) > max_single_file_bytes:
-                raise SkillRepositoryError(
-                    f"Skill file exceeds the {max_single_file_bytes}-byte limit: {relative}"
-                )
-            total_bytes += len(data)
-            if total_bytes > max_total_bytes:
-                raise SkillRepositoryError(
-                    f"Skill exceeds the {max_total_bytes}-byte aggregate limit."
-                )
-            entries.append(
-                SkillTreeEntry(path=relative, size_bytes=len(data), sha256=_sha256_bytes(data))
-            )
-            if len(entries) > max_files:
-                raise SkillRepositoryError(f"Skill exceeds the {max_files}-file limit.")
-    entries.sort(key=lambda item: item.path)
-    if not any(entry.path.casefold() == "skill.md" for entry in entries):
-        raise SkillRepositoryError("Selected skill tree does not contain SKILL.md.")
-    manifest_payload = [entry.as_dict() for entry in entries]
-    return SkillTreeManifest(
-        entries=tuple(entries),
-        total_bytes=total_bytes,
-        tree_sha256=_sha256_bytes(_canonical_json(manifest_payload).encode("utf-8")),
+            _validate_skill_tree_path(relative)
+            yield relative, path.read_bytes()
+
+
+def build_skill_tree_manifest(
+    skill_root: Path,
+    *,
+    max_files: int = MAX_SKILL_FILES,
+    max_total_bytes: int = MAX_SKILL_BYTES,
+    max_single_file_bytes: int = MAX_SINGLE_FILE_BYTES,
+) -> SkillTreeManifest:
+    """Validate and digest every regular file in one selected skill tree."""
+
+    return build_skill_tree_manifest_from_files(
+        _iter_skill_tree_files(skill_root),
+        max_files=max_files,
+        max_total_bytes=max_total_bytes,
+        max_single_file_bytes=max_single_file_bytes,
     )
 
 
@@ -632,9 +677,11 @@ __all__ = [
     "SkillTreeEntry",
     "SkillTreeManifest",
     "build_skill_tree_manifest",
+    "build_skill_tree_manifest_from_files",
     "clone_public_github_repository",
     "copy_skill_to_quarantine",
     "discover_skill_candidates",
+    "is_valid_skill_name",
     "scan_skill_with_skillspector",
     "select_skill_candidate",
     "validate_github_repository_url",
