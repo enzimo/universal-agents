@@ -106,3 +106,19 @@ def test_the_example_configuration_documents_both_limits_inline() -> None:
         line = next(line for line in lines if line.strip().startswith(f"{key}:"))
         assert line.split("#", 1)[0].split(":", 1)[1].strip() == value
         assert "#" in line, f"{key} needs an inline comment"
+
+
+@pytest.mark.parametrize("key", ["max_wait_minutes_without_approval", "max_wait_minutes_with_approval"])
+def test_an_agent_type_cannot_have_its_own_wait_limit_in_either_file(tmp_path: Path, key: str) -> None:
+    """One limit for the whole team: a per-type value is refused, naming the key, never dropped or applied."""
+
+    from config_loader import Config
+
+    raw = {"agent_types": {"WebResearchAgent": {"agent": {key: 30}}}}
+    with pytest.raises(ValueError, match=f"agent_types.WebResearchAgent.agent.{key} is not allowed"):
+        resolve_agent_type_settings(Config(raw), "TeamArchitect")
+
+    data = _instance(tmp_path).to_yaml_dict()
+    data["agent_types"] = raw["agent_types"]
+    with pytest.raises(ValidationError, match=f"agent.{key} is not allowed"):
+        GatewayInstanceConfig.model_validate(data)

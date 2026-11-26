@@ -88,6 +88,8 @@ def _section_versions(sections: Sequence[TransferSection]) -> dict[str, int]:
 class ExportReport:
     path: Path
     manifest: TransferManifestV1
+    # What the operator must know about the export (``SectionExport.notes``).
+    notes: tuple[str, ...] = ()
 
 
 def export_source(config_path: str | Path) -> ExportSource:
@@ -156,8 +158,9 @@ def export_team(
     derivation = key_derivation or new_key_derivation()
     keys = derive_keys(passphrase, derivation)
     writer = TransferWriter.create(out_path)
+    notes: list[str] = []
     try:
-        entries = [_export_section(section, source, writer, keys) for section in chosen]
+        entries = [_export_section(section, source, writer, keys, notes) for section in chosen]
         manifest = TransferManifestV1(
             application_version=application_version(),
             exported_at_utc=utc_now_iso(),
@@ -171,7 +174,7 @@ def export_team(
     except BaseException:
         writer.discard()
         raise
-    return ExportReport(writer.destination, signed)
+    return ExportReport(writer.destination, signed, tuple(notes))
 
 
 def _export_section(
@@ -179,8 +182,10 @@ def _export_section(
     source: ExportSource,
     writer: TransferWriter,
     keys: TransferKeys,
+    notes: list[str],
 ) -> SectionEntryV1:
     exported = section.export(source, SectionFiles(section.name, writer, keys))
+    notes.extend(exported.notes)
     if section.encrypted:
         if exported.ciphertext is None:
             raise TransferError(

@@ -71,6 +71,7 @@ from team_transfer.crypto import TransferKeyError
 from team_transfer.errors import TransferError
 from team_transfer.export_requests import (
     EXPORT_FILE_SUFFIX,
+    NOTE_MAX_CHARS,
     TeamExportPassphraseRequestV1,
     TeamExportPassphraseV1,
     TeamExportProcessEndedV1,
@@ -239,7 +240,7 @@ def _published(
 ) -> TeamExportResultV1:
     """The success result for a published archive; nothing after publishing undoes it (module docstring)."""
 
-    note = ""
+    notes = list(report.notes)
     try:
         _give_to_data_folder_owner((exports_dir, report.path), source.layout.root)
     except Exception as exc:  # OSError mostly; a stop signal now must not hide a written file either
@@ -250,7 +251,7 @@ def _published(
             report.path.name,
             type(exc).__name__,
         )
-        note = OWNER_NOT_SET_NOTE
+        notes.append(OWNER_NOT_SET_NOTE)
     return TeamExportResultV1(
         export_id=export_id,
         team_id=source.team_id,
@@ -260,8 +261,15 @@ def _published(
         file_name=report.path.name,
         size_bytes=_file_size(report.path, export_id),
         sections=export_sections(report.manifest),
-        note=note,
+        note=result_note(notes),
     )
+
+
+def result_note(notes: list[str]) -> str:
+    """The notes in one line within the result's limit; a cut one ends with an ellipsis (the CLI prints them whole)."""
+
+    text = " ".join(notes)
+    return text if len(text) <= NOTE_MAX_CHARS else text[: NOTE_MAX_CHARS - 1] + "\u2026"
 
 
 def _file_size(path: Path, export_id: str) -> int:

@@ -12,7 +12,7 @@ from runtime_settings.worker_pools import WorkerPoolsConfig
 from runtime_settings.review_cleanup import ReviewCleanupSettings
 from runtime_settings.stale_schedules import StaleScheduleSettings
 from runtime_settings.stuck_tasks import StuckTaskSettings
-from runtime_settings.timed_waits import TimedWaitLimits
+from runtime_settings.timed_waits import TimedWaitLimits, refuse_per_type_wait_limits
 from default_values import AGENT_DEFAULTS
 from runtime_settings.common import (
     _default_conversation_compactor_config,
@@ -103,8 +103,9 @@ class AgentRuntimeDefaultsSettings(BaseModel):
         AGENT_DEFAULTS.max_tool_result_tokens_per_call.value
     )
     # How long a task may pause itself in total (runtime_settings.timed_waits).
-    # Not in the per-type overrides: one limit for every agent, and agents
-    # cannot stage it (OPERATOR_ONLY_RUNTIME_SETTINGS).
+    # One limit for every agent: a per-type override is refused in both files
+    # (AgentRuntimeOverrideSettings and config_loader.resolve_agent_type_settings),
+    # and agents cannot stage it (OPERATOR_ONLY_RUNTIME_SETTINGS).
     max_wait_minutes_without_approval: int = Field(
         default=AGENT_DEFAULTS.max_wait_minutes_without_approval.value, ge=1
     )
@@ -272,6 +273,14 @@ class AgentRuntimeDefaultsSettings(BaseModel):
 
 class AgentRuntimeOverrideSettings(BaseModel):
     schedule_worker_rules: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _no_per_type_wait_limits(cls, value: Any) -> Any:
+        # Unknown keys are otherwise dropped without a word; these must not be.
+        if isinstance(value, dict):
+            refuse_per_type_wait_limits(value)
+        return value
 
     @field_validator("schedule_worker_rules")
     @classmethod

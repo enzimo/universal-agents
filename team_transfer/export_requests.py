@@ -115,6 +115,8 @@ _REQUEST_SUFFIX = ".json"
 _REQUEST_MAX_BYTES = 64 * 1024
 _FILE_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 _ERROR_MAX_CHARS = 2000
+# A result's note (a warning beside a success) fits in this many characters.
+NOTE_MAX_CHARS = _ERROR_MAX_CHARS
 # Collection tokens are URL-safe base64 (secrets.token_urlsafe): ASCII only,
 # so comparing them can never fail on the characters themselves.
 _TOKEN_PATTERN = r"^[A-Za-z0-9_-]{0,128}$"
@@ -230,7 +232,7 @@ class TeamExportResultV1(TransferModel):
     size_bytes: int = Field(default=0, ge=0)
     sections: tuple[TeamExportSectionV1, ...] = ()
     error: str = Field(default="", max_length=_ERROR_MAX_CHARS)
-    note: str = Field(default="", max_length=_ERROR_MAX_CHARS)
+    note: str = Field(default="", max_length=NOTE_MAX_CHARS)
 
 
 class TeamExportProcessEndedV1(TransferModel):

@@ -17,6 +17,14 @@ What it carries, and why:
   do not exist on the new host.
 - The configuration file holds no secrets (``_strip_persisted_instance_config_secrets``);
   database connection strings come from the new instance's environment.
+- Settings this line's transfer does not carry (``NOT_CARRIED_SETTINGS``): the
+  two wait limits (``agent.max_wait_minutes_*``, ``runtime_settings.timed_waits``).
+  This line keeps the section at version 9, because release/0.10 already gives
+  settings versions 10 and later other meanings, and the same number must never
+  mean two formats. The export leaves them out; when the team changed one, it
+  logs a warning and the export's report names it, so the operator sets it again
+  after the move. The section's fingerprint and tracked schema describe exactly
+  what is carried (``settings_payload_contract``).
 
 The import builds the new configuration from this version's defaults plus the
 carried choices, validates it with this version's loader, then runs the same
@@ -31,11 +39,13 @@ import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Iterator
 
 import yaml
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
+from runtime_settings.timed_waits import WITH_APPROVAL_PATH, WITHOUT_APPROVAL_PATH
 from team_transfer.format import TransferModel
 from team_transfer.sections import (
     SECTION_UPGRADES,
@@ -54,6 +64,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 INSTANCE_ROOT_TOKEN: Final = "${INSTANCE_ROOT}"
+# Settings this line's transfer leaves out (module docstring); release/0.10 adds
+# them as its next settings version.
+NOT_CARRIED_SETTINGS: Final = frozenset(
+    tuple(path.split(".")) for path in (WITHOUT_APPROVAL_PATH, WITH_APPROVAL_PATH)
+)
 # Describe which instance this is; the import sets them itself.
 _DERIVED_SETTINGS: Final = frozenset(
     {
@@ -93,9 +108,7 @@ class SettingsSection:
     # 7: tool_policy.output_retention_days (how long saved tool outputs are kept) joined it.
     # 8: gateway.storage_warnings (when people and administrators hear that stored data grew) joined it.
     # 9: optional skill semantic-review settings joined workspace.skill_installation.
-    # 10: agent.max_wait_minutes_without_approval and agent.max_wait_minutes_with_approval
-    #     (how long a task may pause itself with wait and long_wait) joined it.
-    schema_version: ClassVar[int] = 10
+    schema_version: ClassVar[int] = 9
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -113,14 +126,18 @@ class SettingsSection:
             timezone="UTC",
         ).to_yaml_dict()
         root = str(source.layout.root)
-        records = [
-            SettingV1(path=path, value=_relative_to_root(value, root)).model_dump(
-                mode="json"
+        records = []
+        notes = []
+        for path, value in changed_settings(saved, baseline):
+            if path in _DERIVED_SETTINGS:
+                continue
+            if path in NOT_CARRIED_SETTINGS:
+                notes.append(_not_carried_note(path, value))
+                continue
+            records.append(
+                SettingV1(path=path, value=_relative_to_root(value, root)).model_dump(mode="json")
             )
-            for path, value in changed_settings(saved, baseline)
-            if path not in _DERIVED_SETTINGS
-        ]
-        return SectionExport(records=records)
+        return SectionExport(records=records, notes=notes)
 
     # -- import ----------------------------------------------------------------
 
@@ -364,6 +381,62 @@ def _refresh_unchanged_model_defaults(context, config):
             render_bootstrap_control_file(config, LLM_OVERRIDES_FILENAME),
             encoding="utf-8",
         )
+
+
+def _not_carried_note(path: tuple[str, ...], value: Any) -> str:
+    """Log a changed setting the export leaves out; the line the export's report shows for it."""
+
+    dotted = ".".join(path)
+    logger.warning(
+        "A changed setting is not carried by this version's team transfer; set it again after the move. "
+        "event=team_transfer_setting_not_carried path=%s value=%s",
+        dotted,
+        value,
+    )
+    return (
+        f"{dotted} is {value} here, but this version's team transfer does not carry it: "
+        "set it again in the new instance's instance_config.yaml."
+    )
+
+
+@lru_cache(maxsize=1)
+def settings_payload_contract() -> type[BaseModel]:
+    """What a settings record describes on this line: the instance configuration without ``NOT_CARRIED_SETTINGS``.
+
+    The section's fingerprint (``data/schemas/team-transfer/section-contracts.json``)
+    and its tracked schema (``GatewayInstanceConfig.schema.json``) are computed from
+    it (``scripts/export_team_transfer_schemas.py``), so adding a setting this
+    line does not carry leaves settings/9 exactly as release/0.10 knows it. It
+    keeps the configuration's own name, which the schema file, the manifest and
+    the fingerprint use.
+    """
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    class CarriedInstanceConfig(GatewayInstanceConfig):
+        @classmethod
+        def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return without_not_carried(GatewayInstanceConfig.model_json_schema(*args, **kwargs))
+
+    CarriedInstanceConfig.__name__ = GatewayInstanceConfig.__name__
+    CarriedInstanceConfig.__qualname__ = GatewayInstanceConfig.__qualname__
+    return CarriedInstanceConfig
+
+
+def without_not_carried(schema: dict[str, Any]) -> dict[str, Any]:
+    """The configuration's JSON schema without ``NOT_CARRIED_SETTINGS`` (raises if one is not in it)."""
+
+    result = copy.deepcopy(schema)
+    for path in sorted(NOT_CARRIED_SETTINGS):
+        node = result
+        for key in path[:-1]:
+            child = node["properties"][key]
+            reference = child.get("$ref", "")
+            node = result["$defs"][reference.rsplit("/", 1)[-1]] if reference else child
+        del node["properties"][path[-1]]
+        if path[-1] in node.get("required", ()):
+            node["required"].remove(path[-1])
+    return result
 
 
 def changed_settings(
@@ -670,21 +743,22 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 __all__ = [
     "INSTANCE_ROOT_TOKEN",
+    "NOT_CARRIED_SETTINGS",
     "SettingV1",
     "SettingsSection",
     "changed_settings",
     "planned_config",
+    "settings_payload_contract",
+    "without_not_carried",
 ]
 
 
 # V6 added agent.request_conflict_checks, V7 tool_policy.output_retention_days,
-# V8 gateway.storage_warnings, V9 workspace.skill_installation.semantic_review
-# (an older export leaves the review off) and V10 the two agent.max_wait_minutes_*
-# limits (an older export gets the defaults, 20 and 1440). Their records keep the
-# same shape and carry only values that differ from defaults, so old choices pass on
-# unchanged and settings absent from an older export use the current defaults.
+# V8 gateway.storage_warnings and V9 workspace.skill_installation.semantic_review
+# (an older export leaves the review off). Their records keep the same shape and carry
+# only values that differ from defaults, so old choices pass on unchanged and
+# settings absent from an older export use the current defaults.
 SECTION_UPGRADES[(SettingsSection.name, 5, SettingsSection.schema_version)] = lambda records: records
 SECTION_UPGRADES[(SettingsSection.name, 6, SettingsSection.schema_version)] = lambda records: records
 SECTION_UPGRADES[(SettingsSection.name, 7, SettingsSection.schema_version)] = lambda records: records
 SECTION_UPGRADES[(SettingsSection.name, 8, SettingsSection.schema_version)] = lambda records: records
-SECTION_UPGRADES[(SettingsSection.name, 9, SettingsSection.schema_version)] = lambda records: records

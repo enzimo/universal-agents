@@ -9,10 +9,15 @@ The approval limit can never exceed one day (``WAIT_MINUTES_CEILING``): a
 paused turn stays in its agent's memory for the whole wait, and a longer
 pause is better served by a schedule. Only the operator changes these limits
 (``OPERATOR_ONLY_RUNTIME_SETTINGS``): raising the first would let tasks wait
-longer without anyone's approval.
+longer without anyone's approval. They are one value for the whole team, so a
+per-agent-type override (``agent_types.<type>.agent``) is refused in both
+config.yaml and instance_config.yaml (``refuse_per_type_wait_limits``).
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -22,6 +27,8 @@ from default_values import AGENT_DEFAULTS
 WAIT_MINUTES_CEILING = 24 * 60
 WITHOUT_APPROVAL_PATH = "agent.max_wait_minutes_without_approval"
 WITH_APPROVAL_PATH = "agent.max_wait_minutes_with_approval"
+# The keys under ``agent``, which no agent type may override.
+WAIT_LIMIT_KEYS = tuple(path.rsplit(".", 1)[-1] for path in (WITHOUT_APPROVAL_PATH, WITH_APPROVAL_PATH))
 
 
 class TimedWaitLimits(BaseModel):
@@ -48,4 +55,22 @@ class TimedWaitLimits(BaseModel):
         return self
 
 
-__all__ = ["WAIT_MINUTES_CEILING", "WITHOUT_APPROVAL_PATH", "WITH_APPROVAL_PATH", "TimedWaitLimits"]
+def refuse_per_type_wait_limits(agent_overrides: Mapping[str, Any], agent_type: str = "<agent type>") -> None:
+    """Refuse wait limits in one agent type's ``agent`` overrides, naming the key and the team-wide setting."""
+
+    for key in WAIT_LIMIT_KEYS:
+        if key in agent_overrides:
+            raise ValueError(
+                f"agent_types.{agent_type}.agent.{key} is not allowed: how long a task may wait is one limit for "
+                f"the whole team. Set {WITHOUT_APPROVAL_PATH} and {WITH_APPROVAL_PATH} instead."
+            )
+
+
+__all__ = [
+    "WAIT_LIMIT_KEYS",
+    "WAIT_MINUTES_CEILING",
+    "WITHOUT_APPROVAL_PATH",
+    "WITH_APPROVAL_PATH",
+    "TimedWaitLimits",
+    "refuse_per_type_wait_limits",
+]
