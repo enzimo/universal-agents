@@ -157,6 +157,8 @@ def test_compact_signature_inlines_short_enums_and_caps_optional_args() -> None:
                     "properties": {
                         "action": {"type": "string", "enum": ["list", "create", "delete"]},
                         "big_enum": {"type": "string", "enum": ["a", "b", "c", "d", "e", "f", "g"]},
+                        "urls": {"type": "array", "items": {"type": "string"}},
+                        "proposal": {"type": "object"},
                         "opt1": {"type": "string"},
                         "opt2": {"type": "integer"},
                         "opt3": {"type": "boolean"},
@@ -164,14 +166,15 @@ def test_compact_signature_inlines_short_enums_and_caps_optional_args() -> None:
                         "opt5": {"type": "string"},
                         "opt6": {"type": "string"},
                     },
-                    "required": ["action", "big_enum"],
+                    "required": ["action", "big_enum", "urls", "proposal"],
                 }
             }
         }
     )
-    assert signature("demo", fake, compact=True) == "demo(action=list|create|delete, big_enum, opt1?, opt2?, opt3?, opt4?, +2?)"
+    assert signature("demo", fake, compact=True) == "demo(action=list|create|delete, big_enum, urls[], proposal{}, opt1?, opt2?, opt3?, opt4?, +2?)"
     no_args = SimpleNamespace(tool_spec={"inputSchema": {"json": {"type": "object", "properties": {}}}})
     assert signature("ping", no_args, compact=True) == "ping()"
+    assert signature("exa_get_contents", TOOLS["exa_get_contents"], compact=True).startswith("exa_get_contents(urls[],")
     assert signature("memory", TOOLS["memory"], compact=True).startswith(
         "memory(action=list|create|replace|delete|undo, bank=coremem|usermem,"
     )

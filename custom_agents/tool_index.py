@@ -191,7 +191,7 @@ def _type_of(schema: Mapping[str, Any]) -> str:
 
 
 def _compact_arg(argument: str, prop: Mapping[str, Any]) -> str:
-    """Format one required argument for a compact index signature (inlining short enum choices)."""
+    """Format one required argument for a compact index signature (short enum choices inline, list/object marked)."""
 
     enum_values = prop.get("enum")
     if (
@@ -200,7 +200,10 @@ def _compact_arg(argument: str, prop: Mapping[str, Any]) -> str:
         and all(isinstance(v, (str, int, float, bool)) for v in enum_values)
     ):
         return f"{argument}={'|'.join(str(v) for v in enum_values)}"
-    return argument
+    # A required list or object is marked ([] or {}) so the model does not send it as text;
+    # Strands' input validation does not turn a string into a list or a dict.
+    kind = _type_of(prop)
+    return argument + ("[]" if kind.startswith("list[") else "{}" if kind.startswith("dict") else "")
 
 
 def _compact_signature(name: str, tool: Any) -> str:

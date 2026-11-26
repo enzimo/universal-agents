@@ -31,6 +31,13 @@ How it works:
   when the agent's task changes. Model calls are counted rather than time,
   because a task may wait days for an approval and the count behaves the same
   on every run. Loading again brings a group back.
+- **Loaded by a skill.** A skill names the groups its procedure needs in its
+  SKILL.md frontmatter, under the Agent Skills ``metadata`` map, key
+  ``ua-tools`` (``SKILL_TOOLS_METADATA_KEY``), as space-separated catalog
+  tool ids. Activating it with the skills tool loads them for the task
+  through the same per-group path as ``use_tools``
+  (``custom_tools.providers.tool_loading.load_skill_tool_groups``), so only
+  held, offered groups load, within the cap, and nothing is granted.
 - **Loaded for the work.** An objective work session's turns have
   ``fn:objectives``: their checkpoint pass must call
   ``record_objective_work_checkpoint`` (``custom_agents.sdk.strands.turn``).
@@ -77,6 +84,25 @@ TOOL_LIMIT_HOOK_ORDER = -40.0
 ON_REQUEST_TOOL_HOOK_ORDER = -10.0
 # Where an agent without Strands parts (one built without a model) keeps its record.
 _STATE_ATTRIBUTE = "_loaded_tools"
+# SKILL.md frontmatter: metadata: {ua-tools: "fn:access_workflows fn:changes"} names the groups a skill needs.
+SKILL_TOOLS_METADATA_KEY = "ua-tools"
+
+
+def declared_skill_tool_ids(metadata: Any, *, skill_name: str = "") -> list[str]:
+    """The catalog tool ids a skill declares under ``ua-tools``, in order without repeats; [] when none or invalid."""
+
+    if not isinstance(metadata, dict) or SKILL_TOOLS_METADATA_KEY not in metadata:
+        return []
+    value = metadata[SKILL_TOOLS_METADATA_KEY]
+    if not isinstance(value, str):
+        logger.warning(
+            "A skill's ua-tools metadata is not a space-separated string; ignoring it. "
+            "event=skill_tools_metadata_invalid skill_name=%s value_type=%s",
+            skill_name,
+            type(value).__name__,
+        )
+        return []
+    return list(dict.fromkeys(value.split()))
 
 
 @dataclass
@@ -621,7 +647,9 @@ __all__ = [
     "LoadedTools",
     "OBJECTIVES_TOOL_ID",
     "OnRequestToolHook",
+    "SKILL_TOOLS_METADATA_KEY",
     "ToolLimitHook",
+    "declared_skill_tool_ids",
     "definition_tool_ids",
     "group_of",
     "group_functions",

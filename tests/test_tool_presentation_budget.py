@@ -3,7 +3,7 @@
 The tool index experiment merges only if it saves context; these checks keep
 the measured savings from eroding as tools are added. Numbers on 2026-11-26
 with compact index signatures and ``call_tool``:
-worker 11,665 -> 4,561 / 4,919 tokens, team lead 18,641 -> 8,748 / 9,229,
+worker 11,665 -> 4,561 / 4,919 tokens, team lead 18,641 -> 8,749 / 9,230,
 system 15,135 -> 4,960 / 5,353.
 """
 

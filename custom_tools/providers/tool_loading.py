@@ -17,6 +17,7 @@ Every agent holds these through its role's standard tool set
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from strands import tool
@@ -27,6 +28,8 @@ from custom_tools.provider_contract import ToolProvider, tool_name
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.tool_search import document, rank
 from custom_agents.tool_presentation import on_request_groups, withheld_functions
+
+logger = logging.getLogger(__name__)
 
 MAX_FIND_RESULTS = 25
 STATUS_LOADED = "loaded"
@@ -405,6 +408,75 @@ def _summary(results: list[dict[str, Any]]) -> str:
     return " ".join(parts) or "Nothing was loaded."
 
 
+def load_tool_groups(agent: Any, catalog: Any, tool_ids: list[str]) -> list[dict[str, Any]]:
+    """Load these groups for the agent's task, one result per group; ``use_tools`` and skills share it.
+
+    Strands can run tool calls concurrently. Capacity is reserved and the
+    loaded set changed together under the agent's ``LoadedTools`` lock,
+    counting every group in this call.
+    """
+
+    from custom_agents.tool_loading import loaded_tools
+
+    with loaded_tools(agent).lock:
+        return [_load_one(agent, catalog, tool_id, set(tool_ids)) for tool_id in tool_ids]
+
+
+def _skill_note(skill_name: str, results: list[dict[str, Any]]) -> str:
+    """What the skill result tells the model about the groups the skill declares."""
+
+    loaded = [item["tool_id"] for item in results if item["status"] == STATUS_LOADED]
+    shown = [item["tool_id"] for item in results if item["status"] == STATUS_ALREADY_SHOWN]
+    lines = [f"Tool groups the skill {skill_name} uses (ua-tools):"]
+    if loaded:
+        lines.append(f"- Loaded for this task: {', '.join(loaded)}. Their functions are in your tool list from your next step.")
+    if shown:
+        lines.append(f"- Already in your tool list: {', '.join(shown)}.")
+    lines.extend(f"- Not loaded, {item['tool_id']}: {item['reason']}" for item in results if item["status"] == STATUS_REFUSED)
+    return "\n".join(lines)
+
+
+def load_skill_tool_groups(agent: Any, skill_name: str, metadata: Any) -> str:
+    """Load the groups a skill declares under ``ua-tools`` when it is activated; the note for the skill result.
+
+    The same per-group path as ``use_tools``: only groups the agent holds and
+    is offered load, within the model's tool cap, and nothing is granted. An
+    id that is no catalog tool is skipped with a warning (the skill is wrong,
+    not the agent; ``scripts/check_skill_tool_names.py`` finds these).
+    Returns empty when the skill declares no known group.
+    """
+
+    from custom_agents.access_runtime import runtime_access
+    from custom_agents.tool_loading import declared_skill_tool_ids
+
+    declared = declared_skill_tool_ids(metadata, skill_name=skill_name)
+    if not declared:
+        return ""
+    catalog = runtime_access(agent).catalog
+    unknown = [tool_id for tool_id in declared if tool_id not in catalog.tools]
+    if unknown:
+        logger.warning(
+            "A skill declares tool ids that are not in the tool catalog; skipping them. "
+            "event=skill_declared_tool_unknown agent_id=%s skill_name=%s tool_ids=%s",
+            getattr(agent, "id", None),
+            skill_name,
+            ",".join(unknown),
+        )
+    known = [tool_id for tool_id in declared if tool_id in catalog.tools]
+    if not known:
+        return ""
+    results = load_tool_groups(agent, catalog, known)
+    logger.info(
+        "Activating a skill loaded the tool groups it declares. event=skill_tool_groups_loaded agent_id=%s "
+        "skill_name=%s loaded=%s refused=%s",
+        getattr(agent, "id", None),
+        skill_name,
+        ",".join(item["tool_id"] for item in results if item["status"] == STATUS_LOADED),
+        ",".join(item["tool_id"] for item in results if item["status"] == STATUS_REFUSED),
+    )
+    return _skill_note(skill_name, results)
+
+
 @tool
 def use_tools(tool_ids: list[str]) -> str:
     """Load tool groups that wait until a task needs them, such as tool_ids=['fn:objectives'].
@@ -418,7 +490,6 @@ def use_tools(tool_ids: list[str]) -> str:
     """
 
     from custom_agents.access_runtime import runtime_access
-    from custom_agents.tool_loading import loaded_tools
     from custom_tools.providers.access import _guarded
 
     def run() -> str:
@@ -427,10 +498,7 @@ def use_tools(tool_ids: list[str]) -> str:
         wanted = list(dict.fromkeys(str(item or "").strip() for item in (tool_ids or []) if str(item or "").strip()))
         if not wanted:
             raise ValueError("Name at least one tool group, for example tool_ids=['fn:objectives'].")
-        # Strands can run use_tools calls concurrently. Reserve capacity and
-        # change the loaded set together, including every group in this call.
-        with loaded_tools(agent).lock:
-            results = [_load_one(agent, catalog, tool_id, set(wanted)) for tool_id in wanted]
+        results = load_tool_groups(agent, catalog, wanted)
         return _json({"tools": results, "message": _summary(results)})
 
     return _guarded(run)
@@ -534,5 +602,7 @@ __all__ = [
     "call_tool",
     "describe_tools",
     "find_tools",
+    "load_skill_tool_groups",
+    "load_tool_groups",
     "use_tools",
 ]

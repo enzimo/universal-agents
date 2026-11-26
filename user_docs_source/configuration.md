@@ -222,7 +222,7 @@ Measured first-request tool context per role (`scripts/measure_tool_context.py`,
 | Role | `full_definitions` | `index` | `index_and_scripts` |
 | --- | ---: | ---: | ---: |
 | `worker` | 11,665 tokens (47 shown) | 4,561 tokens (20 shown, 28 indexed) | 4,919 tokens (21 shown, 28 indexed) |
-| `team_lead` | 18,641 tokens (77 shown) | 8,748 tokens (31 shown, 92 indexed) | 9,229 tokens (32 shown, 92 indexed) |
+| `team_lead` | 18,641 tokens (77 shown) | 8,749 tokens (31 shown, 92 indexed) | 9,230 tokens (32 shown, 92 indexed) |
 | `system` | 15,135 tokens (57 shown) | 4,960 tokens (20 shown, 38 indexed) | 5,353 tokens (21 shown, 38 indexed) |
 
 Access does not change with this setting: every tool call is still checked,
