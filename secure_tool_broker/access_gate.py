@@ -61,7 +61,7 @@ from custom_messages.contracts.access_v2 import (
     injections_match,
 )
 from secure_tool_broker.account_links import ACCESS_STORE_MISSING_NEXT_STEP, ACCESS_STORE_MISSING_TEXT
-from secure_tool_broker.credential_catalog import linked_credential_expired
+from secure_tool_broker.credential_catalog import linked_credential_state
 from secure_tool_broker.tool_setup_tracking import note_gate_link_missing, note_link_missing
 from secure_tools.auth_methods import tool_sign_in
 from secure_tools.chat_commands import link_command
@@ -287,18 +287,22 @@ class BrokerAccessGate:
                 self.team_id, tool_id, LinkOwnerKind.PERSON, person_id, purpose=LinkPurpose.ACCOUNT
             )
             if own is not None:
-                if not linked_credential_expired(own, now=now):
+                own_state = linked_credential_state(own, now=now)
+                if own_state == "usable":
                     return own, None
-                expired_own = own
+                if own_state == "expired":
+                    expired_own = own
         if LinkOwnerKind.TEAM not in owners:
             return None, expired_own
         team_link = self.links.active_link(
             self.team_id, tool_id, LinkOwnerKind.TEAM, self.team_id, purpose=LinkPurpose.ACCOUNT
         )
         if team_link is not None:
-            if not linked_credential_expired(team_link, now=now):
+            team_state = linked_credential_state(team_link, now=now)
+            if team_state == "usable":
                 return team_link, expired_own
-            return None, expired_own or team_link
+            if team_state == "expired":
+                return None, expired_own or team_link
         return None, expired_own
 
     def account_link_for(self, tool_id: str, person_id: str | None) -> AccountLinkV1 | None:
@@ -352,7 +356,8 @@ class BrokerAccessGate:
                 next_step=gate_link_next_step(tool),
                 resolution=resolution,
             )
-        if linked_credential_expired(gate_link):
+        gate_state = linked_credential_state(gate_link)
+        if gate_state == "expired":
             note_gate_link_missing(self.links, self.team_id, person_id, tool.tool_id)
             return None, self._refuse(
                 REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
@@ -360,6 +365,15 @@ class BrokerAccessGate:
                 "so the broker did not send the request.",
                 context,
                 next_step=expired_link_next_step(tool, gate_link),
+                resolution=resolution,
+            )
+        if gate_state == "missing":
+            note_gate_link_missing(self.links, self.team_id, person_id, tool.tool_id)
+            return None, self._refuse(
+                REASON_GATE_LINK_MISSING,
+                f"{tool.display_name} requires a team gate credential before requests can be sent, and none is linked.",
+                context,
+                next_step=gate_link_next_step(tool),
                 resolution=resolution,
             )
         if not injections_match(gate_link.injections, tool.gate_injections):

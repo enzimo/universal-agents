@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Literal, Mapping
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -86,7 +86,7 @@ from secure_tool_broker.sealbox_cli import (
     run_sealbox,
     safe_key_component,
 )
-from secure_tool_broker.sealbox_tenants import sealbox_tenant_environment
+from secure_tool_broker.sealbox_tenants import SEALBOX_TENANT_NOT_PROVISIONED, sealbox_tenant_environment
 from secure_tools.providers import ToolContext, ToolResult, ValidatedAction
 from runtime_settings.openshell_naming import ENV_SANDBOX_NAME as OPENSHELL_ENV_SANDBOX_NAME
 from runtime_settings.openshell_naming import sandbox_name as openshell_sandbox_name
@@ -775,6 +775,123 @@ def _find_shared_sealbox_record(
     return None
 
 
+def _sealbox_delete_targets_for_credential(
+    credential: CatalogCredential,
+    *,
+    keep_keys: set[str] | None = None,
+) -> list[tuple[str, str]]:
+    keep = keep_keys or set()
+    target_kind_by_item: dict[str, str] = {}
+    ordered_items: list[str] = []
+    for field in credential.fields.values():
+        for source_ref in field.resolution_order:
+            record_key = _sealbox_record_key(source_ref)
+            if not record_key or record_key in keep:
+                continue
+            item_kind = _sealbox_ref_kind(source_ref)
+            if record_key not in target_kind_by_item:
+                ordered_items.append(record_key)
+                target_kind_by_item[record_key] = item_kind
+            elif item_kind == "credential":
+                target_kind_by_item[record_key] = "credential"
+    return [(item_key, target_kind_by_item[item_key]) for item_key in ordered_items]
+
+
+def _delete_sealbox_targets(
+    targets: list[tuple[str, str]],
+    *,
+    scope: CredentialOwnerScope,
+    credential_key: str,
+    event_name: str,
+) -> list[str]:
+    if not targets:
+        return []
+    tenant_env = sealbox_tenant_environment(
+        scope_kind=scope.scope_kind,
+        owner_id=scope.owner_id,
+        provision=False,
+    )
+    if isinstance(tenant_env, ToolResult):
+        if (tenant_env.content or {}).get("error_code") == SEALBOX_TENANT_NOT_PROVISIONED:
+            return []
+        _LOGGER.warning(
+            "Failed to open Sealbox tenant environment while cleaning up records. "
+            "event=%s scope_kind=%s owner_id=%s credential_key=%s error=%s",
+            event_name,
+            scope.scope_kind,
+            scope.owner_id,
+            credential_key,
+            tenant_env.error,
+        )
+        return [item_key for item_key, _kind in targets]
+    failed: list[str] = []
+    for item_key, item_kind in targets:
+        deleted = delete_sealbox_item(item_key=item_key, item_kind=item_kind, env=tenant_env)
+        if isinstance(deleted, ToolResult):
+            failed.append(item_key)
+            _LOGGER.warning(
+                "Failed to delete Sealbox record during cleanup. "
+                "event=%s scope_kind=%s owner_id=%s credential_key=%s item_key=%s error=%s",
+                event_name,
+                scope.scope_kind,
+                scope.owner_id,
+                credential_key,
+                item_key,
+                deleted.error,
+            )
+    return failed
+
+
+def _delete_dropped_sealbox_records(
+    old_credential: CatalogCredential,
+    new_credential: CatalogCredential,
+    *,
+    scope: CredentialOwnerScope,
+    credential_key: str,
+) -> list[str]:
+    """Delete every version of Sealbox records referenced by ``old_credential`` but not ``new_credential``."""
+
+    targets = _sealbox_delete_targets_for_credential(
+        old_credential,
+        keep_keys=_credential_sealbox_record_keys(new_credential),
+    )
+    return _delete_sealbox_targets(
+        targets,
+        scope=scope,
+        credential_key=credential_key,
+        event_name="credential_dropped_sealbox_delete_failed",
+    )
+
+
+def _rollback_new_sealbox_writes(
+    written_credential: CatalogCredential,
+    *,
+    existing_keys: set[str],
+    catalog: CredentialCatalog,
+    credential_key: str,
+    scope: CredentialOwnerScope,
+) -> bool:
+    """Delete brand-new Sealbox records written by a failed save; return True if any written record remains."""
+
+    written_targets = _sealbox_delete_targets_for_credential(written_credential)
+    if not written_targets:
+        return False
+    other_keys: set[str] = set()
+    for other_key, other_cred in catalog.credentials.items():
+        if other_key != credential_key:
+            other_keys |= _credential_sealbox_record_keys(other_cred)
+    protected = existing_keys | other_keys
+    rollback_targets = [(key, kind) for key, kind in written_targets if key not in protected]
+    unrolled_protected = len(rollback_targets) < len(written_targets)
+    failed = _delete_sealbox_targets(
+        rollback_targets,
+        scope=scope,
+        credential_key=credential_key,
+        event_name="credential_failed_write_rollback_failed",
+    )
+    return unrolled_protected or bool(failed)
+
+
 def sealbox_record_expiry(
     scope: CredentialOwnerScope,
     *,
@@ -1093,6 +1210,7 @@ def collect_credential(
             else:
                 public_fields[field_name] = value
         with credential_key_lock(resolved_scope, credential_key):
+            existing_keys: set[str] = set()
             with _scope_catalog_lock(resolved_scope):
                 catalog_snapshot = load_catalog(scope=resolved_scope)
                 existing_credential = catalog_snapshot.credentials.get(credential_key)
@@ -1126,15 +1244,45 @@ def collect_credential(
                         )
                     normalized_expires_at = existing_credential.expires_at
                     ttl_seconds = remaining_ttl_seconds(existing_credential.expires_at, now=lock_now)
-                if write_source == "sealbox":
-                    planned_keys = _planned_sealbox_record_keys(
+                existing_keys = (
+                    _credential_sealbox_record_keys(existing_credential)
+                    if existing_credential is not None
+                    else set()
+                )
+                planned_keys = (
+                    _planned_sealbox_record_keys(
                         credential_key=credential_key,
                         request_payload=request_payload,
                         values=values,
                         field_specs=active_field_specs,
                     )
-                    if existing_credential is not None:
-                        planned_keys |= _credential_sealbox_record_keys(existing_credential)
+                    if write_source == "sealbox"
+                    else set()
+                )
+                dropped_keys = existing_keys - planned_keys
+                if dropped_keys:
+                    shared_dropped = _find_shared_sealbox_record(
+                        catalog_snapshot,
+                        exclude_key=credential_key,
+                        target_keys=dropped_keys,
+                        temporary_only=False,
+                    )
+                    if shared_dropped is not None:
+                        other_key, record_key = shared_dropped
+                        return ToolResult(
+                            status="error",
+                            error=(
+                                f"Cannot replace {credential_key} because another catalog entry "
+                                f"({other_key}) still references Sealbox record {record_key}."
+                            ),
+                            content={
+                                "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
+                                "credential_key": credential_key,
+                                "conflicting_credential_key": other_key,
+                                "sealbox_record_key": record_key,
+                            },
+                        )
+                if write_source == "sealbox":
                     shared = _find_shared_sealbox_record(
                         catalog_snapshot,
                         exclude_key=credential_key,
@@ -1186,13 +1334,48 @@ def collect_credential(
                 write_result=write_result,
                 expires_at=normalized_expires_at,
             )
+            latest_existing: CatalogCredential | None = None
+            post_write_conflict: ToolResult | None = None
+            latest_catalog_for_rollback: CredentialCatalog | None = None
+            save_error: Exception | None = None
             with _scope_catalog_lock(resolved_scope):
-                if write_source == "sealbox":
-                    latest_catalog = load_catalog(scope=resolved_scope)
+                latest_catalog = load_catalog(scope=resolved_scope)
+                latest_catalog_for_rollback = latest_catalog
+                latest_existing = latest_catalog.credentials.get(credential_key)
+                actual_new_keys = _credential_sealbox_record_keys(credential)
+                actual_existing_keys = (
+                    _credential_sealbox_record_keys(latest_existing)
+                    if latest_existing is not None
+                    else set()
+                )
+                actual_dropped_keys = actual_existing_keys - actual_new_keys
+                if actual_dropped_keys:
+                    shared_dropped = _find_shared_sealbox_record(
+                        latest_catalog,
+                        exclude_key=credential_key,
+                        target_keys=actual_dropped_keys,
+                        temporary_only=False,
+                    )
+                    if shared_dropped is not None:
+                        other_key, record_key = shared_dropped
+                        post_write_conflict = ToolResult(
+                            status="error",
+                            error=(
+                                f"Cannot replace {credential_key} because another catalog entry "
+                                f"({other_key}) still references Sealbox record {record_key}."
+                            ),
+                            content={
+                                "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
+                                "credential_key": credential_key,
+                                "conflicting_credential_key": other_key,
+                                "sealbox_record_key": record_key,
+                            },
+                        )
+                if post_write_conflict is None and write_source == "sealbox":
                     shared = _find_shared_sealbox_record(
                         latest_catalog,
                         exclude_key=credential_key,
-                        target_keys=_credential_sealbox_record_keys(credential),
+                        target_keys=actual_new_keys,
                         temporary_only=normalized_expires_at is None,
                     )
                     if shared is not None:
@@ -1204,7 +1387,7 @@ def collect_credential(
                             else f"Cannot store {credential_key} onto a Sealbox record owned by temporary "
                             f"credential {other_key}."
                         )
-                        return ToolResult(
+                        post_write_conflict = ToolResult(
                             status="error",
                             error=error_message,
                             content={
@@ -1214,8 +1397,46 @@ def collect_credential(
                                 "sealbox_record_key": record_key,
                             },
                         )
-                _save_catalog_credential(credential_key, credential, scope=resolved_scope)
-                _SECRET_CACHE.clear()
+                if post_write_conflict is None:
+                    try:
+                        _save_catalog_credential(credential_key, credential, scope=resolved_scope)
+                        _SECRET_CACHE.clear()
+                    except Exception as exc:
+                        save_error = exc
+            if post_write_conflict is not None or save_error is not None:
+                partial_write = False
+                if write_source == "sealbox":
+                    rollback_catalog = latest_catalog_for_rollback or CredentialCatalog()
+                    partial_write = _rollback_new_sealbox_writes(
+                        credential,
+                        existing_keys=existing_keys,
+                        catalog=rollback_catalog,
+                        credential_key=credential_key,
+                        scope=resolved_scope,
+                    )
+                if post_write_conflict is not None:
+                    if partial_write:
+                        post_write_conflict.content = {
+                            **dict(post_write_conflict.content or {}),
+                            "partial_store_write": True,
+                        }
+                    return post_write_conflict
+                assert save_error is not None
+                error_content: dict[str, Any] = {"credential_key": credential_key}
+                if partial_write:
+                    error_content["partial_store_write"] = True
+                return ToolResult(
+                    status="error",
+                    error=f"Credential catalog save failed after writing to {write_source}: {save_error}",
+                    content=error_content,
+                )
+            if latest_existing is not None:
+                _delete_dropped_sealbox_records(
+                    latest_existing,
+                    credential,
+                    scope=resolved_scope,
+                    credential_key=credential_key,
+                )
         result_content: dict[str, Any] = {
             "status": "credential_stored",
             "credential_key": credential_key,
@@ -2307,7 +2528,7 @@ def _sealbox_delete_targets(refs: list[CatalogSourceRef]) -> list[tuple[str, str
     target_kind_by_item: dict[str, str] = {}
     ordered_items: list[str] = []
     for source_ref in refs:
-        item_key = _string(source_ref.item_id or source_ref.item_name)
+        item_key = _sealbox_record_key(source_ref) or _string(source_ref.item_id or source_ref.item_name)
         if not item_key:
             continue
         item_kind = _sealbox_ref_kind(source_ref)
@@ -2328,6 +2549,7 @@ def delete_credential(
     expected_updated_at: str | None = None,
     expected_expires_at: str | None = None,
     before_delete: Callable[[], ToolResult | None] | None = None,
+    before_delete_credential: Callable[[CredentialOwnerScope, str, CatalogCredential], ToolResult | None] | None = None,
 ) -> ToolResult:
     try:
         resolved_scope = _owner_scope(context=context, scope=scope)
@@ -2410,6 +2632,10 @@ def delete_credential(
                 # and before deleting Sealbox records or the catalog row so a hook
                 # failure (e.g. link revocation or notice delivery) leaves the row for retry.
                 hook_result = before_delete()
+                if isinstance(hook_result, ToolResult):
+                    return hook_result
+            elif before_delete_credential is not None and credential is not None:
+                hook_result = before_delete_credential(resolved_scope, credential_key, credential)
                 if isinstance(hook_result, ToolResult):
                     return hook_result
 
@@ -2742,24 +2968,37 @@ def _linked_account_scope(link: AccountLinkV1) -> CredentialOwnerScope:
     return CredentialOwnerScope.user(link.owner_id)
 
 
+def linked_credential_state(
+    link: AccountLinkV1,
+    *,
+    now: datetime | None = None,
+) -> Literal["usable", "missing", "expired"]:
+    """Inspect whether ``link`` points at a present, unexpired catalog row (read-only).
+
+    Reads only the single linked catalog row read-only so checking an account
+    link never creates a catalog file or decodes the owner's other entries.
+    A missing catalog row counts as ``"missing"`` so broken links never block
+    team fallback or claim a shared fallback that is not stored.
+    """
+
+    raw = load_credential_readonly(resolve_catalog_db_path(), _linked_account_scope(link), link.credential_key)
+    if not isinstance(raw, Mapping):
+        return "missing"
+    raw_expires = raw.get("expires_at")
+    if raw_expires is not None and not (isinstance(raw_expires, str) and not raw_expires.strip()):
+        if is_expired(raw_expires, now=now):
+            return "expired"
+    return "usable"
+
+
 def linked_credential_expired(
     link: AccountLinkV1,
     *,
     now: datetime | None = None,
 ) -> bool:
-    """Return True when ``link`` points at a temporary credential whose ``expires_at`` has passed.
+    """Return True when ``link`` points at a temporary credential whose ``expires_at`` has passed."""
 
-    Reads only the single linked catalog row read-only so checking an account
-    link never creates a catalog file or decodes the owner's other entries.
-    """
-
-    raw = load_credential_readonly(resolve_catalog_db_path(), _linked_account_scope(link), link.credential_key)
-    if not isinstance(raw, Mapping):
-        return False
-    raw_expires = raw.get("expires_at")
-    if raw_expires is None or (isinstance(raw_expires, str) and not raw_expires.strip()):
-        return False
-    return is_expired(raw_expires, now=now)
+    return linked_credential_state(link, now=now) == "expired"
 
 
 def _resolve_injections(

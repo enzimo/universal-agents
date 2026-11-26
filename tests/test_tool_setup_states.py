@@ -433,7 +433,9 @@ def test_teamlead_uses_a_ready_tool_and_sets_up_the_rest_without_asking() -> Non
     assert json.dumps({"ok": True})  # keeps json imported for fixtures that need it
 
 
-def test_gate_only_tool_status_tracking_and_recheck_notice(tmp_path: Path) -> None:
+def test_gate_only_tool_status_tracking_and_recheck_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from access_catalog.catalog import CatalogSource
     from access_control.identity import ContextVerifier
     from access_control.tool_setup_states import FIXED_BY_ADMINISTRATOR, HOW_GATE_LINK, STEP_GATE_LINK
@@ -446,8 +448,16 @@ def test_gate_only_tool_status_tracking_and_recheck_notice(tmp_path: Path) -> No
         SubjectRefV1,
     )
     from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog import CatalogCredential
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
     from secure_tool_broker.tool_setup_status import tool_status_entry
     from tests.broker_access_support import context_verify_keys
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "credential_catalog.db"))
 
     tools = tmp_path / "instance" / "control" / "access" / "tools"
     tools.mkdir(parents=True)
@@ -475,6 +485,13 @@ tools:
     )
 
     assert tool_status_entry("http:gated-docs", PERSON, gate)["gate"] == {"state": "missing"}
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        CredentialOwnerScope.team(TEAM),
+        "docs_gate",
+        CatalogCredential(display_name="Docs Gate", purpose="Gate credential").model_dump(
+            mode="json", exclude_none=True
+        ),
+    )
     gate_link = access.create_link(
         AccountLinkV1(
             link_id="gate_link_1",

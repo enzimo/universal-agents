@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from urllib.parse import quote
 
 from storage import sqlite_connection
+from secure_tool_broker.credential_expiry import format_utc_timestamp, is_expired
 
 logger = logging.getLogger(__name__)
 
@@ -592,6 +593,58 @@ def load_credential_readonly(
         conn.close()
 
 
+def _sealbox_record_key_from_raw_ref(source_ref: Mapping[str, Any]) -> str | None:
+    source = str(source_ref.get("source") or "").strip().lower()
+    if source not in {"sealbox", "sealbox-cli", "sealbox_cli"}:
+        return None
+    key = str(source_ref.get("item_id") or source_ref.get("item_name") or "").strip()
+    if not key:
+        return None
+    field_ref = str(source_ref.get("field_ref") or "password").strip()
+    if field_ref in {"", "password", "value"}:
+        return key
+    return f"{key}:{field_ref}"
+
+
+def expired_sealbox_record_keys(
+    scope: CredentialOwnerScope,
+    *,
+    now: datetime | None = None,
+) -> dict[str, str]:
+    """Map canonical Sealbox record keys owned by expired catalog entries in ``scope`` to ``expires_at``."""
+
+    rows = load_scope_readonly(resolve_catalog_db_path(), scope)
+    expired: dict[str, str] = {}
+    for raw in rows.values():
+        if not isinstance(raw, Mapping):
+            continue
+        raw_expires = raw.get("expires_at")
+        if raw_expires is None or (isinstance(raw_expires, str) and not raw_expires.strip()):
+            continue
+        try:
+            if not is_expired(raw_expires, now=now):
+                continue
+            expires_iso = format_utc_timestamp(raw_expires)
+        except Exception:
+            continue
+        raw_fields = raw.get("fields")
+        if not isinstance(raw_fields, Mapping):
+            continue
+        for raw_field in raw_fields.values():
+            if not isinstance(raw_field, Mapping):
+                continue
+            resolution_order = raw_field.get("resolution_order")
+            if not isinstance(resolution_order, list):
+                continue
+            for source_ref in resolution_order:
+                if not isinstance(source_ref, Mapping):
+                    continue
+                record_key = _sealbox_record_key_from_raw_ref(source_ref)
+                if record_key:
+                    expired[record_key] = expires_iso
+    return expired
+
+
 __all__ = [
     "CatalogEntryRow",
     "CredentialCatalogReadError",
@@ -599,6 +652,7 @@ __all__ = [
     "CredentialOwnerScope",
     "SealboxTenantMapping",
     "UnreadableCatalogEntryRow",
+    "expired_sealbox_record_keys",
     "load_credential_readonly",
     "load_scope_readonly",
     "resolve_catalog_db_path",

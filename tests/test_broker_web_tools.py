@@ -220,6 +220,7 @@ def test_outdated_brave_and_crawl4ai_links_give_relink_hints_not_missing_key_hin
 
     assert broker.gate.links is not None
     # Outdated personal Brave link -> must tell the person to link again, never suggest /link ... team.
+    broker.store_credential(CredentialOwnerScope.user("user-1"), "brave_old", "TEST_BRAVE_OLD", "api_key")
     broker.gate.links.create_link(
         AccountLinkV1(
             link_id="account_link_person_brave_old",
@@ -243,6 +244,7 @@ def test_outdated_brave_and_crawl4ai_links_give_relink_hints_not_missing_key_hin
 
     # Outdated team Crawl4AI link -> must tell an administrator to link the team's account again.
     monkeypatch.setenv("CRAWL4AI_BASE_URL", CRAWL4AI_URL)
+    broker.store_credential(CredentialOwnerScope.team(TEST_TEAM), "crawl4ai_old", "TEST_CRAWL4AI_OLD", "api_token")
     broker.gate.links.create_link(
         AccountLinkV1(
             link_id="account_link_team_crawl4ai_old",
@@ -265,6 +267,86 @@ def test_outdated_brave_and_crawl4ai_links_give_relink_hints_not_missing_key_hin
     assert crawl_payload["failure_reason"] == "account_link_outdated"
     assert any("/link http:crawl4ai team." in hint for hint in crawl_payload["mitigation_hints"])
     assert not any("links their own" in hint for hint in crawl_payload["mitigation_hints"])
+    assert broker.sent == []
+
+
+def test_f4_expired_brave_and_crawl4ai_links_give_link_setup_hints_not_retry_advice(
+    broker, agent, monkeypatch
+) -> None:
+    """F4: Brave and Crawl4AI give /link setup hints (not retry advice) for account_link_credential_expired."""
+
+    from datetime import datetime, timedelta, timezone
+
+    from access_control.account_sharing import TeamAccountSharing
+    from custom_messages.contracts.access_v2 import AccountSharing
+    from custom_tools.web_research_artifact_tools import brave_llm_context_artifact
+    from custom_tools.web_service_tools import capture_web_screenshot
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+    )
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
+
+    assert broker.gate.links is not None
+    past_expiry = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    user_scope = CredentialOwnerScope.user("user-1")
+    catalog_store = CredentialCatalogStore(resolve_catalog_db_path())
+    sharing = TeamAccountSharing(broker.gate.links, TEST_TEAM)
+
+    # Expired personal Brave key on a private tool (no team fallback).
+    sharing.choose_tool(broker.gate.catalog.tools["http:brave-search"], AccountSharing.PRIVATE, by="admin-1")
+    catalog_store.put_credential(
+        user_scope,
+        "brave_expired",
+        CatalogCredential(
+            display_name="Brave Expired",
+            purpose="test",
+            expires_at=past_expiry,
+            fields={
+                "api_key": CatalogCredentialField(
+                    kind="api_key",
+                    visibility="secret",
+                    resolution_order=[CatalogSourceRef(source="env", env_var="TEST_BRAVE_EXPIRED")],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+    broker.link("http:brave-search", "brave_expired", person_id="user-1")
+    brave_result = brave_llm_context_artifact("expired brave link")
+    brave_payload = json.loads(_text(brave_result))
+    assert brave_result["status"] == "error"
+    assert brave_payload["failure_stage"] == "authentication"
+    assert brave_payload["failure_reason"] == "account_link_credential_expired"
+    assert any("/link http:brave-search" in hint for hint in brave_payload["mitigation_hints"])
+    assert not any("retry shortly" in hint for hint in brave_payload["mitigation_hints"])
+
+    # Expired team Crawl4AI key (Crawl4AI is always team-scoped).
+    monkeypatch.setenv("CRAWL4AI_BASE_URL", CRAWL4AI_URL)
+    catalog_store.put_credential(
+        CredentialOwnerScope.team(TEST_TEAM),
+        "crawl4ai_expired",
+        CatalogCredential(
+            display_name="Crawl4AI Expired",
+            purpose="test",
+            expires_at=past_expiry,
+            fields={
+                "api_token": CatalogCredentialField(
+                    kind="token",
+                    visibility="secret",
+                    resolution_order=[CatalogSourceRef(source="env", env_var="TEST_CRAWL4AI_EXPIRED")],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+    broker.link("http:crawl4ai", "crawl4ai_expired")
+    crawl_result = capture_web_screenshot(url="https://example.com", width_px=8, height_px=6)
+    crawl_payload = json.loads(_text(crawl_result))
+    assert crawl_result["status"] == "error"
+    assert crawl_payload["failure_stage"] == "authentication"
+    assert crawl_payload["failure_reason"] == "account_link_credential_expired"
+    assert any("/link http:crawl4ai team" in hint for hint in crawl_payload["mitigation_hints"])
+    assert not any("retry" in hint.lower() for hint in crawl_payload["mitigation_hints"])
     assert broker.sent == []
 
 

@@ -614,15 +614,20 @@ def test_janitor_retains_row_and_retries_when_link_revocation_or_notice_fails(
     assert first.failed == 1
     assert first.link_failures == 1
     assert sealbox_deletes == []
-    # Catalog row and active link remain for the retry.
+    # Catalog row remains for the retry. Revocation runs before notice (F9), so a
+    # revoke failure leaves the link active while a notice failure revokes it first
+    # and retries notice delivery on the next sweep.
     assert "retry_temp" in load_catalog(scope=USER_SCOPE).credentials
-    assert access_store.get_link("link-retry-temp").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+    expected_first_status = AccountLinkStatus.ACTIVE if fail_step == "revoke_link" else AccountLinkStatus.REVOKED
+    assert access_store.get_link("link-retry-temp").status is expected_first_status  # type: ignore[union-attr]
+    assert access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=()) == []
 
     second = janitor.clean_expired_credentials(gate, now=NOW)
     assert second.deleted == 1
     assert second.failed == 0
     assert second.link_failures == 0
-    assert second.links_revoked == 1
+    assert first.links_revoked + second.links_revoked == 1
+    assert first.notices_sent + second.notices_sent == 1
     assert sealbox_deletes == ["item-retry_temp:api_token"]
     assert "retry_temp" not in load_catalog(scope=USER_SCOPE).credentials
     assert access_store.get_link("link-retry-temp").status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
@@ -1023,3 +1028,313 @@ def test_janitor_link_revocation_and_notices_on_postgres(
         assert len(admin_notices) == 1
         assert admin_notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
         assert "/link http:gated_api gate" in admin_notices[0].summary
+
+
+# --- 7. Project review F8, F9, F12, F16, F19 tests ---------------------------
+
+
+def test_f8_janitor_reloads_and_retries_when_row_rewritten_still_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F8: if a row is rewritten mid-sweep with a still-expired expiry, janitor reloads and deletes it."""
+
+    gate, access_store = _make_gate(tmp_path)
+    _save_catalog_entry("rewritten_expired", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(link_id="link-rewritten", tool_id="http:demo_api", credential_key="rewritten_expired")
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: {
+            "source": "sealbox",
+            "item_key": item_key,
+            "item_kind": item_kind,
+            "already_absent": False,
+        },
+    )
+
+    real_delete = janitor.delete_credential
+    rewrote = False
+
+    def rewrite_once_then_delete(params: Any, **kwargs: Any) -> Any:
+        nonlocal rewrote
+        if not rewrote:
+            rewrote = True
+            # Rewrite the row (new updated_at) while keeping it still expired.
+            _save_catalog_entry(
+                "rewritten_expired",
+                scope=USER_SCOPE,
+                expires_at=PAST_EXPIRY,
+                updated_at="2026-11-26T11:59:00Z",
+            )
+        return real_delete(params, **kwargs)
+
+    monkeypatch.setattr(janitor, "delete_credential", rewrite_once_then_delete)
+    report = janitor.clean_expired_credentials(gate, now=NOW)
+    assert report.deleted == 1
+    assert report.skipped_changed == 0
+    assert report.links_revoked == 1
+    assert report.notices_sent == 1
+    assert "rewritten_expired" not in load_catalog(scope=USER_SCOPE).credentials
+    assert access_store.get_link("link-rewritten").status is AccountLinkStatus.REVOKED  # type: ignore[union-attr]
+
+
+def test_f9_relinking_during_janitor_link_step_sends_no_false_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F9: if the person relinks between list_links and revoke_link, janitor sends no notice and preserves setup state."""
+
+    gate, access_store = _make_gate(tmp_path)
+    _save_catalog_entry("relinked_old", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    _save_catalog_entry("relinked_fresh", scope=USER_SCOPE, expires_at=None)
+    access_store.create_link(
+        _make_link(link_id="link-old", tool_id="http:demo_api", credential_key="relinked_old")
+    )
+    ToolSetupStates(access_store, clock=lambda: NOW - timedelta(minutes=5)).note_ready(
+        TEAM_ID, PERSON_ID, "http:demo_api", how=HOW_OWN_LINK, source=SOURCE_TOOL_CALL
+    )
+    real_revoke = access_store.revoke_link
+
+    def relink_before_revoke(link_id: str, **kwargs: Any) -> Any:
+        if link_id == "link-old":
+            access_store.create_link(
+                _make_link(link_id="link-fresh", tool_id="http:demo_api", credential_key="relinked_fresh")
+            )
+        return real_revoke(link_id, **kwargs)
+
+    monkeypatch.setattr(access_store, "revoke_link", relink_before_revoke)
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: {
+            "source": "sealbox",
+            "item_key": item_key,
+            "item_kind": item_kind,
+            "already_absent": False,
+        },
+    )
+
+    report = janitor.clean_expired_credentials(gate, now=NOW)
+    assert report.deleted == 1
+    assert report.links_revoked == 0
+    assert report.notices_sent == 0
+    assert access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=()) == []
+    assert access_store.get_link("link-fresh").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]
+    setup_state = ToolSetupStates(access_store).get(TEAM_ID, PERSON_ID, "http:demo_api")
+    assert setup_state is not None and setup_state.state is ToolSetupState.READY
+
+
+def test_f12_notice_id_includes_expiry_so_later_expiry_is_not_suppressed(tmp_path: Path) -> None:
+    """F12: distinct expires_at values for the same link produce distinct notice IDs."""
+
+    gate, _store = _make_gate(tmp_path)
+    link = _make_link(link_id="link-repeat", tool_id="http:demo_api", credential_key="repeat_key")
+    first_expiry = (NOW - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    second_expiry = (NOW - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+
+    id_first = janitor._expired_link_notice_id(TEAM_ID, link, expires_at=first_expiry)
+    id_first_retry = janitor._expired_link_notice_id(TEAM_ID, link, expires_at=first_expiry)
+    id_second = janitor._expired_link_notice_id(TEAM_ID, link, expires_at=second_expiry)
+
+    assert id_first == id_first_retry
+    assert id_first != id_second
+
+
+def test_f16_notice_does_not_claim_team_fallback_when_team_credential_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F16: if the team link's credential is absent from the catalog, the personal expiry notice says no linked account."""
+
+    gate, access_store = _make_gate(tmp_path)
+    TeamAccountSharing(access_store, TEAM_ID).choose_tool(
+        gate.catalog.tools["http:demo_api"], AccountSharing.SHARED, by="admin-1"
+    )
+    # Team link exists in access store, but its credential was NOT imported into the catalog.
+    access_store.create_link(
+        _make_link(
+            link_id="link-team-unbacked",
+            tool_id="http:demo_api",
+            credential_key="missing_team_cred",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM_ID,
+        )
+    )
+    _save_catalog_entry("alice_temp", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(link_id="link-alice", tool_id="http:demo_api", credential_key="alice_temp")
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: {
+            "source": "sealbox",
+            "item_key": item_key,
+            "item_kind": item_kind,
+            "already_absent": False,
+        },
+    )
+
+    report = janitor.clean_expired_credentials(gate, now=NOW)
+    assert report.deleted == 1
+    assert report.notices_sent == 1
+    [notice] = [n for n, _read in access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=())]
+    assert "no linked account" in notice.summary
+    assert "team's shared account" not in notice.summary
+
+
+def test_f19_team_account_link_notice_and_private_team_link_personal_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F19: team ACCOUNT link expiry notifies admins with /link ... team; private team link does not count as personal fallback."""
+
+    gate, access_store = _make_gate(tmp_path)
+    TeamAccountSharing(access_store, TEAM_ID).choose_tool(
+        gate.catalog.tools["http:demo_api"], AccountSharing.PRIVATE, by="admin-1"
+    )
+    # Valid team credential + team link exist, but tool is PRIVATE -> Alice's expiry notice must say no linked account.
+    _save_catalog_entry("team_private_cred", scope=TEAM_SCOPE, expires_at=None)
+    access_store.create_link(
+        _make_link(
+            link_id="link-team-private",
+            tool_id="http:demo_api",
+            credential_key="team_private_cred",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM_ID,
+            purpose=LinkPurpose.ACCOUNT,
+        )
+    )
+    _save_catalog_entry("alice_private_only", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(link_id="link-alice-priv", tool_id="http:demo_api", credential_key="alice_private_only")
+    )
+
+    # Also test an expired team ACCOUNT link on a second tool -> notifies admins with /link ... team.
+    second_tool = ToolDefinitionV1(
+        tool_id="http:team_acct_api",
+        kind=ToolKind.HTTP,
+        display_name="Team Account API",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("team-acct.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="api_token"),
+        ),
+    )
+    gate2, _ = _make_gate(tmp_path, store=access_store, extra_tools=(second_tool,))
+    _save_catalog_entry("team_acct_expired", scope=TEAM_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(
+            link_id="link-team-acct",
+            tool_id="http:team_acct_api",
+            credential_key="team_acct_expired",
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM_ID,
+            purpose=LinkPurpose.ACCOUNT,
+        )
+    )
+
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: {
+            "source": "sealbox",
+            "item_key": item_key,
+            "item_kind": item_kind,
+            "already_absent": False,
+        },
+    )
+
+    report = janitor.clean_expired_credentials(gate2, now=NOW)
+    assert report.deleted == 2
+    assert report.links_revoked == 2
+    assert report.notices_sent == 2
+
+    [alice_notice] = [n for n, _read in access_store.notices_for(TEAM_ID, person_id=PERSON_ID, roles=())]
+    assert "no linked account" in alice_notice.summary
+    assert "team's shared account" not in alice_notice.summary
+
+    [admin_notice] = [
+        n for n, _read in access_store.notices_for(TEAM_ID, person_id=OTHER_PERSON_ID, roles=(PERSON_ROLE_ADMIN,))
+    ]
+    assert admin_notice.kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert admin_notice.recipient_roles == (PERSON_ROLE_ADMIN,)
+    assert "/link http:team_acct_api team" in admin_notice.summary
+
+
+def test_f19_renewal_while_key_lock_held_survives_concurrent_janitor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F19: real thread concurrency — holding credential_key_lock during renewal prevents janitor deletion."""
+
+    import threading
+
+    gate, access_store = _make_gate(tmp_path)
+    _save_catalog_entry("lock_race_key", scope=USER_SCOPE, expires_at=PAST_EXPIRY)
+    access_store.create_link(
+        _make_link(link_id="link-lock-race", tool_id="http:demo_api", credential_key="lock_race_key")
+    )
+    sealbox_deleted: list[str] = []
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: (
+            sealbox_deleted.append(item_key)
+            or {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+        ),
+    )
+
+    janitor_report_holder: list[janitor.ExpiredCredentialsReport] = []
+    janitor_started = threading.Event()
+    real_delete = janitor.delete_credential
+
+    def signal_then_delete(params: Any, **kwargs: Any) -> Any:
+        janitor_started.set()
+        return real_delete(params, **kwargs)
+
+    monkeypatch.setattr(janitor, "delete_credential", signal_then_delete)
+
+    lock = credential_catalog.credential_key_lock(USER_SCOPE, "lock_race_key")
+    with lock:
+        worker = threading.Thread(
+            target=lambda: janitor_report_holder.append(janitor.clean_expired_credentials(gate, now=NOW))
+        )
+        worker.start()
+        assert janitor_started.wait(timeout=5.0)
+        # Complete the renewal (extending expiry into the future) before releasing the lock.
+        _save_catalog_entry("lock_race_key", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
+
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+    [report] = janitor_report_holder
+    assert report.deleted == 0
+    assert report.skipped_changed == 1
+    assert report.links_revoked == 0
+    assert report.notices_sent == 0
+    assert sealbox_deleted == []
+    assert load_catalog(scope=USER_SCOPE).credentials["lock_race_key"].expires_at == FUTURE_EXPIRY
+    assert access_store.get_link("link-lock-race").status is AccountLinkStatus.ACTIVE  # type: ignore[union-attr]

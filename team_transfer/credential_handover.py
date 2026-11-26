@@ -285,6 +285,8 @@ def _tell_exporter(config: Any, bundle: CredentialBundle, refused: list[dict[str
         "The team moved to this instance, but these sign-ins and keys were not stored:\n"
         + "\n".join(lines)
     )
+    if any(outcome.get("retryable") for outcome in refused):
+        summary += "\nThe next start retries temporary failures automatically."
     try:
         AccessRepository(config.manager_storage_settings).create_notice_if_absent(
             AccessNoticeV1(

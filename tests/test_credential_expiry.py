@@ -111,7 +111,16 @@ def test_storage_expiry_accepts_short_ttl_while_form_enforces_five_minute_minimu
 
 def test_resolve_form_expiry_presets_and_disabled() -> None:
     assert resolve_form_expiry(enabled=False, when="1h", now=BASE_NOW) is None
-    for key, seconds in EXPIRY_PRESET_SECONDS.items():
+    expected_presets = {
+        "15m": 15 * 60,
+        "1h": 60 * 60,
+        "1d": 24 * 60 * 60,
+        "7d": 7 * 24 * 60 * 60,
+        "30d": 30 * 24 * 60 * 60,
+        "90d": 90 * 24 * 60 * 60,
+    }
+    assert dict(EXPIRY_PRESET_SECONDS) == expected_presets
+    for key, seconds in expected_presets.items():
         resolved = resolve_form_expiry(enabled=True, when=key, now=BASE_NOW)
         assert resolved == BASE_NOW + timedelta(seconds=seconds)
 

@@ -781,7 +781,8 @@ async def test_model_lookup_reads_gated_metadata_with_the_teams_link(broker, tmp
     assert "canary" not in json.dumps(body)
 
 
-def test_each_person_can_link_their_own_hugging_face_account(tmp_path):
+def test_each_person_can_link_their_own_hugging_face_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "credential_catalog.db"))
     """/link cli:huggingface: anyone for themselves, the team's account only for
     administrators; the person's own link wins over the team's. (X uses each
     person's own sign-in instead, with the team's link as the fallback:

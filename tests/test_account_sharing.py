@@ -70,7 +70,8 @@ EXA_SEARCH = "https://api.exa.ai/search"
 
 
 @pytest.fixture
-def links(tmp_path: Path) -> AccessRepository:
+def links(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AccessRepository:
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "credential_catalog.db"))
     return access_store(tmp_path / "access.db")
 
 

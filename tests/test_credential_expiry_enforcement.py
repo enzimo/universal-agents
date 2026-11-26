@@ -1003,3 +1003,257 @@ def test_c21_note_broker_result_maps_gate_only_failures_to_gate_link_and_single_
         )
     link = _make_link(tool_id="http:demo_api", credential_key="good_expired")
     assert linked_credential_expired(link) is True
+
+
+def test_f1_agent_collect_with_different_item_id_deletes_dropped_sealbox_records_and_refuses_shared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: agent credential.collect over a temporary key changing item_id/fields deletes dropped Sealbox records and refuses when shared."""
+
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
+    from secure_tool_broker.credential_expiry import CREDENTIAL_EXPIRY_SHARED_RECORD
+
+    monkeypatch.setattr(
+        credential_catalog,
+        "sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+    monkeypatch.setattr(
+        credential_catalog,
+        "run_sealbox",
+        lambda args, **_k: SimpleNamespace(returncode=0, stdout='{"key":"k","version":1,"password":"gen-password"}', stderr=""),
+    )
+
+    # Seed temporary credential on original Sealbox record.
+    _save_temp_credential("temp_move", scope=USER_SCOPE, expires_at=FUTURE_EXPIRY)
+    old_record_key = "team-nats-agents:default:temp_move:api_token"
+    deleted_items: list[tuple[str, str]] = []
+
+    def fake_delete(*, item_key: str, item_kind: str, env: Any = None) -> dict[str, Any]:
+        deleted_items.append((item_key, item_kind))
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    # Agent collect moves item_id elsewhere -> old record is deleted under key lock and expiry is preserved.
+    moved = credential_catalog.collect_credential(
+        {
+            "credential_key": "temp_move",
+            "write_source": "sealbox",
+            "item_id": "relocated-temp-move",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "store_generated_secret"}],
+        },
+        {},
+        scope=USER_SCOPE,
+        now=BASE_NOW,
+    )
+    assert moved.status == "success", moved.error
+    assert moved.content["expires_at"] == FUTURE_EXPIRY
+    assert deleted_items == [(old_record_key, "secret")]
+
+    # If another entry references a dropped record, agent collect refuses BEFORE writing anything.
+    _save_temp_credential("lasting_shared_owner", scope=USER_SCOPE, expires_at=None)
+    shared_key = "team-nats-agents:default:lasting_shared_owner:api_token"
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        USER_SCOPE,
+        "lasting_alias",
+        CatalogCredential(
+            display_name="Lasting Alias",
+            purpose="Shares Sealbox record",
+            fields={
+                "api_token": CatalogCredentialField(
+                    kind="token",
+                    visibility="secret",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id=shared_key, item_name=shared_key, field_ref="value")
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+    writes: list[Any] = []
+    monkeypatch.setattr(
+        credential_catalog,
+        "write_credential_to_source",
+        lambda **kwargs: writes.append(kwargs) or credential_catalog.ToolResult(status="error", error="unexpected"),
+    )
+    refused = credential_catalog.collect_credential(
+        {
+            "credential_key": "lasting_shared_owner",
+            "write_source": "sealbox",
+            "item_id": "different-item-id",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "store_generated_secret"}],
+        },
+        {},
+        scope=USER_SCOPE,
+    )
+    assert refused.status == "error"
+    assert refused.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
+    assert refused.content["conflicting_credential_key"] == "lasting_alias"
+    assert writes == []
+
+
+def test_f3_cli_sealbox_search_and_get_metadata_hide_and_refuse_expired_catalog_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F3: cli:sealbox credential.search omits expired catalog records and get_metadata refuses them with credential_expired."""
+
+    import json as json_mod
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
+    from secure_tool_broker.credential_sources.base import CredentialRef, CredentialSearchRequest
+    from secure_tool_broker.credential_sources.sealbox import SealboxCredentialSource
+
+    expired_key = "team-nats-agents:default:expired_login"
+    active_key = "team-nats-agents:default:active_login"
+    store = CredentialCatalogStore(resolve_catalog_db_path())
+    for key, sb_key, exp in (
+        ("expired_login", expired_key, PAST_EXPIRY),
+        ("active_login", active_key, FUTURE_EXPIRY),
+    ):
+        store.put_credential(
+            USER_SCOPE,
+            key,
+            CatalogCredential(
+                display_name=key,
+                purpose="test",
+                expires_at=exp,
+                fields={
+                    "password": CatalogCredentialField(
+                        kind="password",
+                        visibility="secret",
+                        resolution_order=[
+                            CatalogSourceRef(source="sealbox", item_id=sb_key, item_name=sb_key, field_ref="password")
+                        ],
+                    )
+                },
+            ).model_dump(mode="json", exclude_none=True),
+        )
+
+    list_calls = 0
+
+    def fake_run_sealbox(args: list[str], **_k: Any) -> Any:
+        nonlocal list_calls
+        list_calls += 1
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json_mod.dumps(
+                [
+                    {"key": expired_key, "username": "old-lasting-user"},
+                    {"key": active_key, "username": "active-user"},
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("secure_tool_broker.credential_sources.sealbox.run_sealbox", fake_run_sealbox)
+    monkeypatch.setattr(
+        "secure_tool_broker.credential_sources.sealbox.sealbox_tenant_environment",
+        lambda **_k: {"SEALBOX_TOKEN_FILE": "/tmp/fake-token"},
+    )
+
+    source = SealboxCredentialSource()
+    search_result = source.search(
+        CredentialSearchRequest(owner_scope_kind="user", owner_id=PERSON_ID)
+    )
+    assert search_result.status == "success"
+    returned_ids = [item["credential_ref"]["item_id"] for item in search_result.content["credentials"]]
+    assert returned_ids == [active_key]
+    assert search_result.content["count"] == 1
+
+    calls_before_get = list_calls
+    meta_expired = source.get_metadata(
+        CredentialRef(
+            source_provider="sealbox",
+            item_id=expired_key,
+            owner_scope_kind="user",
+            owner_id=PERSON_ID,
+        )
+    )
+    assert meta_expired.status == "error"
+    assert meta_expired.content["error_code"] == CREDENTIAL_EXPIRED
+    assert list_calls == calls_before_get, "expired record must be refused without querying Sealbox"
+
+    meta_active = source.get_metadata(
+        CredentialRef(
+            source_provider="sealbox",
+            item_id=active_key,
+            owner_scope_kind="user",
+            owner_id=PERSON_ID,
+        )
+    )
+    assert meta_active.status == "success"
+    assert meta_active.content["credential"]["username"] == "active-user"
+
+
+def test_f5_f6_missing_catalog_row_counts_as_missing_link_and_allows_team_fallback(tmp_path: Path) -> None:
+    """Root cause B (F5/F6): a link whose credential key has no catalog row falls back to a shared team account or refuses as missing."""
+
+    from access_control.account_sharing import TeamAccountSharing
+    from custom_messages.contracts.access_v2 import (
+        AccountSharing,
+        ClassificationSource,
+        REASON_ACCOUNT_LINK_MISSING,
+    )
+
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:missing_row_demo",
+        kind=ToolKind.HTTP,
+        display_name="Missing Row Demo",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("missing-row.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="api_token"),
+        ),
+    )
+    gate, store = _gate_with_tools(tmp_path, demo_tool)
+    TeamAccountSharing(store, TEAM_ID).choose_tool(demo_tool, AccountSharing.SHARED, by="admin-1")
+
+    # Personal link points to a deleted/missing catalog key; team link has a valid credential.
+    _save_temp_credential("team_valid_cred", scope=TEAM_SCOPE, expires_at=None)
+    team_link = store.create_link(
+        AccountLinkV1(
+            link_id="link-team-valid",
+            team_id=TEAM_ID,
+            tool_id=demo_tool.tool_id,
+            owner_kind=LinkOwnerKind.TEAM,
+            owner_id=TEAM_ID,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="team_valid_cred",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="admin-1"),
+            created_at_utc=BASE_NOW - timedelta(hours=1),
+        )
+    )
+    store.create_link(
+        AccountLinkV1(
+            link_id="link-person-missing-row",
+            team_id=TEAM_ID,
+            tool_id=demo_tool.tool_id,
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=PERSON_ID,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="deleted_personal_key",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=PERSON_ID),
+            created_at_utc=BASE_NOW - timedelta(hours=1),
+        )
+    )
+    usable, expired = gate.resolve_account_link(demo_tool.tool_id, PERSON_ID, now=BASE_NOW)
+    assert usable == team_link
+    assert expired is None
+
+    # When the tool is private (no shared team fallback), the missing-row link refuses with account_link_missing + /link.
+    TeamAccountSharing(store, TEAM_ID).choose_tool(demo_tool, AccountSharing.PRIVATE, by="admin-1")
+    refused = gate._with_account(
+        OperationResolutionV1(
+            tool_id=demo_tool.tool_id,
+            operation="GET /items",
+            level=AccessLevel.READ,
+            source=ClassificationSource.TRUSTED,
+        ),
+        PERSON_ID,
+        {},
+    )
+    assert refused.allowed is False
+    assert refused.reason_code == REASON_ACCOUNT_LINK_MISSING
+    assert f"/link {demo_tool.tool_id}" in refused.next_step

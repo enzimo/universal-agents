@@ -52,7 +52,7 @@ TEAM_OWNER = "team"
 PERSON_OWNER = "person"
 EXPIRED_BEFORE_IMPORT_REASON = "expired before import"
 EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON = (
-    "expired before import; its account link could not be removed, import it again"
+    "expired before import; its account link could not be removed yet (the next start retries automatically)"
 )
 # Sources whose values live inside this instance; others are external stores.
 _INTERNAL_SOURCES = frozenset({"sealbox"})
@@ -109,6 +109,15 @@ class CatalogEntryV1(_Model):
     secret_values: dict[str, str] = Field(default_factory=dict, repr=False)
 
 
+class ExpiredCatalogEntryV1(_Model):
+    """A temporary catalog entry that had already expired at export time (key and expiry only, no values)."""
+
+    kind: Literal["expired_catalog_entry"] = "expired_catalog_entry"
+    owner: CredentialOwnerV1
+    credential_key: str = Field(min_length=1, max_length=200)
+    expires_at: str = Field(min_length=1, max_length=64)
+
+
 class OwnerFileV1(_Model):
     kind: Literal["owner_file"] = "owner_file"
     owner: CredentialOwnerV1
@@ -127,6 +136,7 @@ _RECORD_MODELS: dict[str, type[_Model]] = {
     "stored_value": StoredValueV1,
     "model_key": ModelKeyV1,
     "catalog_entry": CatalogEntryV1,
+    "expired_catalog_entry": ExpiredCatalogEntryV1,
     "owner_file": OwnerFileV1,
 }
 
@@ -134,9 +144,14 @@ _RECORD_MODELS: dict[str, type[_Model]] = {
 class BrokerCredentialsDocumentV1(_Model):
     """The plaintext shape of the ``broker_credentials`` transfer section (for its tracked schema)."""
 
-    records: list[StoredValueV1 | ModelKeyV1 | CatalogEntryV1 | OwnerFileV1 | TemplateOverridesV1] = Field(
-        default_factory=list
-    )
+    records: list[
+        StoredValueV1
+        | ModelKeyV1
+        | CatalogEntryV1
+        | ExpiredCatalogEntryV1
+        | OwnerFileV1
+        | TemplateOverridesV1
+    ] = Field(default_factory=list)
 
 
 class CredentialOutcomeV1(_Model):
@@ -254,28 +269,62 @@ class _ExpiredDuringExport(Exception):
     """Internal signal when a temporary credential expires mid-export read."""
 
 
-def _export_catalog(owner: CredentialOwnerV1) -> list[CatalogEntryV1]:
-    from secure_tool_broker.credential_catalog import load_catalog
+def _export_catalog(owner: CredentialOwnerV1) -> list[CatalogEntryV1 | ExpiredCatalogEntryV1]:
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CredentialCatalog,
+        credential_key_lock,
+        load_catalog,
+    )
+    from secure_tool_broker.credential_catalog_store import CredentialCatalogStore, resolve_catalog_db_path
     from secure_tool_broker.credential_expiry import is_expired
 
     scope = _catalog_scope(owner)
-    catalog = load_catalog(scope=scope)
-    entries = []
-    for key, credential in sorted(catalog.credentials.items()):
-        if is_expired(credential.expires_at):
-            continue
-        secret_values: dict[str, str] = {}
-        try:
-            for field_name, spec in credential.fields.items():
-                if spec.is_secret() and _internal(spec):
-                    secret_values[field_name] = _stored_secret_value(owner, key, field_name, catalog=catalog, scope=scope)
-        except _ExpiredDuringExport:
-            continue
-        entries.append(
-            CatalogEntryV1(
-                owner=owner, credential_key=key, credential=credential.model_dump(mode="json"), secret_values=secret_values
+    candidate_keys = sorted(load_catalog(scope=scope).credentials)
+    store = CredentialCatalogStore(resolve_catalog_db_path())
+    entries: list[CatalogEntryV1 | ExpiredCatalogEntryV1] = []
+    for key in candidate_keys:
+        with credential_key_lock(scope, key):
+            row = store.load_credential(scope, key)
+            if row is None:
+                continue
+            credential = CatalogCredential.model_validate(row.credential)
+            if is_expired(credential.expires_at):
+                assert credential.expires_at is not None
+                entries.append(
+                    ExpiredCatalogEntryV1(
+                        owner=owner,
+                        credential_key=key,
+                        expires_at=credential.expires_at,
+                    )
+                )
+                continue
+            single_catalog = CredentialCatalog(credentials={key: credential})
+            secret_values: dict[str, str] = {}
+            try:
+                for field_name, spec in credential.fields.items():
+                    if spec.is_secret() and _internal(spec):
+                        secret_values[field_name] = _stored_secret_value(
+                            owner, key, field_name, catalog=single_catalog, scope=scope
+                        )
+            except _ExpiredDuringExport:
+                if credential.expires_at is not None:
+                    entries.append(
+                        ExpiredCatalogEntryV1(
+                            owner=owner,
+                            credential_key=key,
+                            expires_at=credential.expires_at,
+                        )
+                    )
+                continue
+            entries.append(
+                CatalogEntryV1(
+                    owner=owner,
+                    credential_key=key,
+                    credential=credential.model_dump(mode="json"),
+                    secret_values=secret_values,
+                )
             )
-        )
     return entries
 
 
@@ -375,11 +424,10 @@ def import_credentials(
     janitor's shared revocation-and-notice helper.
     """
 
-    moment = datetime.now(timezone.utc) if now is None else now.astimezone(timezone.utc)
     outcomes = []
     for raw in records:
         record = _RECORD_MODELS[str(raw.get("kind"))].model_validate(raw)
-        outcomes.append(_import_record(record, team_id, access_gate=access_gate, now=moment))
+        outcomes.append(_import_record(record, team_id, access_gate=access_gate, now=now))
     logger.warning(
         "Stored credentials imported from a team transfer. event=credentials_transfer_imported team_id=%s "
         "source_team_id=%r imported=%s refused=%s",
@@ -396,6 +444,7 @@ def _revoke_expired_import_links(
     owner: CredentialOwnerV1,
     credential_key: str,
     *,
+    expires_at: str | None = None,
     now: datetime,
 ) -> int:
     if access_gate is None:
@@ -406,6 +455,7 @@ def _revoke_expired_import_links(
         access_gate,
         _catalog_scope(owner),
         credential_key,
+        expires_at=expires_at,
         now=now,
     )
     return link_failures
@@ -418,8 +468,15 @@ def _expired_import_outcome(
     *,
     access_gate: Any,
     now: datetime,
+    expires_at: str | None = None,
 ) -> CredentialOutcomeV1:
-    link_failures = _revoke_expired_import_links(access_gate, owner, credential_key, now=now)
+    link_failures = _revoke_expired_import_links(
+        access_gate,
+        owner,
+        credential_key,
+        expires_at=expires_at,
+        now=now,
+    )
     if link_failures > 0:
         return CredentialOutcomeV1(
             key=key,
@@ -450,23 +507,58 @@ def _import_record(
     if owner.kind == TEAM_OWNER and owner.owner_id != team_id:
         return CredentialOutcomeV1(key=key, owner=owner, imported=False, reason="it belongs to another team")
     try:
-        if _already_stored(record):
-            return CredentialOutcomeV1(key=key, owner=owner, imported=False,
-                                       reason="already stored in this instance; kept the current credential")
-        if isinstance(record, CatalogEntryV1):
-            from secure_tool_broker.credential_expiry import is_expired
+        if isinstance(record, (CatalogEntryV1, ExpiredCatalogEntryV1)):
+            from secure_tool_broker.credential_catalog import credential_key_lock
 
-            raw_expires = record.credential.get("expires_at")
-            if raw_expires is not None and is_expired(raw_expires, now=moment):
-                return _expired_import_outcome(
-                    key, owner, record.credential_key, access_gate=access_gate, now=moment
-                )
-            _import_catalog_entry(record, now=moment)
+            scope = _catalog_scope(owner)
+            with credential_key_lock(scope, record.credential_key):
+                if _already_stored(record, now=moment):
+                    return CredentialOutcomeV1(
+                        key=key,
+                        owner=owner,
+                        imported=False,
+                        reason="already stored in this instance; kept the current credential",
+                    )
+                if isinstance(record, ExpiredCatalogEntryV1):
+                    return _expired_import_outcome(
+                        key,
+                        owner,
+                        record.credential_key,
+                        access_gate=access_gate,
+                        now=moment,
+                        expires_at=record.expires_at,
+                    )
+                from secure_tool_broker.credential_expiry import is_expired
+
+                raw_expires = record.credential.get("expires_at")
+                if raw_expires is not None and is_expired(raw_expires, now=moment):
+                    return _expired_import_outcome(
+                        key,
+                        owner,
+                        record.credential_key,
+                        access_gate=access_gate,
+                        now=moment,
+                        expires_at=str(raw_expires),
+                    )
+                _import_catalog_entry(record, now=now)
         else:
+            if _already_stored(record, now=moment):
+                return CredentialOutcomeV1(
+                    key=key,
+                    owner=owner,
+                    imported=False,
+                    reason="already stored in this instance; kept the current credential",
+                )
             _IMPORTERS[record.kind](record)
     except _ExpiredBeforeImport:
+        raw_expires = record.credential.get("expires_at") if isinstance(record, CatalogEntryV1) else None
         return _expired_import_outcome(
-            key, owner, record.credential_key, access_gate=access_gate, now=moment
+            key,
+            owner,
+            record.credential_key,
+            access_gate=access_gate,
+            now=datetime.now(timezone.utc) if now is None else moment,
+            expires_at=str(raw_expires) if raw_expires is not None else None,
         )
     except Exception as exc:  # each store reports in its own way; no value is in these messages
         logger.error(
@@ -486,7 +578,7 @@ def _import_record(
     return CredentialOutcomeV1(key=key, owner=owner, imported=True)
 
 
-def _already_stored(record: Any) -> bool:
+def _already_stored(record: Any, *, now: datetime | None = None) -> bool:
     """Later batches must not replace a sign-in created after the first start."""
     if isinstance(record, StoredValueV1):
         from secure_tool_broker.credential_state_store import read_credential_state
@@ -499,10 +591,12 @@ def _already_stored(record: Any) -> bool:
         return value is not None
     if isinstance(record, ModelKeyV1):
         return any(entry.address == record.entry.get("address") for entry in _model_key_store(record.owner).entries())
-    if isinstance(record, CatalogEntryV1):
+    if isinstance(record, (CatalogEntryV1, ExpiredCatalogEntryV1)):
         from secure_tool_broker.credential_catalog import load_catalog
+        from secure_tool_broker.credential_expiry import is_expired
 
-        return record.credential_key in load_catalog(scope=_catalog_scope(record.owner)).credentials
+        existing = load_catalog(scope=_catalog_scope(record.owner)).credentials.get(record.credential_key)
+        return existing is not None and not is_expired(existing.expires_at, now=now)
     if isinstance(record, OwnerFileV1):
         folder = _owner_folder(record.owner)
         if folder is None:
@@ -521,7 +615,7 @@ def _record_name(record: Any) -> str:
         return record.name
     if isinstance(record, ModelKeyV1):
         return str(record.entry.get("address", ""))
-    if isinstance(record, CatalogEntryV1):
+    if isinstance(record, (CatalogEntryV1, ExpiredCatalogEntryV1)):
         return record.credential_key
     if isinstance(record, TemplateOverridesV1):
         return "credential_template_overrides"
@@ -567,8 +661,13 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
     from secure_tool_broker.credential_catalog import (
         CatalogCredential,
         _SECRET_CACHE,
+        _credential_sealbox_record_keys,
+        _delete_dropped_sealbox_records,
+        _find_shared_sealbox_record,
         _normalize_field_specs,
         _save_catalog_credential,
+        _scope_catalog_lock,
+        load_catalog,
         write_credential_to_source,
     )
     from secure_tool_broker.credential_expiry import remaining_ttl_seconds
@@ -582,14 +681,57 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
         if ttl_seconds <= 0:
             raise _ExpiredBeforeImport()
     if not record.secret_values:
-        # Only external references and public fields: store the entry as it was.
-        _save_catalog_credential(record.credential_key, original, scope=scope)
+        # Only external references and public fields: store the entry as it was,
+        # checking and cleaning any Sealbox records dropped from an expired destination row.
+        new_keys = _credential_sealbox_record_keys(original)
+        existing_row: CatalogCredential | None = None
+        with _scope_catalog_lock(scope):
+            catalog = load_catalog(scope=scope)
+            existing_row = catalog.credentials.get(record.credential_key)
+            if existing_row is not None:
+                dropped_keys = _credential_sealbox_record_keys(existing_row) - new_keys
+                shared_dropped = _find_shared_sealbox_record(
+                    catalog,
+                    exclude_key=record.credential_key,
+                    target_keys=dropped_keys,
+                    temporary_only=False,
+                )
+                if shared_dropped is not None:
+                    other_key, _record_key = shared_dropped
+                    raise CredentialImportRefused(
+                        f"Cannot replace {record.credential_key} because credential {other_key} "
+                        f"for {record.owner.label} still references one of its Sealbox records."
+                    )
+            _save_catalog_credential(record.credential_key, original, scope=scope)
+            _SECRET_CACHE.clear()
+        if existing_row is not None:
+            _delete_dropped_sealbox_records(existing_row, original, scope=scope, credential_key=record.credential_key)
         return
     values = {name: value.strip() for name, value in record.secret_values.items()}
     if any(not value for value in values.values()):
         raise ValueError("An imported secret field has no value.")
     request = _collection_request(record, original)
-    _require_unreferenced_import_items(record.owner, request, scope=scope)
+    planned_targets = {f"{request['item_id']}:{field['field_ref']}" for field in request["fields"]}
+    with _scope_catalog_lock(scope):
+        catalog = load_catalog(scope=scope)
+        _require_unreferenced_import_items(
+            record.owner, request, scope=scope, catalog=catalog, exclude_key=record.credential_key
+        )
+        existing_before = catalog.credentials.get(record.credential_key)
+        if existing_before is not None:
+            dropped_keys = _credential_sealbox_record_keys(existing_before) - planned_targets
+            shared_dropped = _find_shared_sealbox_record(
+                catalog,
+                exclude_key=record.credential_key,
+                target_keys=dropped_keys,
+                temporary_only=False,
+            )
+            if shared_dropped is not None:
+                other_key, _record_key = shared_dropped
+                raise CredentialImportRefused(
+                    f"Cannot replace {record.credential_key} because credential {other_key} "
+                    f"for {record.owner.label} still references one of its Sealbox records."
+                )
     try:
         written = write_credential_to_source(
             write_source=request["write_source"],
@@ -609,7 +751,36 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
             fields[name] = original.fields[name].model_copy(
                 update={"resolution_order": [written.source_ref_by_field[name]]}
             )
-        _save_catalog_credential(record.credential_key, original.model_copy(update={"fields": fields}), scope=scope)
+        saved_credential = original.model_copy(update={"fields": fields})
+        latest_existing: CatalogCredential | None = None
+        with _scope_catalog_lock(scope):
+            latest_catalog = load_catalog(scope=scope)
+            _require_unreferenced_import_items(
+                record.owner, request, scope=scope, catalog=latest_catalog, exclude_key=record.credential_key
+            )
+            latest_existing = latest_catalog.credentials.get(record.credential_key)
+            if latest_existing is not None:
+                actual_dropped = _credential_sealbox_record_keys(latest_existing) - _credential_sealbox_record_keys(
+                    saved_credential
+                )
+                shared_dropped = _find_shared_sealbox_record(
+                    latest_catalog,
+                    exclude_key=record.credential_key,
+                    target_keys=actual_dropped,
+                    temporary_only=False,
+                )
+                if shared_dropped is not None:
+                    other_key, _record_key = shared_dropped
+                    raise CredentialImportRefused(
+                        f"Cannot replace {record.credential_key} because credential {other_key} "
+                        f"for {record.owner.label} still references one of its Sealbox records."
+                    )
+            _save_catalog_credential(record.credential_key, saved_credential, scope=scope)
+            _SECRET_CACHE.clear()
+        if latest_existing is not None:
+            _delete_dropped_sealbox_records(
+                latest_existing, saved_credential, scope=scope, credential_key=record.credential_key
+            )
     except Exception as exc:
         logger.warning(
             "A catalog credential import failed; retry the same backup to reuse its stored secret items. "
@@ -617,15 +788,24 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
             record.credential_key, record.owner.label, request["item_id"], type(exc).__name__,
         )
         raise
-    _SECRET_CACHE.clear()
 
 
-def _require_unreferenced_import_items(owner: CredentialOwnerV1, request: dict[str, Any], *, scope: Any) -> None:
+def _require_unreferenced_import_items(
+    owner: CredentialOwnerV1,
+    request: dict[str, Any],
+    *,
+    scope: Any,
+    catalog: Any = None,
+    exclude_key: str | None = None,
+) -> None:
     """Do not overwrite an item a destination credential already names, including a registered alias."""
     from secure_tool_broker.credential_catalog import load_catalog
 
     targets = {f"{request['item_id']}:{field['field_ref']}" for field in request["fields"]}
-    for key, credential in load_catalog(scope=scope).credentials.items():
+    active_catalog = catalog if catalog is not None else load_catalog(scope=scope)
+    for key, credential in active_catalog.credentials.items():
+        if exclude_key is not None and key == exclude_key:
+            continue
         for field in credential.fields.values():
             if any(_sealbox_secret_item(ref) in targets for ref in field.resolution_order):
                 raise CredentialImportRefused(
@@ -752,6 +932,7 @@ __all__ = [
     "CredentialOwnerV1",
     "EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON",
     "EXPIRED_BEFORE_IMPORT_REASON",
+    "ExpiredCatalogEntryV1",
     "ModelKeyV1",
     "OwnerFileV1",
     "STATE_TRANSFER_NAMES",

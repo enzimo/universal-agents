@@ -1495,6 +1495,8 @@ def test_live_sealbox_temporary_credential_expiry_overwrite_fallback_and_janitor
     assert direct_before["version"] == 2
     assert direct_before["value"] == "temporary-v2-secret"
     sealbox_v2_expires_at = int(direct_before["expires_at"])
+    # F19: Sealbox TTL rounds up so Sealbox never expires earlier than the catalog's expires_at.
+    assert sealbox_v2_expires_at >= int(short_expiry.timestamp())
 
     _run_cli(
         live_sealbox["cli"],
@@ -1564,12 +1566,13 @@ def test_live_sealbox_temporary_credential_expiry_overwrite_fallback_and_janitor
     assert report.sealbox_cleanup.tenants_timed_out == 0
     assert report.sealbox_cleanup.secrets_deleted >= 1
 
-    # 6. Confirm catalog entry, ALL Sealbox versions (v1 and v2), and the account link are gone, and 1 notice exists.
+    # 6. Confirm catalog entry, ALL Sealbox versions (v1 and v2), the standalone expired secret, and the account link are gone, and 1 notice exists.
     assert "live_temp_api" not in credential_catalog.load_catalog(scope=scope).credentials
     for args in (
         ["secret", "get", sealbox_key],
         ["secret", "get", sealbox_key, "--version", "1"],
         ["secret", "get", sealbox_key, "--version", "2"],
+        ["secret", "get", "standalone-expiring-secret"],
     ):
         missing = _run_cli_raw(live_sealbox["cli"], args, env=alice_tenant_env)
         assert missing.returncode != 0

@@ -210,3 +210,36 @@ def test_finish_import_cli_completes_when_the_destination_credential_is_kept(han
 
     assert not path.exists()
     assert "Stored 0 of 1" in capsys.readouterr().out
+
+
+def test_f15_exhausted_retryable_handover_notice_says_next_start_retries_automatically(
+    handed_over, monkeypatch
+) -> None:
+    """F15: when retryable link/store failures exhaust the retry window, the exporter notice says the next start retries automatically."""
+
+    from secure_tool_broker.credential_transfer import EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON
+
+    config_path, config, path = handed_over
+    monkeypatch.setattr(
+        credential_handover,
+        "import_credential_bundle",
+        lambda *_args, **_kwargs: _report(
+            {
+                "key": KEY,
+                "imported": False,
+                "retryable": True,
+                "reason": EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON,
+                "owner": {"kind": "person", "owner_id": "usr_ana"},
+            }
+        ),
+    )
+
+    with pytest.raises(TransferError, match="next start tries again"):
+        import_handed_over_credentials(str(config_path), retry_delays=(0.0,), sleep=lambda _s: None)
+
+    assert path.exists()
+    [(notice, _read)] = AccessRepository(config.manager_storage_settings).notices_for(
+        TEAM, person_id="usr_ana", roles=()
+    )
+    assert "import it again" not in notice.summary.lower()
+    assert "next start retries" in notice.summary.lower()

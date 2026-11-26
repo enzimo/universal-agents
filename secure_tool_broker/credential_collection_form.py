@@ -83,6 +83,7 @@ class ExistingCredentialInfo:
 
     exists: bool = False
     expires_at: str | None = None
+    lookup_failed: bool = False
 
 
 CREDENTIAL_EXPIRY_FORM_SCRIPT = f"""
@@ -248,7 +249,7 @@ def existing_credential_info(
             credential_key,
             type(exc).__name__,
         )
-        return ExistingCredentialInfo()
+        return ExistingCredentialInfo(lookup_failed=True)
     if existing is None or is_expired(existing.expires_at):
         return ExistingCredentialInfo()
     return ExistingCredentialInfo(exists=True, expires_at=existing.expires_at)
@@ -294,6 +295,7 @@ def _render_expiry_control(
     state: ExpiryFormState,
     *,
     key_exists: bool,
+    key_exists_uncertain: bool = False,
     existing_expires_at: str | None = None,
     write_source: str = "sealbox",
 ) -> str:
@@ -333,14 +335,22 @@ def _render_expiry_control(
         if key_exists and existing_expires_at
         else ""
     )
-    existing_warning_html = (
-        '<p class="expiry-existing-warning">'
-        "This credential already exists. If you set a deletion time, the whole credential, "
-        "including earlier versions, is deleted at that time."
-        "</p>"
-        if key_exists
-        else ""
-    )
+    if key_exists:
+        existing_warning_html = (
+            '<p class="expiry-existing-warning">'
+            "This credential already exists. If you set a deletion time, the whole credential, "
+            "including earlier versions, is deleted at that time."
+            "</p>"
+        )
+    elif key_exists_uncertain:
+        existing_warning_html = (
+            '<p class="expiry-existing-warning">'
+            "Could not check whether this credential already exists. If it does and you set a "
+            "deletion time, the whole credential, including earlier versions, is deleted at that time."
+            "</p>"
+        )
+    else:
+        existing_warning_html = ""
     return (
         f'<div class="expiry-control" data-credential-expiry-control{proposed_attr}>'
         '<div class="expiry-bar">'
@@ -372,14 +382,19 @@ def _render_expiry_control(
     )
 
 
-def render_credential_collection_failed_page(details: str) -> str:
+def render_credential_collection_failed_page(details: str, *, partial_write: bool = False) -> str:
     """Render the terminal failure page after a claimed store submission fails."""
 
+    lead_text = (
+        "Could not finish saving the credential."
+        if partial_write
+        else "The credential was not stored."
+    )
     body = (
         '<section class="content-panel">'
         '<p class="eyebrow">Secure Credential Collection</p>'
         "<h1>Credential submission failed.</h1>"
-        f'<div class="status status-error" role="alert"><strong>The credential was not stored.</strong> {html.escape(details)}</div>'
+        f'<div class="status status-error" role="alert"><strong>{lead_text}</strong> {html.escape(details)}</div>'
         '<p class="lede">This form can no longer be submitted. Ask the agent for a new form to try again.</p>'
         "</section>"
     )
@@ -394,6 +409,7 @@ def render_credential_collection_form(
     is_secret_field: Callable[[dict[str, Any]], bool] = is_secret_credential_field,
     signup_html: str = "",
     key_exists: bool = False,
+    key_exists_uncertain: bool = False,
     existing_expires_at: str | None = None,
     error_message: str | None = None,
     preserved_fields: Mapping[str, str] | None = None,
@@ -506,6 +522,7 @@ def render_credential_collection_form(
     expiry_html = _render_expiry_control(
         resolved_expiry_state,
         key_exists=key_exists,
+        key_exists_uncertain=key_exists_uncertain,
         existing_expires_at=existing_expires_at,
         write_source=write_source,
     )

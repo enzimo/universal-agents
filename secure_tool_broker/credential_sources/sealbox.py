@@ -6,6 +6,8 @@ import os
 from typing import Any, Mapping
 
 from secure_tool_broker.auth_models import AuthStatus
+from secure_tool_broker.credential_catalog_store import CredentialOwnerScope, expired_sealbox_record_keys
+from secure_tool_broker.credential_diagnostics import CREDENTIAL_EXPIRED
 from secure_tool_broker.credential_state import active_credential_owner_id
 from secure_tool_broker.credential_sources.base import (
     CredentialMetadata,
@@ -37,6 +39,22 @@ def _item_reference(ref: CredentialRef) -> str:
 
 def _configured() -> bool:
     return bool(os.getenv("SEALBOX_URL") and os.getenv("SEALBOX_ROOT_TOKEN_FILE"))
+
+
+def _expired_catalog_records(
+    owner_scope_kind: str | None,
+    owner_id: str | None,
+) -> dict[str, str]:
+    resolved_owner_id = _string(owner_id) or _string(active_credential_owner_id())
+    if not resolved_owner_id:
+        return {}
+    scope_kind = _string(owner_scope_kind).lower() or "user"
+    scope = (
+        CredentialOwnerScope.team(resolved_owner_id)
+        if scope_kind == "team"
+        else CredentialOwnerScope.user(resolved_owner_id)
+    )
+    return expired_sealbox_record_keys(scope)
 
 
 def _credential_metadata_from_item(item: Mapping[str, Any]) -> CredentialMetadata:
@@ -227,8 +245,11 @@ class SealboxCredentialSource:
                     },
                 )
             return listed
+        expired_records = _expired_catalog_records(request.owner_scope_kind, request.owner_id)
         credentials = []
         for item in listed:
+            if _string(item.get("key")) in expired_records:
+                continue
             metadata = _credential_metadata_from_item(item).to_dict()
             credentials.append(metadata)
         bounded_limit = max(1, min(int(request.limit), 100))
@@ -254,6 +275,18 @@ class SealboxCredentialSource:
         invalid = reject_unsupported_key(key)
         if invalid is not None:
             return invalid
+        expired_records = _expired_catalog_records(ref.owner_scope_kind, ref.owner_id)
+        if key in expired_records:
+            return ToolResult(
+                status="error",
+                error=f"Temporary credential has expired: {key}",
+                content={
+                    "error_code": CREDENTIAL_EXPIRED,
+                    "provider": "sealbox",
+                    "item_id": key,
+                    "expires_at": expired_records[key],
+                },
+            )
         listed = self._list_credentials(
             owner_scope_kind=ref.owner_scope_kind,
             owner_id=ref.owner_id,
