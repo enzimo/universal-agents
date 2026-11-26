@@ -724,8 +724,6 @@ class DiscordInteractiveApp(BaseInteractiveApp):
         channel = getattr(interaction, "channel", None)
         user_id = str(getattr(user, "id", "discord_unknown"))
         chat_id, thread_id = self._resolve_channel_ids(channel)
-        if not chat_id and getattr(interaction, "channel_id", None) is not None:
-            chat_id = str(interaction.channel_id)
         activity_context = ActivityContext(
             chat_id=chat_id,
             thread_id=thread_id,
@@ -889,13 +887,8 @@ class DiscordInteractiveApp(BaseInteractiveApp):
         user = getattr(interaction, "user", None)
         channel = getattr(interaction, "channel", None)
         user_id = str(getattr(user, "id", "discord_unknown"))
-        raw_channel_id = getattr(channel, "id", None)
-        if raw_channel_id is None:
-            raw_channel_id = getattr(interaction, "channel_id", None)
-        channel_id = str(raw_channel_id) if raw_channel_id is not None else ""
+        channel_id = str(getattr(channel, "id", ""))
         chat_id, _thread_id = self._resolve_channel_ids(channel)
-        if not chat_id:
-            chat_id = channel_id
         channel_type = getattr(
             channel,
             "type",
@@ -1450,14 +1443,19 @@ def _is_direct_message(message: object) -> bool:
 
 
 def _is_direct_interaction(interaction: object) -> bool:
-    """A slash command run in a DM with the bot: no server, and not through a user install.
+    """A slash command run in the one-to-one DM with the bot.
 
-    An app a person installed for themselves can run commands in DMs and
-    group DMs with other people, which also have no server; those are not
-    private (``is_user_integration``).
+    Discord reports where the command ran in ``interaction.context`` (discord.py
+    2.4+): ``context.dm_channel`` is True only in the DM with the bot, whether
+    the app was installed for a server or for the person. Commands run in a
+    guild, in a DM or group DM between other people
+    (``context.private_channel``), or without context information fail closed.
     """
 
     if getattr(interaction, "guild_id", _UNKNOWN) is not None:
         return False
-    user_install = getattr(interaction, "is_user_integration", None)
-    return callable(user_install) and not user_install()
+    context = getattr(interaction, "context", None)
+    return (
+        getattr(context, "dm_channel", False) is True
+        and getattr(context, "private_channel", False) is not True
+    )

@@ -622,7 +622,7 @@ class SignalInteractiveApp(BaseInteractiveApp):
         except AttachmentValidationError as exc:
             await self._send_text(chat_id=chat_id, text=str(exc))
             return
-        except Exception as exc:
+        except Exception:
             logger.warning(
                 "Signal attachment download failed: user_id=%s chat_id=%s message_id=%s.",
                 user_id,
@@ -631,7 +631,7 @@ class SignalInteractiveApp(BaseInteractiveApp):
                 exc_info=True,
             )
             await self._send_text(
-                chat_id=chat_id, text=f"Attachment download failed: {exc}"
+                chat_id=chat_id, text="Attachment download failed."
             )
             return
         if stored_attachments and text.startswith("/"):

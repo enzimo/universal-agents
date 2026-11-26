@@ -667,7 +667,18 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
         nonlocal chunked_bytes_written
         att_id = request.match_info["attachment_id"]
         if att_id == "redirect-me":
-            return web.Response(status=302, headers={"Location": "/v1/attachments/"})
+            return web.Response(
+                status=302,
+                headers={"Location": "/v1/attachments/"},
+                text="redirect body INTERNAL-REDIRECT-DETAIL",
+            )
+        if att_id == "boom-500":
+            return web.json_response(
+                {
+                    "error": "read /var/lib/signal-cli/attachments/x: INTERNAL-500-DETAIL"
+                },
+                status=500,
+            )
         if att_id == "too-big-cl":
             resp = web.StreamResponse(
                 status=200,
@@ -782,6 +793,29 @@ async def test_signal_rest_client_enforces_content_length_and_chunked_limits(
             assert "event=signal_attachment_refused" in caplog.text
             assert "attachment_id=too-big-chunked" in caplog.text
             assert "sender=sender-uuid" in caplog.text
+
+            # Redirect and 5xx errors reply with fixed text and never leak response bodies.
+            for idx, (att_id, secret_marker) in enumerate(
+                (
+                    ("redirect-me", "INTERNAL-REDIRECT-DETAIL"),
+                    ("boom-500", "INTERNAL-500-DETAIL"),
+                ),
+                start=1,
+            ):
+                caplog.clear()
+                err_payload = _direct_payload(message="", timestamp=200 + idx)
+                err_payload["envelope"]["dataMessage"]["attachments"] = [
+                    {"id": att_id, "filename": "a.txt", "contentType": "text/plain"}
+                ]
+                with caplog.at_level(logging.WARNING):
+                    await app._process_inbound_payload(err_payload)
+
+                assert bridge.inbound_messages == []
+                reply_text = str(sent_replies[-1]["message"])
+                assert reply_text == "Attachment download failed."
+                assert secret_marker not in reply_text
+                assert "/var/lib/signal-cli" not in reply_text
+                assert "Signal attachment download failed" in caplog.text
     finally:
         await server.close()
 

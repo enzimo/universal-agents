@@ -264,8 +264,7 @@ class _FakeInteraction:
         user_id: int,
         channel,
         guild_id: object = _UNSET,
-        channel_id: int | None = None,
-        user_integration: bool = False,
+        context: object = _UNSET,
     ) -> None:
         self.user = SimpleNamespace(id=user_id)
         self.channel = channel
@@ -277,17 +276,17 @@ class _FakeInteraction:
             )
         else:
             self.guild_id = guild_id
-        self.channel_id = (
-            channel_id
-            if channel_id is not None
-            else (getattr(channel, "id", None) if channel is not None else None)
-        )
-        self._user_integration = user_integration
+        self.channel_id = getattr(channel, "id", None) if channel is not None else None
+        if context is _UNSET:
+            self.context = SimpleNamespace(
+                guild=self.guild_id is not None,
+                dm_channel=self.guild_id is None,
+                private_channel=False,
+            )
+        else:
+            self.context = context
         self.response = _FakeInteractionResponse()
         self.followup = _FakeInteractionFollowup()
-
-    def is_user_integration(self) -> bool:
-        return self._user_integration
 
 
 class _FakeAuthor:
@@ -987,59 +986,251 @@ async def test_discord_slash_commands_allow_allowlisted_user_and_thread_parent(
     assert len(application.command_calls) == 4
     assert "session_owner" in thread_interaction.followup.messages[0]
 
-    # Partial interaction with channel=None falls back to interaction.channel_id.
-    partial_denied = _FakeInteraction(
-        user_id=100, channel=None, guild_id=555, channel_id=999
-    )
-    await app._handle_slash_command(partial_denied, "/list_sessions")
-    assert len(application.command_calls) == 4
-    assert partial_denied.response.message_calls[0]["ephemeral"] is True
 
-    partial_allowed = _FakeInteraction(
-        user_id=100, channel=None, guild_id=555, channel_id=200
-    )
-    await app._handle_slash_command(partial_allowed, "/list_sessions")
-    assert len(application.command_calls) == 5
+def _build_real_discord_interaction(
+    state,
+    *,
+    user_id: str,
+    channel: dict | None,
+    guild_id: str | None,
+    owners: dict[str, str],
+    context: int | None,
+):
+    import discord as real_discord
+
+    user = {
+        "id": user_id,
+        "username": f"user_{user_id}",
+        "discriminator": "0",
+        "avatar": None,
+        "global_name": None,
+    }
+    data: dict[str, object] = {
+        "id": "1",
+        "type": 2,
+        "token": "test-token",
+        "version": 1,
+        "application_id": "42",
+        "attachment_size_limit": 1024,
+        "authorizing_integration_owners": owners,
+        "data": {"id": "5", "name": "list_sessions", "type": 1},
+    }
+    if channel is not None:
+        data["channel"] = channel
+        data["channel_id"] = channel["id"]
+    if context is not None:
+        data["context"] = context
+    if guild_id is not None:
+        data["guild_id"] = guild_id
+        data["member"] = {
+            "user": user,
+            "roles": [],
+            "joined_at": "2020-01-01T00:00:00+00:00",
+            "deaf": False,
+            "mute": False,
+            "flags": 0,
+            "permissions": "0",
+        }
+    else:
+        data["user"] = user
+    interaction = real_discord.Interaction(data=data, state=state)  # type: ignore[arg-type]
+    interaction._cs_response = _FakeInteractionResponse()  # type: ignore[assignment]
+    interaction._cs_followup = _FakeInteractionFollowup()  # type: ignore[assignment]
+    return interaction
 
 
 @pytest.mark.asyncio
-async def test_discord_slash_commands_dm_registered_user_and_user_install_rules(
+@pytest.mark.parametrize("users_enabled", [False, True])
+async def test_discord_slash_commands_real_interaction_dm_and_channel_rules(
     tmp_path: Path,
+    users_enabled: bool,
 ) -> None:
-    # With users.enabled=True, a registered person in a bot DM passes even if not in allowlists.
-    app_enabled, app_calls_enabled, ops_enabled = _build_slash_allowlist_app(
-        tmp_path, users_enabled=True
-    )
-    dm_channel = _FakeTextChannel(900, guild=None)
-    dm_interaction = _FakeInteraction(
-        user_id=300, channel=dm_channel, guild_id=None, user_integration=False
-    )
-    await app_enabled._handle_slash_command(dm_interaction, "/stop")
-    assert len(app_calls_enabled.command_calls) == 1
-    assert len(ops_enabled.stop_calls) == 1
-    assert dm_interaction.followup.messages == ["Stopped active work."]
+    import discord as real_discord
 
-    # A user-installed interaction with guild_id=None is NOT treated as a bot DM (fails closed).
-    user_install_interaction = _FakeInteraction(
-        user_id=300, channel=dm_channel, guild_id=None, user_integration=True
+    app, application, _operations = _build_slash_allowlist_app(
+        tmp_path, users_enabled=users_enabled
     )
-    await app_enabled._handle_slash_command(user_install_interaction, "/list_sessions")
-    assert len(app_calls_enabled.command_calls) == 1
-    assert user_install_interaction.response.defer_calls == []
-    assert user_install_interaction.response.message_calls[0]["ephemeral"] is True
+    client = real_discord.Client(intents=real_discord.Intents.default())
+    try:
+        state = client._connection
+        state.user = real_discord.ClientUser(
+            state=state,
+            data={
+                "id": "42",
+                "username": "bot",
+                "discriminator": "0",
+                "avatar": None,
+                "global_name": None,
+                "bot": True,
+            },
+        )
+        registered_user = {
+            "id": "300",
+            "username": "member",
+            "discriminator": "0",
+            "avatar": None,
+            "global_name": None,
+        }
+        owner_user = {
+            "id": "100",
+            "username": "owner",
+            "discriminator": "0",
+            "avatar": None,
+            "global_name": None,
+        }
 
-    # With users.enabled=False, the same Discord id is NOT registered and is refused in DM.
-    app_disabled, app_calls_disabled, ops_disabled = _build_slash_allowlist_app(
-        tmp_path, users_enabled=False
-    )
-    dm_disabled = _FakeInteraction(
-        user_id=300, channel=dm_channel, guild_id=None, user_integration=False
-    )
-    await app_disabled._handle_slash_command(dm_disabled, "/list_sessions")
-    assert app_calls_disabled.command_calls == []
-    assert ops_disabled.stop_calls == []
-    assert dm_disabled.response.defer_calls == []
-    assert dm_disabled.response.message_calls[0]["ephemeral"] is True
+        cases = [
+            # Registered user in bot DM, server-installed app: passes only when users.enabled=True.
+            (
+                "bot_dm_guild_install",
+                dict(
+                    user_id="300",
+                    channel={"id": "900", "type": 1, "recipients": [registered_user]},
+                    guild_id=None,
+                    owners={"0": "0"},
+                    context=1,
+                ),
+                True,
+                users_enabled,
+            ),
+            # Registered user in bot DM, user-installed app: passes only when users.enabled=True.
+            (
+                "bot_dm_user_install",
+                dict(
+                    user_id="300",
+                    channel={"id": "900", "type": 1, "recipients": [registered_user]},
+                    guild_id=None,
+                    owners={"0": "0", "1": "300"},
+                    context=1,
+                ),
+                True,
+                users_enabled,
+            ),
+            # DM between two people through a user install: never a bot DM; refused in both modes.
+            (
+                "private_dm_user_install",
+                dict(
+                    user_id="300",
+                    channel={"id": "901", "type": 1, "recipients": [registered_user]},
+                    guild_id=None,
+                    owners={"1": "300"},
+                    context=2,
+                ),
+                False,
+                False,
+            ),
+            # Missing interaction context: fails closed in both modes.
+            (
+                "bot_dm_missing_context",
+                dict(
+                    user_id="300",
+                    channel={"id": "900", "type": 1, "recipients": [registered_user]},
+                    guild_id=None,
+                    owners={"0": "0"},
+                    context=None,
+                ),
+                False,
+                False,
+            ),
+            # Owner on allowed_user_ids in bot DM: refused when users.enabled=False (unregistered)
+            # because allowed_channel_ids is non-empty; passes when users.enabled=True.
+            (
+                "owner_bot_dm",
+                dict(
+                    user_id="100",
+                    channel={"id": "902", "type": 1, "recipients": [owner_user]},
+                    guild_id=None,
+                    owners={"0": "0"},
+                    context=1,
+                ),
+                True,
+                users_enabled,
+            ),
+            # Allowed user in allowed guild channel: passes in both modes.
+            (
+                "guild_channel_allowed",
+                dict(
+                    user_id="100",
+                    channel={
+                        "id": "200",
+                        "type": 0,
+                        "name": "allowed",
+                        "position": 0,
+                        "guild_id": "555",
+                    },
+                    guild_id="555",
+                    owners={"0": "555"},
+                    context=0,
+                ),
+                False,
+                True,
+            ),
+            # Allowed user in disallowed guild channel: refused in both modes.
+            (
+                "guild_channel_other",
+                dict(
+                    user_id="100",
+                    channel={
+                        "id": "999",
+                        "type": 0,
+                        "name": "other",
+                        "position": 0,
+                        "guild_id": "555",
+                    },
+                    guild_id="555",
+                    owners={"0": "555"},
+                    context=0,
+                ),
+                False,
+                False,
+            ),
+            # Missing channel payload: channel and channel_id are both None; refused in both modes.
+            (
+                "no_channel",
+                dict(
+                    user_id="100",
+                    channel=None,
+                    guild_id="555",
+                    owners={"0": "555"},
+                    context=0,
+                ),
+                False,
+                False,
+            ),
+        ]
+
+        expected_calls = 0
+        for case_name, kwargs, expected_direct, expected_allowed in cases:
+            inter = _build_real_discord_interaction(state, **kwargs)
+            if case_name == "bot_dm_user_install":
+                assert inter.is_user_integration() is True
+                assert inter.context.dm_channel is True
+            if case_name == "private_dm_user_install":
+                assert inter.is_user_integration() is True
+                assert inter.context.private_channel is True
+            if case_name == "no_channel":
+                assert inter.channel is None
+                assert inter.channel_id is None
+
+            assert discord_module._is_direct_interaction(inter) is expected_direct, case_name
+            assert app._is_allowed_interaction(inter) is expected_allowed, case_name
+
+            await app._handle_slash_command(inter, "/list_sessions")
+            if expected_allowed:
+                expected_calls += 1
+                assert len(application.command_calls) == expected_calls, case_name
+                assert application.command_calls[-1]["private_chat"] is expected_direct, case_name
+                assert inter.response.defer_calls == [{"thinking": True}], case_name
+                assert len(inter.followup.messages) == 1, case_name
+                assert inter.followup.message_calls[0].get("ephemeral") is not True, case_name
+            else:
+                assert len(application.command_calls) == expected_calls, case_name
+                assert inter.response.defer_calls == [], case_name
+                assert inter.followup.messages == [], case_name
+                assert len(inter.response.message_calls) == 1, case_name
+                assert inter.response.message_calls[0]["ephemeral"] is True, case_name
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
