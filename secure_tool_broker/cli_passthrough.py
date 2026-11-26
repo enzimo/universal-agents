@@ -36,10 +36,12 @@ from access_catalog.cli_tables import (
     CliPolicy,
     CommandFileRules,
     CommandLineRejected,
+    GhApiCall,
     classify_passthrough,
-    gh_api_method,
+    gh_api_level,
     load_cli_policy,
     parse_command_line,
+    parse_gh_api,
     split_flag,
 )
 from custom_messages.contracts.access_v2 import AccessLevel
@@ -227,13 +229,21 @@ def check_command_line(
             reason_code=REASON_COMMAND_BLOCKED,
         )
     rules = policy.rules_for(dotted)
-    level = classify_passthrough(policy, parsed)
     _refuse_blocked_flags(policy, rules, parsed.argv)
+    api_call: GhApiCall | None = None
+    try:
+        if cli == "gh" and parsed.command_path == ("api",):
+            api_call = parse_gh_api(parsed)
+            level = gh_api_level(api_call)
+        else:
+            level = classify_passthrough(policy, parsed)
+    except CommandLineRejected as exc:
+        raise CommandRefused(str(exc), reason_code=REASON_COMMAND_LINE_REJECTED) from exc
     checked_argv = list(parsed.argv)
     stage: TaskFileStage | None = None
     if cli == "gh":
         _check_gh_files(rules, parsed.argv, dotted)
-        if parsed.command_path == ("api",) and gh_api_method(parsed) not in GH_API_INTERIM_METHODS:
+        if api_call is not None and api_call.method not in GH_API_INTERIM_METHODS:
             raise CommandRefused(
                 "gh api allows only GET or POST through the broker for now.",
                 reason_code=REASON_COMMAND_BLOCKED,
@@ -285,11 +295,15 @@ def check_installed_command_line(policy: CliPolicy, argv: Sequence[str]) -> Chec
             reason_code=REASON_COMMAND_BLOCKED,
         )
     _refuse_blocked_flags(policy, policy.rules_for(dotted), parsed.argv)
+    try:
+        level = classify_passthrough(policy, parsed)
+    except CommandLineRejected as exc:
+        raise CommandRefused(str(exc), reason_code=REASON_COMMAND_LINE_REJECTED) from exc
     return CheckedCommand(
         cli=policy.cli,
         argv=list(parsed.argv),
         command_path=dotted,
-        level=classify_passthrough(policy, parsed),
+        level=level,
     )
 
 

@@ -1005,6 +1005,11 @@ def test_gh_api_hidden_method_in_value_flags_and_implicit_post_classify_full(
         (["api", "-X", "GET", "repos/o/r"], "GET"),
         (["api", "--method=get", "repos/o/r"], "GET"),
         (["api", "-X", "HEAD", "repos/o/r"], "HEAD"),
+        # Explicit GET with -f/-F sends query parameters without a request body.
+        (["api", "repos/o/r", "-X", "GET", "-f", "a=b"], "GET"),
+        (["api", "repos/o/r", "-X", "GET", "-F", "a=1"], "GET"),
+        (["api", "-X", "GET", "search/issues", "-f", "q=repo:o/r is:open"], "GET"),
+        (["api", "--method=GET", "search/issues", "--raw-field", "q=x", "-F", "per_page=5", "--paginate"], "GET"),
         # A repo named "graphql" under repos/ is not the GraphQL endpoint.
         (["api", "repos/o/graphql"], "GET"),
     ],
@@ -1030,12 +1035,11 @@ def test_gh_api_ordinary_reads_classify_read(catalog, argv, expected_method) -> 
         (["api", "repos/o/r/issues/1", "-X", "PUT"], "PUT"),
         (["api", "repos/o/r/issues/1", "-X", "DELETE"], "DELETE"),
         (["api", "repos/o/r", "--method= GET "], " GET "),
-        # Body/field flags on GET or HEAD never classify as read.
+        # Requests that send a body on GET (--input) or HEAD (--input or -f/-F) never classify as read.
         (["api", "repos/o/r", "-X", "GET", "--input", "-"], "GET"),
         (["api", "repos/o/r", "-X", "HEAD", "--input", "-"], "HEAD"),
-        (["api", "repos/o/r", "-X", "GET", "-f", "a=b"], "GET"),
-        (["api", "repos/o/r", "-X", "GET", "-F", "a=1"], "GET"),
         (["api", "repos/o/r", "-X", "HEAD", "-f", "a=b"], "HEAD"),
+        (["api", "repos/o/r", "-X", "HEAD", "-F", "a=1"], "HEAD"),
         # GraphQL endpoint always classifies as full regardless of HTTP method.
         (["api", "graphql"], "GET"),
         (["api", "graphql", "-X", "GET"], "GET"),
@@ -1044,6 +1048,9 @@ def test_gh_api_ordinary_reads_classify_read(catalog, argv, expected_method) -> 
         (["api", "graphql", "-X", "GET", "-f", "query=mutation{x}"], "GET"),
         (["api", "graphql", "-X", "GET", "--input", "-"], "GET"),
         (["api", "/graphql", "-X", "GET"], "GET"),
+        (["api", "//graphql", "-X", "GET"], "GET"),
+        (["api", "//graphql?query=x", "-X", "GET"], "GET"),
+        (["api", "//api/graphql", "-X", "GET"], "GET"),
         (["api", "///GraphQL", "-X", "GET"], "GET"),
         (["api", "https://api.github.com/graphql", "-X", "GET"], "GET"),
         (["api", "https://api.github.com/GRAPHQL?query=x", "-X", "GET"], "GET"),
@@ -1153,12 +1160,36 @@ def _extract_gh_debug_method(output: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _gh_debug_request_has_body(output: str) -> bool:
+    """Whether GH_DEBUG=api logged a Content-Length header or request body bytes."""
+
+    lines = output.splitlines()
+    start = next((idx for idx, line in enumerate(lines) if line.startswith("> ") and line.endswith(" HTTP/1.1")), None)
+    if start is None:
+        return False
+    idx = start + 1
+    while idx < len(lines) and lines[idx].startswith("> "):
+        if lines[idx].lower().startswith("> content-length:"):
+            return True
+        idx += 1
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    while idx < len(lines) and not lines[idx].startswith("* "):
+        if lines[idx].strip():
+            return True
+        idx += 1
+    return False
+
+
 @pytest.mark.parametrize(
     ("argv", "stdin_text"),
     [
         (["api", "repos/o/r"], ""),
         (["api", "repos/o/r", "-X", "GET"], ""),
+        (["api", "-X", "GET", "search/issues", "-f", "q=repo:o/r", "-F", "per_page=5"], ""),
         (["api", "repos/o/r", "--method=HEAD"], ""),
+        (["api", "repos/o/r", "-X", "HEAD", "-f", "a=b"], ""),
+        (["api", "repos/o/r", "-X", "GET", "--input", "-"], '{"x":1}'),
         (["api", "repos/o/r", "-X", "DELETE"], ""),
         (["api", "repos/o/r", "--method=PATCH"], ""),
         (["api", "repos/o/r", "--method=PUT"], ""),
@@ -1182,14 +1213,45 @@ def test_gh_api_method_matches_real_gh_wire_request(tmp_path, argv, stdin_text) 
     if shutil.which("gh") is None:
         pytest.skip("gh binary not on PATH")
 
-    from access_catalog.cli_tables import gh_api_method, parse_command_line
+    from access_catalog.cli_tables import gh_api_level, parse_command_line, parse_gh_api
 
     policy = load_cli_policy("gh")
     parsed = parse_command_line(argv, policy.table)
+    call = parse_gh_api(parsed)
     output = _run_offline_gh_api(argv, tmp_path, stdin_text=stdin_text)
     wire_method = _extract_gh_debug_method(output)
     assert wire_method is not None, f"expected gh to emit an HTTP request line, got:\n{output}"
-    assert gh_api_method(parsed) == wire_method
+    assert call.method == wire_method
+    if gh_api_level(call) is READ:
+        assert not _gh_debug_request_has_body(output), (
+            f"read-classified gh api call emitted a Content-Length or request body:\n{output}"
+        )
+
+
+def test_gh_api_body_presence_matches_real_gh_for_get_and_head(tmp_path) -> None:
+    import shutil
+
+    if shutil.which("gh") is None:
+        pytest.skip("gh binary not on PATH")
+
+    from access_catalog.cli_tables import gh_api_level, parse_command_line, parse_gh_api
+
+    policy = load_cli_policy("gh")
+
+    get_fields = ["api", "-X", "GET", "search/issues", "-f", "q=repo:o/r", "-F", "per_page=5"]
+    get_fields_out = _run_offline_gh_api(get_fields, tmp_path)
+    assert gh_api_level(parse_gh_api(parse_command_line(get_fields, policy.table))) is READ
+    assert not _gh_debug_request_has_body(get_fields_out)
+
+    head_fields = ["api", "-X", "HEAD", "repos/o/r", "-f", "a=b"]
+    head_fields_out = _run_offline_gh_api(head_fields, tmp_path)
+    assert gh_api_level(parse_gh_api(parse_command_line(head_fields, policy.table))) is FULL
+    assert _gh_debug_request_has_body(head_fields_out)
+
+    get_input = ["api", "-X", "GET", "repos/o/r", "--input", "-"]
+    get_input_out = _run_offline_gh_api(get_input, tmp_path, stdin_text='{"x":1}')
+    assert gh_api_level(parse_gh_api(parse_command_line(get_input, policy.table))) is FULL
+    assert _gh_debug_request_has_body(get_input_out)
 
 
 @pytest.mark.parametrize(

@@ -47,7 +47,9 @@ GH_API_READ_METHODS = frozenset({"GET", "HEAD"})
 # upstream, because the older `gh` rejects the unknown flag before sending any
 # request. Flags newer than these tables are refused fail-closed until added.
 _GH_API_METHOD_FLAGS = frozenset({"-X", "--method"})
-_GH_API_BODY_FLAGS = frozenset({"-F", "--field", "-f", "--raw-field", "--input"})
+_GH_API_FIELD_FLAGS = frozenset({"-F", "--field", "-f", "--raw-field"})
+_GH_API_INPUT_FLAGS = frozenset({"--input"})
+_GH_API_BODY_FLAGS = _GH_API_FIELD_FLAGS | _GH_API_INPUT_FLAGS
 _GH_API_VALUE_FLAGS = (
     _GH_API_METHOD_FLAGS
     | _GH_API_BODY_FLAGS
@@ -87,7 +89,8 @@ class GhApiCall:
     """Parsed HTTP method and classification signals for one ``gh api`` invocation."""
 
     method: str
-    has_body_flags: bool
+    has_fields: bool
+    has_input: bool
     is_graphql: bool
 
 
@@ -237,12 +240,14 @@ def _read_gh_api_flag(tokens: tuple[str, ...], index: int) -> tuple[str, str | N
 def _is_gh_api_graphql_endpoint(endpoint: str) -> bool:
     """Whether an endpoint argument targets GitHub's GraphQL endpoint.
 
-    Removes any scheme/host, query string, fragment, percent-encoding, and
-    leading slashes, resolves dot segments, and checks whether the first path
-    segment is ``graphql`` (case-insensitive).
+    Mirrors ``gh``'s own URL rule (only strings containing ``://`` are parsed
+    as full URLs; everything else, including leading ``//``, is a path), then
+    strips query string, fragment, percent-encoding, and leading slashes,
+    resolves dot segments, and checks whether the path targets ``graphql`` or
+    ``api/graphql`` (case-insensitive).
     """
 
-    if "://" in endpoint or endpoint.startswith("//"):
+    if "://" in endpoint:
         raw_path = urlsplit(endpoint).path
     else:
         raw_path = endpoint.split("?", 1)[0].split("#", 1)[0]
@@ -252,6 +257,14 @@ def _is_gh_api_graphql_endpoint(endpoint: str) -> bool:
         return False
     segments = [segment.lower() for segment in normalized.split("/")]
     return segments[0] == "graphql" or segments[:2] == ["api", "graphql"]
+
+
+def _parse_gh_api_method_value(explicit_method: str | None, value: str | None) -> str:
+    if explicit_method is not None:
+        raise CommandLineRejected("gh api: -X/--method may only be specified once.")
+    if not value:
+        raise CommandLineRejected("gh api: -X/--method requires a non-empty HTTP method.")
+    return value.upper()
 
 
 def parse_gh_api(parsed: ParsedCommandLine) -> GhApiCall:
@@ -266,7 +279,8 @@ def parse_gh_api(parsed: ParsedCommandLine) -> GhApiCall:
     tokens = parsed.argv
     index = parsed.command_index
     explicit_method: str | None = None
-    has_body_flags = False
+    has_fields = False
+    has_input = False
     positionals: list[str] = []
     while index < len(tokens):
         token = tokens[index]
@@ -276,16 +290,14 @@ def parse_gh_api(parsed: ParsedCommandLine) -> GhApiCall:
             continue
         name, value, index = _read_gh_api_flag(tokens, index)
         if name in _GH_API_METHOD_FLAGS:
-            if explicit_method is not None:
-                raise CommandLineRejected("gh api: -X/--method may only be specified once.")
-            if not value:
-                raise CommandLineRejected("gh api: -X/--method requires a non-empty HTTP method.")
-            explicit_method = value.upper()
-        elif name in _GH_API_BODY_FLAGS:
-            has_body_flags = True
-    method = explicit_method if explicit_method is not None else ("POST" if has_body_flags else "GET")
+            explicit_method = _parse_gh_api_method_value(explicit_method, value)
+        elif name in _GH_API_FIELD_FLAGS:
+            has_fields = True
+        elif name in _GH_API_INPUT_FLAGS:
+            has_input = True
+    method = explicit_method if explicit_method is not None else ("POST" if (has_fields or has_input) else "GET")
     is_graphql = any(_is_gh_api_graphql_endpoint(arg) for arg in positionals)
-    return GhApiCall(method=method, has_body_flags=has_body_flags, is_graphql=is_graphql)
+    return GhApiCall(method=method, has_fields=has_fields, has_input=has_input, is_graphql=is_graphql)
 
 
 def gh_api_method(parsed: ParsedCommandLine) -> str:
@@ -297,14 +309,18 @@ def gh_api_method(parsed: ParsedCommandLine) -> str:
 def gh_api_level(call: GhApiCall) -> AccessLevel:
     """The access level one parsed ``gh api`` call requires.
 
-    Only plain GET/HEAD calls to non-GraphQL endpoints without body/field flags
-    (``-f``, ``-F``, ``--input``) classify as ``read``; GraphQL requests, calls
-    with body/field flags, and all other HTTP methods require ``full``.
+    Plain ``GET`` calls (including ``-f``/``-F`` fields, which ``gh`` sends in
+    the URL query string without a body) and ``HEAD`` calls without fields or
+    ``--input`` to non-GraphQL endpoints classify as ``read``. ``HEAD`` with
+    fields (which ``gh`` sends as a JSON request body), any call with
+    ``--input``, any GraphQL call, and all other HTTP methods require ``full``.
     """
 
-    if call.method in GH_API_READ_METHODS and not call.is_graphql and not call.has_body_flags:
-        return AccessLevel.READ
-    return AccessLevel.FULL
+    if call.method not in GH_API_READ_METHODS or call.is_graphql or call.has_input:
+        return AccessLevel.FULL
+    if call.method == "HEAD" and call.has_fields:
+        return AccessLevel.FULL
+    return AccessLevel.READ
 
 
 def classify_passthrough(policy: CliPolicy, parsed: ParsedCommandLine) -> AccessLevel:

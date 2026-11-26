@@ -17,8 +17,9 @@ and the broker runs exactly the list it checked:
   did not know about could consume a command word;
 - ``--`` separators are refused.
 
-Flags after the command path are free-form; blocked flags are checked by the
-broker on every token regardless of position.
+Flags after the command path are free-form except where a command has its own
+parser (such as ``gh api`` in ``access_catalog.cli_tables``); blocked flags
+are checked by the broker on every token regardless of position.
 """
 
 from __future__ import annotations
