@@ -562,8 +562,9 @@ async def recover_runtime_after_restart(agent: Any) -> None:
                 agent.task_manager.enqueue_task, task_id
             )
 
-    # Tasks kept waiting above for a set_up_tools run that has ended.
+    # Tasks kept waiting above for a set_up_tools run that has ended, or a timed wait now due.
     await _resume_ended_setup_runs(agent)
+    await _resume_due_timed_waits(agent)
 
 
 async def _resume_ended_setup_runs(agent: Any) -> None:
@@ -583,5 +584,24 @@ async def _resume_ended_setup_runs(agent: Any) -> None:
         agent._logger.exception(
             "Could not resume tasks whose setup run ended during the restart. "
             "event=setup_run_recovery_failed agent_id=%s",
+            agent.id,
+        )
+
+
+async def _resume_due_timed_waits(agent: Any) -> None:
+    """Resume tasks whose timed wait came due while the agent was down (``timed_wait_runtime``).
+
+    Not-yet-due timed waits stay ``WAITING`` until the scheduler pass sees
+    their resume time pass; due waits are queued from a durable note without
+    waking the drain (startup wakes the drain once ready).
+    """
+    from custom_agents.timed_wait_runtime import resume_due_timed_waits
+
+    try:
+        await resume_due_timed_waits(agent, at_start=True)
+    except Exception:
+        agent._logger.exception(
+            "Could not resume tasks whose timed wait ended during the restart. "
+            "event=timed_wait_recovery_failed agent_id=%s",
             agent.id,
         )

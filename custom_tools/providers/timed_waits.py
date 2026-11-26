@@ -10,19 +10,18 @@ and the access hook enforces both before the tool runs.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from strands import tool
 from strands.interrupt import InterruptException
 from strands.types.tools import ToolContext
 
-from access_control.identity import ISSUER_SCHEDULER
 from custom_agents import timed_waits as timed_waits_rules
+from custom_agents.timed_wait_runtime import check_schedule_next_run
 from custom_agents.timed_waits import (
     LONG_WAIT_TOOL_NAME,
     TIMED_WAIT_KIND,
@@ -32,15 +31,12 @@ from custom_agents.timed_waits import (
     WaitEntry,
     WaitLedger,
     budget_refusal,
-    next_run_refusal,
     validate_wait_args,
     wait_result,
     wait_summary_text,
 )
 from custom_tools.provider_contract import ToolProvider, tool_name
 from custom_tools.runtime_context import (
-    active_schedule_run,
-    active_signed_task_context,
     bound_task_id,
     get_agent_ref,
 )
@@ -113,104 +109,6 @@ def _call_id(agent: Any, tool_context: ToolContext, tool_use_id: str, tool_id_na
         tool_name=tool_id_name,
     )
     return resolved or tool_use_id
-
-
-def _verified_scheduler_schedule_id(agent: Any, task_id: str) -> str | None:
-    """The schedule id of a scheduler-issued task context, or None (never trusts message claims)."""
-
-    from custom_agents.access_runtime import verified_task_context
-
-    has_identity = active_signed_task_context(agent) is not None or active_schedule_run(agent) is not None
-    try:
-        context = verified_task_context(agent)
-    except RuntimeError as exc:
-        if has_identity:
-            logger.warning(
-                "Could not verify the active task's schedule identity. "
-                "event=timed_wait_identity_unchecked task_id=%s error=%s",
-                task_id,
-                exc,
-            )
-        return None
-    if context is None or not context.schedule_id:
-        return None
-    if context.issuer != ISSUER_SCHEDULER:
-        logger.warning(
-            "Ignoring schedule_id from a non-scheduler task context during timed wait check. "
-            "event=schedule_id_from_non_scheduler_ignored issuer=%s schedule_id=%s task_id=%s",
-            context.issuer,
-            context.schedule_id,
-            task_id,
-        )
-        return None
-    return context.schedule_id
-
-
-def _schedule_store(agent: Any) -> Any | None:
-    store = getattr(agent, "_schedule_store", None)
-    if store is None and callable(getattr(agent, "_ensure_schedule_store", None)):
-        store = agent._ensure_schedule_store()
-    return store
-
-
-async def _check_schedule_next_run(
-    agent: Any,
-    task_id: str,
-    *,
-    now: datetime,
-    resume_at: datetime,
-) -> str | None:
-    """Refuse a wait in a recurring scheduled run that would reach or pass its next fire time."""
-
-    schedule_id = _verified_scheduler_schedule_id(agent, task_id)
-    if not schedule_id:
-        return None
-    store = _schedule_store(agent)
-    if store is None:
-        logger.warning(
-            "Timed wait refused because this agent has no schedule store to read the next run time. "
-            "event=timed_wait_refused reason=schedule_unreadable task_id=%s schedule_id=%s",
-            task_id,
-            schedule_id,
-        )
-        return (
-            f"Could not check schedule {schedule_id}'s next run time (no schedule store), "
-            "so this wait was refused to avoid overlapping the next run."
-        )
-    try:
-        schedule, finishing = await asyncio.to_thread(store.read_next_fire_schedule, schedule_id)
-    except Exception as exc:  # noqa: BLE001 - fail safe on any storage or parse error
-        logger.warning(
-            "Timed wait refused because the schedule could not be read. "
-            "event=timed_wait_refused reason=schedule_unreadable task_id=%s schedule_id=%s error_type=%s",
-            task_id,
-            schedule_id,
-            type(exc).__name__,
-        )
-        return (
-            f"Could not check schedule {schedule_id}'s next run time ({type(exc).__name__}), "
-            "so this wait was refused to avoid overlapping the next run."
-        )
-    if schedule is None:
-        logger.info(
-            "Scheduled run's schedule row was not found; allowing timed wait. "
-            "event=timed_wait_schedule_missing task_id=%s schedule_id=%s",
-            task_id,
-            schedule_id,
-        )
-        return None
-    refusal = next_run_refusal(schedule, resume_at, now=now, finishing=finishing)
-    if refusal is not None:
-        logger.info(
-            "Timed wait refused because it would overlap the schedule's next run. "
-            "event=timed_wait_refused reason=next_run_overlap task_id=%s schedule_id=%s "
-            "resume_at=%s next_fire_at=%s",
-            task_id,
-            schedule_id,
-            resume_at.isoformat(),
-            schedule.next_fire_at,
-        )
-    return refusal
 
 
 def _handle_resume_response(entry: WaitEntry, response: Any, *, task_id: str) -> str:
@@ -327,7 +225,7 @@ async def _timed_wait(
 
     now = timed_waits_rules.utc_now()
     resume_at = now + timedelta(minutes=valid_minutes)
-    overlap = await _check_schedule_next_run(agent, task_id, now=now, resume_at=resume_at)
+    overlap = await check_schedule_next_run(agent, task_id, now=now, resume_at=resume_at)
     if overlap is not None:
         return _refused(overlap)
 

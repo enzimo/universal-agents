@@ -52,6 +52,7 @@ from custom_agents.dead_letter_watch import report_dead_letters
 from custom_agents.storage_usage_runtime import keep_storage_usage_measured
 from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.access_request_runtime import resume_decided_access_waits
+from custom_agents.timed_wait_runtime import resume_due_timed_waits, seconds_until_next_resume
 from custom_agents.tool_setup_run_runtime import resume_ended_setup_runs
 from custom_agents.orphaned_work_takeover import take_over_orphaned_work
 from custom_agents.agent_liveness import prune_departed_agent_rows_when_due
@@ -1943,6 +1944,14 @@ async def _scheduler_pass(
             "event=setup_run_recovery_failed agent_id=%s",
             agent.id,
         )
+    # Resume any task whose timed wait (wait / long_wait) has reached its resume time.
+    try:
+        await resume_due_timed_waits(agent)
+    except Exception:
+        agent._logger.exception(
+            "Could not check for due timed waits. event=timed_wait_check_failed agent_id=%s",
+            agent.id,
+        )
     # The lead sends out again any task a worker returned that is not settled.
     await process_pending_handbacks(agent)
     # ...and starts a replacement for a dead agent still holding unfinished work.
@@ -2235,4 +2244,7 @@ async def _idle_sleep_seconds(agent: Any, can_claim_scheduled_work: bool, *, par
         from custom_agents.agent_instantiation_service import current_worker_limits
 
         sleep_seconds = min(sleep_seconds, current_worker_limits(agent).reconcile_interval_seconds)
+    next_timed_wait = await seconds_until_next_resume(agent)
+    if next_timed_wait is not None:
+        sleep_seconds = min(sleep_seconds, next_timed_wait)
     return sleep_seconds

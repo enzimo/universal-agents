@@ -101,6 +101,7 @@ from custom_tools.tool_stop import ToolStop
 from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_agents.turn_failure_runtime import UnroutableTaskInterruptError, settle_failed_turn
 from custom_agents.turn_action_outbox_runtime import TurnActionRecoveryScheduled
+from custom_agents.timed_waits import TIMED_WAIT_KIND, TIMED_WAIT_RESPONSE_KIND
 from custom_agents.tool_setup_runs import TOOL_SETUP_RUN_KIND, TOOL_SETUP_RUN_RESPONSE_KIND
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
@@ -1040,10 +1041,16 @@ async def _take_interrupt_response(
         "Continue the original task using this requester input as authoritative steering:\n"
         f"{response_text}"
     )
+    answered_ids = [
+        str(item.get("interrupt_id") or item.get("interruptId"))
+        for item in (steering.interrupt_responses or [])
+        if item.get("interrupt_id") or item.get("interruptId")
+    ]
     await agent.task_manager.operations_runtime.run(
         partial(clear_answered_blocker, agent.task_manager),
         task_id,
         _structured_answers(steering),
+        answered_interrupt_ids=answered_ids,
     )
     await agent.task_manager.operations_runtime.run(
         agent.task_manager.append_runtime_resume_directive, task_id, directive
@@ -1080,26 +1087,37 @@ async def _take_interrupt_response(
 
 
 def _note_replaced_setup_answer(agent: Any, task_id: str, steering: TaskSteering) -> None:
-    """Log an answer that replaces a held ``set_up_tools`` answer before the turn took it.
+    """Log an answer that replaces a held ``set_up_tools`` or timed-wait answer before the turn took it.
 
-    The turn still gets the run's result: ``set_up_tools`` re-reads the run
-    when it resumes, and the resumed turn removes the run's marked record
-    (``clear_answered_blocker``).
+    For setup runs, ``set_up_tools`` re-reads the run when it resumes; for timed
+    waits, the resumed turn clears the marked record (``clear_answered_blocker``)
+    and the tool reports ``ended_early``.
     """
 
     pending = agent._pending_interrupt_responses.get(task_id)
-    if pending is None or not any(
-        isinstance(item.get("response"), dict) and item["response"].get("kind") == TOOL_SETUP_RUN_RESPONSE_KIND
-        for item in pending.interrupt_responses or []
-    ):
+    if pending is None:
         return
-    agent._logger.warning(
-        "An answer replaced a held setup answer before the paused turn took it. "
-        "event=tool_setup_answer_replaced task_id=%s steering_id=%s replaced_steering_id=%s",
-        task_id,
-        steering.steering_id,
-        pending.steering_id,
-    )
+    responses = [
+        item["response"]
+        for item in (pending.interrupt_responses or [])
+        if isinstance(item.get("response"), dict)
+    ]
+    if any(resp.get("kind") == TOOL_SETUP_RUN_RESPONSE_KIND for resp in responses):
+        agent._logger.warning(
+            "An answer replaced a held setup answer before the paused turn took it. "
+            "event=tool_setup_answer_replaced task_id=%s steering_id=%s replaced_steering_id=%s",
+            task_id,
+            steering.steering_id,
+            pending.steering_id,
+        )
+    elif any(resp.get("kind") == TIMED_WAIT_RESPONSE_KIND for resp in responses):
+        agent._logger.warning(
+            "An answer replaced a held timed-wait answer before the paused turn took it. "
+            "event=timed_wait_answer_replaced task_id=%s steering_id=%s replaced_steering_id=%s",
+            task_id,
+            steering.steering_id,
+            pending.steering_id,
+        )
 
 
 def _format_interrupt_responses(steering: TaskSteering) -> str:
@@ -1175,16 +1193,20 @@ def _structured_answers(
 
 
 async def _answer_not_taken(agent: Any, task_id: str, steering: TaskSteering, *, why: str) -> None:
-    """An answer no paused turn can take: a ``set_up_tools`` answer resumes its task from a note.
+    """An answer no paused turn can take: a setup-run or timed-wait answer resumes its task from a note.
 
     Its record would otherwise keep the task waiting with nothing left to
-    resume it (``tool_setup_run_runtime.resume_without_paused_turn``). Other
-    answers keep their handling here.
+    resume it (``tool_setup_run_runtime.resume_without_paused_turn`` and
+    ``timed_wait_runtime.resume_without_paused_turn``). Other answers keep
+    their handling here.
     """
 
+    from custom_agents.timed_wait_runtime import resume_without_paused_turn as resume_timed_wait_without_paused_turn
     from custom_agents.tool_setup_run_runtime import resume_without_paused_turn
 
-    await resume_without_paused_turn(agent, task_id, steering, why=why)
+    if await resume_without_paused_turn(agent, task_id, steering, why=why):
+        return
+    await resume_timed_wait_without_paused_turn(agent, task_id, steering, why=why)
 
 
 async def resume_interrupted_task_turn(agent: Any, task_id: str) -> Optional[Any]:
@@ -1236,11 +1258,17 @@ async def _resume_interrupted_task_turn(agent: Any, task_id: str, work: TaskWork
     # Clear the old durable wait before output projection or another interrupt.
     # The access-request handler already checked the stored decision; every
     # tool call is still decided again when the SDK resumes.
+    answered_interrupt_ids = [
+        str(block["interruptResponse"]["interruptId"])
+        for block in response_blocks
+        if isinstance(block.get("interruptResponse"), dict) and block["interruptResponse"].get("interruptId")
+    ]
     await agent.task_manager.operations_runtime.run(
         partial(clear_answered_blocker, agent.task_manager),
         task_id,
         _structured_answers(steering),
         resumed_interrupt_ids=[item.interrupt_id for item in session.interrupts],
+        answered_interrupt_ids=answered_interrupt_ids,
     )
     # A resumed turn is a new turn: it gets its own stop for its commands.
     tool_stop = agent._set_active_execution_context(task_id)
@@ -1423,8 +1451,8 @@ async def _finish_resumed_turn(
 
 
 # Waits trusted code ends in this process (people decide in the Inbox or on
-# setup pages); they are never sent to the requester as questions.
-_LOCAL_WAIT_KINDS = frozenset({ACCESS_REQUEST_INTERRUPT_KIND, TOOL_SETUP_RUN_KIND})
+# setup pages, or the scheduler resumes a timed wait); never sent to a requester.
+_LOCAL_WAIT_KINDS = frozenset({ACCESS_REQUEST_INTERRUPT_KIND, TOOL_SETUP_RUN_KIND, TIMED_WAIT_KIND})
 
 
 def _is_local_wait(record: TaskSteeringInterruptRecord) -> bool:
@@ -1437,6 +1465,10 @@ def _is_access_request(record: TaskSteeringInterruptRecord) -> bool:
 
 def _is_setup_run(record: TaskSteeringInterruptRecord) -> bool:
     return isinstance(record.reason, dict) and record.reason.get("kind") == TOOL_SETUP_RUN_KIND
+
+
+def _is_timed_wait(record: TaskSteeringInterruptRecord) -> bool:
+    return isinstance(record.reason, dict) and record.reason.get("kind") == TIMED_WAIT_KIND
 
 
 async def send_interrupt_request_for_result(
@@ -1479,6 +1511,7 @@ async def send_interrupt_request_for_result(
     # other interrupts ask the requester (the parent agent or the chat).
     access_interrupts = [record for record in interrupt_records if _is_access_request(record)]
     setup_runs = [record for record in interrupt_records if _is_setup_run(record)]
+    timed_waits = [record for record in interrupt_records if _is_timed_wait(record)]
     upstream_interrupts = [record for record in interrupt_records if not _is_local_wait(record)]
     routing_key = None
     if upstream_interrupts:
@@ -1574,6 +1607,19 @@ async def send_interrupt_request_for_result(
         assert isinstance(setup_run.reason, dict)
         await begin_run(
             agent, task_id=task.task_id, interrupt_id=setup_run.interrupt_id, reason=setup_run.reason, msg_meta=msg_meta
+        )
+    for timed_wait in timed_waits:
+        # Called last (C01): any other wait of this step already holds the blocker, so a second wait defers.
+        from custom_agents.timed_wait_runtime import begin_timed_wait
+
+        assert isinstance(timed_wait.reason, dict)
+        await begin_timed_wait(
+            agent,
+            task_id=task.task_id,
+            interrupt_id=timed_wait.interrupt_id,
+            reason=timed_wait.reason,
+            msg_meta=msg_meta,
+            defer_for_other_wait=bool(upstream_interrupts),
         )
     if routing_key is None:
         return steering
