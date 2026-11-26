@@ -1382,3 +1382,133 @@ async def test_retried_resume_from_note_adds_only_one_note(
     directive = agent.task_manager.read_runtime_resume_directive(TASK_ID) or ""
     assert directive == timed_waits_rules.resume_note(rec)
     assert directive.count("Portainer redeploy") == 1
+
+
+# -- Contract drain (release/0.10): own due timed waits still resume; no takeover ------------
+
+
+@pytest.mark.asyncio
+async def test_draining_agent_scheduler_pass_resumes_due_timed_wait_and_caps_idle_sleep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent draining for another message contract still wakes for and resumes its own due timed wait."""
+
+    from custom_agents.contract_drain_state import ContractDrain
+
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    woken: list[Any] = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+
+    agent = _make_runtime_agent(tmp_path / "manager.db")
+    model = _ScriptedWaitModel([[("tu-wait-drain", "wait", {"minutes": 10, "reason": "Portainer redeploy"})]])
+    strands_agent = Agent(model=model, tools=[wait], callback_handler=None)
+
+    result, _parts = await _invoke_and_pause(agent, strands_agent)
+    assert result.stop_reason == "interrupt"
+
+    agent._contract_drain = ContractDrain(reason="another message contract", started_at=BASE_TIME)
+
+    now_box[0] = BASE_TIME + timedelta(minutes=9, seconds=55)
+    sleep_s = await scheduled_runtime._idle_sleep_seconds(agent, can_claim_scheduled_work=False)
+    assert 4.0 <= sleep_s <= 6.0
+
+    now_box[0] = BASE_TIME + timedelta(minutes=10, seconds=6)
+    await _run_real_scheduler_pass(agent, monkeypatch)
+    assert TASK_ID in agent._pending_interrupt_responses
+    assert woken == [agent]
+    assert answer_held(get_human_interaction_blocker(agent.task_manager, TASK_ID), AGENT_ID)
+
+
+def _save_due_timed_wait_for_owner(db_path: Path, owner_id: str, task_id: str, reason: str) -> dict[str, Any]:
+    manager = TaskManager(db_path=str(db_path))
+    manager.set_owner_identity(owner_id, owner_id, TEST_TEAM, "Worker")
+    assert manager.add_task(
+        Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement=reason),
+        MessageHeader(from_agent_id="scheduler"),
+        MessageMeta(),
+        owner_person_id=None,
+    )
+    assert manager.get_next_task_to_process() == task_id
+    manager.update_main_task_state(task_id, ProgressState.IN_PROGRESS, BASE_TIME.isoformat())
+    manager.update_main_task_state(task_id, ProgressState.WAITING, BASE_TIME.isoformat())
+    rec = timed_wait_record(
+        interrupt_id=f"int-{task_id}",
+        call_id=f"call-{task_id}",
+        tool=WAIT_TOOL_NAME,
+        tool_use_id=f"tu-{task_id}",
+        minutes=2,
+        reason=reason,
+        requested_at=BASE_TIME.isoformat(),
+        resume_at=(BASE_TIME + timedelta(minutes=2)).isoformat(),
+    )
+    record_human_interaction_blocker(manager, task_id, rec)
+    manager._persist_runtime_state()
+    return rec
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("draining", [True, False], ids=["draining", "not_draining"])
+async def test_draining_agent_start_recovery_resumes_own_due_timed_wait_and_adopts_no_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, draining: bool
+) -> None:
+    """At start, a draining agent resumes its own due timed wait from a note and takes over no gone agent's wait."""
+
+    from custom_agents.contract_drain_state import ContractDrain
+    from custom_agents.lease_loss_wind_down import may_start_next_task
+
+    own_task, gone_task = "task-own-due", "task-gone-due"
+    gone_owner = "agent-gone-worker"
+    db_path = tmp_path / "manager.db"
+
+    own_rec = _save_due_timed_wait_for_owner(db_path, AGENT_ID, own_task, "own redeploy wait")
+    gone_rec = _save_due_timed_wait_for_owner(db_path, gone_owner, gone_task, "gone worker wait")
+
+    now_box = [BASE_TIME + timedelta(minutes=5)]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    woken: list[Any] = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    monkeypatch.setattr(
+        runtime_recovery,
+        "gone_owner_ids",
+        AsyncMock(side_effect=lambda _agent, ids, **_kw: [owner for owner in ids if owner == gone_owner]),
+    )
+    monkeypatch.setattr(runtime_recovery, "tell_task_about_its_restarts", AsyncMock())
+
+    agent = _make_runtime_agent(db_path, add_initial_task=False)
+    agent.same_role_runtime_takeover_enabled = True
+    agent._recovery_retry_deadline_seconds = lambda: None
+    agent.deferred_inbox = SimpleNamespace(
+        stored_team_id=AsyncMock(return_value=None),
+        restore_role=AsyncMock(return_value=False),
+        restore=AsyncMock(return_value=False),
+    )
+    if draining:
+        agent._contract_drain = ContractDrain(
+            reason="another message contract",
+            started_at=now_box[0],
+            holds_back_unstarted=True,
+        )
+
+    await runtime_recovery.recover_runtime_after_restart(agent)
+    mgr = agent.task_manager
+
+    if not draining:
+        assert sorted(mgr.task_state.task_queue) == sorted([own_task, gone_task])
+        assert mgr.read_runtime_resume_directive(own_task) == timed_waits_rules.resume_note(own_rec)
+        assert mgr.read_runtime_resume_directive(gone_task) == timed_waits_rules.resume_note(gone_rec)
+        return
+
+    assert list(mgr.task_state.task_queue) == [own_task]
+    assert get_human_interaction_blocker(mgr, own_task) is None
+    assert mgr.get_task_info(own_task).state == ProgressState.ACCEPTED
+    assert mgr.read_runtime_resume_directive(own_task) == timed_waits_rules.resume_note(own_rec)
+    assert woken == []
+
+    # The gone worker's saved timed wait is untouched and never adopted.
+    assert mgr.get_task_info(gone_task) is None
+    saved_owners = {row.owner_agent_id for row in mgr.runtime_state_store.peek_task_runtime_by_role(TEST_TEAM, "Worker")}
+    assert gone_owner in saved_owners
+
+    # Even a pool worker drain holding back unstarted tasks may start its own resumed wait.
+    assert await may_start_next_task(agent) is True

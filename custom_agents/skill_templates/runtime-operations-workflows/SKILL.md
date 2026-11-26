@@ -75,7 +75,7 @@ only the remaining step. `apply_change` without agreement, a denied approval
 or a stale plan fails the call because that change was not applied.
 
 When a worker loses its launch lease it winds down: it returns unstarted and
-running tasks to you, keeps tasks waiting on a person or subtask for
+running tasks to you, keeps tasks waiting on a person, timed wait, or subtask for
 `agent.schedule_workers.lease_loss_wait_timeout_seconds`, then exits. Your runtime,
 not you, sends returned tasks to another worker of the same type; an interrupted
 run arrives there with a note of the actions it had already sent. Interrupted
@@ -1604,7 +1604,9 @@ local time they asked for, never a UTC conversion; pass `cron_timezone` only
 when they name another zone. Keep known-blocked jobs as inactive drafts. Declare each requirement as a tool catalog id and one of its operations
 (`{"capability_id": "fn:web_research", "operation": "exa_search"}`; for Gmail,
 `cli:google` with `gmail_search` and `gmail_read`, never the function name
-`secure_cli`; `find_tools` lists them, and a blocked check's `suggestions` name
+`secure_cli`; for pauses beyond the team's without-approval wait limit,
+`{"capability_id": "fn:long_wait", "operation": "long_wait"}`, which
+`authorize_scheduled_job_access` lists under `ask_a_person`; `find_tools` lists them, and a blocked check's `suggestions` name
 valid operations); mark branch-dependent needs conditional and leave
 `runtime_discovery` enabled for open-ended work. A saved requirement that names
 a removed tool group id such as `builtin:web_research` blocks the schedule

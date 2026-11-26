@@ -17,9 +17,11 @@ refused to start a replacement for the live worker. The wind-down instead:
 3. keeps tasks that already started and now wait on a person, a subtask or a
    timed wait, because their replies or paused turns live on this worker; they
    may finish here until ``lease_loss_wait_timeout_seconds`` after the lease
-   was lost (the wind-down loop resumes due timed waits because the scheduler
-   loop has stopped), after which they fail with an explanation to the
-   requester;
+   was lost (after a lost lease the scheduler loop has stopped, so the
+   wind-down loop resumes due timed waits; during a contract drain the
+   scheduler pass still runs and may resume them too, which is safe because
+   each resume takes the task's lock), after which they fail with an
+   explanation to the requester;
 4. exits once it holds no unfinished task.
 
 The worker keeps refreshing its own status row (its heartbeat, every 20 seconds)
@@ -504,8 +506,10 @@ async def _wait_for_resumable_tasks(agent: Any, state: LeaseLossWindDown) -> Non
         if datetime.now(timezone.utc) >= state.deadline:
             await _end_at_deadline(agent, state, remaining)
             return
-        # The scheduler loop has already stopped during wind-down, so this loop
-        # resumes any timed wait that comes due before the deadline.
+        # After a lost lease the scheduler loop has stopped, so this loop
+        # resumes due timed waits before the deadline. During a contract drain
+        # the scheduler pass still runs and may resume them too, which is safe
+        # because each resume takes the task's lock.
         try:
             await resume_due_timed_waits(agent)
         except Exception:
