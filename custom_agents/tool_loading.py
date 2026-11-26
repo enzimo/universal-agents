@@ -531,8 +531,7 @@ class OnRequestToolHook(HookProvider):
             return
         if tool_id not in hidden_tool_ids(self.agent, catalog, loaded=state):
             return
-        # The agent's own tools: its definition's, which hold every group it may load.
-        tool = next((item for item in getattr(self.agent, "tools", ()) or () if tool_name(item) == name), None)
+        tool = self._tool_for(name)
         if tool is None or not offered(self.agent, [tool]) or not self._may_load(name):
             return
         state.load([tool_id])
@@ -545,6 +544,24 @@ class OnRequestToolHook(HookProvider):
             name,
         )
 
+    def _tool_for(self, name: str) -> Any | None:
+        """The function to give a call: with authorization on any trusted function (the access hook decides it),
+        with it off only the definition's own tools (``_may_load``).
+
+        Looking only at the definition's tools missed the role's standard
+        functions, which the tool-list sync adds from the catalog rather than
+        the definition: with a tool index those wait in the index, and a call
+        to one by name answered "Unknown tool" (live comparison, 2026-11-26).
+        """
+
+        from custom_agents.access_runtime import authorization_enabled
+
+        if authorization_enabled(getattr(self.agent, "authorization_config", None)):
+            from custom_tools.tool_lookup import trusted_tools
+
+            return trusted_tools().get(name)
+        return next((item for item in getattr(self.agent, "tools", ()) or () if tool_name(item) == name), None)
+
     def _script_call(self, event: BeforeToolCallEvent, name: str) -> None:
         """A tool script's call gets its tool without loading its group (``custom_tools.tool_script_context``).
 
@@ -556,9 +573,7 @@ class OnRequestToolHook(HookProvider):
 
         if event.selected_tool is not None:
             return
-        from custom_tools.tool_lookup import trusted_tools
-
-        tool = trusted_tools().get(name)
+        tool = self._tool_for(name)
         if tool is None or not offered(self.agent, [tool]) or not self._may_load(name):
             return
         event.selected_tool = tool

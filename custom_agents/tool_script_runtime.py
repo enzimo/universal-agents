@@ -39,16 +39,14 @@ and how it ended, and a stopped task kills the script's process group
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import queue
 import shutil
 import signal
-import subprocess
 import sys
 import tempfile
-import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -197,11 +195,13 @@ def _error_text(result: dict[str, Any]) -> str:
     return " ".join(texts).strip() or "The tool call failed."
 
 
-def execute_call(
+async def execute_call(
     strands_agent: Any, invocation_state: dict[str, Any], name: str, inputs: dict[str, Any]
 ) -> tuple[bool, Any, list[str]]:
     """Run one call through Strands' tool executor, as a script's call; (succeeded, value or error text, notes).
 
+    It runs on the event loop the turn's own tool calls use (``run_tool_script``
+    is an async tool), because task operations must stay on their owning loop.
     Strands' own direct calls (``agent.tool.<name>``) use the same executor
     stream, but only for tools already in the registry; a script's tool may be
     one the index lists without a definition, which ``OnRequestToolHook`` gives
@@ -209,33 +209,22 @@ def execute_call(
     pinned by ``tests/test_tool_scripts.py``.
     """
 
-    from strands._async import run_async
     from strands.tools.executors._executor import ToolExecutor
     from strands.types._events import ToolInterruptEvent
-
-    from custom_tools.tool_script_context import tool_script_call
-
     from strands.types.tools import ToolResult, ToolUse
 
+    from custom_tools.tool_script_context import tool_script_call
     from id_generation import new_id
 
     tool_use = cast(ToolUse, {"toolUseId": new_id("tooluse_script"), "name": name, "input": dict(inputs)})
     results: list[ToolResult] = []
     # A copy shares the turn's request state (call budget) and ToolStop, but Strands' updates stay here.
     state = dict(invocation_state or {})
-    paused: list[bool] = []
-
-    async def run() -> None:
+    with tool_script_call():
         async for event in ToolExecutor._stream(strands_agent, tool_use, results, state):
             if isinstance(event, ToolInterruptEvent):
-                paused.append(True)
                 strands_agent._interrupt_state.deactivate()
-                return
-
-    with tool_script_call():
-        run_async(run)
-    if paused:
-        return False, f"{name} needs a person's decision, which cannot happen inside a script; call it directly.", []
+                return False, f"{name} needs a person's decision, which cannot happen inside a script; call it directly.", []
     if not results:
         return False, f"{name} returned no result.", []
     result = cast(dict[str, Any], results[0])
@@ -248,142 +237,28 @@ def execute_call(
 # -- the script process ----------------------------------------------------------------------
 
 
-class _BoundedReader(threading.Thread):
-    """Keeps at most ``limit`` characters of a stream so a chatty script cannot block on a full pipe."""
+async def _bounded_output(stream: asyncio.StreamReader, limit: int) -> str:
+    """At most ``limit`` characters of a stream, read to its end so a chatty script never blocks on a full pipe."""
 
-    def __init__(self, stream: Any, limit: int) -> None:
-        super().__init__(daemon=True)
-        self.stream, self.limit = stream, limit
-        self.parts: list[str] = []
-        self.size = self.dropped = 0
-
-    def run(self) -> None:
-        for chunk in iter(lambda: self.stream.read(4096), b""):
-            text = chunk.decode("utf-8", errors="replace")
-            room = self.limit - self.size
-            if room > 0:
-                self.parts.append(text[:room])
-                self.size += min(room, len(text))
-            self.dropped += max(0, len(text) - max(room, 0))
-
-    def text(self) -> str:
-        body = "".join(self.parts)
-        return body + (f"\n... {self.dropped} more characters not kept" if self.dropped else "")
+    kept: list[str] = []
+    size = dropped = 0
+    while chunk := await stream.read(4096):
+        text = chunk.decode("utf-8", errors="replace")
+        room = max(limit - size, 0)
+        kept.append(text[:room])
+        size += min(room, len(text))
+        dropped += max(len(text) - room, 0)
+    body = "".join(kept)
+    return body + (f"\n... {dropped} more characters not kept" if dropped else "")
 
 
-def _line_reader(stream: Any, lines: queue.Queue[str | None]) -> None:
-    for line in stream:
-        lines.put(line)
-    lines.put(None)
-
-
-def _end_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
+def _end_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
         return
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         process.kill()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        logger.error("A tool script did not end after SIGKILL. event=tool_script_kill_failed pid=%s", process.pid)
-
-
-def run_script(
-    agent: Any,
-    strands_agent: Any,
-    invocation_state: dict[str, Any],
-    code: str,
-    *,
-    tool_stop: Any = None,
-    limits: ScriptLimits = ScriptLimits(),
-) -> ScriptRun:
-    """Run one tool script for the agent's current turn; raises ``ScriptRefused`` when it cannot start."""
-
-    from custom_agents.access_runtime import runtime_access
-    from custom_agents.strands_parts import current_parts
-    from custom_agents.tool_index import held_functions
-    from custom_agents.tool_presentation import scripts_enabled
-    from custom_tools.code_sandbox import prepare_sandboxed_command, release_sandboxed_command
-    from custom_tools import tool_script_runner
-
-    if not scripts_enabled(agent):
-        raise ScriptRefused("Tool scripts are not on for this team (agent.tool_presentation). Call the tools directly.")
-    if not str(code or "").strip():
-        raise ScriptRefused("The script is empty. Write a function body that calls tools.<name>(...) and returns a value.")
-    if len(code) > limits.max_script_chars:
-        raise ScriptRefused(f"The script is longer than {limits.max_script_chars} characters; keep it short.")
-    refusal = sandbox_refusal()
-    if refusal:
-        raise ScriptRefused(refusal)
-
-    catalog = runtime_access(agent).catalog
-    held = held_functions(agent, current_parts(agent))
-    scratch = Path(tempfile.mkdtemp(prefix="ua-tool-script-"))
-    run = ScriptRun()
-    process: subprocess.Popen[bytes] | None = None
-    request_read, request_write = os.pipe()
-    reply_read, reply_write = os.pipe()
-    try:
-        shutil.copyfile(tool_script_runner.__file__, scratch / RUNNER_FILE)
-        (scratch / SCRIPT_FILE).write_text(code, encoding="utf-8")
-        command = prepare_sandboxed_command(
-            (
-                sys.executable, "-I", "-S", str(scratch / RUNNER_FILE),
-                str(request_write), str(reply_read), str(scratch / SCRIPT_FILE),
-                str(limits.memory_bytes), str(int(limits.wall_seconds) + 5),
-            ),
-            task_roots=(),
-            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
-            network=False,
-            scratch_dir=str(scratch),
-        )
-        process = subprocess.Popen(
-            command.argv,
-            env=command.env,
-            cwd=str(scratch),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            pass_fds=(request_write, reply_read),
-            start_new_session=True,
-        )
-        if tool_stop is not None:
-            tool_stop.process_group_recorder(TOOL_SCRIPT_NAME)(process.pid)
-        os.close(request_write)
-        os.close(reply_read)
-        request_write = reply_read = -1
-        printed = _BoundedReader(process.stdout, limits.max_output_chars)
-        printed.start()
-        # _serve owns and closes these two from here on.
-        served = (request_read, reply_write)
-        request_read = reply_write = -1
-        session = _Session(agent, strands_agent, invocation_state, catalog, held, run, limits)
-        _serve(session, *served, tool_stop)
-        _end_process(process)
-        printed.join(timeout=2)
-        run.output = printed.text().strip()
-        release_sandboxed_command(command)
-    finally:
-        for fd in (request_read, request_write, reply_read, reply_write):
-            if fd >= 0:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-        if process is not None:
-            _end_process(process)
-        shutil.rmtree(scratch, ignore_errors=True)
-    logger.info(
-        "A tool script ended. event=tool_script_finished agent_id=%s calls=%d refused=%d status=%s stopped=%s",
-        getattr(agent, "id", None),
-        len(run.calls),
-        sum(1 for call in run.calls if call.get("refused")),
-        "error" if run.error else "success",
-        run.stopped,
-    )
-    return run
 
 
 @dataclass
@@ -399,6 +274,110 @@ class _Session:
     limits: ScriptLimits
 
 
+async def run_script(
+    agent: Any,
+    strands_agent: Any,
+    invocation_state: dict[str, Any],
+    code: str,
+    *,
+    tool_stop: Any = None,
+    limits: ScriptLimits = ScriptLimits(),
+) -> ScriptRun:
+    """Run one tool script for the agent's current turn; raises ``ScriptRefused`` when it cannot start."""
+
+    from custom_agents.access_runtime import runtime_access
+    from custom_agents.strands_parts import current_parts
+    from custom_agents.tool_index import held_functions
+    from custom_agents.tool_presentation import scripts_enabled
+
+    if not scripts_enabled(agent):
+        raise ScriptRefused("Tool scripts are not on for this team (agent.tool_presentation). Call the tools directly.")
+    if not str(code or "").strip():
+        raise ScriptRefused("The script is empty. Write a function body that calls tools.<name>(...) and returns a value.")
+    if len(code) > limits.max_script_chars:
+        raise ScriptRefused(f"The script is longer than {limits.max_script_chars} characters; keep it short.")
+    refusal = sandbox_refusal()
+    if refusal:
+        raise ScriptRefused(refusal)
+    session = _Session(
+        agent, strands_agent, invocation_state, runtime_access(agent).catalog,
+        held_functions(agent, current_parts(agent)), ScriptRun(), limits,
+    )
+    scratch = Path(tempfile.mkdtemp(prefix="ua-tool-script-"))
+    try:
+        await _run_in(scratch, session, code, tool_stop)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    run = session.run
+    logger.info(
+        "A tool script ended. event=tool_script_finished agent_id=%s calls=%d refused=%d status=%s stopped=%s",
+        getattr(agent, "id", None),
+        len(run.calls),
+        sum(1 for call in run.calls if call.get("refused")),
+        "error" if run.error else "success",
+        run.stopped,
+    )
+    return run
+
+
+async def _run_in(scratch: Path, session: _Session, code: str, tool_stop: Any) -> None:
+    """Start the sandboxed runner in ``scratch`` and serve it; every descriptor and the process end here."""
+
+    from custom_tools import tool_script_runner
+    from custom_tools.code_sandbox import prepare_sandboxed_command
+
+    shutil.copyfile(tool_script_runner.__file__, scratch / RUNNER_FILE)
+    (scratch / SCRIPT_FILE).write_text(code, encoding="utf-8")
+    request_read, request_write = os.pipe()
+    reply_read, reply_write = os.pipe()
+    process: asyncio.subprocess.Process | None = None
+    child_ends = [request_write, reply_read]
+    try:
+        command = prepare_sandboxed_command(
+            (
+                sys.executable, "-I", "-S", str(scratch / RUNNER_FILE),
+                str(request_write), str(reply_read), str(scratch / SCRIPT_FILE),
+                str(session.limits.memory_bytes), str(int(session.limits.wall_seconds) + 5),
+            ),
+            task_roots=(),
+            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+            network=False,
+            scratch_dir=str(scratch),
+        )
+        process = await asyncio.create_subprocess_exec(
+            *command.argv,
+            env=command.env,
+            cwd=str(scratch),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            pass_fds=tuple(child_ends),
+            start_new_session=True,
+        )
+        if tool_stop is not None:
+            tool_stop.process_group_recorder(TOOL_SCRIPT_NAME)(process.pid)
+        for fd in child_ends:
+            os.close(fd)
+        child_ends.clear()
+        assert process.stdout is not None
+        printed = asyncio.create_task(_bounded_output(process.stdout, session.limits.max_output_chars))
+        await _serve(session, request_read, reply_write, tool_stop)
+        request_read = reply_write = -1  # closed by _serve
+        _end_process(process)
+        await process.wait()
+        session.run.output = (await printed).strip()
+    finally:
+        for fd in (request_read, reply_write, *child_ends):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        if process is not None and process.returncode is None:
+            _end_process(process)
+            await process.wait()
+
+
 def _stop_reason(session: _Session, tool_stop: Any, deadline: float) -> str | None:
     if tool_stop is not None and tool_stop.is_requested():
         return "The task was stopped, so the script was ended."
@@ -407,15 +386,15 @@ def _stop_reason(session: _Session, tool_stop: Any, deadline: float) -> str | No
     return None
 
 
-def _handle(session: _Session, line: str | None, replies: Any) -> bool:
-    """Handle one line from the script; True when the script has ended."""
+async def _handle(session: _Session, line: bytes, reply_write: int) -> bool:
+    """Handle one line from the script (empty at its end); True when the script has ended."""
 
     run = session.run
-    if line is None:
+    if not line:
         if run.result is None and run.error is None:
             run.error = "The script process ended without a result."
         return True
-    message = _parsed(line)
+    message = _parsed(line.decode("utf-8", errors="replace"))
     kind = message.get("kind")
     if kind == "done":
         run.result = message.get("result")
@@ -426,18 +405,26 @@ def _handle(session: _Session, line: str | None, replies: Any) -> bool:
     if kind != "call":
         run.error = "The script sent something that is not a tool call."
         return True
-    replies.write(json.dumps(_answer(session, message), default=str) + "\n")
-    replies.flush()
+    reply = (json.dumps(await _answer(session, message), default=str) + "\n").encode("utf-8")
+    # A reply can be larger than a pipe holds; the script reads it while this thread writes.
+    await asyncio.to_thread(_write_all, reply_write, reply)
     return False
 
 
-def _serve(session: _Session, request_read: int, reply_write: int, tool_stop: Any) -> None:
-    """Answer the script's calls until it ends, is stopped, or runs out of time."""
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
-    requests = os.fdopen(request_read, "r", encoding="utf-8")
-    replies = os.fdopen(reply_write, "w", encoding="utf-8", buffering=1)
-    lines: queue.Queue[str | None] = queue.Queue()
-    threading.Thread(target=_line_reader, args=(requests, lines), daemon=True).start()
+
+async def _serve(session: _Session, request_read: int, reply_write: int, tool_stop: Any) -> None:
+    """Answer the script's calls until it ends, is stopped, or runs out of time; closes both descriptors."""
+
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader(limit=4 * session.limits.max_result_chars)
+    transport, _protocol = await loop.connect_read_pipe(
+        lambda: asyncio.StreamReaderProtocol(reader), os.fdopen(request_read, "rb", buffering=0)
+    )
     deadline = time.monotonic() + session.limits.wall_seconds
     try:
         while True:
@@ -446,17 +433,17 @@ def _serve(session: _Session, request_read: int, reply_write: int, tool_stop: An
                 session.run.stopped = reason
                 return
             try:
-                line = lines.get(timeout=0.2)
-            except queue.Empty:
+                line = await asyncio.wait_for(reader.readline(), timeout=0.2)
+            except asyncio.TimeoutError:
                 continue
-            if _handle(session, line, replies):
+            if await _handle(session, line, reply_write):
                 return
     finally:
-        for stream in (replies, requests):
-            try:
-                stream.close()
-            except OSError:
-                pass
+        transport.close()
+        try:
+            os.close(reply_write)
+        except OSError:
+            pass
 
 
 def _parsed(line: str) -> dict[str, Any]:
@@ -467,7 +454,7 @@ def _parsed(line: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _answer(session: _Session, message: dict[str, Any]) -> dict[str, Any]:
+async def _answer(session: _Session, message: dict[str, Any]) -> dict[str, Any]:
     agent, run, limits = session.agent, session.run, session.limits
     name, inputs = message.get("tool"), message.get("input")
     if len(run.calls) >= limits.max_calls:
@@ -484,7 +471,7 @@ def _answer(session: _Session, message: dict[str, Any]) -> dict[str, Any]:
         )
         return {"ok": False, "error": refusal}
     try:
-        ok, value, notes = execute_call(session.strands_agent, session.invocation_state, str(name), dict(inputs or {}))
+        ok, value, notes = await execute_call(session.strands_agent, session.invocation_state, str(name), dict(inputs or {}))
     except Exception as exc:  # noqa: BLE001 - one failed call fails in the script, not the turn
         logger.exception(
             "A tool script's call failed. event=tool_script_call_failed agent_id=%s tool=%s", getattr(agent, "id", None), name

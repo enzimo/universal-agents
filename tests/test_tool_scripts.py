@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import socket
@@ -73,7 +74,7 @@ def test_the_operators_block_list_applies_to_scripts_too() -> None:
 def test_scripts_are_refused_when_the_setting_is_not_on() -> None:
     agent = SimpleNamespace(id="a", tool_filter={"tool_presentation": TOOL_PRESENTATION_INDEX})
     with pytest.raises(ScriptRefused, match="not on for this team"):
-        run_script(agent, None, {}, "return 1")
+        asyncio.run(run_script(agent, None, {}, "return 1"))
 
 
 def test_scripts_are_refused_without_a_sandbox_that_closes_the_network(monkeypatch) -> None:
@@ -83,7 +84,7 @@ def test_scripts_are_refused_without_a_sandbox_that_closes_the_network(monkeypat
         code_sandbox, "code_sandbox_status", lambda env=None: SimpleNamespace(mode="off", available=False, landlock_abi=0)
     )
     with pytest.raises(ScriptRefused, match="operator turned it off"):
-        run_script(scripts_agent(), None, {}, "return 1")
+        asyncio.run(run_script(scripts_agent(), None, {}, "return 1"))
 
 
 def test_strands_executor_stream_keeps_the_signature_scripts_rely_on() -> None:
@@ -103,7 +104,7 @@ def sandboxed(code: str, monkeypatch, **limits) -> dict:
 
     monkeypatch.setattr("custom_agents.access_runtime.runtime_access", lambda agent: SimpleNamespace(catalog=CATALOG))
     monkeypatch.setattr("custom_agents.tool_index.held_functions", lambda agent, parts: set())
-    return run_script(scripts_agent(), None, {}, code, limits=ScriptLimits(**limits)).payload()
+    return asyncio.run(run_script(scripts_agent(), None, {}, code, limits=ScriptLimits(**limits))).payload()
 
 
 @needs_sandbox
@@ -165,6 +166,7 @@ def test_a_script_error_names_the_script_line(monkeypatch) -> None:
 
 SCRIPT = """
 status = tools.get_self_status()
+config = tools.get_runtime_configuration_context(include_config_file_snapshot=False)
 total = tools.calculator(expression="17*3")
 try:
     tools.knowledge_write(title="x", content="y")
@@ -172,7 +174,7 @@ try:
 except ToolError as exc:
     wrote = str(exc)
 print("checked")
-return {"status_kind": type(status).__name__, "total": total, "write": wrote}
+return {"status_kind": type(status).__name__, "config_kind": type(config).__name__, "total": total, "write": wrote}
 """
 
 
@@ -247,8 +249,11 @@ def test_a_real_team_lead_chains_index_tools_in_one_script_without_loading_them(
     assert payload["result"]["total"] and payload["result"]["status_kind"] in {"dict", "str", "list"}
     assert "changes things" in payload["result"]["write"]
     assert payload["printed"] == "checked"
-    assert [call["tool"] for call in payload["calls"]] == ["get_self_status", "calculator", "knowledge_write"]
-    assert payload["calls"][2]["refused"] is True
+    assert [call["tool"] for call in payload["calls"]] == [
+        "get_self_status", "get_runtime_configuration_context", "calculator", "knowledge_write"
+    ]
+    assert all(call["ok"] for call in payload["calls"][:3]), payload["calls"]
+    assert payload["calls"][3]["refused"] is True
     assert {"run_tool_script", "get_self_status", "calculator"} <= set(decided), "the access hook saw every call"
     assert "knowledge_write" not in decided, "refused before it reached any hook"
     assert "get_self_status" not in second and "calculator" not in second, "a script loads nothing"

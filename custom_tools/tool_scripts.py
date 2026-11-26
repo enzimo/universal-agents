@@ -1,6 +1,8 @@
 """``run_tool_script``: chain read-only tool calls in one short sandboxed Python script.
 
-Shown only when ``agent.tool_presentation`` is ``index_and_scripts``
+An async tool, so Strands runs it on the turn's own event loop and the
+calls the script makes run there too, like a model's direct calls (task
+operations must stay on their owning loop). Shown only when ``agent.tool_presentation`` is ``index_and_scripts``
 (``custom_agents.tool_presentation.withheld_functions``). Every agent and
 member holds it (``fn:tool_scripts`` in ``agent_runtime``) because the script
 reaches nothing by itself: each call it makes is checked and decided like a
@@ -21,7 +23,7 @@ from custom_tools.tool_stop import tracked_tool_call
 
 
 @tool(context=True)
-def run_tool_script(code: str, tool_context: ToolContext) -> dict[str, Any]:
+async def run_tool_script(code: str, tool_context: ToolContext) -> dict[str, Any]:
     """Run a short Python script that chains read-only tool calls and returns only what you need.
 
     Write a function body: call a tool with tools.<name>(input=value, ...)
@@ -49,7 +51,7 @@ def run_tool_script(code: str, tool_context: ToolContext) -> dict[str, Any]:
         if agent is None:
             return _result("error", {"error": "No agent is running this tool."})
         try:
-            run = run_script(agent, tool_context.agent, tool_context.invocation_state, code, tool_stop=tool_stop)
+            run = await run_script(agent, tool_context.agent, tool_context.invocation_state, code, tool_stop=tool_stop)
         except ScriptRefused as exc:
             return _result("error", {"error": str(exc)})
         payload = run.payload()

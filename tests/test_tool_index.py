@@ -271,3 +271,18 @@ def test_with_full_definitions_nothing_changes(storage, tmp_path) -> None:
 
     assert "knowledge_search" in shown and "memory" in shown
     assert "objectives" not in shown, "the catalog's on_request groups still wait"
+
+
+@needs_cedar
+def test_a_call_by_name_gets_a_standard_function_the_definition_does_not_list(storage, tmp_path) -> None:
+    # Live (2026-11-26): with an index, a call to get_self_status by name answered "Unknown tool",
+    # because only the definition's tools were searched and the role's standard functions are not there.
+    lead = index_lead(storage, tmp_path)
+    lead.tools = [tool for tool in lead.tools if tool_name(tool) != "get_self_status"]
+    registry, hook = model_view(lead)
+    next_model_call(hook, registry)
+    event = SimpleNamespace(tool_use={"name": "get_self_status"}, selected_tool=None)
+
+    OnRequestToolHook(lead, main_parts(lead)).before_tool_call(event)
+
+    assert tool_name(event.selected_tool) == "get_self_status"
