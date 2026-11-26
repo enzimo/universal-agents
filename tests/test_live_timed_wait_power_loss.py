@@ -152,21 +152,59 @@ def _snapshot_runtime_rows(db_path: Path) -> list[tuple[str, str]]:
     return [(str(owner), str(payload)) for owner, payload in rows]
 
 
-async def _abruptly_kill_agent(agent: UniversalAgent, agent_task: asyncio.Task[Any]) -> None:
-    """Simulate sudden process death without calling ``exit_agent()``."""
+def _snapshot_agent_state_row(db_path: Path, agent_id: str) -> tuple[Any, ...] | None:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT agent_id, is_exiting, last_seen_at, full_status_json FROM agent_states WHERE agent_id = ?",
+            (agent_id,),
+        ).fetchone()
 
-    for task in list(getattr(agent, "_owned_tasks", ()) or ()):
-        if not task.done():
-            task.cancel()
+
+async def _abruptly_kill_agent(agent: UniversalAgent, agent_task: asyncio.Task[Any]) -> None:
+    """Simulate sudden process death without running ``exit_agent()`` or exit presence/DB writes (C19)."""
+    from custom_agents.agent_team_runtime import unregister_local_worker
+
+    async def _raw_task_and_socket_cleanup(adapter: Any) -> None:
+        # Cancel only in-process background tasks and drop the socket without publishing
+        # exit presence or writing is_exiting=1 to agent_states (what a power loss skips).
+        unregister_local_worker(agent.id)
+        for attr in ("_local_schedule_task", "_presence_task", "_scheduler_task"):
+            bg = getattr(agent, attr, None)
+            if bg is not None and not bg.done():
+                bg.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await asyncio.wait_for(bg, timeout=1.0)
+            setattr(agent, attr, None)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(adapter.close(), timeout=2.0)
+
+    agent._cleanup_nats_runtime_on_exit = _raw_task_and_socket_cleanup  # type: ignore[method-assign]
     if not agent_task.done():
         agent_task.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await asyncio.wait_for(agent_task, timeout=5.0)
-    # Close any lingering client socket directly so the event loop stays clean without touching SQLite.
-    adapter = getattr(agent, "_nats_transport_adapter", None)
-    if adapter is not None:
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(adapter.close(), timeout=2.0)
+
+
+async def _assert_restarted_jetstream_loaded_store(
+    team_id: str,
+    transport_cfg: TransportSettings,
+    nats_url: str,
+) -> None:
+    """Verify the restarted nats-server loaded the prior file-backed work stream and its consumers (C19)."""
+    from custom_transport.nats_adapter import NatsTransportAdapter
+    from custom_transport.subjects import NatsSubjectMapper
+    from live_nats_client import nats_transport_config_from_env
+
+    config = nats_transport_config_from_env(transport=transport_cfg, servers=[nats_url], name="pl-store-check")
+    mapper = NatsSubjectMapper(team_id=team_id, subject_prefix=config.subject_prefix)
+    adapter = NatsTransportAdapter(config=config, mapper=mapper, logger=logging.getLogger("test.pl_store"))
+    await adapter.connect(reconcile_topology=False)
+    try:
+        info = await adapter._js.stream_info(mapper.work_stream_name())
+        assert str(info.config.storage).lower().endswith("file")
+        assert info.state.consumer_count >= 1
+    finally:
+        await adapter.close()
 
 
 def _prompt_text(messages: list[dict[str, Any]]) -> str:
@@ -403,15 +441,21 @@ async def _run_power_loss_scenario(
                     assert agent1.task_manager.task_state.current_in_progress_task_id is None
                     assert first_model.wait_calls == 1
 
-                # --- Phase 2: simulate power loss (SIGKILL nats-server + raw task cancel without exit_agent) ---
+                # --- Phase 2: simulate power loss (SIGKILL nats-server + raw task cancel without exit cleanup) ---
                 rows_before_kill = _snapshot_runtime_rows(db_path)
+                state_before_kill = _snapshot_agent_state_row(db_path, first_agent_id)
                 assert rows_before_kill, "WAITING task must be persisted in SQLite before power loss"
+                assert state_before_kill is not None and state_before_kill[1] == 0
                 _sigkill_nats_server(proc1, log1)
                 await _abruptly_kill_agent(agent1, agent1_task)
                 set_agent_ref(None)
                 rows_after_kill = _snapshot_runtime_rows(db_path)
+                state_after_kill = _snapshot_agent_state_row(db_path, first_agent_id)
                 assert rows_after_kill == rows_before_kill, (
-                    "Abrupt kill without exit_agent() must not run shutdown mutations on SQLite"
+                    "Abrupt kill must not run shutdown mutations on active_task_runtime"
+                )
+                assert state_after_kill == state_before_kill, (
+                    "Abrupt kill must not mark agent_states as exiting or alter last_seen_at"
                 )
 
             # --- Phase 3: advance clock, restart nats-server from SAME JetStream store_dir, start fresh agent ---
@@ -421,6 +465,8 @@ async def _run_power_loss_scenario(
             current_process_identity.cache_clear()
             proc2, nats_url_2, log2 = _start_nats_server(tmp_path, port)
             assert nats_url_2 == nats_url
+            # Prove the restarted nats-server loaded the prior file-backed work stream and consumers from disk.
+            await _assert_restarted_jetstream_loaded_store(team_id, transport_cfg, nats_url)
 
             with patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=second_model):
                 agent2 = _power_loss_agent(

@@ -1584,41 +1584,87 @@ pure rules in `custom_agents/timed_waits.py`, runtime in
 
 - `wait(minutes, reason)` is catalog tool `fn:wait` in the standard
   `agent_runtime` tool set at level `read`, so every role holds it without a
-  grant. All waits in a task share one cumulative budget bounded by
+  grant. Wait budgets are tracked **per task** (each delegated subtask has its
+  own budget, and child waits do not count against the parent task's budget):
+  all waits in one task share a cumulative budget bounded by
   `agent.max_wait_minutes_without_approval` (default `20` minutes).
 - `long_wait(minutes, reason)` is its own catalog tool `fn:long_wait` outside
   every standard tool set and starter profile at level `write`, bounded by
-  `agent.max_wait_minutes_with_approval` (default `1440` minutes / 24 hours,
-  hard ceiling `1440`). Agents reach it only through `find_tools` +
+  `agent.max_wait_minutes_with_approval` (default `1440` minutes / 24 hours per
+  task, hard ceiling `1440`). Agents reach it only through `find_tools` +
   `request_access` (or lasting `SubjectKind.SCHEDULE` access on a recurring
   job). Both limits are team-wide and `operator_only` so agents cannot raise
   their own wait budget.
 
 Both tools pause the task with a local Strands interrupt (`timed_wait`, listed
 in `task_steering_runtime._LOCAL_WAIT_KINDS` so nothing is sent to a
-requester). Before `ProgressState.WAITING` is saved (matching access requests),
-trusted code charges the wait once in task history (`timed_wait_started`, keyed
-by `access_runtime.step_tool_call_id`) and saves one `timed_wait` record in
-`TaskRuntimeState.human_interaction_blockers` whose `resume_at` UTC timestamp
-is the single source of truth, so a crash right after `WAITING` cannot leave a
-waiting task without its wait record. Moving the task to `WAITING` releases the
-worker's main slot so other work can run while the timer ticks. Each
-`scheduled_runtime._scheduler_pass` runs `resume_due_timed_waits` (capping its
-idle sleep to the next resume time and backing off overdue unresumable
-records) through the shared `custom_agents/paused_wait_resume.py` helpers used
-by `tool_setup_run`: when the paused turn is still in memory, the interrupt is
-answered with the elapsed time and current UTC timestamp (marking the record
-`answer_held` while it waits for a busy lane, without overwriting another
-pending answer); after a restart or takeover, the task resumes from a durable
-next-turn note (`timed_wait_ended` is written on either path). In a recurring
-scheduled run (verified scheduler-issued task context), waits that would reach
-or pass the schedule's next fire time are refused so the next occurrence is
-not coalesced. Stuck-task checks (`custom_agents/task_wait_reasons.py`) treat
-an active timer as `WaitReason.TIMED_WAIT` (with a 5-minute grace window past
-`resume_at`) and a held answer as `WaitReason.ANSWER_HELD`, while overdue
-unheld waits are reported as stuck. Lease-loss wind-down keeps and resumes due
-timed waits before its deadline, and stopping or cancelling a waiting task
-removes the blocker record and drops the paused turn so nothing resumes later.
+requester). Before `ProgressState.WAITING` is saved (the same order access
+requests and `tool_setup_run_runtime.stage_run` use), trusted code writes the
+budget charge (`timed_wait_started` in task history, keyed by
+`access_runtime.step_tool_call_id`) and the `timed_wait` blocker record in
+`TaskRuntimeState.human_interaction_blockers` together in **one atomic
+runtime-state write** (`task_state_transitions.record_blocker_with_history`,
+with full in-memory rollback on error), using `resume_at` UTC as the single
+source of truth. A crash around pausing can therefore neither leave a budget
+charge without its blocker nor leave a `WAITING` task without its wait record.
+Moving the task to `WAITING` releases the worker's main slot so other work can
+run while the timer ticks.
+
+Each `scheduled_runtime._scheduler_pass` runs `resume_due_timed_waits` (capping
+its idle sleep to the next resume time and backing off overdue unresumable
+records) through `custom_agents/paused_wait_resume.py` and
+`custom_agents/task_state_transitions.py`:
+
+- **Live paused turn**: when the paused turn is still in memory, the interrupt
+  is answered with the elapsed time and current UTC timestamp (marking the
+  record `answer_held` while it waits for a busy lane, without overwriting
+  another pending answer). When the resumed turn consumes the blocker
+  (`clear_answered_blocker_with_resume_note`), trusted code atomically removes
+  the blocker and saves a past-fact `resume_note(record, now=...)` (replacing
+  any earlier live-wait note in the same turn so repeated waits keep at most
+  one stored note, and restoring the blocker unmarked if the save fails so the
+  task stays recoverable). `TurnStartNotes.with_live_wait_directive` releases
+  that note when the turn records its decision; if the worker crashes after
+  clearing the blocker or before recording a decision, restart recovery
+  delivers the note so the next turn knows the wait already ended and never
+  double-charges the budget.
+- **Restart, power loss, or takeover**: `runtime_recovery.recover_runtime_after_restart`
+  clears stale `answer_held` marks (for both same-id restarts and new-id
+  takeovers), keeps not-yet-due waits `WAITING` until `resume_at`, and resumes
+  overdue waits promptly via **one atomic write**
+  (`task_state_transitions.resume_wait_from_note`, committing the past-fact
+  resume note with real elapsed minutes and exact resume time, blocker removal,
+  `timed_wait_ended` + state-change history, `ProgressState.ACCEPTED`, and
+  front-of-queue enqueue together, with clean rollback on readiness or
+  persistence failure). If a worker holding a `WAITING` timed wait dies and no
+  worker of that type is running (such as a pool worker), TeamLead's
+  `orphaned_work_takeover.take_over_orphaned_work` starts a replacement, which
+  adopts the task transactionally via `agent_liveness` /
+  `commit_task_runtime_recovery`, stays alive via `worker_holds_work`, and
+  resumes it at `resume_at`.
+- **Recurring schedules**: in a recurring scheduled run (verified
+  scheduler-issued task context), waits that would reach or pass the schedule's
+  next fire time are refused so the next occurrence is not skipped. After a
+  long outage past both `resume_at` and `next_fire_at`, recovery resumes the
+  waiting task first; when the scheduler claims the overdue schedule, an
+  overlapping fire coalesces into the active resumed task (or starts one
+  catch-up run if the resumed task already finished) and `next_fire_at`
+  advances past now without burst-replaying missed occurrences.
+- **Stuck-task checks & wind-down**: `custom_agents/task_wait_reasons.py`
+  treats an active timer as `WaitReason.TIMED_WAIT` (with a 5-minute grace
+  window past `resume_at`) and a held answer as `WaitReason.ANSWER_HELD`, while
+  overdue unheld waits are reported as stuck. During lease-loss wind-down
+  (`custom_agents/lease_loss_wind_down.py`), any `WAITING` timed wait whose
+  `resume_at` already outlasts the worker's shutdown deadline (with no held
+  answer and not yet resumed) fails immediately at classification and on each
+  poll (`timed_wait_runtime.fail_timed_wait_outlasting_deadline`, logging
+  `event=worker_wind_down_timed_wait_outlasts_deadline`), stops pending
+  delegated subtasks, clears its blocker and paused turn, and tells the
+  requester with a dedicated early-shutdown message; waits due before the
+  deadline still resume and finish on the winding-down worker, held answers are
+  not failed early, and waits on people (`access_request`, `tool_setup_run`)
+  keep the full timeout. Stopping or cancelling a waiting task removes the
+  blocker record and drops the paused turn so nothing resumes later.
 
 Rationale for a paused Strands interrupt plus a saved blocker record:
 

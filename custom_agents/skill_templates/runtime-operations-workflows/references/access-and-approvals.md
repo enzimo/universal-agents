@@ -43,10 +43,11 @@ operator).
 ## Where access comes from
 
 - **Standard tools** come with a role: every agent can manage its own work,
-  use short timed pauses (`wait`, up to the team's without-approval limit),
+  use short timed pauses (`wait`, up to the team's without-approval limit per
+  task; delegated subtasks have their own budget),
   use files in its task's folders, and use the internet; TeamLead also has
   the team tools. They need no grant and cannot be removed, only blocked.
-  Longer timed pauses (`fn:long_wait`, level `write`, up to 24 hours) are not
+  Longer timed pauses (`fn:long_wait`, level `write`, up to 24 hours per task) are not
   in any standard tool set or starter profile: a person who holds `fn:long_wait`
   approves requests for their own work in the Inbox (for one run, or kept for a
   scheduled job); for a member who does not hold it, an administrator decides

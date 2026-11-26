@@ -1883,7 +1883,9 @@ The reserve does not fund research, shell, delegation, or other material work.
 `agent.max_wait_minutes_without_approval` (default `20`) and
 `agent.max_wait_minutes_with_approval` (default `1440`, hard ceiling `1440` =
 24 hours) set how many total minutes a single task may pause itself using
-`wait` and `long_wait` respectively. Both values must be whole numbers of at
+`wait` and `long_wait` respectively. Both budgets are tracked **per task**:
+each delegated subtask has its own budget and its waits do not count against
+its parent task's budget. Both values must be whole numbers of at
 least `1`, and `max_wait_minutes_with_approval` must be at least
 `max_wait_minutes_without_approval` and at most `1440`; invalid values refuse
 to load. Both settings are team-wide only (per-agent-type overrides in
