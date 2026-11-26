@@ -529,6 +529,7 @@ def _import_record(
                 retry_pending_dropped_sealbox_deletes,
             )
             from secure_tool_broker.credential_catalog_store import (
+                DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT,
                 CredentialCatalogStore,
                 resolve_catalog_db_path,
             )
@@ -546,7 +547,10 @@ def _import_record(
                             if db_path.is_file()
                             else []
                         )
-                        if any(entry.queued_by == "transfer_import" for entry in pending_for_key):
+                        if any(
+                            entry.queued_by == DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT
+                            for entry in pending_for_key
+                        ):
                             retry_report = retry_pending_dropped_sealbox_deletes(
                                 scope=scope,
                                 credential_key=record.credential_key,
@@ -725,6 +729,9 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
         load_catalog,
         write_credential_to_source,
     )
+    from secure_tool_broker.credential_catalog_store import (
+        DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT,
+    )
     from secure_tool_broker.credential_expiry import remaining_ttl_seconds
     from secure_tools.providers import ToolResult
 
@@ -773,7 +780,7 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
                 original,
                 existing_credential=existing_row,
                 scope=scope,
-                queued_by="transfer_import",
+                queued_by=DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT,
             )
         if failed_dropped:
             raise _DroppedSealboxDeleteFailed(failed_dropped)
@@ -868,7 +875,7 @@ def _import_catalog_entry(record: CatalogEntryV1, *, now: datetime | None = None
                 saved_credential,
                 existing_credential=latest_existing,
                 scope=scope,
-                queued_by="transfer_import",
+                queued_by=DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT,
             )
         if failed_dropped:
             raise _DroppedSealboxDeleteFailed(failed_dropped)

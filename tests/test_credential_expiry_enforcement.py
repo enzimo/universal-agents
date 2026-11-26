@@ -1076,7 +1076,31 @@ def test_f1_agent_collect_refuses_dropped_sealbox_records_while_same_layout_and_
     assert len(sealbox_writes) >= 1
     assert deleted_items == []
 
-    # 3. Person's submitted form (allow_expiry_change=True) changing item_id deletes dropped Sealbox records.
+    # 2b. C36: An expiry-setting caller (allow_expiry_change=True, e.g. trusted broker capture)
+    # without allow_drop_stored_records=True is STILL refused with CREDENTIAL_REPLACEMENT_FORM_ONLY
+    # before any Sealbox write or deletion when the save would drop stored Sealbox records.
+    sealbox_writes.clear()
+    refused_expiry_caller = credential_catalog.collect_credential(
+        {
+            "credential_key": "temp_move",
+            "write_source": "sealbox",
+            "item_id": "relocated-by-capture",
+            "fields": [{"name": "api_token", "kind": "token", "secret": True, "value_source": "user_input"}],
+        },
+        {"api_token": "captured-secret"},
+        scope=USER_SCOPE,
+        expires_at=FUTURE_EXPIRY,
+        allow_expiry_change=True,
+        now=BASE_NOW,
+    )
+    assert refused_expiry_caller.status == "error"
+    assert refused_expiry_caller.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert refused_expiry_caller.content["dropped_sealbox_records"] == [old_record_key]
+    assert sealbox_writes == []
+    assert deleted_items == []
+
+    # 3. Person's submitted form (allow_expiry_change=True, allow_drop_stored_records=True)
+    # changing item_id deletes dropped Sealbox records.
     moved_by_form = credential_catalog.collect_credential(
         {
             "credential_key": "temp_move",
@@ -1088,6 +1112,7 @@ def test_f1_agent_collect_refuses_dropped_sealbox_records_while_same_layout_and_
         scope=USER_SCOPE,
         expires_at=FUTURE_EXPIRY,
         allow_expiry_change=True,
+        allow_drop_stored_records=True,
         now=BASE_NOW,
     )
     assert moved_by_form.status == "success", moved_by_form.error
@@ -1130,6 +1155,7 @@ def test_f1_agent_collect_refuses_dropped_sealbox_records_while_same_layout_and_
         {"api_token": "new-secret"},
         scope=USER_SCOPE,
         allow_expiry_change=True,
+        allow_drop_stored_records=True,
     )
     assert refused.status == "error"
     assert refused.content["error_code"] == CREDENTIAL_EXPIRY_SHARED_RECORD
@@ -1436,6 +1462,7 @@ def test_c34_c35_pending_dropped_record_inline_retry_and_collect_refusal(
         {"api_token": "new-secret"},
         scope=USER_SCOPE,
         allow_expiry_change=True,
+        allow_drop_stored_records=True,
     )
     assert form_move.status == "success"
     assert (form_move.content or {}).get("dropped_records_not_deleted") == [orig_record]
@@ -1452,6 +1479,7 @@ def test_c34_c35_pending_dropped_record_inline_retry_and_collect_refusal(
         {"api_token": "another-secret"},
         scope=USER_SCOPE,
         allow_expiry_change=True,
+        allow_drop_stored_records=True,
     )
     assert refused_collect.status == "error"
     assert (refused_collect.content or {}).get("error_code") == CREDENTIAL_DROPPED_CLEANUP_PENDING
@@ -1484,6 +1512,7 @@ def test_c34_c35_pending_dropped_record_inline_retry_and_collect_refusal(
         {"api_token": "restored-secret"},
         scope=USER_SCOPE,
         allow_expiry_change=True,
+        allow_drop_stored_records=True,
     )
     assert recovered.status == "success", recovered.error
     assert orig_record in deleted_items
@@ -1570,3 +1599,53 @@ def test_c35c_cli_sealbox_hides_records_queued_for_dropped_deletion(
     )
     assert auto_queued.status == "error"
     assert (auto_queued.content or {}).get("error_code") == "credential_not_found"
+
+
+def test_c38_inline_stale_dropped_delete_logs_warning_and_store_validates_queued_by(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C38(a,c): inline pending-dropped resolution logs skipped re-referenced rows and store rejects unknown queued_by."""
+
+    import logging
+
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        resolve_catalog_db_path,
+    )
+
+    _save_temp_credential("active_k", scope=USER_SCOPE, expires_at=None)
+    active_record = "team-nats-agents:default:active_k:api_token"
+    store = CredentialCatalogStore(resolve_catalog_db_path())
+    row = store.load_credential(USER_SCOPE, "active_k")
+    assert row is not None
+
+    with pytest.raises(ValueError, match="Unsupported dropped-delete queued_by"):
+        store.put_credential(
+            USER_SCOPE,
+            "active_k",
+            row.credential,
+            dropped_sealbox_targets=[(active_record, "secret")],
+            queued_by="unknown_origin",
+        )
+
+    store.put_credential(
+        USER_SCOPE,
+        "active_k",
+        row.credential,
+        dropped_sealbox_targets=[(active_record, "secret")],
+    )
+    catalog = credential_catalog.load_catalog(scope=USER_SCOPE)
+    with caplog.at_level(logging.WARNING, logger=credential_catalog._LOGGER.name):
+        conflict = credential_catalog._resolve_pending_dropped_sealbox_conflict(
+            USER_SCOPE,
+            {active_record},
+            catalog=catalog,
+            credential_key="active_k",
+        )
+    assert conflict is None
+    assert store.list_pending_dropped_sealbox_deletes(scope=USER_SCOPE) == []
+    assert any(
+        "event=credential_pending_dropped_delete_skipped_referenced" in rec.message
+        and active_record in rec.message
+        for rec in caplog.records
+    )

@@ -2050,6 +2050,7 @@ class SecureToolBrokerService:
             ),
             expires_at=parsed.resolved_expires_at,
             allow_expiry_change=True,
+            allow_drop_stored_records=True,
             on_result=lambda done: record_credential_form_result(session, done, stored_status="credential_stored"),
             log_ref=f"credential_collection {session_id[:12]}",
         )

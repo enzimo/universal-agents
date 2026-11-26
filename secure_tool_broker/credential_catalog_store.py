@@ -26,6 +26,14 @@ class CredentialCatalogReadError(RuntimeError):
 _SCOPE_KINDS = {"user", "team", "system"}
 # How long a catalog statement waits for another writer's lock.
 _LOCK_WAIT_MS = 10_000
+DROPPED_DELETE_QUEUED_BY_FORM = "form"
+DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT = "transfer_import"
+VALID_DROPPED_DELETE_QUEUED_BY = frozenset(
+    {
+        DROPPED_DELETE_QUEUED_BY_FORM,
+        DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -102,7 +110,7 @@ class PendingDroppedSealboxDelete:
     item_kind: str
     credential_key: str
     created_at: str
-    queued_by: str = "form"
+    queued_by: str = DROPPED_DELETE_QUEUED_BY_FORM
 
 
 def resolve_catalog_db_path() -> Path:
@@ -196,7 +204,7 @@ class CredentialCatalogStore:
         credential: Mapping[str, Any],
         *,
         dropped_sealbox_targets: Sequence[tuple[str, str]] = (),
-        queued_by: str = "form",
+        queued_by: str = DROPPED_DELETE_QUEUED_BY_FORM,
     ) -> None:
         """Atomically insert or replace one credential without touching sibling keys.
 
@@ -207,7 +215,11 @@ class CredentialCatalogStore:
         """
         now = datetime.now(timezone.utc).isoformat()
         rendered = json.dumps(dict(credential), sort_keys=True, separators=(",", ":"))
-        normalized_queued_by = str(queued_by or "form").strip() or "form"
+        normalized_queued_by = (
+            str(queued_by or DROPPED_DELETE_QUEUED_BY_FORM).strip() or DROPPED_DELETE_QUEUED_BY_FORM
+        )
+        if normalized_queued_by not in VALID_DROPPED_DELETE_QUEUED_BY:
+            raise ValueError(f"Unsupported dropped-delete queued_by value: {normalized_queued_by!r}")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -543,7 +555,7 @@ class CredentialCatalogStore:
                 item_kind=str(row["item_kind"]),
                 credential_key=str(row["credential_key"]),
                 created_at=str(row["created_at"]),
-                queued_by=str(row["queued_by"] or "form"),
+                queued_by=str(row["queued_by"] or DROPPED_DELETE_QUEUED_BY_FORM),
             )
             for row in rows
         ]
@@ -836,9 +848,12 @@ __all__ = [
     "CredentialCatalogReadError",
     "CredentialCatalogStore",
     "CredentialOwnerScope",
+    "DROPPED_DELETE_QUEUED_BY_FORM",
+    "DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT",
     "PendingDroppedSealboxDelete",
     "SealboxTenantMapping",
     "UnreadableCatalogEntryRow",
+    "VALID_DROPPED_DELETE_QUEUED_BY",
     "expired_sealbox_record_keys",
     "load_credential_readonly",
     "load_scope_readonly",

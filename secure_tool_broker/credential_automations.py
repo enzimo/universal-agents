@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from secure_tool_broker.credential_catalog import sealbox_record_expiry
-from secure_tool_broker.credential_catalog_store import (
-    CredentialOwnerScope,
-    pending_dropped_sealbox_keys_readonly,
+from secure_tool_broker.credential_catalog import (
+    sealbox_record_expiry,
+    sealbox_record_queued_for_deletion,
 )
+from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from secure_tool_broker.credential_diagnostics import CREDENTIAL_EXPIRED
 from secure_tool_broker.credential_expiry import is_expired
 from secure_tool_broker.credential_sources import (
@@ -127,14 +127,12 @@ def use_credential_for_action(
     sealbox_expires_at: str | None = None
     if source_provider == "sealbox" and owner_id:
         owner_scope = CredentialOwnerScope.user(owner_id)
-        raw_key = str(item_id or item_name or "").strip()
-        normalized_field_ref = str(field_ref or "password").strip()
-        canonical_key = (
-            raw_key
-            if normalized_field_ref in {"", "password", "value"}
-            else f"{raw_key}:{normalized_field_ref}"
-        )
-        if canonical_key and canonical_key in pending_dropped_sealbox_keys_readonly(owner_scope):
+        if sealbox_record_queued_for_deletion(
+            owner_scope,
+            item_id=item_id,
+            item_name=item_name,
+            field_ref=field_ref or "password",
+        ):
             return ToolResult(
                 status="error",
                 error="The requested Sealbox secret does not exist.",

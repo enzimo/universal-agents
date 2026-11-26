@@ -1574,6 +1574,7 @@ def test_c35_import_pending_dropped_refusal_inline_retry_and_form_queued_already
         load_catalog,
     )
     from secure_tool_broker.credential_catalog_store import (
+        DROPPED_DELETE_QUEUED_BY_FORM,
         CredentialCatalogStore,
         CredentialOwnerScope,
         resolve_catalog_db_path,
@@ -1619,7 +1620,7 @@ def test_c35_import_pending_dropped_refusal_inline_retry_and_form_queued_already
         "other_existing",
         CatalogCredential(display_name="Other", purpose="test", fields={}).model_dump(mode="json", exclude_none=True),
         dropped_sealbox_targets=[(planned_key, "secret")],
-        queued_by="form",
+        queued_by=DROPPED_DELETE_QUEUED_BY_FORM,
     )
     fail_delete = True
     deleted_items: list[str] = []
@@ -1665,7 +1666,7 @@ def test_c35_import_pending_dropped_refusal_inline_retry_and_form_queued_already
             },
         ).model_dump(mode="json", exclude_none=True),
         dropped_sealbox_targets=[("person-old-item:api_key", "secret")],
-        queued_by="form",
+        queued_by=DROPPED_DELETE_QUEUED_BY_FORM,
     )
     [kept] = import_credentials(records, team_id=TEST_TEAM, now=now)
     assert kept.imported is False

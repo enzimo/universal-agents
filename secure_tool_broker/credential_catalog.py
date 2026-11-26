@@ -61,11 +61,13 @@ from secure_tool_broker.credential_sources import (
     normalize_credential_source_name,
 )
 from secure_tool_broker.credential_catalog_store import (
+    DROPPED_DELETE_QUEUED_BY_FORM,
     CredentialCatalogStore,
     CredentialOwnerScope,
     PendingDroppedSealboxDelete,
     load_credential_readonly,
     load_scope_readonly,
+    pending_dropped_sealbox_keys_readonly,
     resolve_catalog_db_path,
 )
 from secure_tool_broker.credential_state import (
@@ -402,7 +404,7 @@ def _save_catalog_credential(
     *,
     scope: CredentialOwnerScope,
     dropped_sealbox_targets: Sequence[tuple[str, str]] = (),
-    queued_by: str = "form",
+    queued_by: str = DROPPED_DELETE_QUEUED_BY_FORM,
 ) -> Path:
     store = CredentialCatalogStore(resolve_catalog_db_path())
     payload = credential.model_dump(mode="json", exclude_none=True)
@@ -862,6 +864,56 @@ def _pending_dropped_sealbox_conflict(scope: CredentialOwnerScope, target_keys: 
     return sorted(overlap)[0] if overlap else None
 
 
+def _process_pending_dropped_sealbox_entries(
+    store: CredentialCatalogStore,
+    *,
+    scope: CredentialOwnerScope,
+    catalog: CredentialCatalog,
+    entries: Sequence[PendingDroppedSealboxDelete],
+    credential_key: str,
+    event_name: str,
+) -> tuple[int, int, list[str]]:
+    """Clear stale queue rows referenced again in ``catalog`` and delete remaining queued records.
+
+    Must only be called while holding ``_scope_catalog_lock(scope)``.
+    Returns ``(skipped_referenced, deleted_count, failed_keys)``.
+    """
+
+    if not entries:
+        return 0, 0, []
+    referenced_keys: set[str] = set()
+    for cred in catalog.credentials.values():
+        referenced_keys |= _credential_sealbox_record_keys(cred)
+    stale_keys: list[str] = []
+    targets_to_delete: list[tuple[str, str]] = []
+    for entry in entries:
+        if entry.item_key in referenced_keys:
+            stale_keys.append(entry.item_key)
+            _LOGGER.warning(
+                "Skipped pending dropped Sealbox deletion because a catalog entry references the record again. "
+                "event=credential_pending_dropped_delete_skipped_referenced scope_kind=%s owner_id=%s "
+                "item_key=%s credential_key=%s",
+                scope.scope_kind,
+                scope.owner_id,
+                entry.item_key,
+                entry.credential_key,
+            )
+        else:
+            targets_to_delete.append((entry.item_key, entry.item_kind))
+    if stale_keys:
+        store.remove_pending_dropped_sealbox_deletes(scope, stale_keys)
+    if not targets_to_delete:
+        return len(stale_keys), 0, []
+    failed = _delete_and_clear_dropped_targets(
+        targets_to_delete,
+        scope=scope,
+        credential_key=credential_key,
+        event_name=event_name,
+    )
+    deleted_count = len(targets_to_delete) - len(failed)
+    return len(stale_keys), deleted_count, failed
+
+
 def _resolve_pending_dropped_sealbox_conflict(
     scope: CredentialOwnerScope,
     target_keys: set[str],
@@ -891,23 +943,11 @@ def _resolve_pending_dropped_sealbox_conflict(
     ]
     if not overlapping:
         return None
-    referenced_keys: set[str] = set()
-    for cred in catalog.credentials.values():
-        referenced_keys |= _credential_sealbox_record_keys(cred)
-    stale_keys: list[str] = []
-    targets_to_delete: list[tuple[str, str]] = []
-    for entry in overlapping:
-        if entry.item_key in referenced_keys:
-            stale_keys.append(entry.item_key)
-        else:
-            targets_to_delete.append((entry.item_key, entry.item_kind))
-    if stale_keys:
-        store.remove_pending_dropped_sealbox_deletes(scope, stale_keys)
-    if not targets_to_delete:
-        return None
-    still_failed = _delete_and_clear_dropped_targets(
-        targets_to_delete,
+    _skipped, _deleted, still_failed = _process_pending_dropped_sealbox_entries(
+        store,
         scope=scope,
+        catalog=catalog,
+        entries=overlapping,
         credential_key=credential_key,
         event_name="credential_dropped_sealbox_inline_retry_failed",
     )
@@ -1008,7 +1048,7 @@ def _save_credential_and_cleanup_dropped(
     *,
     existing_credential: CatalogCredential | None,
     scope: CredentialOwnerScope,
-    queued_by: str = "form",
+    queued_by: str = DROPPED_DELETE_QUEUED_BY_FORM,
 ) -> list[str]:
     """Commit ``credential`` and delete dropped Sealbox records while holding ``_scope_catalog_lock``.
 
@@ -1094,38 +1134,18 @@ def retry_pending_dropped_sealbox_deletes(
                 scanned += len(pending)
                 counted_scope = True
                 catalog = load_catalog(scope=row_scope)
-                referenced_keys: set[str] = set()
-                for cred in catalog.credentials.values():
-                    referenced_keys |= _credential_sealbox_record_keys(cred)
-                stale_keys: list[str] = []
-                targets_to_delete: list[tuple[str, str]] = []
-                for entry in pending:
-                    if entry.item_key in referenced_keys:
-                        stale_keys.append(entry.item_key)
-                        skipped_referenced += 1
-                        _LOGGER.warning(
-                            "Skipped pending dropped Sealbox deletion because a catalog entry references the record again. "
-                            "event=credential_pending_dropped_delete_skipped_referenced scope_kind=%s owner_id=%s "
-                            "item_key=%s credential_key=%s",
-                            row_scope.scope_kind,
-                            row_scope.owner_id,
-                            entry.item_key,
-                            entry.credential_key,
-                        )
-                    else:
-                        targets_to_delete.append((entry.item_key, entry.item_kind))
-                if stale_keys:
-                    store.remove_pending_dropped_sealbox_deletes(row_scope, stale_keys)
-                if targets_to_delete:
-                    scope_failed = _delete_and_clear_dropped_targets(
-                        targets_to_delete,
-                        scope=row_scope,
-                        credential_key=credential_key or pending[0].credential_key,
-                        event_name="credential_dropped_sealbox_retry_failed",
-                    )
-                    deleted += len(targets_to_delete) - len(scope_failed)
-                    failed += len(scope_failed)
-                    failed_keys.extend(scope_failed)
+                scope_skipped, scope_deleted, scope_failed = _process_pending_dropped_sealbox_entries(
+                    store,
+                    scope=row_scope,
+                    catalog=catalog,
+                    entries=pending,
+                    credential_key=credential_key or pending[0].credential_key,
+                    event_name="credential_dropped_sealbox_retry_failed",
+                )
+                skipped_referenced += scope_skipped
+                deleted += scope_deleted
+                failed += len(scope_failed)
+                failed_keys.extend(scope_failed)
         except Exception as exc:  # noqa: BLE001 - isolate one owner's unreadable catalog from other owners
             if not counted_scope:
                 scanned += len(pending)
@@ -1208,6 +1228,28 @@ def sealbox_record_expiry(
         if target_key in _credential_sealbox_record_keys(credential):
             return credential.expires_at
     return None
+
+
+def sealbox_record_queued_for_deletion(
+    scope: CredentialOwnerScope,
+    *,
+    item_id: str | None = None,
+    item_name: str | None = None,
+    field_ref: str | None = None,
+) -> bool:
+    """Return True when this Sealbox record is currently queued for dropped-record deletion."""
+
+    target_key = _sealbox_record_key(
+        CatalogSourceRef(
+            source="sealbox",
+            item_id=item_id,
+            item_name=item_name,
+            field_ref=field_ref or "password",
+        )
+    )
+    if not target_key:
+        return False
+    return target_key in pending_dropped_sealbox_keys_readonly(scope)
 
 
 def _secret_cache_key(
@@ -1368,19 +1410,28 @@ def collect_credential(
     scope: CredentialOwnerScope | None = None,
     expires_at: datetime | str | None = None,
     allow_expiry_change: bool = False,
+    allow_drop_stored_records: bool = False,
     now: datetime | None = None,
 ) -> ToolResult:
     """Store a credential from trusted form submission or broker-side storage.
 
     ``expires_at`` is accepted only as an explicit keyword argument (never read
     from ``request_payload``) and only when ``allow_expiry_change=True`` (set
-    by the secure form submission handler, team transfer import, and trusted
-    broker capture). When ``allow_expiry_change=False`` (the default, used by
-    agent-callable ``credential.collect``), overwriting a key that currently
-    has ``expires_at`` preserves that expiry and writes every Sealbox record
-    with the remaining TTL (or refuses if the expiry has already passed), and
-    any save that would drop Sealbox records referenced by the existing key is
-    refused with ``credential_replacement_form_only`` before writing anything.
+    by the secure form submission handler and trusted broker capture; team
+    transfer import writes through ``write_credential_to_source`` and
+    ``_save_credential_and_cleanup_dropped`` directly rather than calling
+    ``collect_credential``). When ``allow_expiry_change=False`` (the default,
+    used by agent-callable ``credential.collect``), overwriting a key that
+    currently has ``expires_at`` preserves that expiry and writes every Sealbox
+    record with the remaining TTL (or refuses if the expiry has already passed).
+
+    Dropping and deleting Sealbox records referenced by an existing catalog
+    entry is permitted only when ``allow_drop_stored_records=True`` (set only
+    by the person's submitted secure form in ``service.py``). Any caller with
+    ``allow_drop_stored_records=False`` — including agent-callable
+    ``credential.collect`` and expiry-setting trusted broker capture — is
+    refused with ``credential_replacement_form_only`` before writing anything
+    when the save would drop a stored Sealbox record.
     """
 
     try:
@@ -1549,7 +1600,7 @@ def collect_credential(
                 )
                 dropped_keys = existing_keys - planned_keys
                 if dropped_keys:
-                    if not allow_expiry_change:
+                    if not allow_drop_stored_records:
                         return _dropped_sealbox_records_form_only_result(credential_key, dropped_keys)
                     shared_dropped = _find_shared_sealbox_record(
                         catalog_snapshot,
@@ -1649,7 +1700,7 @@ def collect_credential(
                 )
                 actual_dropped_keys = actual_existing_keys - actual_new_keys
                 if actual_dropped_keys:
-                    if not allow_expiry_change:
+                    if not allow_drop_stored_records:
                         post_write_conflict = _dropped_sealbox_records_form_only_result(
                             credential_key, actual_dropped_keys
                         )
