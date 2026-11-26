@@ -18,10 +18,10 @@ refused to start a replacement for the live worker. The wind-down instead:
    timed wait that can finish before ``lease_loss_wait_timeout_seconds``,
    because their replies or paused turns live on this worker; they may finish
    here until ``lease_loss_wait_timeout_seconds`` after the wind-down started
-   (after a lost lease the scheduler loop has stopped, so the wind-down loop
-   resumes due timed waits; during a contract drain the scheduler pass still
-   runs and may resume them too, which is safe because each resume takes the
-   task's lock), after which remaining waits fail with an explanation to the
+   (only the wind-down loop resumes due timed waits: after a lost lease the
+   scheduler loop has stopped, and during a contract drain the scheduler pass
+   skips them while the agent winds down,
+   ``scheduled_runtime._resume_due_timed_waits_step``), after which remaining waits fail with an explanation to the
    requester. Any ``WAITING`` timed wait whose saved ``resume_at`` is already
    after the wind-down deadline, or within one poll interval of it (with no held
    answer and not yet resumed), fails at once, when the wind-down starts and on
@@ -605,10 +605,10 @@ async def _fail_hopeless_timed_waits(
 async def _resume_due_timed_waits_safely(agent: Any, state: LeaseLossWindDown) -> int:
     """Resume due timed waits during wind-down.
 
-    After a lost lease the scheduler loop has stopped, so this loop resumes due
-    timed waits before the deadline. During a contract drain the scheduler pass
-    still runs and may resume them too, which is safe because each resume takes
-    the task's lock.
+    Only this loop resumes them while the agent winds down: after a lost lease
+    the scheduler loop has stopped, and during a contract drain the scheduler
+    pass skips them (``scheduled_runtime._resume_due_timed_waits_step``), so no
+    resume lands between a poll's snapshot and the step that fails what remains.
     """
 
     try:
@@ -651,9 +651,8 @@ async def _wait_for_resumable_tasks(agent: Any, state: LeaseLossWindDown) -> Non
         )
         if failed_early and all(info.task.task_id in failed_early for info in remaining):
             return
-        # After a lost lease the scheduler loop has stopped, so this loop resumes
-        # any timed wait that comes due before the deadline (during a contract
-        # drain the scheduler pass may resume it too; each resume takes the lock).
+        # Only this loop resumes timed waits while winding down (the scheduler
+        # pass skips them), so it resumes any that come due before the deadline.
         await _resume_due_timed_waits_safely(agent, state)
         await asyncio.sleep(WIND_DOWN_POLL_SECONDS)
 

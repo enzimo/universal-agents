@@ -83,7 +83,10 @@ requester instead of holding the old worker alive), keeps tasks waiting on a
 person, a subtask, or a timed wait due before that deadline until the deadline,
 then exits. A pool worker whose process runs another message contract than its
 installation winds down the same way once its running turns end; nothing
-failed there, so its handbacks do not count as interruptions. Your runtime,
+failed there, so its handbacks do not count as interruptions. You and startup
+agents cannot hand tasks back during such a drain: you finish what you already
+admitted, including a timed wait of up to 24 hours, before the old process
+can be replaced. Your runtime,
 not you, sends returned tasks to another worker of the same type; an interrupted
 run arrives there with a note of the actions it had already sent. Interrupted
 scheduled runs are not rerun when the schedule already ran again, is paused or

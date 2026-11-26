@@ -1864,3 +1864,41 @@ async def test_f3_resumed_live_turn_releases_live_wait_note_when_decision_keeps_
     ]
     assert len(ended_events) == 1
     assert ended_events[0]["how"] == "live_turn"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_pass_leaves_due_timed_waits_to_a_winding_down_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While the agent winds down, the scheduler pass resumes no timed wait; the wind-down loop does (review F2)."""
+
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    woken: list[Any] = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    agent = _make_runtime_agent(tmp_path / "manager.db")
+    reason = {
+        "kind": TIMED_WAIT_KIND,
+        "call_id": "call-wind-down",
+        "tool": WAIT_TOOL_NAME,
+        "tool_use_id": "tu-wind-down",
+        "minutes": 10,
+        "reason": "redeploy",
+    }
+    await stage_timed_wait(agent, task_id=TASK_ID, interrupt_id="int-wind-down", reason=reason, msg_meta=MessageMeta())
+    agent.task_manager.update_main_task_state(TASK_ID, ProgressState.WAITING, BASE_TIME.isoformat())
+    now_box[0] = BASE_TIME + timedelta(minutes=10, seconds=6)
+
+    # Winding down (lease_loss_wind_down.is_winding_down): the due wait stays for the wind-down loop.
+    agent._lease_loss_wind_down = SimpleNamespace()
+    await _run_real_scheduler_pass(agent, monkeypatch)
+    assert agent.task_manager.get_task_info(TASK_ID).state == ProgressState.WAITING
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID)["kind"] == TIMED_WAIT_KIND
+    assert woken == []
+
+    # Not winding down: the same pass resumes it from its note.
+    agent._lease_loss_wind_down = None
+    await _run_real_scheduler_pass(agent, monkeypatch)
+    assert agent.task_manager.get_task_info(TASK_ID).state == ProgressState.ACCEPTED
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is None
+    assert woken == [agent]

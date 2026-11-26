@@ -9,7 +9,10 @@ abrupt power loss:
 
 1. The first agent runs in its own OS process
    (``tests/live_power_loss_first_agent.py``) with its own process run id,
-   connected to the mapped server. Once its task is ``WAITING`` and the worker
+   connected to the mapped server, deferring its SQLite flushes until it sends
+   as ``strands_main`` does; its ready report must show no unflushed commit of
+   the task runtime store, which only the pause flush provides (SIGKILL keeps
+   the page cache, so the kill alone cannot show a missing flush). Once its task is ``WAITING`` and the worker
    slot is free, ``SIGKILL`` ends that process and then ``nats-server``: a real
    process death, so nothing of the first agent (turn work, heartbeat, status
    writes) can run or write afterwards. An in-process stand-in that cancelled
@@ -151,8 +154,10 @@ def _saved_agent_status(db_path: Path, agent_id: str) -> tuple[int, str | None]:
     return int(row[0]), json.loads(row[1]).get("process_identity")
 
 
-async def _start_first_agent_process(tmp_path: Path, args: dict[str, str], env: dict[str, str]) -> tuple[Any, str]:
-    """Start ``live_power_loss_first_agent.py``; return the process and its identity once its task is WAITING."""
+async def _start_first_agent_process(
+    tmp_path: Path, args: dict[str, str], env: dict[str, str]
+) -> tuple[Any, dict[str, Any]]:
+    """Start ``live_power_loss_first_agent.py``; return the process and its READY report once its task is WAITING."""
 
     project_root = Path(__file__).resolve().parents[1]
     tests_dir = Path(__file__).resolve().parent
@@ -194,7 +199,7 @@ async def _start_first_agent_process(tmp_path: Path, args: dict[str, str], env: 
                 )
             text = line.decode("utf-8", errors="replace").strip()
             if text.startswith("READY "):
-                return process, str(json.loads(text[len("READY "):])["process_identity"])
+                return process, json.loads(text[len("READY "):])
     except BaseException:
         await asyncio.shield(_sigkill_process(process))
         raise
@@ -439,7 +444,7 @@ async def _run_power_loss_scenario(
                 first_env = dict(os.environ)
                 first_env[PROCESS_RUN_ID_ENV] = before_run_id
                 first_env[PROCESS_RUN_PROVEN_ENV] = "1"
-                first_process, first_identity = await _start_first_agent_process(
+                first_process, first_ready = await _start_first_agent_process(
                     tmp_path,
                     {
                         "nats_url": nats_url_1,
@@ -454,7 +459,15 @@ async def _run_power_loss_scenario(
                     },
                     first_env,
                 )
+                first_identity = str(first_ready["process_identity"])
                 assert before_run_id in first_identity
+                # 0.10 (review F1): the child defers flushes like strands_main, and the pause
+                # flush left no commit of the task runtime store unflushed before the kill.
+                assert first_ready["flushes_deferred"] is True
+                assert first_ready["task_runtime_commits"] > 0
+                assert first_ready["task_runtime_unflushed"] is False, (
+                    "The paused task's records were not flushed to disk before the power loss"
+                )
 
                 # --- Phase 2: power loss: SIGKILL agent 1's process, then nats-server ---
                 await _sigkill_process(first_process)

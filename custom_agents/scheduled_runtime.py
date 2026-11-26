@@ -19,7 +19,7 @@ from custom_agents.task_context_runtime import inactive_owner, run_owner, schedu
 from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 
-from custom_agents.lease_loss_wind_down import start_lease_loss_wind_down
+from custom_agents.lease_loss_wind_down import is_winding_down, start_lease_loss_wind_down
 from custom_agents.worker_handback_runtime import process_pending_handbacks
 from custom_agents.task_queue_notifications import check_queue_pressure
 from custom_agents.conversation_runtime import (
@@ -1915,6 +1915,27 @@ async def _wait_for_scheduler_wake(agent: Any, timeout_seconds: float) -> None:
         pass
 
 
+async def _resume_due_timed_waits_step(agent: Any) -> None:
+    """Resume any task whose timed wait (wait / long_wait) has reached its resume time.
+
+    Skipped while the agent winds down (``lease_loss_wind_down``): its wind-down
+    loop resumes due timed waits itself, between the checks of each poll. During
+    a contract drain this pass still runs, and a resume here could land between
+    a deadline poll's snapshot and the step that fails what remains, which would
+    then fail a resumed task with the message for a person's wait.
+    """
+
+    if is_winding_down(agent):
+        return
+    try:
+        await resume_due_timed_waits(agent)
+    except Exception:
+        agent._logger.exception(
+            "Could not check for due timed waits. event=timed_wait_check_failed agent_id=%s",
+            agent.id,
+        )
+
+
 async def _scheduler_pass(
     agent: Any,
     claim_retry_deadlines: dict[str, datetime],
@@ -1955,14 +1976,7 @@ async def _scheduler_pass(
             "event=setup_run_recovery_failed agent_id=%s",
             agent.id,
         )
-    # Resume any task whose timed wait (wait / long_wait) has reached its resume time.
-    try:
-        await resume_due_timed_waits(agent)
-    except Exception:
-        agent._logger.exception(
-            "Could not check for due timed waits. event=timed_wait_check_failed agent_id=%s",
-            agent.id,
-        )
+    await _resume_due_timed_waits_step(agent)
     # The lead sends out again any task a worker returned that is not settled.
     await process_pending_handbacks(agent)
     # ...and starts a replacement for a dead agent still holding unfinished work.

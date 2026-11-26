@@ -994,7 +994,8 @@ Five repairs keep work from getting stuck in the first place:
   next pass, so its warnings (`event=tool_setup_run_recovered`) name only
   real lost wake-ups. An agent that drains for another message contract does
   this too, as it resumes its decided access waits and due timed waits
-  (`timed_wait_runtime.resume_due_timed_waits`): these are tasks it
+  (`timed_wait_runtime.resume_due_timed_waits`; once a pool worker winds down,
+  its wind-down loop resumes timed waits instead): these are tasks it
   already holds, the recovery takes over nothing and starts no agent, and a
   resumed task already ran, so even a draining pool worker starts it.
 - A task that ends with delegated work still running stops it
@@ -1045,10 +1046,11 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    falls before the deadline, because their paused turns live here and can
    resume and finish. They may finish until
    `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30
-   minutes) after the wind-down started (after a lost lease the scheduler loop
-   has stopped, so the wind-down loop resumes due timed waits; during a
-   contract drain the scheduler pass still runs and may resume them too, which
-   is safe because each resume takes the task's lock); then they fail with an
+   minutes) after the wind-down started. Only the wind-down loop resumes due
+   timed waits meanwhile: after a lost lease the scheduler loop has stopped, and
+   during a contract drain the scheduler pass skips them while the agent winds
+   down (`scheduled_runtime._resume_due_timed_waits_step`), so no resume lands
+   between a poll's snapshot and the step that fails what remains. Then they fail with an
    explanation to the requester, their pending subtasks are asked to stop, and
    an access request they were waiting on is withdrawn so the reviewer is not
    left with an open item. A timed wait whose `resume_at` falls after that
@@ -1953,7 +1955,8 @@ records) through `custom_agents/paused_wait_resume.py` and
   fails the remaining waits with the deadline message, which names why the worker wound down. Waits due before the
   deadline still resume and finish on the winding-down worker, held answers are
   not failed early, and waits on people (`access_request`, `tool_setup_run`)
-  keep the full timeout. If failing the task raises, it counts as failed only
+  keep the full timeout. A draining team lead or startup agent does not wind
+  down: it keeps its timed waits, up to 24 hours, until they end. If failing the task raises, it counts as failed only
   when the task is FAILED in memory or archived as FAILED; a task another agent
   took over (`custody_loss.custody_moved`) is left to that agent with no
   message and no subtask stop (`event=timed_wait_wind_down_custody_moved`).
@@ -7358,7 +7361,9 @@ failed); pool workers run in the team lead's process, so the lead
 drains with them, and what they return waits in the lead's queue for a team lead on the
 installation's contract. The team lead and startup agents have no way to hand a task
 back yet (that comes with `task.handback` and the queued work of protocol 1), so they
-finish what they already admitted. The host's record says `draining` meanwhile; its
+finish what they already admitted, and they have no wind-down deadline: a timed wait they
+hold, a `long_wait` of up to 24 hours included, is kept until it ends and its task
+finishes, so the old process stays until then. The host's record says `draining` meanwhile; its
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
 Startup counts as held work until recovery finishes, so a drain cannot close controls
 before saved tasks become visible. A draining startup restores its own work and adopts

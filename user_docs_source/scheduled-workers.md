@@ -891,7 +891,10 @@ A pool worker winds down the same way, without any fault, when an upgrade
 leaves its process on a different message format (message contract) than the
 rest of the installation: it stops taking new work, finishes the turns it is
 running, and then winds down as above, with the deadline counted from then.
-Tasks it returns this way do not count as interruptions.
+Tasks it returns this way do not count as interruptions. The TeamLead and the
+agents started with the instance can't hand work back during such an upgrade:
+they finish what they already started, including a timed wait of up to 24
+hours, before their old process can be replaced.
 
 The TeamLead sends returned tasks to another worker of the same type, starting
 one when none is available, and the result still goes to whoever asked. A task

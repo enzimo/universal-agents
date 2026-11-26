@@ -840,10 +840,15 @@ async def test_wind_down_fails_hopeless_timed_wait_immediately_on_wind_down_star
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cause",
+    ["launch_lease_lost", "other_message_contract"],
+    ids=["lease_loss", "contract_drain"],
+)
 async def test_wind_down_fails_hopeless_timed_wait_started_after_classification_on_next_poll(
-    manager, monkeypatch, caplog
+    manager, monkeypatch, caplog, cause
 ):
-    """#210 / P1: a resumable task that enters a hopeless timed wait after classification fails on the next poll."""
+    """#210 / P1 (both causes): a resumable task that enters a hopeless timed wait after classification fails on the next poll."""
     start = datetime.now(timezone.utc)
     _add(manager, "waiting", ProgressState.IN_PROGRESS)
     manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
@@ -858,7 +863,7 @@ async def test_wind_down_fails_hopeless_timed_wait_started_after_classification_
     agent._pending_interrupt_responses = {}
 
     with caplog.at_level(logging.WARNING):
-        state = wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+        state = wind_down.start_lease_loss_wind_down(agent, reason="wind_down_reason", cause=cause)
         await asyncio.sleep(0.03)
         assert "waiting" in state.resumable_task_ids
         assert not agent.exited
@@ -888,6 +893,7 @@ async def test_wind_down_fails_hopeless_timed_wait_started_after_classification_
         "so the task was stopped. Ask again to rerun it."
     )
     assert "event=worker_wind_down_timed_wait_outlasts_deadline" in caplog.text
+    assert f"cause={cause}" in caplog.text
     archived = manager.get_task_from_db("waiting")
     assert archived is not None and archived["status"] == ProgressState.FAILED.value
 
@@ -1562,3 +1568,60 @@ async def test_wind_down_leaves_a_taken_over_timed_wait_alone_without_answering_
     assert new_owner.get_task_info("parent").state == ProgressState.WAITING
     assert is_timed_wait_blocker(get_human_interaction_blocker(new_owner, "parent"))
     assert new_owner.get_task_from_db("parent") is None
+
+
+@pytest.mark.asyncio
+async def test_contract_drain_deadline_poll_fails_a_due_wait_with_its_message_despite_a_scheduler_pass(
+    manager, monkeypatch
+):
+    """Review F2: during a contract drain the scheduler pass still runs; at the deadline poll it resumes nothing.
+
+    The pass runs right between the poll's snapshot and the step that fails what
+    remains (the interleaving the review forced), so the due timed wait is failed
+    with the timed-wait message instead of being resumed and then failed as a
+    person's wait.
+    """
+    from custom_agents import scheduled_runtime
+
+    cause = "other_message_contract"
+    start = datetime.now(timezone.utc)
+    _add(manager, "due", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("due", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "due",
+        timed_wait_record(
+            interrupt_id="int-due",
+            call_id="call-due",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-due",
+            minutes=1,
+            reason="already due",
+            requested_at=(start - timedelta(minutes=2)).isoformat(),
+            resume_at=(start - timedelta(seconds=1)).isoformat(),
+        ),
+    )
+    agent = _worker(manager, wait_seconds=0.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+    woken: list = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    end_at_deadline = wind_down._end_at_deadline
+
+    async def scheduler_pass_step_then_end(agent_, state_, remaining):
+        await scheduled_runtime._resume_due_timed_waits_step(agent_)
+        await end_at_deadline(agent_, state_, remaining)
+
+    monkeypatch.setattr(wind_down, "_end_at_deadline", scheduler_pass_step_then_end)
+    state = wind_down.start_lease_loss_wind_down(agent, reason="wind_down_reason", cause=cause)
+    state.deadline = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await asyncio.wait_for(state.task, timeout=2.0)
+
+    assert woken == []
+    assert agent.exited
+    archived = manager.get_task_from_db("due")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+    agent._send_task_error_response.assert_awaited_once()
+    assert agent._send_task_error_response.await_args.args[3].startswith(
+        f"This task was paused on a timed wait when its worker {wind_down._WHAT_HAPPENED[cause]}."
+    )
