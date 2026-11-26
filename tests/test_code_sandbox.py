@@ -444,11 +444,23 @@ def test_sandbox_policy_drops_instance_private_and_symlinked_task_and_granted_re
         link_to_outside,
     ):
         assert str(forbidden) not in granted, f"{forbidden} must not be granted"
-    assert "event=code_sandbox_path_skipped" in caplog.text
-    assert "kind=task_link" in caplog.text
-    assert "kind=granted_read_link" in caplog.text
-    assert "kind=task" in caplog.text
-    assert "kind=granted_read" in caplog.text
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "event=code_sandbox_path_skipped" in msg and f"kind=task_link path={link_to_bob}" in msg
+        for msg in messages
+    )
+    assert any(
+        "event=code_sandbox_path_skipped" in msg and f"kind=granted_read_link path={link_to_control}" in msg
+        for msg in messages
+    )
+    assert any(
+        "event=code_sandbox_path_skipped" in msg and f"kind=task path={layout.control_dir}" in msg
+        for msg in messages
+    )
+    assert any(
+        "event=code_sandbox_path_skipped" in msg and f"kind=granted_read path={layout.control_dir}" in msg
+        for msg in messages
+    )
 
 
 @requires_landlock
@@ -580,3 +592,104 @@ def test_full_chain_post_planning_symlink_swap_exits_126_and_logs_warning(
     assert "event=code_sandbox_link_refused" in caplog.text
     assert str(layout.team_dir) in caplog.text
     assert "symbolic link" in result.get("sandbox_note", "")
+
+
+@pytest.mark.parametrize(
+    ("sandbox", "exit_code", "stderr", "policy_paths", "expected"),
+    [
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team\n",
+            frozenset({"/allowed/team"}),
+            "/allowed/team",
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/made/up event=fake agent_id=other\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            1,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_OFF,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_UNCONFINED,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            "ordinary error output\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+    ],
+    ids=[
+        "mounted_path_refusal",
+        "spoofed_unmounted_path",
+        "non_126_exit_code",
+        "sandbox_off",
+        "sandbox_unconfined",
+        "no_prefix_line",
+    ],
+)
+def test_sandbox_link_refusal_path_validates_exit_mode_prefix_and_policy_paths(
+    sandbox: str,
+    exit_code: int,
+    stderr: str,
+    policy_paths: frozenset[str],
+    expected: str | None,
+) -> None:
+    """C07 + C08: sandbox_link_refusal_path only accepts a mounted policy path on Landlock exit 126."""
+
+    cmd = code_sandbox.SandboxedCommand(
+        argv=("true",),
+        env={},
+        sandbox=sandbox,
+        policy_paths=policy_paths,
+    )
+    assert code_sandbox.sandbox_link_refusal_path(cmd, exit_code, stderr) == expected
+
+
+@requires_landlock
+def test_command_printing_fake_link_refusal_does_not_log_warning_or_override_note(
+    instance, caplog
+) -> None:
+    """C07: command-printed refusal prefix with a made-up path logs no warning and keeps the normal note."""
+
+    marker = instance["workspace"] / "ran.txt"
+    secret_expr = _dynamic(instance["root"] / "team.env")
+    prefix = json.dumps(code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX)
+    # Build the fake path at runtime so command-text path checks do not refuse before spawn.
+    script = (
+        "import sys; "
+        'open("ran.txt", "w").write("did-run\\n"); '
+        f'sys.stderr.write({prefix} + "/" + "made/up/by/the/command event=fake agent_id=someone-else\\n"); '
+        f"open({secret_expr}).read()"
+    )
+    cmd = f"python3 -c '{script}'; exit 126"
+    with caplog.at_level(logging.WARNING, logger="custom_tools.non_interactive_shell"):
+        result = _run(cmd, instance["workspace"])
+
+    assert result["exit_code"] == SANDBOX_FAILURE_EXIT_CODE
+    assert marker.read_text(encoding="utf-8").strip() == "did-run"
+    assert "event=code_sandbox_link_refused" not in caplog.text
+    note = result.get("sandbox_note", "")
+    assert "symbolic link" not in note
+    assert "Commands run in a sandbox" in note

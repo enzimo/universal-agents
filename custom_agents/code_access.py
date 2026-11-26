@@ -8,10 +8,15 @@ command it asks here:
   grants for this person's work (decision D13) and the folders other people
   shared with the person (decision D15) are each mounted read-write when both
   the agent and the person it works for may write there, read-only when they
-  may only read, and not at all otherwise. Landlock rules only ever add access, so a folder with a block
-  somewhere below it is not mounted at all (the command result says so)
-  rather than mounted with the blocked part exposed. One-time grants never
-  count: a mount lasts the whole command.
+  may only read, and not at all otherwise. Landlock rules only ever add access,
+  so a folder with a blocked folder or file below it (or a file block naming
+  the folder itself) is not mounted at all (the command result says so) rather
+  than mounted with the blocked part exposed. Before mounting, each folder's
+  path is walked component by component from its trusted root without
+  following symbolic links (``access_control.safe_open``): folders reached
+  through a symbolic link, non-directories (code mounts are folders only), and
+  folders the runtime cannot open are skipped with a log entry and a sandbox
+  note. One-time grants never count: a mount lasts the whole command.
 - **Network.** Code may open TCP connections only when the agent and its
   person hold internet access (``fn:internet``, decision D14). It is standard
   for every role, so the network is open unless a block closes it; full

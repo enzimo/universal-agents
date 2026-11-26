@@ -2165,9 +2165,21 @@ agent's grants for this person's work) and grants each one
 read-write where both may write, read-only where they may only read, or not at
 all; the command also gets read-only skill folders, a private scratch home, and
 read-only system files. Landlock rules only add access, so a folder with a
-blocked folder below it is left out entirely and the result says so, rather
-than exposing the blocked part. Control files, databases, secrets, instance
-configuration, other people's folders, and other processes stay out of reach.
+blocked folder or file below it (or a file block naming the folder itself) is
+left out entirely and the result says so, rather than exposing the blocked
+part. Before mounting, `custom_agents/code_access.py` walks every granted
+folder from its trusted root (`workspaces/` or the registered data folder)
+with `access_control.safe_open.open_directory`: folders reached through a
+symbolic link, non-directories (code mounts are folders only), and folders the
+runtime itself cannot open are skipped with a warning and a sandbox note. As
+independent layers, `custom_tools/code_sandbox.py` (`sandbox_policy`) drops
+symlinked or instance-private task and granted-read roots while passing the
+planned link-free paths unresolved to `custom_tools/code_sandbox_exec.py`,
+which opens every Landlock rule path from `/` component by component with
+`O_NOFOLLOW` and `fstat` and refuses any symbolic link with exit 126 before
+`execvp` (closing the check-then-use race). Control files, databases, secrets,
+instance configuration, other people's folders, and other processes stay out
+of reach.
 TCP connect and listen are open only when the agent and its person hold
 internet access (`fn:internet`, operation `connect`, decision D14). It sits
 with the web research tools in the `internet` tool set, which every role

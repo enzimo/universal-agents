@@ -17,8 +17,14 @@ Usage: code_sandbox_exec.py <policy-json> <command> [args...]
 ``policy-json`` holds ``read`` (read and execute), ``write`` (full access),
 and ``device`` (read/write existing device files) path lists, and ``network``:
 when false, TCP connect and bind are denied (Landlock ABI 4 and later; the
-launcher refuses to start such a command on an older kernel). Missing paths
-are skipped. Any failure to apply the sandbox exits with status 126 before the
+launcher refuses to start such a command on an older kernel). Every rule path
+is walked from ``/`` one component at a time with ``O_PATH | O_CLOEXEC |
+O_NOFOLLOW`` and checked with ``fstat``: missing paths are skipped, and any
+symbolic link (final or intermediate) is refused with status 126 before the
+command runs so a post-planning link swap cannot widen the sandbox. Callers
+building a policy must therefore pass canonical, link-free system paths (for
+example ``/usr/bin`` where ``/bin`` is a symbolic link), as ``sandbox_policy``
+does. Any failure to apply the sandbox exits with status 126 before the
 command runs, so the command never executes unconfined.
 """
 

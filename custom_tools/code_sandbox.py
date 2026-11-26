@@ -134,6 +134,7 @@ class SandboxedCommand:
     env: dict[str, str]
     sandbox: str
     scratch_dir: str | None = None
+    policy_paths: frozenset[str] = frozenset()
 
 
 def configured_mode(env: Mapping[str, str] | None = None) -> str:
@@ -515,11 +516,16 @@ def prepare_sandboxed_command(
         if owned:
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise
+    policy_paths = frozenset(
+        path.replace("\r", "\\r").replace("\n", "\\n")
+        for path in (*policy["read"], *policy["write"], *policy["device"])
+    )
     return SandboxedCommand(
         argv=wrapped,
         env=child_env,
         sandbox=CODE_SANDBOX_KIND_LANDLOCK,
         scratch_dir=scratch_dir if owned else None,
+        policy_paths=policy_paths,
     )
 
 
@@ -531,13 +537,22 @@ def release_sandboxed_command(command: SandboxedCommand) -> None:
 
 
 def sandbox_link_refusal_path(command: SandboxedCommand, exit_code: int, stderr: str) -> str | None:
-    """Return the rule path refused by the Landlock launcher for traversing a symbolic link, or None."""
+    """Return a policy rule path reported as a symbolic link refusal on exit 126, or None.
+
+    Only paths that were actually handed to the Landlock launcher in ``command.policy_paths``
+    are accepted, so arbitrary text written to stderr by the command cannot inject log entries
+    or trigger a false refusal note for an unmounted path.
+    """
 
     if command.sandbox != CODE_SANDBOX_KIND_LANDLOCK or exit_code != SANDBOX_FAILURE_EXIT_CODE:
         return None
+    if not command.policy_paths:
+        return None
     for line in stderr.splitlines():
         if line.startswith(SANDBOX_LINK_REFUSAL_PREFIX):
-            return line[len(SANDBOX_LINK_REFUSAL_PREFIX) :].strip()
+            candidate = line[len(SANDBOX_LINK_REFUSAL_PREFIX) :].strip()
+            if candidate in command.policy_paths:
+                return candidate
     return None
 
 

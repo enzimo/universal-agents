@@ -669,7 +669,7 @@ def _sandbox_note(
     notes = list(planned_notes)
     if refused_link is not None:
         notes.append(
-            "The command was not started because one of its mounted folder paths contains a symbolic link; "
+            "The sandbox launcher reported that a mounted folder path contains a symbolic link; "
             "the sandbox never mounts a folder reached through a link."
         )
         return " ".join(notes)
@@ -808,7 +808,7 @@ def _run_in_sandbox(
     if refused_link is not None:
         agent = get_agent_ref()
         logger.warning(
-            "Refused to start a sandboxed command because a mounted path became a symbolic link. "
+            "Sandbox launcher reported a symbolic link on a mounted path and exited with status 126. "
             "event=code_sandbox_link_refused agent_id=%s task_id=%s path=%s",
             getattr(agent, "id", None),
             bound_task_id(),
