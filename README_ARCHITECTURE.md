@@ -2578,15 +2578,31 @@ cannot open or share it, and agent grants on a person's folder are refused.
 An agent working for the recipient uses what was shared with that person at
 the shared level, for file tools and sandbox mounts, through per-decision
 copies of the person's share grants (`AccessService.shared_with`); blocks on
-the agent still apply. In Cedar a file is inside each folder
-up to its root, so a grant or block on a folder covers everything below it.
+the agent still apply. In Cedar a file is inside each folder up to its root, so a grant or block on a
+folder covers everything below it. Every `TargetKind.FOLDER` block also emits a
+forbid link (`block-file:<grant_id>`) targeting `File::<id>` alongside
+`Folder::<id>` (`access_control/entities.py`), and `AccessService._evaluate`
+normalizes those ids back to `block:<grant_id>`, so blocking a file path (via
+`/access block`, `assistant_cli access block --folder`, or `restrict_access`)
+stops file tools from opening that file while siblings remain accessible and
+keeps the containing folder out of sandboxed code (`custom_agents/code_access.py`).
+Blocks match the exact spelling of a path.
 `AccessService.decide_folder` decides each file use (agent side, then person
-side), and `custom_agents/folder_access.py` keeps allowed answers for 10
-seconds per folder, keyed by the access store version, so a crawl or a Python
-environment does not ask for every file while every grant, revocation or block
-still applies to the next file. `request_access`, `restrict_access`, `/access`
-and `assistant_cli access grant|block --folder` accept folders, and a worker's
-task gets a folder from TeamLead's access like a tool.
+side). `AccessService.reusable_folder_allowance` decides when a folder allowance
+covers its direct children and returns the set of blocked direct-child ids
+(skipping the second Cedar check on folder listings when neither side holds a
+one-time grant). `custom_agents/folder_access.py` keeps allowed answers for up
+to 10 seconds, keyed by team, access store version, agent, work/schedule/task,
+person, level, scope (`folder` or `file`), and target id: a folder-level entry
+holds its blocked direct-child exclusions so crawls beside a blocked sibling
+still reuse one answer per folder while blocked files fall through to Cedar,
+whereas a single-file share (or any file-only allowance) is kept only under its
+exact `file` key and never opens siblings or the parent folder. Because the
+access store version is part of every key, every grant, revocation, or block
+applies to the next file. `request_access`, `restrict_access`, `/access`, and
+`assistant_cli access grant|block --folder` accept folders (and blocks accept
+file paths as well), and a worker's task gets a folder from TeamLead's access
+like a tool.
 
 People share and send files through `assistant_gateway/file_sharing.py`
 (`/share`, `/unshare`, `/shares`, `/send`, and the workspace browser's Share

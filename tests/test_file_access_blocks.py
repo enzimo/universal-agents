@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 from access_control.data_folders import DataFolderRegistry, protected_locations
-from access_control.entities import PersonPrincipal
+from access_control.entities import AgentPrincipal, PersonPrincipal
 from access_control.inbox import StoredAccessInbox
 from access_control.operator_commands import list_grants
 from access_control.requests import AccessRequests
@@ -90,6 +90,7 @@ def _make_agent(
     lead: bool = False,
     signed_context: Any | None = None,
     task_id: str = "task-1",
+    agent_id: str | None = None,
 ) -> SimpleNamespace:
     context = signed_context or context_signer().issue(team_id=TEAM, person_id=person, person_roles=roles)
     meta = SimpleNamespace(gateway_context=SimpleNamespace(canonical_user_id=person, task_context=context))
@@ -100,7 +101,7 @@ def _make_agent(
         storage_settings=storage,
     )
     agent = SimpleNamespace(
-        id=f"agent-{agent_type}-{task_id}",
+        id=agent_id or f"agent-{agent_type}-{task_id}",
         name=agent_type,
         named_agent_type=agent_type,
         team_id=TEAM,
@@ -217,6 +218,8 @@ async def test_slash_access_block_on_file_path_refuses_file_operations_and_sandb
             )
         )
         assert reply.startswith("Blocked.")
+        assert "the path team/finance/payroll.csv" in reply
+        assert "payroll.csv/ folder" not in reply
 
         agent = _make_agent(layout, "alice")
         set_agent_ref(agent)
@@ -530,11 +533,24 @@ def test_restrict_access_on_file_path_isolates_to_its_request_even_with_warm_cac
     lead_first = _make_agent(
         layout, "alice", agent_type="TeamArchitect", lead=True, signed_context=req_first, task_id="task-lead-1"
     )
+    # Same worker process (shared agent_id) serving two different requests sequentially so cache isolation
+    # depends on the request-identifying key fields (work_id / task_id), not on distinct agent ids.
+    shared_worker_id = "agent-WebResearchAgent-shared"
     worker_first = _make_agent(
-        layout, "alice", agent_type="WebResearchAgent", signed_context=req_first, task_id="task-worker-1"
+        layout,
+        "alice",
+        agent_type="WebResearchAgent",
+        signed_context=req_first,
+        task_id="task-worker-1",
+        agent_id=shared_worker_id,
     )
     worker_second = _make_agent(
-        layout, "alice", agent_type="WebResearchAgent", signed_context=req_second, task_id="task-worker-2"
+        layout,
+        "alice",
+        agent_type="WebResearchAgent",
+        signed_context=req_second,
+        task_id="task-worker-2",
+        agent_id=shared_worker_id,
     )
 
     # Give TeamArchitect delegable write on team/finance for Alice so it may restrict the worker there.
@@ -561,6 +577,8 @@ def test_restrict_access_on_file_path_isolates_to_its_request_even_with_warm_cac
         )
     )
     assert restricted["status"] == "restricted"
+    assert "the path team/finance/payroll.csv" in restricted["message"]
+    assert "payroll.csv/ folder" not in restricted["message"]
 
     folder_access.forget_kept_answers()
 
@@ -578,7 +596,8 @@ def test_restrict_access_on_file_path_isolates_to_its_request_even_with_warm_cac
     assert allowed_second["status"] == "success"
     assert "restricted-payroll" in _text(allowed_second)
 
-    # Back in Request 1 with Request 2's unrestricted folder entry still warm -> still refused (proves work_id in key).
+    # Back in Request 1 on the same worker (same agent_id) with Request 2's unrestricted folder entry still warm ->
+    # still refused (proves the request-identifying key fields work_id/task_id keep the cache entries apart).
     set_agent_ref(worker_first)
     still_blocked = file_read(path=str(payroll))
     assert (still_blocked["status"], still_blocked["reason_code"]) == ("error", file_access.ACCESS_DENIED)
@@ -618,3 +637,63 @@ def test_pre_block_on_missing_file_path_refuses_write_while_sibling_succeeds(lay
     refused = file_write(path=str(future_blocked), content="should-not-write\n")
     assert (refused["status"], refused["reason_code"]) == ("error", file_access.ACCESS_DENIED)
     assert not future_blocked.exists()
+
+
+# -- C12: Parent-folder block refusal names the blocking folder --------------
+
+
+def test_parent_folder_block_refusal_names_the_blocking_folder(layout: InstanceLayout) -> None:
+    q1_dir = layout.team_dir / "finance" / "q1"
+    q1_dir.mkdir(parents=True, exist_ok=True)
+    report = q1_dir / "report.csv"
+    report.write_text("q1-numbers\n", encoding="utf-8")
+
+    worker_agent = _make_agent(layout, "alice", agent_type="WebResearchAgent")
+    service = access_runtime.runtime_access(worker_agent).service
+    assert service is not None
+    requests = AccessRequests(service=service, inbox=StoredAccessInbox(service.store), lead_agent_type="TeamArchitect")
+
+    # Agent-side block on team/finance: reading team/finance/q1/report.csv names both the file and the block target.
+    agent_block = requests.block(
+        OWNER,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/WebResearchAgent"),
+        target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance"),
+        reason="Finance folder is restricted",
+    )
+    worker = AgentPrincipal("agent-1", "WebResearchAgent", "worker", TEAM, work_id="req-parent-1")
+    alice = PersonPrincipal("alice", TEAM, ("member",))
+    refused_agent = service.decide_folder(
+        agent=worker,
+        person=alice,
+        target_id="team/finance/q1/report.csv",
+        is_file=True,
+        level=AccessLevel.READ,
+        task_id="req-parent-1",
+    )
+    assert refused_agent.allowed is False
+    assert refused_agent.blocking_policy_ids == (f"block:{agent_block.grant_id}",)
+    assert "team/finance/q1/report.csv" in refused_agent.reason
+    assert "by a block on team/finance" in refused_agent.reason
+    assert "A block on team/finance stops WebResearchAgent from using team/finance/q1/report.csv" in refused_agent.next_step
+
+    # Person-side block on team/finance: tells administrators to remove the block on team/finance (not the file).
+    requests.unblock(OWNER, agent_block.grant_id)
+    person_block = requests.block(
+        OWNER,
+        subject=SubjectRefV1(kind=SubjectKind.USER, id="alice"),
+        target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance"),
+        reason="Alice cannot read finance",
+    )
+    refused_person = service.decide_folder(
+        agent=worker,
+        person=alice,
+        target_id="team/finance/q1/report.csv",
+        is_file=True,
+        level=AccessLevel.READ,
+        task_id="req-parent-2",
+    )
+    assert refused_person.allowed is False
+    assert refused_person.blocking_policy_ids == (f"block:{person_block.grant_id}",)
+    assert "blocked from team/finance/q1/report.csv by a block on team/finance" in refused_person.reason
+    assert "remove the block on team/finance for them" in refused_person.next_step
+    assert "remove the block on team/finance/q1/report.csv" not in refused_person.next_step

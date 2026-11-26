@@ -711,6 +711,29 @@ class AccessService:
             raise AccessDenied(decision)
         return decision
 
+    def _evaluate_person_folder(
+        self,
+        person: PersonPrincipal | None,
+        *,
+        resource: dict[str, str],
+        entities: list[dict[str, Any]],
+        level: AccessLevel,
+        task_id: str | None,
+    ) -> tuple[_SideResult, list[GrantV1]]:
+        if person is None:
+            return _SideResult(True, (), ()), []
+        grants = self.valid_grants(person.subjects(), task_id=task_id)
+        result = self._evaluate(
+            principal=person.uid(),
+            principal_entities=person_entities(person),
+            grants=grants,
+            action=f"use.{level.value}",
+            resource=resource,
+            resource_entities=entities,
+            task_id=task_id,
+        )
+        return result, grants
+
     def decide_folder(
         self,
         *,
@@ -787,13 +810,16 @@ class AccessService:
             ):
                 agent_result, agent_grants = agent_side()
             if not agent_result.allowed:
+                block_targets = _blocking_targets(agent_result.blocking, agent_grants)
                 return self._finish(
                     AccessDecisionV1(
                         allowed=False,
                         **base,
-                        reason=_folder_refusal(agent.agent_type, level, folder_id, chain[0], agent_result, other_person),
+                        reason=_folder_refusal(
+                            agent.agent_type, level, folder_id, chain[0], agent_result, other_person, block_targets
+                        ),
                         next_step=_folder_next_step(
-                            agent.agent_type, level, folder_id, chain[0], agent_result, other_person
+                            agent.agent_type, level, folder_id, chain[0], agent_result, other_person, block_targets
                         ),
                         blocking_policy_ids=agent_result.blocking,
                     ),
@@ -801,22 +827,17 @@ class AccessService:
                     person,
                     task_id,
                 )
-        person_result = (
-            _SideResult(True, (), ())
-            if person is None
-            else self._evaluate(
-                principal=person.uid(),
-                principal_entities=person_entities(person),
-                grants=self.valid_grants(person.subjects(), task_id=task_id),
-                action=f"use.{level.value}",
-                resource=resource,
-                resource_entities=entities,
-                task_id=task_id,
-            )
+        person_result, person_grants = self._evaluate_person_folder(
+            person, resource=resource, entities=entities, level=level, task_id=task_id
         )
         if not person_result.allowed:
             reason, next_step = _person_folder_refusal(
-                level, folder_id, chain[0], bool(_blocks(person_result.blocking)), other_person
+                level,
+                folder_id,
+                chain[0],
+                bool(_blocks(person_result.blocking)),
+                other_person,
+                _blocking_targets(person_result.blocking, person_grants),
             )
             return self._finish(
                 AccessDecisionV1(
@@ -1756,6 +1777,20 @@ def _recipient_allowed(
     return any(subject in covering for subject in allowed)
 
 
+def _blocking_targets(blocking: tuple[str, ...], grants: Iterable[GrantV1]) -> tuple[str, ...]:
+    """Target ids of the active block grants named in ``blocking``, in order without duplicates."""
+
+    by_id = {grant.grant_id: grant.target.id for grant in grants}
+    targets: list[str] = []
+    seen: set[str] = set()
+    for grant_id in _blocks(blocking):
+        target_id = by_id.get(grant_id)
+        if target_id and target_id not in seen:
+            seen.add(target_id)
+            targets.append(target_id)
+    return tuple(targets)
+
+
 def _folder_refusal(
     agent_type: str,
     level: AccessLevel,
@@ -1763,11 +1798,18 @@ def _folder_refusal(
     target_id: str,
     result: _SideResult,
     other_person: bool,
+    block_targets: tuple[str, ...] = (),
 ) -> str:
     if other_person:
         return f"{target_id} is in another person's private folder, and its owner has not shared it at this level."
     if _blocks(result.blocking):
-        text = f"{agent_type} needs {level.value} access to {target_id}. It is blocked."
+        if block_targets and block_targets != (target_id,):
+            text = (
+                f"{agent_type} needs {level.value} access to {target_id}. "
+                f"It is blocked by a block on {', '.join(block_targets)}."
+            )
+        else:
+            text = f"{agent_type} needs {level.value} access to {target_id}. It is blocked."
     else:
         text = f"{agent_type} needs {level.value} access to the folder {folder_id}."
     if result.error:
@@ -1782,6 +1824,7 @@ def _folder_next_step(
     target_id: str,
     result: _SideResult,
     other_person: bool,
+    block_targets: tuple[str, ...] = (),
 ) -> str:
     if other_person:
         return (
@@ -1789,8 +1832,9 @@ def _folder_next_step(
             "browser). Work in this person's folder or the shared team/ and agents/ folders meanwhile."
         )
     if _blocks(result.blocking):
+        by_block = f" on {', '.join(block_targets)}" if block_targets and block_targets != (target_id,) else ""
         return (
-            f"A block stops {agent_type} from using {target_id}; asking for access will not change that. "
+            f"A block{by_block} stops {agent_type} from using {target_id}; asking for access will not change that. "
             "Tell the person you work for; only a person can remove the block."
         )
     return (
@@ -1800,10 +1844,22 @@ def _folder_next_step(
 
 
 def _person_folder_refusal(
-    level: AccessLevel, folder_id: str, target_id: str, blocked: bool, other_person: bool
+    level: AccessLevel,
+    folder_id: str,
+    target_id: str,
+    blocked: bool,
+    other_person: bool,
+    block_targets: tuple[str, ...] = (),
 ) -> tuple[str, str]:
     shown = target_id if blocked or other_person else folder_id
     if blocked:
+        if block_targets and block_targets != (target_id,):
+            block_desc = ", ".join(block_targets)
+            return (
+                f"The person this task works for is blocked from {target_id} by a block on {block_desc}, "
+                "and agents never exceed their person.",
+                f"Ask a team administrator to remove the block on {block_desc} for them.",
+            )
         return (
             f"The person this task works for is blocked from {shown}, and agents never exceed their person.",
             f"Ask a team administrator to remove the block on {shown} for them.",

@@ -292,10 +292,10 @@ class AccessRequests:
 
     # -- descriptions ---------------------------------------------------------
 
-    def target_name(self, target: TargetRefV1) -> str:
+    def target_name(self, target: TargetRefV1, *, for_block: bool = False) -> str:
         catalog = self.service.catalog
         if target.kind is TargetKind.FOLDER:
-            return f"the {target.id}/ folder"
+            return f"the path {target.id}" if for_block else f"the {target.id}/ folder"
         if target.kind is TargetKind.FILE:
             return f"the file {target.id}"
         if target.kind is TargetKind.TOOL_SET and target.id in catalog.tool_sets:
@@ -1426,7 +1426,8 @@ class AccessRequests:
             raise HandDownRefused("Agents can restrict only workers; people restrict team leads and system agents.")
         if not self.service.may_give(grantor, target, AccessLevel.READ, task_id=task_id, person_id=person_id):
             raise HandDownRefused(
-                f"You can restrict only access you could give; you cannot give access to {self.target_name(target)}."
+                f"You can restrict only access you could give; you cannot give access to "
+                f"{self.target_name(target, for_block=True)}."
             )
         now = self.service.clock()
         block = GrantV1(
@@ -1488,7 +1489,7 @@ class AccessRequests:
             raise ValueError(f"A block for a limited time needs hours between 1 and {MAX_REQUEST_HOURS}.")
         # Raises HandDownRefused for targets outside the catalog.
         self.service.target_entities_for_ref(target)
-        name = self.target_name(target)
+        name = self.target_name(target, for_block=True)
         previous = self._replacement_block(person, replace_block_id, subject, target) if replace_block_id else None
         if previous is not None and hours is not None:
             raise ValueError("A replacement keeps the old block's expiry; leave out --hours.")

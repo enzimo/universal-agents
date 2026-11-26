@@ -321,12 +321,12 @@ class _MapRead:
 
         return grant.kind is GrantKind.ACCESS and self.service.worker_lasting_refusal(grant) is not None
 
-    def target(self, target: TargetRefV1) -> dict[str, str]:
+    def target(self, target: TargetRefV1, *, for_block: bool = False) -> dict[str, str]:
         return {
             "target": target.id,
             "target_kind": target.kind.value,
             "target_kind_words": TARGET_KIND_WORDS[target.kind],
-            "target_name": self.requests.target_name(target),
+            "target_name": self.requests.target_name(target, for_block=for_block),
         }
 
     def hand_on_words(self, grant: GrantV1) -> str:
@@ -480,7 +480,7 @@ class _MapRead:
     def block_view(self, block: GrantV1) -> dict[str, Any]:
         return {
             "block_id": block.grant_id,
-            **self.target(block.target),
+            **self.target(block.target, for_block=True),
             **_lifetime(block),
             "blocked_by": self.who(block.granted_by),
             "reason": block.reason,
@@ -868,7 +868,7 @@ class GatewayAccessMap:
         return {
             "block": read.block_view(created),
             "message": (
-                f"{read.who(subject)} is blocked from {read.requests.target_name(target)}. "
+                f"{read.who(subject)} is blocked from {read.requests.target_name(target, for_block=True)}. "
                 "It applies from the next action."
             ),
         }
@@ -882,7 +882,8 @@ class GatewayAccessMap:
         return {
             "block_id": removed.grant_id,
             "message": (
-                f"The block on {read.who(removed.subject)} for {read.requests.target_name(removed.target)} is removed. "
+                f"The block on {read.who(removed.subject)} for "
+                f"{read.requests.target_name(removed.target, for_block=True)} is removed. "
                 "The access it stopped applies again from the next action."
             ),
         }

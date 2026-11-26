@@ -404,9 +404,9 @@ class CompiledProposal:
     person_needs: tuple[tuple[TargetRefV1, AccessLevel], ...] = ()
 
 
-def _target_name(catalog: ToolCatalog, target: TargetRefV1) -> str:
+def _target_name(catalog: ToolCatalog, target: TargetRefV1, *, for_block: bool = False) -> str:
     if target.kind is TargetKind.FOLDER:
-        return f"the {target.id}/ folder"
+        return f"the path {target.id}" if for_block else f"the {target.id}/ folder"
     if target.kind is TargetKind.TOOL_SET:
         tool_set = catalog.tool_sets.get(target.id)
         return tool_set.display_name if tool_set else target.id
@@ -793,7 +793,10 @@ class ProposalCompiler:
                 ReviewItemV1(
                     item_id=f"block-{index}",
                     section="restriction",
-                    text=f"{block.agent_type} can no longer use {_target_name(catalog, block.target)}. Why: {block.reason}",
+                    text=(
+                        f"{block.agent_type} can no longer use {_target_name(catalog, block.target, for_block=True)}. "
+                        f"Why: {block.reason}"
+                    ),
                 )
             )
         return rows

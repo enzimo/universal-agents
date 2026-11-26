@@ -185,6 +185,10 @@ operator).
 - Folders outside the workspace reach agents only as **data folders** that an
   administrator registers (`/access folders`, the Access page's Files tab, or
   a proposal); agents still need access to each one when access control is on.
+- A block on a folder or file path stops file tools from opening it and keeps
+  the containing folder out of sandboxed code; sibling files stay readable and
+  the blocked file's name still appears in its parent folder's listing. Blocks
+  match the exact spelling of a path.
 
 ## Platform changes
 
