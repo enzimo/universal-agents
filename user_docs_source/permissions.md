@@ -597,7 +597,10 @@ one TeamLead holds, and TeamLead can block a worker from a folder or file path
 in the current request with `restrict_access(agent_type=..., folder=..., reason=...)`.
 TeamLead does not pass on a folder that holds a file or folder TeamLead itself
 is blocked from, because the worker would get the blocked path with it; the
-worker then asks with `request_access` and a person decides.
+worker then asks with `request_access` and a person decides. If the person
+approves, the worker gets the folder for its task; with **Keep**, TeamLead also
+keeps it for later tasks but still does not pass it on while the block is
+inside it.
 People give and block folders (and block file paths) with `/access` and
 `assistant_cli access` (examples below).
 

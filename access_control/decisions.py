@@ -113,6 +113,21 @@ class HandDownRefused(PermissionError):
     """A grant could not be created or handed down; the message says why."""
 
 
+class HandDownBlockedInside(HandDownRefused):
+    """A folder was not handed on because its grantor is blocked from a path inside it.
+
+    Raised by ``_refuse_folder_with_block_inside``. Agents get it as a plain
+    refusal; a person's approval that keeps a worker's folder request for the
+    team lead catches it and gives the worker this task's access on the
+    person's own authority (``AccessRequests._give_specs``).
+    """
+
+    def __init__(self, message: str, *, blocked_paths: tuple[str, ...], block_ids: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.blocked_paths = blocked_paths
+        self.block_ids = block_ids
+
+
 @dataclass(frozen=True)
 class _SideResult:
     allowed: bool
@@ -1881,7 +1896,7 @@ def _person_folder_refusal(
 
 
 def _refuse_folder_with_block_inside(grantor: AgentPrincipal, target: TargetRefV1, grants: Iterable[GrantV1]) -> None:
-    """Raise ``HandDownRefused`` when the grantor is blocked from a path inside the folder it would hand on.
+    """Raise ``HandDownBlockedInside`` when the grantor is blocked from a path inside the folder it would hand on.
 
     Cedar refuses the hand-down of a folder the grantor is blocked from, or
     one below such a folder, but a block on a file or subfolder inside it does
@@ -1889,7 +1904,8 @@ def _refuse_folder_with_block_inside(grantor: AgentPrincipal, target: TargetRefV
     the worker, who holds no block on it, so a worker would get what its
     grantor may not use (AGENTS.md: a worker gets what the team lead may hand
     on). Same rule as the sandbox's (``access_control.folders.paths_inside``).
-    Fails closed: a block whose target id cannot be read refuses the hand-down.
+    Fails closed: a block whose target id cannot be read refuses the hand-down
+    with a plain ``HandDownRefused``, which no caller turns into a grant.
     """
 
     if target.kind is not TargetKind.FOLDER:
@@ -1914,17 +1930,20 @@ def _refuse_folder_with_block_inside(grantor: AgentPrincipal, target: TargetRefV
         ) from exc
     if not inside:
         return
+    block_ids = tuple(grant.grant_id for grant in blocks if grant.target.id in inside)
     logger.info(
         "A folder holding a path the grantor is blocked from is not handed on. "
         "event=hand_down_refused_block_inside grantor_type=%s target=%s blocked_paths=%s block_ids=%s",
         grantor.agent_type,
         target.id,
         ",".join(inside),
-        ",".join(grant.grant_id for grant in blocks if grant.target.id in inside),
+        ",".join(block_ids),
     )
-    raise HandDownRefused(
+    raise HandDownBlockedInside(
         f"{grantor.agent_type} is blocked from {', '.join(inside)} inside {target.id}, so it may not hand on "
-        f"{target.id}. Hand on a folder that does not contain the blocked path, or ask a person."
+        f"{target.id}. Hand on a folder that does not contain the blocked path, or ask a person.",
+        blocked_paths=tuple(inside),
+        block_ids=block_ids,
     )
 
 
@@ -1991,6 +2010,7 @@ __all__ = [
     "UNCONFINED_EXECUTION_TOOL_ID",
     "AccessDenied",
     "AccessService",
+    "HandDownBlockedInside",
     "HandDownRefused",
     "attenuation_problems",
 ]

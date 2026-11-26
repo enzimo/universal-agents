@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Protocol
 
-from access_control.decisions import AccessService, HandDownRefused
+from access_control.decisions import AccessService, HandDownBlockedInside, HandDownRefused
 from access_control.entities import (
     AGENT_ROLE_TEAM_LEAD,
     AGENT_ROLE_WORKER,
@@ -370,9 +370,10 @@ class AccessRequests:
         - Kept, another worker's request: the team lead's lasting access for the
           person, which it may hand on without asking, so the worker's later
           tasks get it at once; and the worker's grant for this task, handed
-          down from it (``_approve``), so removing the team lead's access ends
-          it too. Workers keep no lasting access of their own
-          (``AccessService.agent_grants``).
+          down from it (``_worker_task_grant``), so removing the team lead's
+          access ends it too (given on the reviewer's authority instead when
+          the team lead is blocked inside the folder). Workers keep no
+          lasting access of their own (``AccessService.agent_grants``).
         - The person too, when they lack the access (agents never exceed their person).
         """
 
@@ -1028,13 +1029,40 @@ class AccessRequests:
         for spec in specs:
             spec = spec.model_copy(update={"approval_id": request.request_id})
             if kept_by_lead and spec.subject == request.subject:
-                # The worker's access for this task comes from what the team
-                # lead now keeps, so removing that also ends it.
-                grant = self.service.hand_down(self.lead(), spec, task_id=request.work_id, person_id=request.person_id)
+                grant = self._worker_task_grant(request, reviewer, spec)
             else:
                 grant = self.service.grant_by_person(reviewer, spec)
             given.append(grant)
         return given
+
+    def _worker_task_grant(self, request: AccessRequestV1, reviewer: PersonPrincipal, spec: GrantV1) -> GrantV1:
+        """The worker's grant for this task when the person keeps its request for the team lead.
+
+        Normally handed down from what the team lead now keeps, so removing
+        that also ends it. When the team lead is blocked from a path inside
+        the folder, it may not pass the folder on
+        (``HandDownBlockedInside``), but the person has just approved this
+        worker's request: the worker gets this task's grant on the person's
+        authority, exactly as "approve for this task only" gives it, and the
+        team lead keeps its access for later tasks. Any other refusal stays a
+        refusal.
+        """
+
+        try:
+            return self.service.hand_down(self.lead(), spec, task_id=request.work_id, person_id=request.person_id)
+        except HandDownBlockedInside as exc:
+            logger.warning(
+                "The team lead is blocked inside the approved folder, so the worker's task access is given on "
+                "the reviewer's authority. event=approval_worker_grant_by_person request_id=%s by=%s "
+                "worker_type=%s target=%s blocked_paths=%s block_ids=%s",
+                request.request_id,
+                reviewer.person_id,
+                request.requester_agent_type,
+                spec.target.id,
+                ",".join(exc.blocked_paths),
+                ",".join(exc.block_ids),
+            )
+            return self.service.grant_by_person(reviewer, spec)
 
     def _chosen_lifetime(
         self, request: AccessRequestV1, choice: AccessReviewChoice, keep: bool | None, keep_hours: int | None

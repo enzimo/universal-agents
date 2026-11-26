@@ -123,12 +123,14 @@ def paths_inside(folder_id: str, paths: Iterable[str]) -> list[str]:
     """The ``paths`` strictly inside the folder ``folder_id``, sorted.
 
     Used with the targets of blocks: a block inside a folder keeps the whole
-    folder from the sandbox (``custom_agents.code_access``) and from being
-    handed on (``AccessService._prepare_hand_down``), because both would give
-    the folder with everything in it. A block on the folder itself or above it
-    is left out: Cedar already refuses the folder for it. Raises
-    ``FolderIdError`` when an id is not a folder id.
+    folder from being handed on (``AccessService._prepare_hand_down``),
+    because the worker would get the folder with everything in it. A block on
+    the folder itself or above it is left out: Cedar already refuses the
+    folder for it. Raises ``FolderIdError`` when an id is not a folder id.
     """
+
+    # custom_agents.code_access._blocked_inside applies the same rule for the
+    # sandbox; it can call this once the parallel sandbox change is merged.
 
     return sorted(path for path in paths if path != folder_id and covers(folder_id, path))
 

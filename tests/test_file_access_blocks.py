@@ -44,6 +44,8 @@ from assistant_gateway.application.commands.context import GatewayActorContext
 from custom_agents import access_runtime, code_access, folder_access
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
+    AccessRequestStatus,
+    AccessReviewChoice,
     DelegationMode,
     GrantKind,
     GrantLifetime,
@@ -843,6 +845,71 @@ def test_lead_block_on_subfolder_stops_worker_hand_on_of_parent_but_not_of_unblo
     assert "open-notes" in _text(allowed)
     assert [grant.target.id for grant in _worker_task_grants(service)] == ["data/reports/other"]
     _refused(file_read(path=str(reports_dir / "private" / "plan.txt")), "restricted-plan")
+
+
+@pytest.mark.parametrize("choice", [AccessReviewChoice.APPROVE, AccessReviewChoice.APPROVE_TASK])
+def test_person_approval_of_worker_folder_request_with_lead_block_inside(
+    layout: InstanceLayout, tmp_path: Path, caplog: pytest.LogCaptureFixture, choice: AccessReviewChoice
+) -> None:
+    # C14: the team lead cannot pass data/reports on (a block inside it), so the
+    # worker's request goes to Alice. Her default "Keep" approval and her
+    # "this task only" approval both give the worker this task's access.
+    worker_agent, service, reports_dir, requests = _reports_with_lead_hand_on(layout, tmp_path)
+    block = requests.block(
+        OWNER,
+        subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect"),
+        target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports/payroll.csv"),
+        reason="Payroll stays with people.",
+    )
+    principal, person, task_id = access_runtime.task_access(worker_agent, access_runtime.runtime_access(worker_agent))
+    assert person is not None
+    asked = requests.submit(
+        requester=principal,
+        person=person,
+        target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"),
+        level=AccessLevel.READ,
+        reason="Summarize the reports.",
+        lifetime=GrantLifetime.UNTIL_REVOKED,
+        task_id=task_id,
+    )
+    assert asked.request is not None
+    assert asked.request.status is AccessRequestStatus.WAITING
+    assert _worker_task_grants(service) == []
+
+    alice = PersonPrincipal("alice", TEAM, ("member",))
+    with caplog.at_level("WARNING", logger="access_control.requests"):
+        decided = requests.decide(asked.request.request_id, alice, choice)
+    assert decided.status is AccessRequestStatus.GRANTED
+    assert "event=access_decision_failed" not in caplog.text
+
+    (worker_grant,) = _worker_task_grants(service)
+    assert (worker_grant.target.id, worker_grant.lifetime, worker_grant.task_id) == (
+        "data/reports",
+        GrantLifetime.TASK,
+        principal.work_id,
+    )
+    assert worker_grant.parent_grant_id is None
+    assert worker_grant.granted_by == SubjectRefV1(kind=SubjectKind.USER, id="alice")
+    lead_subject = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=f"{TEAM}/TeamArchitect")
+    given = [service.store.get(grant_id) for grant_id in decided.grant_ids]
+    lead_kept = [grant for grant in given if grant is not None and grant.subject == lead_subject]
+    if choice is AccessReviewChoice.APPROVE:
+        # The team lead keeps the access for later tasks; the fallback is logged with the block.
+        assert [grant.lifetime for grant in lead_kept] == [GrantLifetime.UNTIL_REVOKED]
+        assert "event=approval_worker_grant_by_person" in caplog.text
+        assert block.grant_id in caplog.text
+    else:
+        assert lead_kept == []
+        assert "event=approval_worker_grant_by_person" not in caplog.text
+
+    # The person approved the folder for this worker's task, so its files open.
+    allowed = file_read(path=str(reports_dir / "public.csv"))
+    assert allowed["status"] == "success"
+    assert "open-public" in _text(allowed)
+    # The team lead still may not pass the folder on itself.
+    assert not service.may_hand_on_for_task(
+        principal, person, TargetRefV1(kind=TargetKind.FOLDER, id="data/reports"), AccessLevel.READ, principal.work_id
+    )
 
 
 # -- F4: the request (work_id) and the schedule (schedule_id) are in the kept-answer key

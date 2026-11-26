@@ -2607,9 +2607,13 @@ like a tool. A folder-kind access grant on a file path links only
 link. `AccessService._prepare_hand_down` refuses to hand on a folder when the
 grantor holds a block on a path inside it (`access_control.folders.paths_inside`,
 the rule the sandbox uses), because the worker holds no such block and would
-reach the blocked path through the folder. A block added after a folder was
-already handed on to a running task does not take that task's grant back; the
-grant ends with the task.
+reach the blocked path through the folder. That refusal is
+`HandDownBlockedInside`; when a person approves a worker's folder request with
+"Keep", `AccessRequests._give_specs` catches it and gives the worker its task
+grant on the reviewer's authority, as "approve for this task only" does, and
+logs `event=approval_worker_grant_by_person` with the block ids. A block added
+after a folder was already handed on to a running task does not take that
+task's grant back; the grant ends with the task.
 
 People share and send files through `assistant_gateway/file_sharing.py`
 (`/share`, `/unshare`, `/shares`, `/send`, and the workspace browser's Share
