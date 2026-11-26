@@ -635,12 +635,21 @@ that send work out and wait for a reply):
 While a task is in a timed wait:
 
 - **Worker capacity is freed.** The worker can accept and run other tasks while
-  the timer ticks. When the timer ends, if the agent is busy with another task,
-  the wait completes and the task continues next as soon as the current task
-  finishes or pauses.
+  the timer ticks. When the timer ends, if the worker is busy with another task
+  it took during the wait, the finished wait is held until that work finishes or
+  pauses, so a long task on the same worker can delay continuation past the
+  scheduled resume time.
+- **Budgets are tracked per task.** Each delegated subtask starts with its own
+  task history and therefore its own wait budget; a child task's waits do not
+  count against its parent task's wait budget.
 - **Recurring schedules protect the next run.** In a recurring scheduled run, a
   wait whose resume time would reach or pass the schedule's next fire time is
   refused with the next run time named, so the next occurrence is not skipped.
+- **Long waits in interactive chat may show a reply timeout notice.** Because
+  timed waits pause locally without sending an intermediate message, a chat
+  request that pauses longer than the gateway's reply timeout (default 60
+  minutes) shows a timeout notice in chat; the task keeps waiting in the
+  background and delivers its final reply when the wait ends.
 - **Messages in the same chat become guidance.** If you send another message in
   a chat thread whose task is waiting on a timer, it is saved as guidance for
   that task and applied when the wait ends; it does not wake the timer early.
@@ -653,7 +662,8 @@ While a task is in a timed wait:
 - **Restarts keep the wait and budget.** A task's waited-minutes budget and
   scheduled resume time are saved with the task; after a restart, a wait that
   is still in the future stays waiting, and a due wait resumes the task from a
-  durable note with the current UTC time.
+  durable note explaining that the wait ended (the resumed turn receives the
+  current UTC time as usual).
 
 ## Change the worker or launch rules
 

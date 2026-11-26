@@ -100,7 +100,6 @@ from custom_agents.paused_wait_resume import (
 from custom_agents.task_human_interaction_blockers import (
     SETUP_RUN_BLOCKER,
     answer_held,
-    clear_answer_marks,
     get_human_interaction_blocker,
     is_setup_run_blocker,
     record_human_interaction_blocker,
@@ -701,6 +700,7 @@ async def _answer_paused_turn(agent: Any, run: ToolSetupRunV1) -> bool:
         kind=SETUP_RUN_BLOCKER,
         wait_id=run.run_id,
         steering=steering,
+        interrupt_id=run.interrupt_id,
     )
     if not held:
         return False
@@ -879,19 +879,6 @@ async def resume_ended_setup_runs(agent: Any, *, now: float | None = None, at_st
     if moment < getattr(agent, "_setup_run_check_after", 0.0):
         return 0
     agent._setup_run_check_after = moment + SETUP_RUN_RECOVERY_SECONDS
-    if at_start:
-        # No paused turn survives a restart, so every held-answer mark is stale;
-        # removing them also covers an agent whose id is fixed in its
-        # configuration, whose old marks would otherwise still name it.
-        cleared = await agent.task_manager.operations_runtime.run(
-            partial(clear_answer_marks, agent.task_manager)
-        )
-        if cleared:
-            logger.info(
-                "Removed held-answer marks left from before the restart. event=tool_setup_answer_marks_cleared "
-                "task_ids=%s",
-                ",".join(cleared),
-            )
     resumed = 0
     for task_id, blocker in await agent.task_manager.operations_runtime.run(partial(_setup_run_waits, agent)):
         resumed += await _recover_task(agent, task_id, blocker, at_start=at_start)

@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from custom_agents import paused_wait_resume, task_steering_runtime, tool_setup_run_runtime
+from custom_agents import paused_wait_resume, runtime_recovery, task_steering_runtime, tool_setup_run_runtime
 from custom_agents.task_human_interaction_blockers import (
     ACCESS_REQUEST_BLOCKER,
     clear_answered_blocker,
@@ -842,10 +842,11 @@ async def test_start_recovery_removes_every_mark_even_when_it_cannot_resume_the_
     monkeypatch.setattr(tool_setup_run_runtime, "_load", unreadable)
 
     with caplog.at_level(logging.INFO):
+        await runtime_recovery._clear_stale_wait_answer_marks(lead)
         assert await tool_setup_run_runtime.resume_ended_setup_runs(lead, now=PASS, at_start=True) == 0
 
     assert not answer_held(record_of(lead)), "the stuck check can report it if recovery keeps failing"
-    assert "event=tool_setup_answer_marks_cleared" in caplog.text
+    assert "event=wait_answer_marks_cleared" in caplog.text
 
 
 @pytest.mark.parametrize("marked", [True, False], ids=["marked record", "unmarked record"])

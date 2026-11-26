@@ -1578,6 +1578,32 @@ async def send_interrupt_request_for_result(
                 "conversation_id": getattr(msg_meta, "conversation_id", None),
             },
         )
+    timed_wait_decisions: list[Any] = []
+    if timed_waits:
+        # Stage timed waits (charge and blocker record) BEFORE ProgressState.WAITING
+        # is persisted, just like access requests above, so a crash right after
+        # WAITING can never leave a waiting task without its wait record.
+        from custom_agents.timed_wait_runtime import stage_timed_wait
+
+        deferred_by = (
+            "upstream_interrupt"
+            if upstream_interrupts
+            else ("tool_setup_run" if setup_runs else "access_request")
+        )
+        defer_for_other_wait = bool(upstream_interrupts or setup_runs)
+        for timed_wait in timed_waits:
+            assert isinstance(timed_wait.reason, dict)
+            timed_wait_decisions.append(
+                await stage_timed_wait(
+                    agent,
+                    task_id=task.task_id,
+                    interrupt_id=timed_wait.interrupt_id,
+                    reason=timed_wait.reason,
+                    msg_meta=msg_meta,
+                    defer_for_other_wait=defer_for_other_wait,
+                    deferred_by=deferred_by,
+                )
+            )
     # Already set when the call paused (strands_parts.mark_paused), and kept by
     # a resumed turn's parts since their first pause; the session holds them now.
     strands.replace_before_next_turn = True
@@ -1608,19 +1634,11 @@ async def send_interrupt_request_for_result(
         await begin_run(
             agent, task_id=task.task_id, interrupt_id=setup_run.interrupt_id, reason=setup_run.reason, msg_meta=msg_meta
         )
-    for timed_wait in timed_waits:
-        # Called last: any other wait of this step already holds the blocker, so a second wait defers.
-        from custom_agents.timed_wait_runtime import begin_timed_wait
+    if timed_wait_decisions:
+        from custom_agents.timed_wait_runtime import finish_timed_wait
 
-        assert isinstance(timed_wait.reason, dict)
-        await begin_timed_wait(
-            agent,
-            task_id=task.task_id,
-            interrupt_id=timed_wait.interrupt_id,
-            reason=timed_wait.reason,
-            msg_meta=msg_meta,
-            defer_for_other_wait=bool(upstream_interrupts),
-        )
+        for decision in timed_wait_decisions:
+            await finish_timed_wait(agent, decision)
     if routing_key is None:
         return steering
 

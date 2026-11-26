@@ -300,6 +300,46 @@ async def test_hand_answer_to_paused_turn_unmarks_if_other_answer_arrives_during
 
 
 @pytest.mark.asyncio
+async def test_hand_answer_to_paused_turn_unmarks_if_turn_stops_during_save(
+    manager: TaskManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the paused turn disappears while mark_answer_held is saving, remove the mark and leave no orphan answer."""
+
+    woken: list = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+    record_human_interaction_blocker(manager, TASK, _timed_record("i-wait"))
+    agent = _fake_agent(manager, interrupt_id="i-wait")
+    original_run = manager.operations_runtime.run
+    stopped = False
+
+    async def racing_stop(fn, *args, **kwargs):
+        nonlocal stopped
+        result = await original_run(fn, *args, **kwargs)
+        if not stopped and result is True:
+            stopped = True
+            agent._interrupted_turn_sessions.pop(TASK, None)
+        return result
+
+    monkeypatch.setattr(manager.operations_runtime, "run", racing_stop)
+
+    held = await paused_wait_resume.hand_answer_to_paused_turn(
+        agent,
+        task_id=TASK,
+        kind=TIMED_WAIT_BLOCKER,
+        wait_id="i-wait",
+        steering=_timed_steering("i-wait"),
+        interrupt_id="i-wait",
+        replace_pending=False,
+    )
+
+    assert stopped is True
+    assert held is False
+    assert TASK not in agent._pending_interrupt_responses
+    assert not answer_held(get_human_interaction_blocker(manager, TASK))
+    assert not woken
+
+
+@pytest.mark.asyncio
 async def test_hand_answer_to_paused_turn_marks_and_wakes_for_timed_wait(
     manager: TaskManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:

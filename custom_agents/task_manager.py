@@ -64,6 +64,7 @@ from custom_agents.task_records import AfterActionReportRecordResult, ReportedWo
 from custom_agents.turn_work_notes import note_summary, render_earlier_turn_work, turn_work_notes
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import (
+    BUBBLED_ENTRY_ID_KEY,
     AfterActionReport,
     ExecutionDigest,
     ExecutionPlanItem,
@@ -3410,9 +3411,9 @@ class TaskManager(
             return
 
         existing_bubbles = {
-            entry.details.get("bubbled_entry_id")
+            entry.details.get(BUBBLED_ENTRY_ID_KEY)
             for entry in parent_task.execution_history
-            if entry.details.get("bubbled_entry_id")
+            if entry.details.get(BUBBLED_ENTRY_ID_KEY)
         }
 
         for entry in subtask_task.execution_history:
@@ -3438,7 +3439,7 @@ class TaskManager(
                 related_task_id=subtask_task.task_id,
                 plan_step_id=entry.plan_step_id,
                 tracks_to_plan=entry.tracks_to_plan,
-                details={**entry.details, "bubbled_entry_id": entry.entry_id},
+                details={**entry.details, BUBBLED_ENTRY_ID_KEY: entry.entry_id},
             )
 
     def bubble_subtask_result(self, parent_task_id: str, subtask_id: str) -> None:

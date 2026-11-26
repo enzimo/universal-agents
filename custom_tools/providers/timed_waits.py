@@ -294,6 +294,8 @@ async def wait(minutes: int, reason: str, tool_context: ToolContext) -> str:
     Args:
         minutes: Whole number of minutes to pause (>= 1). All waits in a task
             count toward the team's without-approval total (default 20 minutes).
+            Wait budgets are tracked per task: a delegated subtask has its own
+            budget and its waits do not count against its parent task's budget.
             If a task needs to wait longer than ``wait`` allows (up to 24 hours
             total), ``wait`` refuses and its answer names the next step for
             ``long_wait``.
@@ -310,12 +312,19 @@ async def long_wait(minutes: int, reason: str, tool_context: ToolContext) -> str
 
     Works like ``wait`` but allows a task's total waited time (counting both
     ``wait`` and ``long_wait`` calls) to reach the team's with-approval limit
-    (default 1440 minutes / 24 hours). Not in any standard tool set; when
-    access control is enabled it requires approval for one run or lasting
-    schedule access for a recurring scheduled job.
+    (default 1440 minutes / 24 hours). Wait budgets are tracked per task: a
+    delegated subtask has its own budget and its waits do not count against its
+    parent task's budget. Not in any standard tool set; when access control is
+    enabled it requires approval for one run or lasting schedule access for a
+    recurring scheduled job.
 
     In a recurring scheduled run, waits that would reach or pass the schedule's
     next run time are refused so the next run is not skipped.
+
+    In an interactive chat request, pausing longer than the gateway's reply
+    timeout (default 60 minutes) causes the chat UI to show a timeout notice
+    while the task keeps waiting; the final reply still arrives once the wait
+    ends.
 
     Do not use ``long_wait`` to wait for delegated subtasks, a person's reply,
     or an access decision: those already pause and resume the task by

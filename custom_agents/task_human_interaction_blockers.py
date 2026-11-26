@@ -60,18 +60,18 @@ _WAIT_ID_KEYS: Mapping[str, str] = {
     SETUP_RUN_BLOCKER: "run_id",
     TIMED_WAIT_BLOCKER: "interrupt_id",
 }
-
-
-def wait_id_key(kind: str) -> str:
-    """The record and log field that identifies one locally-ended wait of ``kind``."""
-
-    return _WAIT_ID_KEYS[kind]
 # The mark of a record whose answer waits in memory for the task's lane: when
 # (UTC, ISO 8601) and which agent process holds the answer. Agent ids are new
 # for each process, so a mark from another id is left over from before a
 # restart (``custom_agents.task_wait_reasons``).
 ANSWER_HELD_AT_KEY = "answer_held_at"
 ANSWER_HELD_BY_KEY = "answer_held_by"
+
+
+def wait_id_key(kind: str) -> str:
+    """The record and log field that identifies one locally-ended wait of ``kind``."""
+
+    return _WAIT_ID_KEYS[kind]
 
 
 def blocker_request_ids(blocker: dict[str, Any]) -> list[str]:

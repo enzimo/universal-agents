@@ -40,9 +40,10 @@ from custom_agents.timed_waits import (
 from custom_messages.contracts.access_v2 import TaskContextV1
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage, is_recurring_schedule
-from custom_messages.contracts.task_v1 import Task
+from custom_messages.contracts.task_v1 import BUBBLED_ENTRY_ID_KEY, Task
 from custom_messages.enums import (
     MessageMetaType,
+    ProgressState,
     ScheduleManagementClass,
     TaskHistoryImportance,
     TaskHistoryType,
@@ -340,9 +341,11 @@ def test_timer_running_is_due_summary_and_resume_note() -> None:
     assert not timer_running({"kind": TIMED_WAIT_KIND, "resume_at": "not-a-date"}, BASE_TIME)
     assert not is_due({"kind": TIMED_WAIT_KIND}, BASE_TIME)
 
-    note = resume_note(record, resume_at + timedelta(seconds=5))
-    assert "10-minute wait (Portainer redeploy)" in note
-    assert "2026-11-26 12:10:05 UTC" in note
+    note = resume_note(record)
+    assert "10-minute wait (Portainer redeploy) ended" in note
+    assert "2026-11-26 12:10:00 UTC" in note
+    assert resume_at.isoformat() in note
+    assert resume_note(record) == note
 
 
 # -- Tool tests: pause, resume, A4 budgets, C04 auth-off ------------------------------------
@@ -870,5 +873,116 @@ def test_real_final_run_allows_wait_and_first_of_two_interval_runs_refuses(
         refused_first = asyncio.run(_call_first_of_two())
         assert refused_first["status"] == "refused"
         assert "next run" in refused_first["reason"]
+    finally:
+        forget_task_context_keys()
+
+
+@pytest.mark.asyncio
+async def test_bubbled_child_wait_does_not_count_against_parent_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delegated subtask's bubbled timed_wait_started entry must not consume its parent's wait budget."""
+
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: BASE_TIME)
+    mgr = _make_manager(tmp_path / "manager.db", task_id="parent-task")
+    subtask = Task(
+        task_id="child-task",
+        parent_task_id="parent-task",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="worker step",
+    )
+    assert (
+        mgr.add_subtask(
+            "parent-task",
+            subtask,
+            MessageHeader(from_agent_id="worker"),
+            MessageMeta(),
+        )
+        is not None
+    )
+    _record_started_wait(mgr, "child-task", tool_use_id="tu-child", call_id="call-child", minutes=15)
+    child_info = mgr.get_task_info("child-task")
+    assert child_info is not None
+    child_info.task.answer = "child done"
+    mgr.update_main_task_state("child-task", ProgressState.COMPLETED, BASE_TIME.isoformat())
+    mgr.bubble_subtask_result("parent-task", "child-task")
+
+    parent_info = mgr.get_task_info("parent-task")
+    assert parent_info is not None
+    bubbled_waits = [
+        entry
+        for entry in parent_info.task.execution_history
+        if entry.details
+        and entry.details.get("event") == TIMED_WAIT_STARTED_EVENT
+        and entry.details.get(BUBBLED_ENTRY_ID_KEY)
+    ]
+    assert len(bubbled_waits) == 1
+    assert WaitLedger.from_history(parent_info).total_minutes == 0
+
+    # Parent still has its full 20-minute without-approval wait budget.
+    agent = _make_agent(mgr)
+    set_agent_ref(agent)  # type: ignore[arg-type]
+    try:
+        with task_work("parent-task"), pytest.raises(InterruptException):
+            await wait(10, "parent waits after child finished", _make_tool_context("tu-parent-wait"))
+    finally:
+        set_agent_ref(None)
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_task_identity_refuses_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When signed identity material is present but cannot be verified, refuse the wait fail-safe."""
+
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now)
+
+    # 1. Context signed with a key unknown to the runtime verifier (bad/unverifiable signature).
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    unknown_signer = ContextSigner(ISSUER_SCHEDULER, "unknown-key", Ed25519PrivateKey.generate())
+    bad_signed = unknown_signer.sign(
+        TaskContextV1(
+            context_id="ctx-bad-sig",
+            issuer=ISSUER_SCHEDULER,
+            team_id=TEST_TEAM,
+            person_id="alice",
+            person_roles=("member",),
+            schedule_id="sched-recurring",
+            issued_at_utc=now,
+            expires_at_utc=now + timedelta(hours=1),
+        )
+    )
+    bad_meta = MessageMeta(gateway_context=GatewayContext(task_context=bad_signed))
+    mgr = _make_manager(tmp_path / "manager.db", task_id="task-bad-id", meta=bad_meta)
+    agent = _make_agent(mgr, schedule_store=ScheduleStore(db_path=str(tmp_path / "team.db")))
+
+    use_scheduler_key(monkeypatch)
+    try:
+        set_agent_ref(agent)  # type: ignore[arg-type]
+        try:
+            with task_work("task-bad-id"), caplog.at_level(logging.WARNING):
+                refused = json.loads(await wait(10, "wait with bad context", _make_tool_context("tu-bad-id")))
+            assert refused["status"] == "refused"
+            assert "verify" in refused["reason"].lower()
+            assert "event=timed_wait_refused" in caplog.text
+            assert "reason=identity_unverifiable" in caplog.text
+
+            # 2. Verifier raises RuntimeError while identity material is present.
+            from custom_agents import access_runtime
+
+            def broken_verifier(_agent: Any, _access: Any = None) -> Any:
+                raise RuntimeError("task storage unavailable")
+
+            monkeypatch.setattr(access_runtime, "verified_task_context", broken_verifier)
+            caplog.clear()
+            with task_work("task-bad-id"), caplog.at_level(logging.WARNING):
+                refused_err = json.loads(await wait(10, "wait with broken verifier", _make_tool_context("tu-err-id")))
+            assert refused_err["status"] == "refused"
+            assert "event=timed_wait_refused" in caplog.text
+            assert "reason=identity_unverifiable" in caplog.text
+        finally:
+            set_agent_ref(None)
     finally:
         forget_task_context_keys()

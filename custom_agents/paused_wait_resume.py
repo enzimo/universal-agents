@@ -110,6 +110,16 @@ def drop_paused_turn(
     return True
 
 
+def _steering_interrupt_id(steering: TaskSteering) -> str | None:
+    """Extract the first non-empty interrupt id carried by ``steering``."""
+
+    for item in steering.interrupt_responses or ():
+        interrupt_id = str(item.get("interrupt_id") or "").strip()
+        if interrupt_id:
+            return interrupt_id
+    return None
+
+
 async def hand_answer_to_paused_turn(
     agent: Any,
     *,
@@ -117,6 +127,7 @@ async def hand_answer_to_paused_turn(
     kind: str,
     wait_id: str,
     steering: TaskSteering,
+    interrupt_id: str | None = None,
     replace_pending: bool = True,
     at: str | None = None,
 ) -> bool:
@@ -124,9 +135,11 @@ async def hand_answer_to_paused_turn(
 
     The mark is saved before the answer exists in memory, so the answer is
     never held without its record; the resumed turn removes the record
-    (``task_steering_runtime``). When ``replace_pending`` is False and another
-    answer is already pending for the task, leaves the record unmarked and
-    returns False so the next pass tries again.
+    (``task_steering_runtime``). After saving the mark, re-checks that the
+    paused turn is still waiting (so a concurrent stop or turn drop never
+    leaves an orphan answer) and, when ``replace_pending`` is False, that no
+    other answer arrived meanwhile; otherwise removes the mark and returns
+    False.
     """
 
     if not replace_pending and task_id in agent._pending_interrupt_responses:
@@ -142,7 +155,13 @@ async def hand_answer_to_paused_turn(
     )
     if not marked:
         return False
-    if not replace_pending and task_id in agent._pending_interrupt_responses:
+    target_interrupt_id = interrupt_id or _steering_interrupt_id(steering)
+    turn_still_waits = (
+        paused_turn_waits(agent, task_id, target_interrupt_id)
+        if target_interrupt_id
+        else task_id in getattr(agent, "_interrupted_turn_sessions", {})
+    )
+    if not turn_still_waits or (not replace_pending and task_id in agent._pending_interrupt_responses):
         await manager.operations_runtime.run(partial(remove_answer_mark, manager), task_id, kind, wait_id)
         return False
     agent._pending_interrupt_responses[task_id] = steering

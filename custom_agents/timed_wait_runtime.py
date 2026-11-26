@@ -3,21 +3,25 @@
 Both tools pause the active turn with a local Strands interrupt
 (``TIMED_WAIT_KIND``). This module owns the trusted runtime side:
 
-- **Begin** (``begin_timed_wait``, called last in
+- **Begin** (``decide_timed_wait`` / ``write_timed_wait`` / ``stage_timed_wait``
+  and ``finish_timed_wait``, called around the ``WAITING`` transition in
   ``task_steering_runtime.send_interrupt_request_for_result``): under a
-  per-task lock, defers the wait (no charge, no record) if another wait is
-  already active on the task (same-step ``request_access``, ``set_up_tools``,
-  upstream question, or an earlier ``wait``). When starting a new wait, this
-  module computes ``requested_at`` and ``resume_at`` from ``timed_waits.utc_now``
-  so the blocker record and ``timed_wait_started`` history entry are the single
-  source of truth (including for a wait deferred behind an earlier pause whose
-  reused Strands ``Interrupt`` object still holds its first call's payload). It
-  re-checks the recurring-schedule next-run rule against that ``resume_at``; if
-  the wait no longer fits, nothing is charged and the paused turn is answered
-  immediately with a refusal. Otherwise it writes the ``timed_wait_started``
-  history entry (the budget charge) before saving the blocker record, then
-  wakes the scheduler loop. A re-raise of an already-charged ``call_id`` adds
-  no second charge and restores an unmarked blocker with the original times.
+  per-task lock, ``decide_timed_wait`` defers the wait (no charge, no record)
+  if another wait is already active on the task (same-step ``request_access``,
+  ``set_up_tools``, upstream question, or an earlier ``wait``). When starting a
+  new wait, it computes ``requested_at`` and ``resume_at`` from
+  ``timed_waits.utc_now`` so the blocker record and ``timed_wait_started``
+  history entry are the single source of truth (including for a wait deferred
+  behind an earlier pause whose reused Strands ``Interrupt`` object still holds
+  its first call's payload) and re-checks the recurring-schedule next-run rule
+  against that ``resume_at``. ``write_timed_wait`` writes the
+  ``timed_wait_started`` history entry (the budget charge) and saves the
+  blocker record *before* ``ProgressState.WAITING`` is persisted, so a crash
+  after pausing can never leave a ``WAITING`` task without its blocker. A
+  re-raise of an already-charged ``call_id`` adds no second charge and restores
+  an unmarked blocker with the original times. After ``WAITING`` is saved,
+  ``finish_timed_wait`` wakes the scheduler loop (or, if the wait was refused
+  at start time, answers the paused turn immediately without charging).
 - **Resume** (``resume_due_timed_waits``, run on every scheduler pass, at
   startup recovery, and during lease-loss wind-down): for each non-terminal
   task of this agent whose timed-wait record is due, acquires the task lock,
@@ -39,9 +43,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 from access_control.identity import ISSUER_SCHEDULER
 from custom_agents import timed_waits as timed_waits_rules
@@ -58,7 +63,6 @@ from custom_agents.pending_work_runtime import schedule_pending_work
 from custom_agents.task_human_interaction_blockers import (
     TIMED_WAIT_BLOCKER,
     answer_held,
-    clear_answer_marks,
     get_human_interaction_blocker,
     is_timed_wait_blocker,
     record_human_interaction_blocker,
@@ -150,33 +154,63 @@ def _prune_warned_anomalies(agent: Any, active_records: set[tuple[str, str, str]
 # -- recurring-schedule next-run check (shared by tools and begin_timed_wait) ----------------
 
 
-def _verified_scheduler_schedule_id(agent: Any, task_id: str, *, meta: Any = None) -> str | None:
-    """The schedule id of a scheduler-issued verified task context, or None."""
+def _verified_scheduler_schedule_id(
+    agent: Any, task_id: str, *, meta: Any = None
+) -> tuple[str | None, str | None]:
+    """Return ``(schedule_id, refusal)`` for the active task or ``meta``.
+
+    When signed identity material is present but cannot be verified, returns a
+    fail-safe refusal with a structured warning instead of skipping the
+    recurring-schedule next-run guard.
+    """
 
     from custom_agents.access_runtime import resolve_meta_identity, verified_task_context
 
-    has_identity = (
-        active_signed_task_context(agent) is not None
-        or active_schedule_run(agent) is not None
-        or getattr(getattr(meta, "gateway_context", None), "task_context", None) is not None
+    has_active_identity = (
+        active_signed_task_context(agent) is not None or active_schedule_run(agent) is not None
+    )
+    has_meta_identity = (
+        getattr(getattr(meta, "gateway_context", None), "task_context", None) is not None
         or getattr(getattr(meta, "gateway_context", None), "schedule_run", None) is not None
     )
+    if not has_active_identity and not has_meta_identity:
+        return None, None
+
     context = None
-    try:
-        context = verified_task_context(agent)
-    except RuntimeError as exc:
-        if has_identity and meta is None:
-            logger.warning(
-                "Could not verify the active task's schedule identity. "
-                "event=timed_wait_identity_unchecked task_id=%s error=%s",
-                task_id,
-                exc,
-            )
-            return None
-    if context is None and meta is not None:
+    error_detail = "verification_failed"
+    if has_active_identity:
+        try:
+            context = verified_task_context(agent)
+        except RuntimeError as exc:
+            error_detail = type(exc).__name__
+            if not has_meta_identity:
+                logger.warning(
+                    "Timed wait refused because the active task's schedule identity could not be verified. "
+                    "event=timed_wait_refused reason=identity_unverifiable task_id=%s error=%s",
+                    task_id,
+                    exc,
+                )
+                return (
+                    None,
+                    "Could not verify this task's schedule identity, so this wait was refused to avoid "
+                    "overlapping a recurring schedule's next run.",
+                )
+    if context is None and has_meta_identity:
         context = resolve_meta_identity(agent, meta)
-    if context is None or not context.schedule_id:
-        return None
+    if context is None:
+        logger.warning(
+            "Timed wait refused because the task's identity could not be verified. "
+            "event=timed_wait_refused reason=identity_unverifiable task_id=%s detail=%s",
+            task_id,
+            error_detail,
+        )
+        return (
+            None,
+            "Could not verify this task's schedule identity, so this wait was refused to avoid "
+            "overlapping a recurring schedule's next run.",
+        )
+    if not context.schedule_id:
+        return None, None
     if context.issuer != ISSUER_SCHEDULER:
         logger.warning(
             "Ignoring schedule_id from a non-scheduler task context during timed wait check. "
@@ -185,8 +219,8 @@ def _verified_scheduler_schedule_id(agent: Any, task_id: str, *, meta: Any = Non
             context.schedule_id,
             task_id,
         )
-        return None
-    return context.schedule_id
+        return None, None
+    return context.schedule_id, None
 
 
 def _schedule_store(agent: Any) -> Any | None:
@@ -206,7 +240,9 @@ async def check_schedule_next_run(
 ) -> str | None:
     """Refuse a wait in a recurring scheduled run that would reach or pass its next fire time."""
 
-    schedule_id = _verified_scheduler_schedule_id(agent, task_id, meta=meta)
+    schedule_id, identity_refusal = _verified_scheduler_schedule_id(agent, task_id, meta=meta)
+    if identity_refusal is not None:
+        return identity_refusal
     if not schedule_id:
         return None
     store = _schedule_store(agent)
@@ -318,6 +354,216 @@ async def _refuse_at_start(agent: Any, *, task_id: str, interrupt_id: str, refus
     schedule_pending_work(agent)
 
 
+@dataclass(frozen=True)
+class TimedWaitDecision:
+    """Decision for one timed-wait interrupt, separated from the write and post-WAITING effects."""
+
+    action: Literal["record", "restore", "defer", "refuse", "skip"]
+    task_id: str
+    interrupt_id: str
+    record: dict[str, Any] | None = None
+    history_details: dict[str, Any] | None = None
+    refusal: str | None = None
+
+
+async def decide_timed_wait(
+    agent: Any,
+    *,
+    task_id: str,
+    interrupt_id: str,
+    reason: dict[str, Any],
+    msg_meta: Any,
+    defer_for_other_wait: bool = False,
+    deferred_by: str = "upstream_interrupt",
+) -> TimedWaitDecision:
+    """Decide whether to record, restore, defer, or refuse a timed wait without mutating state.
+
+    Caller holds ``_lock(agent, task_id)``.
+    """
+
+    if defer_for_other_wait:
+        logger.info(
+            "Deferring timed wait because another interrupt is active in the same step. "
+            "event=timed_wait_deferred task_id=%s interrupt_id=%s active_kind=%s",
+            task_id,
+            interrupt_id,
+            deferred_by,
+        )
+        return TimedWaitDecision(action="defer", task_id=task_id, interrupt_id=interrupt_id)
+
+    manager = agent.task_manager
+    run_ops = manager.operations_runtime.run
+    existing_blocker = await run_ops(partial(get_human_interaction_blocker, manager), task_id)
+    if existing_blocker is not None and not is_timed_wait_blocker(existing_blocker, interrupt_id):
+        logger.info(
+            "Deferring timed wait because another wait is already active on this task. "
+            "event=timed_wait_deferred task_id=%s interrupt_id=%s active_kind=%s",
+            task_id,
+            interrupt_id,
+            existing_blocker.get("kind"),
+        )
+        return TimedWaitDecision(action="defer", task_id=task_id, interrupt_id=interrupt_id)
+
+    task_info = await run_ops(manager.get_task_info, task_id)
+    if task_info is None or await run_ops(manager.is_terminal_state, task_info.state):
+        return TimedWaitDecision(action="skip", task_id=task_id, interrupt_id=interrupt_id)
+
+    tool = str(reason.get("tool") or WAIT_TOOL_NAME)
+    tool_use_id = str(reason.get("tool_use_id") or "").strip()
+    call_id = str(reason.get("call_id") or tool_use_id or interrupt_id).strip()
+    raw_minutes = reason.get("minutes")
+    minutes = raw_minutes if isinstance(raw_minutes, int) and not isinstance(raw_minutes, bool) else 0
+    wait_reason = str(reason.get("reason") or "").strip() or "timed wait"
+
+    ledger = WaitLedger.from_history(task_info)
+    existing_entry = ledger.entry_for(call_id)
+    if existing_entry is not None:
+        # Re-raise of an already-charged call: no second charge, keep original times, clear held mark.
+        record = timed_wait_record(
+            interrupt_id=interrupt_id,
+            call_id=existing_entry.call_id,
+            tool=existing_entry.tool,
+            tool_use_id=existing_entry.tool_use_id,
+            minutes=existing_entry.minutes,
+            reason=existing_entry.reason,
+            requested_at=existing_entry.requested_at,
+            resume_at=existing_entry.resume_at,
+        )
+        return TimedWaitDecision(action="restore", task_id=task_id, interrupt_id=interrupt_id, record=record)
+
+    if minutes < 1:
+        logger.warning(
+            "Timed wait interrupt had invalid minutes; refusing at start. "
+            "event=timed_wait_refused reason=invalid_minutes task_id=%s interrupt_id=%s minutes=%r",
+            task_id,
+            interrupt_id,
+            raw_minutes,
+        )
+        return TimedWaitDecision(
+            action="refuse",
+            task_id=task_id,
+            interrupt_id=interrupt_id,
+            refusal="minutes must be a whole number of at least 1.",
+        )
+
+    # The runtime clock is the single source of truth for start/resume times when recording a new wait.
+    now = timed_waits_rules.utc_now()
+    resume_at = now + timedelta(minutes=minutes)
+    refusal = await check_schedule_next_run(agent, task_id, now=now, resume_at=resume_at, meta=msg_meta)
+    if refusal is not None:
+        return TimedWaitDecision(action="refuse", task_id=task_id, interrupt_id=interrupt_id, refusal=refusal)
+
+    requested_at_iso = now.isoformat()
+    resume_at_iso = resume_at.isoformat()
+    record = timed_wait_record(
+        interrupt_id=interrupt_id,
+        call_id=call_id,
+        tool=tool,
+        tool_use_id=tool_use_id,
+        minutes=minutes,
+        reason=wait_reason,
+        requested_at=requested_at_iso,
+        resume_at=resume_at_iso,
+    )
+    history_details = {
+        "event": TIMED_WAIT_STARTED_EVENT,
+        "call_id": call_id,
+        "tool": tool,
+        "tool_use_id": tool_use_id,
+        "interrupt_id": interrupt_id,
+        "minutes": minutes,
+        "reason": wait_reason,
+        "requested_at": requested_at_iso,
+        "resume_at": resume_at_iso,
+    }
+    return TimedWaitDecision(
+        action="record",
+        task_id=task_id,
+        interrupt_id=interrupt_id,
+        record=record,
+        history_details=history_details,
+    )
+
+
+async def write_timed_wait(agent: Any, decision: TimedWaitDecision) -> bool:
+    """Persist the charge and blocker record for a decided timed wait (before WAITING is saved).
+
+    Caller holds ``_lock(agent, decision.task_id)``. Returns True when a record was written.
+    """
+
+    if decision.action not in {"record", "restore"} or decision.record is None:
+        return False
+    manager = agent.task_manager
+    run_ops = manager.operations_runtime.run
+    if decision.action == "record":
+        assert decision.history_details is not None
+        # Charge (history) first, then save the blocker record.
+        await append_wait_history(
+            agent,
+            decision.task_id,
+            decision.record["summary"],
+            decision.history_details,
+        )
+        await run_ops(partial(record_human_interaction_blocker, manager), decision.task_id, decision.record)
+        logger.info(
+            "A task paused on a timed wait. event=timed_wait_started task_id=%s interrupt_id=%s "
+            "tool=%s minutes=%s resume_at=%s agent_id=%s",
+            decision.task_id,
+            decision.interrupt_id,
+            decision.record.get("tool"),
+            decision.record.get("minutes"),
+            decision.record.get("resume_at"),
+            getattr(agent, "id", "-"),
+        )
+        return True
+    await run_ops(partial(record_human_interaction_blocker, manager), decision.task_id, decision.record)
+    return True
+
+
+async def stage_timed_wait(
+    agent: Any,
+    *,
+    task_id: str,
+    interrupt_id: str,
+    reason: dict[str, Any],
+    msg_meta: Any,
+    defer_for_other_wait: bool = False,
+    deferred_by: str = "upstream_interrupt",
+) -> TimedWaitDecision:
+    """Decide and persist a timed wait's charge and blocker before ``ProgressState.WAITING`` is saved."""
+
+    async with _lock(agent, task_id):
+        decision = await decide_timed_wait(
+            agent,
+            task_id=task_id,
+            interrupt_id=interrupt_id,
+            reason=reason,
+            msg_meta=msg_meta,
+            defer_for_other_wait=defer_for_other_wait,
+            deferred_by=deferred_by,
+        )
+        if decision.action in {"record", "restore"}:
+            await write_timed_wait(agent, decision)
+        return decision
+
+
+async def finish_timed_wait(agent: Any, decision: TimedWaitDecision) -> bool:
+    """Run post-``WAITING`` effects for a staged timed wait (wake scheduler or hand start-time refusal)."""
+
+    if decision.action in {"record", "restore"}:
+        _wake_scheduler(agent)
+        return True
+    if decision.action == "refuse":
+        async with _lock(agent, decision.task_id):
+            await _refuse_at_start(
+                agent,
+                task_id=decision.task_id,
+                interrupt_id=decision.interrupt_id,
+                refusal=decision.refusal or "The timed wait was refused at start time.",
+            )
+    return False
+
+
 async def begin_timed_wait(
     agent: Any,
     *,
@@ -326,127 +572,20 @@ async def begin_timed_wait(
     reason: dict[str, Any],
     msg_meta: Any,
     defer_for_other_wait: bool = False,
+    deferred_by: str = "upstream_interrupt",
 ) -> bool:
-    """Record a timed wait after the turn paused (module docstring). True when a record was saved."""
+    """Stage and finish a timed wait in one call (convenience wrapper; True when a record was saved)."""
 
-    manager = agent.task_manager
-    run_ops = manager.operations_runtime.run
-    async with _lock(agent, task_id):
-        if defer_for_other_wait:
-            logger.info(
-                "Deferring timed wait because an upstream interrupt is active in the same step. "
-                "event=timed_wait_deferred task_id=%s interrupt_id=%s active_kind=upstream_interrupt",
-                task_id,
-                interrupt_id,
-            )
-            return False
-
-        existing_blocker = await run_ops(partial(get_human_interaction_blocker, manager), task_id)
-        if existing_blocker is not None and not is_timed_wait_blocker(existing_blocker, interrupt_id):
-            logger.info(
-                "Deferring timed wait because another wait is already active on this task. "
-                "event=timed_wait_deferred task_id=%s interrupt_id=%s active_kind=%s",
-                task_id,
-                interrupt_id,
-                existing_blocker.get("kind"),
-            )
-            return False
-
-        task_info = await run_ops(manager.get_task_info, task_id)
-        if task_info is None or await run_ops(manager.is_terminal_state, task_info.state):
-            return False
-
-        tool = str(reason.get("tool") or WAIT_TOOL_NAME)
-        tool_use_id = str(reason.get("tool_use_id") or "").strip()
-        call_id = str(reason.get("call_id") or tool_use_id or interrupt_id).strip()
-        raw_minutes = reason.get("minutes")
-        minutes = raw_minutes if isinstance(raw_minutes, int) and not isinstance(raw_minutes, bool) else 0
-        wait_reason = str(reason.get("reason") or "").strip() or "timed wait"
-
-        ledger = WaitLedger.from_history(task_info)
-        existing_entry = ledger.entry_for(call_id)
-        if existing_entry is not None:
-            # Re-raise of an already-charged call: no second charge, keep original times, clear held mark.
-            record = timed_wait_record(
-                interrupt_id=interrupt_id,
-                call_id=existing_entry.call_id,
-                tool=existing_entry.tool,
-                tool_use_id=existing_entry.tool_use_id,
-                minutes=existing_entry.minutes,
-                reason=existing_entry.reason,
-                requested_at=existing_entry.requested_at,
-                resume_at=existing_entry.resume_at,
-            )
-            await run_ops(partial(record_human_interaction_blocker, manager), task_id, record)
-            _wake_scheduler(agent)
-            return True
-
-        if minutes < 1:
-            logger.warning(
-                "Timed wait interrupt had invalid minutes; refusing at start. "
-                "event=timed_wait_refused reason=invalid_minutes task_id=%s interrupt_id=%s minutes=%r",
-                task_id,
-                interrupt_id,
-                raw_minutes,
-            )
-            await _refuse_at_start(
-                agent,
-                task_id=task_id,
-                interrupt_id=interrupt_id,
-                refusal="minutes must be a whole number of at least 1.",
-            )
-            return False
-
-        # The runtime clock is the single source of truth for start/resume times when recording a new wait.
-        now = timed_waits_rules.utc_now()
-        resume_at = now + timedelta(minutes=minutes)
-        refusal = await check_schedule_next_run(agent, task_id, now=now, resume_at=resume_at, meta=msg_meta)
-        if refusal is not None:
-            await _refuse_at_start(agent, task_id=task_id, interrupt_id=interrupt_id, refusal=refusal)
-            return False
-
-        requested_at_iso = now.isoformat()
-        resume_at_iso = resume_at.isoformat()
-        record = timed_wait_record(
-            interrupt_id=interrupt_id,
-            call_id=call_id,
-            tool=tool,
-            tool_use_id=tool_use_id,
-            minutes=minutes,
-            reason=wait_reason,
-            requested_at=requested_at_iso,
-            resume_at=resume_at_iso,
-        )
-        # Charge (history) first, then save the blocker record.
-        await append_wait_history(
-            agent,
-            task_id,
-            record["summary"],
-            {
-                "event": TIMED_WAIT_STARTED_EVENT,
-                "call_id": call_id,
-                "tool": tool,
-                "tool_use_id": tool_use_id,
-                "interrupt_id": interrupt_id,
-                "minutes": minutes,
-                "reason": wait_reason,
-                "requested_at": requested_at_iso,
-                "resume_at": resume_at_iso,
-            },
-        )
-        await run_ops(partial(record_human_interaction_blocker, manager), task_id, record)
-        logger.info(
-            "A task paused on a timed wait. event=timed_wait_started task_id=%s interrupt_id=%s "
-            "tool=%s minutes=%s resume_at=%s agent_id=%s",
-            task_id,
-            interrupt_id,
-            tool,
-            minutes,
-            resume_at_iso,
-            getattr(agent, "id", "-"),
-        )
-        _wake_scheduler(agent)
-        return True
+    decision = await stage_timed_wait(
+        agent,
+        task_id=task_id,
+        interrupt_id=interrupt_id,
+        reason=reason,
+        msg_meta=msg_meta,
+        defer_for_other_wait=defer_for_other_wait,
+        deferred_by=deferred_by,
+    )
+    return await finish_timed_wait(agent, decision)
 
 
 # -- resume ----------------------------------------------------------------------------------
@@ -495,6 +634,7 @@ async def _answer_paused_turn(agent: Any, *, task_id: str, blocker: dict[str, An
         kind=TIMED_WAIT_BLOCKER,
         wait_id=interrupt_id,
         steering=steering,
+        interrupt_id=interrupt_id,
         replace_pending=False,
         at=now_iso,
     )
@@ -561,7 +701,7 @@ async def _resume_task_from_note(
         task_id=task_id,
         kind=TIMED_WAIT_BLOCKER,
         wait_id=interrupt_id,
-        note=resume_note(blocker, now),
+        note=resume_note(blocker),
         history=f"Timed wait ended after {elapsed} minutes; task resumed from saved note.",
         history_details={
             "event": TIMED_WAIT_ENDED_EVENT,
@@ -655,14 +795,6 @@ async def resume_due_timed_waits(
     if manager is None:
         return 0
     moment = (now or timed_waits_rules.utc_now()).astimezone(timezone.utc)
-    if at_start:
-        cleared = await manager.operations_runtime.run(partial(clear_answer_marks, manager))
-        if cleared:
-            logger.info(
-                "Removed held-answer marks left from before the restart. "
-                "event=timed_wait_answer_marks_cleared task_ids=%s",
-                ",".join(cleared),
-            )
     candidates = await manager.operations_runtime.run(partial(_timed_wait_tasks, agent))
     resumed = 0
     wake = not at_start
@@ -837,9 +969,14 @@ async def seconds_until_next_resume(agent: Any, *, now: datetime | None = None) 
 
 
 __all__ = [
+    "TimedWaitDecision",
     "begin_timed_wait",
     "check_schedule_next_run",
+    "decide_timed_wait",
+    "finish_timed_wait",
     "resume_due_timed_waits",
     "resume_without_paused_turn",
     "seconds_until_next_resume",
+    "stage_timed_wait",
+    "write_timed_wait",
 ]

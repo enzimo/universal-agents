@@ -415,7 +415,7 @@ async def test_a2_wait_pauses_frees_slot_and_resumes_through_scheduler_pass(
 
 @pytest.mark.asyncio
 async def test_a3_restart_keeps_future_wait_and_resumes_due_wait_from_note(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     now_box = [BASE_TIME]
     monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
@@ -468,7 +468,11 @@ async def test_a3_restart_keeps_future_wait_and_resumes_due_wait_from_note(
     after = _make_runtime_agent(db_path, add_initial_task=False)
     after.task_manager = restarted_mgr
 
-    await runtime_recovery.recover_runtime_after_restart(after)
+    with caplog.at_level(logging.INFO):
+        await runtime_recovery.recover_runtime_after_restart(after)
+
+    assert "event=wait_answer_marks_cleared" in caplog.text
+    assert "event=tool_setup_answer_marks_cleared" not in caplog.text
 
     # task-already-due was resumed from a note during startup recovery (wake=False).
     assert restarted_mgr.get_task_info("task-already-due").state == ProgressState.ACCEPTED
@@ -1220,3 +1224,152 @@ async def test_a6_stopping_a_waiting_task_clears_blocker_drops_turn_and_never_re
     assert await seconds_until_next_resume(agent) is None
     assert woken == []
     assert TASK_ID not in agent.task_manager.task_state.task_queue
+
+
+@pytest.mark.asyncio
+async def test_crash_between_record_and_waiting_recovers_waits_and_delivers_note_to_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Charge and blocker persist before WAITING; a crash in that window recovers to WAITING,
+    waits until due, resumes from a durable note, and delivers that note to the next model turn."""
+
+    from collections import deque
+    import dataclasses
+
+    from tests.test_runtime_owner_boundaries import build_turn_owner
+
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda _a: None)
+
+    db_path = tmp_path / "manager.db"
+    agent = _make_runtime_agent(db_path)
+    model = _ScriptedWaitModel([[("tu-crash", "wait", {"minutes": 10, "reason": "Portainer redeploy"})]])
+    strands_agent = Agent(model=model, tools=[wait], callback_handler=None)
+
+    # Simulate process crash right before ProgressState.WAITING is saved.
+    orig_update = agent.task_manager.update_main_task_state
+
+    def crash_on_waiting(task_id: str, new_state: ProgressState, *args: Any, **kwargs: Any) -> bool:
+        if new_state == ProgressState.WAITING:
+            raise RuntimeError("simulated crash before WAITING")
+        return orig_update(task_id, new_state, *args, **kwargs)
+
+    monkeypatch.setattr(agent.task_manager, "update_main_task_state", crash_on_waiting)
+    with pytest.raises(RuntimeError, match="simulated crash before WAITING"):
+        await _invoke_and_pause(agent, strands_agent)
+
+    # Reload from SQLite in a fresh process: state is still IN_PROGRESS, but charge and blocker are durable.
+    restarted_mgr = TaskManager(db_path=str(db_path))
+    restarted_mgr.set_owner_identity(AGENT_ID, "Worker", TEST_TEAM, "Worker")
+    restarted_mgr.restore_runtime_state()
+    pre_recovery = restarted_mgr.get_task_info(TASK_ID)
+    assert pre_recovery is not None
+    assert pre_recovery.state == ProgressState.IN_PROGRESS
+    assert WaitLedger.from_history(pre_recovery).total_minutes == 10
+    saved_blocker = get_human_interaction_blocker(restarted_mgr, TASK_ID)
+    assert saved_blocker is not None and saved_blocker["kind"] == TIMED_WAIT_KIND
+
+    # Restart 2 minutes later (even past a short executing-task grace period): recovery moves it to WAITING.
+    now_box[0] = BASE_TIME + timedelta(minutes=2)
+    restarted = _make_runtime_agent(db_path, add_initial_task=False)
+    restarted.task_manager = restarted_mgr
+    restarted._recovery_retry_deadline_seconds = lambda: 1.0
+    await runtime_recovery.recover_runtime_after_restart(restarted)
+
+    assert restarted_mgr.get_task_info(TASK_ID).state == ProgressState.WAITING
+    assert list(restarted_mgr.task_state.task_queue) == []
+    assert get_human_interaction_blocker(restarted_mgr, TASK_ID) is not None
+
+    # When the 10-minute wait ends, resume_due_timed_waits queues the task at front with its durable note.
+    now_box[0] = BASE_TIME + timedelta(minutes=10, seconds=5)
+    assert await resume_due_timed_waits(restarted) == 1
+    assert restarted_mgr.get_task_info(TASK_ID).state == ProgressState.ACCEPTED
+    assert list(restarted_mgr.task_state.task_queue) == [TASK_ID]
+    assert get_human_interaction_blocker(restarted_mgr, TASK_ID) is None
+    expected_note = timed_waits_rules.resume_note(saved_blocker)
+    assert restarted_mgr.read_runtime_resume_directive(TASK_ID) == expected_note
+
+    # Drain the queue and run the real turn owner to prove the saved note reaches the model prompt.
+    assert restarted_mgr.get_next_task_to_process() == TASK_ID
+    captured_prompts: list[str] = []
+
+    async def capture_model_call(prompt: str, **_kwargs: Any) -> Any:
+        captured_prompts.append(prompt)
+        return turn_result
+
+    executor, turn_result = build_turn_owner(
+        invoke=capture_model_call,
+        guidance=deque(["", ""]),
+        committed=[],
+        cleared=[],
+        task_operations={
+            "read_runtime_resume_directive": restarted_mgr.read_runtime_resume_directive,
+            "read_partial_tool_call_limit": restarted_mgr.read_partial_tool_call_limit,
+            "release_turn_start_notes": restarted_mgr.release_turn_start_notes,
+        },
+    )
+
+    async def record_decision(*, incoming_content: Task, start_notes: Any = None, **_kwargs: Any) -> Task:
+        assert restarted_mgr.create_turn_action_batch(incoming_content.task_id, [], release_notes=start_notes)
+        return Task(task_id=incoming_content.task_id, task_type=MessageMetaType.RESPONSE, answer="done")
+
+    executor.effects = dataclasses.replace(executor.effects, execute_turn_decision_outbox=record_decision)
+    resumed_info = restarted_mgr.get_task_info(TASK_ID)
+    assert resumed_info is not None
+    response = await executor.process_llm_interaction(resumed_info.task, resumed_info.header, resumed_info.meta)
+
+    assert response.answer == "done"
+    assert len(captured_prompts) == 1
+    assert expected_note in captured_prompts[0]
+    assert "10-minute wait (Portainer redeploy) ended" in captured_prompts[0]
+    assert restarted_mgr.read_runtime_resume_directive(TASK_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_retried_resume_from_note_adds_only_one_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retrying a failed note-based resume at a later time keeps exactly one resume directive."""
+
+    now_box = [BASE_TIME + timedelta(minutes=10, seconds=5)]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda _a: None)
+
+    agent = _make_runtime_agent(tmp_path / "manager.db")
+    agent.task_manager.update_main_task_state(TASK_ID, ProgressState.WAITING, BASE_TIME.isoformat())
+    rec = timed_wait_record(
+        interrupt_id="int-retry",
+        call_id="call-retry",
+        tool=WAIT_TOOL_NAME,
+        tool_use_id="tu-retry",
+        minutes=10,
+        reason="Portainer redeploy",
+        requested_at=BASE_TIME.isoformat(),
+        resume_at=(BASE_TIME + timedelta(minutes=10)).isoformat(),
+    )
+    record_human_interaction_blocker(agent.task_manager, TASK_ID, rec)
+
+    # First attempt fails after saving the note and clearing the blocker, restoring the blocker.
+    orig_enqueue = agent.task_manager.enqueue_task
+    fail_once = [True]
+
+    def flaky_enqueue(task_id: str, *, front: bool = False) -> bool:
+        if fail_once[0]:
+            fail_once[0] = False
+            raise RuntimeError("transient sqlite failure")
+        return orig_enqueue(task_id, front=front)
+
+    monkeypatch.setattr(agent.task_manager, "enqueue_task", flaky_enqueue)
+    assert await resume_due_timed_waits(agent) == 0
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is not None
+
+    # Retry 2 minutes later succeeds without appending a second, different note.
+    now_box[0] = BASE_TIME + timedelta(minutes=12, seconds=5)
+    assert await resume_due_timed_waits(agent) == 1
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is None
+    assert list(agent.task_manager.task_state.task_queue) == [TASK_ID]
+
+    directive = agent.task_manager.read_runtime_resume_directive(TASK_ID) or ""
+    assert directive == timed_waits_rules.resume_note(rec)
+    assert directive.count("Portainer redeploy") == 1

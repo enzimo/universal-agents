@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from custom_messages.contracts.schedule_v1 import ScheduledMessage, is_recurring_schedule
+from custom_messages.contracts.task_v1 import BUBBLED_ENTRY_ID_KEY
 from runtime_settings.timed_waits import TimedWaitLimits
 
 # Interrupt kind, blocker record kind, and interrupt-response kinds (defined once).
@@ -122,6 +123,10 @@ class WaitLedger:
         for idx, item in enumerate(history):
             details = _entry_details(item)
             if not details or details.get("event") != TIMED_WAIT_STARTED_EVENT:
+                continue
+            # High-importance child entries are bubbled into the parent's history;
+            # skip bubbled copies so a subtask's waits never count against its parent's budget.
+            if details.get(BUBBLED_ENTRY_ID_KEY):
                 continue
             raw_minutes = details.get("minutes")
             if not isinstance(raw_minutes, int) or isinstance(raw_minutes, bool) or raw_minutes < 1:
@@ -419,10 +424,15 @@ def wait_result(
     }
 
 
-def resume_note(record: Mapping[str, Any], now: datetime | None = None) -> str:
-    """Durable resume directive saved when a timed wait resumes without a live paused turn."""
+def resume_note(record: Mapping[str, Any]) -> str:
+    """Durable resume directive saved when a timed wait resumes without a live paused turn.
 
-    moment = (now or utc_now()).astimezone(timezone.utc)
+    Built solely from the saved wait record (duration, reason, and scheduled
+    ``resume_at``) so retrying a failed resume produces the exact same note and
+    ``TaskManager.append_runtime_resume_directive`` never appends a duplicate.
+    Every model turn already receives the current UTC time in its prompt.
+    """
+
     minutes = record.get("minutes")
     duration = (
         f"{minutes}-minute"
@@ -432,11 +442,13 @@ def resume_note(record: Mapping[str, Any], now: datetime | None = None) -> str:
     reason = str(record.get("reason") or "").strip()
     reason_clause = f" ({reason})" if reason else ""
     scheduled = resume_at_of(record)
-    scheduled_clause = f"; scheduled for {format_utc_display(scheduled)}" if scheduled is not None else ""
-    return (
-        f"Your {duration} wait{reason_clause} ended at {format_utc_display(moment)} "
-        f"({moment.isoformat()}{scheduled_clause}). Continue the task from where you left off."
-    )
+    if scheduled is not None:
+        return (
+            f"Your {duration} wait{reason_clause} ended "
+            f"(scheduled for {format_utc_display(scheduled)}, {scheduled.isoformat()}). "
+            "Continue the task from where you left off."
+        )
+    return f"Your {duration} wait{reason_clause} ended. Continue the task from where you left off."
 
 
 __all__ = [
