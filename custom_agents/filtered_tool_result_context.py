@@ -23,6 +23,7 @@ from custom_agents.context_recovery import (
 )
 from custom_agents.token_estimation import count_message_tokens, count_text_tokens, truncate_to_token_budget
 from custom_agents.tool_result_offloader import SAVED_RESULT_MESSAGE, TaskAwareWorkspaceStorage
+from custom_agents.tool_use_unwrap import unwrap_tool_use
 
 logger = logging.getLogger(__name__)
 
@@ -882,8 +883,6 @@ class FilteredToolResultConversationManager(ConversationManager):
 
     @staticmethod
     def _tool_name_for(messages: list[dict[str, Any]], tool_use_id: str) -> str:
-        from custom_agents.tool_calling import unwrap_tool_use
-
         for message in messages:
             for content in message.get("content", []) or []:
                 tool_use = content.get("toolUse") if isinstance(content, dict) else None

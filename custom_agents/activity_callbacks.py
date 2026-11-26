@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Any, Callable, Dict, Optional, TextIO
 
-from custom_agents.tool_calling import unwrap_tool_use
+from custom_agents.tool_use_unwrap import unwrap_tool_use
 from custom_messages.enums import TaskActivityStage, TaskActivityType
+
+
+def _input_signature(raw_input: Any) -> str:
+    if isinstance(raw_input, str):
+        return raw_input
+    if raw_input is None:
+        return ""
+    try:
+        return json.dumps(raw_input, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return str(raw_input)
 
 
 class ActivityPhaseCallbackHandler:
@@ -21,7 +33,10 @@ class ActivityPhaseCallbackHandler:
         self.emit_activity = emit_activity
         self.task_id = task_id
         self.previous_tool_use: Optional[Dict[str, Any]] = None
-        self._emitted_call_keys: set[tuple[str, str]] = set()
+        # Track the last streamed input seen per (toolUseId, tool_name) so chunks of one
+        # call emit once, while a later step reusing the same toolUseId starts a fresh input
+        # (does not extend the previous text) and still reports its activity.
+        self._last_input_by_key: Dict[tuple[str, str], str] = {}
 
     def __call__(self, **kwargs: Any) -> None:
         current_tool_use = kwargs.get("current_tool_use") or {}
@@ -29,15 +44,20 @@ class ActivityPhaseCallbackHandler:
             return
         unwrapped = unwrap_tool_use(current_tool_use)
         if not unwrapped.name:
-            # Streaming call_tool chunks before the target name is readable wait until it arrives.
-            return
-        tool_name = unwrapped.name
+            if not unwrapped.complete:
+                # Streaming call_tool chunks before the target name is readable wait until it arrives.
+                return
+            tool_name = str(current_tool_use.get("name") or "")
+        else:
+            tool_name = unwrapped.name
         tool_use_id = current_tool_use.get("toolUseId")
         if tool_use_id:
             call_key = (str(tool_use_id), tool_name)
-            if call_key in self._emitted_call_keys:
+            input_text = _input_signature(current_tool_use.get("input"))
+            previous_input = self._last_input_by_key.get(call_key)
+            self._last_input_by_key[call_key] = input_text
+            if previous_input is not None and input_text.startswith(previous_input):
                 return
-            self._emitted_call_keys.add(call_key)
         else:
             normalized_tool_use = dict(current_tool_use)
             if self.previous_tool_use == normalized_tool_use:

@@ -1,4 +1,4 @@
-"""One-step ``call_tool(name, inputs)`` rewriting and unwrapping for the tool index.
+"""One-step ``call_tool(name, inputs)`` rewriting for the tool index.
 
 Why: model APIs only accept calls to tools present in the model's tool list.
 With ``agent.tool_presentation`` set to ``index`` or ``index_and_scripts``,
@@ -27,6 +27,11 @@ Strands' ``HookOrder.SDK_FIRST`` at ``-100``):
   tracking) use ``unwrap_tool_use`` so they observe ``F`` instead of
   ``call_tool``.
 
+Both helpers live in the leaf module ``custom_agents.tool_use_unwrap``, which
+also checks the shape of every target name: ``call_tool``'s ``name`` is free
+text, so only a name that looks like a tool function name is ever logged,
+shown to the person or stored in task notes.
+
 Callable target rule: ``call_tool`` resolves only names in ``catalog.functions``
 or ``catalog.function_dispatchers`` (when the dispatcher is already in the
 agent's registry). It never searches the registry for non-catalog tools (such
@@ -37,10 +42,8 @@ counts are affected.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
 from strands.hooks import (
@@ -54,6 +57,7 @@ from strands.hooks import (
 from custom_agents.runtime_guardrails import STRUCTURED_OUTPUT_TOOL_NAMES
 from custom_agents.tool_loading import offered
 from custom_agents.tool_presentation import CALL_TOOL_NAME, index_enabled, withheld_functions
+from custom_agents.tool_use_unwrap import checked_target_name, resolve_tool_use
 from custom_tools.provider_contract import tool_name
 
 logger = logging.getLogger(__name__)
@@ -64,161 +68,6 @@ CALL_TOOL_EXCLUDED_TOOLS = frozenset({"fn:tool_loading"})
 CALL_TOOL_PLUGIN_TOOLS = frozenset({"fn:skills"})
 # Strictly before Strands' HookOrder.SDK_FIRST (-100), OnRequestToolHook (-10), steering (0), and AccessDecisionHook (+inf).
 CALL_TOOL_HOOK_ORDER = -200.0
-
-_JSON_DECODER = json.JSONDecoder()
-
-
-@dataclass(frozen=True)
-class ResolvedCall:
-    """The real function call behind a model tool use (unwrapped if it came through ``call_tool``)."""
-
-    name: str
-    inputs: dict[str, Any]
-    unwrapped: bool
-    error: str | None = None
-    inputs_parsed_from_json: bool = False
-
-
-@dataclass(frozen=True)
-class UnwrappedToolUse:
-    """Best-effort view of a history or streamed tool use (never raises on partial or malformed data)."""
-
-    name: str | None
-    inputs: Any
-    unwrapped: bool
-    complete: bool
-
-
-def _parse_inner_inputs(target_name: str, raw_inner: Any) -> tuple[dict[str, Any], str | None, bool]:
-    """Validate ``inputs`` of a ``call_tool`` call: mapping, None (empty), or JSON string decoding to a mapping."""
-
-    if raw_inner is None:
-        return {}, None, False
-    if isinstance(raw_inner, Mapping):
-        return dict(raw_inner), None, False
-    if isinstance(raw_inner, str):
-        try:
-            parsed = json.loads(raw_inner)
-        except (TypeError, ValueError):
-            parsed = None
-        if isinstance(parsed, Mapping):
-            return dict(parsed), None, True
-    return (
-        {},
-        f"call_tool 'inputs' for {target_name} must be an object (dictionary) of named arguments.",
-        False,
-    )
-
-
-def resolve_tool_use(tool_use: Any) -> ResolvedCall:
-    """Resolve what function a tool use really calls; total over any input type and never raises."""
-
-    if not isinstance(tool_use, Mapping):
-        return ResolvedCall(name="", inputs={}, unwrapped=False, error="Malformed tool call.")
-    raw_name = tool_use.get("name")
-    outer_name = raw_name.strip() if isinstance(raw_name, str) else ""
-    raw_input = tool_use.get("input")
-    if outer_name != CALL_TOOL_NAME:
-        inputs = dict(raw_input) if isinstance(raw_input, Mapping) else {}
-        return ResolvedCall(name=outer_name, inputs=inputs, unwrapped=False)
-    if not isinstance(raw_input, Mapping):
-        return ResolvedCall(
-            name="",
-            inputs={},
-            unwrapped=True,
-            error="call_tool requires an object input with 'name' and optional 'inputs'.",
-        )
-    raw_target = raw_input.get("name")
-    if not isinstance(raw_target, str) or not raw_target.strip():
-        return ResolvedCall(
-            name="",
-            inputs={},
-            unwrapped=True,
-            error="call_tool requires a non-empty string 'name' naming the tool function to call.",
-        )
-    target_name = raw_target.strip()
-    inner_inputs, error, parsed_from_json = _parse_inner_inputs(target_name, raw_input.get("inputs"))
-    return ResolvedCall(
-        name=target_name,
-        inputs=inner_inputs,
-        unwrapped=True,
-        error=error,
-        inputs_parsed_from_json=parsed_from_json,
-    )
-
-
-def _skip_whitespace(text: str, pos: int) -> int:
-    length = len(text)
-    while pos < length and text[pos] in " \t\r\n":
-        pos += 1
-    return pos
-
-
-def _decode_json_at(text: str, pos: int) -> tuple[Any, int] | None:
-    pos = _skip_whitespace(text, pos)
-    if pos >= len(text):
-        return None
-    try:
-        return _JSON_DECODER.raw_decode(text, pos)
-    except ValueError:
-        return None
-
-
-def _expect_char(text: str, pos: int, ch: str) -> int | None:
-    pos = _skip_whitespace(text, pos)
-    return pos + 1 if pos < len(text) and text[pos] == ch else None
-
-
-def _extract_top_level_json_string_field(text: str, field_name: str) -> str | None:
-    """Read one complete top-level string field from a possibly partial JSON object without matching nested keys."""
-
-    pos = _expect_char(text, 0, "{")
-    while pos is not None:
-        key_pair = _decode_json_at(text, pos)
-        if key_pair is None or not isinstance(key_pair[0], str):
-            return None
-        after_colon = _expect_char(text, key_pair[1], ":")
-        value_pair = _decode_json_at(text, after_colon) if after_colon is not None else None
-        if value_pair is None:
-            return None
-        if key_pair[0] == field_name:
-            return value_pair[0].strip() or None if isinstance(value_pair[0], str) else None
-        pos = _expect_char(text, value_pair[1], ",")
-    return None
-
-
-def _unwrap_mapping_input(raw_input: Mapping[str, Any]) -> UnwrappedToolUse:
-    resolved = resolve_tool_use({"name": CALL_TOOL_NAME, "input": raw_input})
-    if resolved.name:
-        inputs = raw_input.get("inputs") if resolved.error else resolved.inputs
-        return UnwrappedToolUse(name=resolved.name, inputs=inputs, unwrapped=True, complete=True)
-    return UnwrappedToolUse(name=None, inputs=None, unwrapped=True, complete=True)
-
-
-def unwrap_tool_use(tool_use: Any) -> UnwrappedToolUse:
-    """Read the real function name and inputs from history or streaming ``tool_use`` data; never raises."""
-
-    if not isinstance(tool_use, Mapping):
-        return UnwrappedToolUse(name=None, inputs=None, unwrapped=False, complete=True)
-    raw_name = tool_use.get("name")
-    outer_name = raw_name.strip() if isinstance(raw_name, str) else ""
-    if not outer_name:
-        return UnwrappedToolUse(name=None, inputs=None, unwrapped=False, complete=True)
-    raw_input = tool_use.get("input")
-    if outer_name != CALL_TOOL_NAME:
-        return UnwrappedToolUse(name=outer_name, inputs=raw_input, unwrapped=False, complete=True)
-    if isinstance(raw_input, Mapping):
-        return _unwrap_mapping_input(raw_input)
-    if isinstance(raw_input, str):
-        try:
-            parsed = json.loads(raw_input)
-        except (TypeError, ValueError):
-            partial_name = _extract_top_level_json_string_field(raw_input, "name")
-            return UnwrappedToolUse(name=partial_name, inputs=None, unwrapped=True, complete=False)
-        if isinstance(parsed, Mapping):
-            return _unwrap_mapping_input(parsed)
-        return UnwrappedToolUse(name=None, inputs=None, unwrapped=True, complete=True)
-    return UnwrappedToolUse(name=None, inputs=None, unwrapped=True, complete=True)
 
 
 # -- callable target resolution -------------------------------------------------------------
@@ -234,8 +83,11 @@ def _registry_lookup(registry: Any, name: str) -> Any | None:
 
 
 def _is_mcp_tool(catalog: Any, registry: Any, name: str) -> bool:
-    """Whether ``name`` is an MCP server tool (by catalog prefix or registered MCPAgentTool)."""
+    """Whether ``name`` is an MCP server tool (catalog functions take precedence over MCP prefixes)."""
 
+    # Matches access_catalog.catalog.ToolCatalog.resolve_function: catalog functions win over MCP prefixes.
+    if name in catalog.functions:
+        return False
     for prefix in getattr(catalog, "mcp_prefixes", ()) or ():
         if name.startswith(f"{prefix}_"):
             return True
@@ -333,11 +185,8 @@ class CallToolHook(HookProvider):
         if not isinstance(event.tool_use, Mapping) or event.tool_use.get("name") != CALL_TOOL_NAME:
             return
         tool_use_id = str(event.tool_use.get("toolUseId") or "")
-        target_hint = ""
+        target_hint = checked_target_name(event.tool_use)
         try:
-            raw_input = event.tool_use.get("input")
-            if isinstance(raw_input, Mapping) and isinstance(raw_input.get("name"), str):
-                target_hint = raw_input["name"].strip()
             self._rewrite(event, tool_use_id)
         except Exception:  # noqa: BLE001 - one broken call must return an error result, never fail the turn
             logger.exception(
@@ -499,8 +348,4 @@ __all__ = [
     "CALL_TOOL_HOOK_ORDER",
     "CALL_TOOL_NAME",
     "CallToolHook",
-    "ResolvedCall",
-    "UnwrappedToolUse",
-    "resolve_tool_use",
-    "unwrap_tool_use",
 ]

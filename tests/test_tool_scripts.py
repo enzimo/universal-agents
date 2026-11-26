@@ -115,6 +115,15 @@ def test_a_script_returns_its_value_and_what_it_printed(monkeypatch) -> None:
 
 
 @needs_sandbox
+def test_a_script_that_closes_stdout_still_returns_its_result_or_its_error(monkeypatch) -> None:
+    ok_payload = sandboxed("import sys\nsys.stdout.close()\nreturn 42", monkeypatch)
+    assert ok_payload["status"] == "success" and ok_payload["result"] == 42
+
+    err_payload = sandboxed('import sys\nsys.stdout.close()\nraise ValueError("after close")', monkeypatch)
+    assert err_payload["status"] == "error" and "after close" in err_payload["error"]
+
+
+@needs_sandbox
 def test_a_script_reads_no_instance_or_person_files(tmp_path: Path, monkeypatch) -> None:
     secret = tmp_path / "workspaces" / "users" / "alice" / "notes.txt"
     secret.parent.mkdir(parents=True)

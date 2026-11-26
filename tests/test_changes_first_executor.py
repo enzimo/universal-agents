@@ -315,7 +315,7 @@ class _UnwrapForTestHook(HookProvider):
         registry.add_callback(BeforeToolCallEvent, self._before, order=-200.0)
 
     def _before(self, event: BeforeToolCallEvent) -> None:
-        from custom_agents.tool_calling import CALL_TOOL_NAME, resolve_tool_use
+        from custom_agents.tool_use_unwrap import CALL_TOOL_NAME, resolve_tool_use
 
         if event.tool_use.get("name") != CALL_TOOL_NAME:
             return

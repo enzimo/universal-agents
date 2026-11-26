@@ -273,6 +273,31 @@ def test_with_full_definitions_nothing_changes(storage, tmp_path) -> None:
     assert "call_tool" not in shown, "call_tool is withheld in full_definitions mode"
     assert "objectives" not in shown, "the catalog's on_request groups still wait"
 
+    # C11: find_tools and describe_tools leave out functions this setting withholds.
+    found = json.loads(tool_loading.find_tools(query="find_tools"))["tools"]
+    [loading_group] = [item for item in found if item["tool_id"] == "fn:tool_loading"]
+    assert loading_group["in_your_tool_list"] is True
+    assert loading_group["functions"] == ["describe_tools", "find_tools", "use_tools"]
+
+    described = json.loads(tool_loading.describe_tools(names=["call_tool", "run_tool_script"]))["tools"]
+    assert [entry["name"] for entry in described] == ["call_tool", "run_tool_script"]
+    for entry in described:
+        assert entry["error"] == "Not available with this team's tool presentation setting."
+        assert "you_hold_it" not in entry and "signature" not in entry
+
+
+@needs_cedar
+def test_with_full_definitions_and_authorization_off_find_tools_leaves_out_call_tool(storage, tmp_path) -> None:
+    lead = index_lead(storage, tmp_path, "full_definitions", enabled=False)
+    registry, hook = model_view(lead)
+    next_model_call(hook, registry)
+
+    found = json.loads(tool_loading.find_tools(query="find_tools"))["tools"]
+
+    [loading_group] = [item for item in found if item["tool_id"] == "fn:tool_loading"]
+    assert loading_group["in_your_tool_list"] is True
+    assert "call_tool" not in loading_group["functions"]
+
 
 @needs_cedar
 def test_a_call_by_name_gets_a_standard_function_the_definition_does_not_list(storage, tmp_path) -> None:

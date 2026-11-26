@@ -49,7 +49,7 @@ from strands.types._events import ToolInterruptEvent, ToolResultEvent, TypedEven
 from strands.types.tools import ToolResult, ToolUse
 from typing_extensions import override
 
-from custom_agents.tool_calling import resolve_tool_use
+from custom_agents.tool_use_unwrap import resolve_tool_use
 from custom_messages.enums import ChangeRecordKind
 
 if TYPE_CHECKING:  # pragma: no cover

@@ -26,7 +26,7 @@ from custom_messages.contracts.access_v2 import AccessLevel, TargetKind, TargetR
 from custom_tools.provider_contract import ToolProvider, tool_name
 from custom_tools.runtime_context import get_agent_ref
 from custom_tools.tool_search import document, rank
-from custom_agents.tool_presentation import on_request_groups
+from custom_agents.tool_presentation import on_request_groups, withheld_functions
 
 MAX_FIND_RESULTS = 25
 STATUS_LOADED = "loaded"
@@ -152,10 +152,16 @@ def _find_with_authorization(agent: Any, query: str) -> list[dict[str, Any]]:
     person_id = person.person_id if person else None
     catalog = requests.service.catalog
     hidden = hidden_tool_ids(agent, catalog)
+    withheld = withheld_functions(agent, catalog)
     grants = requests.service.agent_grants(principal, task_id=task_id, person_id=person_id)
     # An MCP server's functions are its discovered tools, <prefix>_<tool>.
+    # Withheld functions (such as call_tool in full_definitions or run_tool_script when scripts are off)
+    # are left out so find_tools reflects what this setting actually shows.
     candidates = [
-        (tool_def, sorted(functions_of_tools(catalog, {tool_def.tool_id}) | mcp_function_names(catalog, tool_def.tool_id)))
+        (
+            tool_def,
+            sorted((functions_of_tools(catalog, {tool_def.tool_id}) - withheld) | mcp_function_names(catalog, tool_def.tool_id)),
+        )
         for tool_def in sorted(catalog.tools.values(), key=lambda t: t.tool_id)
     ]
     results: list[dict[str, Any]] = []
@@ -177,9 +183,10 @@ def _find_without_authorization(agent: Any, query: str) -> list[dict[str, Any]]:
 
     catalog = runtime_access(agent).catalog
     hidden = hidden_tool_ids(agent, catalog)
+    withheld = withheld_functions(agent, catalog)
     names = {tool_name(tool) for tool in getattr(agent, "tools", ()) or ()}
     candidates = [
-        (tool_def, sorted(functions_of_tools(catalog, {tool_def.tool_id}) & names))
+        (tool_def, sorted((functions_of_tools(catalog, {tool_def.tool_id}) & names) - withheld))
         for tool_def in sorted(catalog.tools.values(), key=lambda t: t.tool_id)
     ]
     results: list[dict[str, Any]] = []
@@ -452,12 +459,27 @@ def describe_tools(names: list[str]) -> str:
         catalog = runtime_access(agent).catalog
         tools = trusted_tools()
         held = held_functions(agent, current_parts(agent))
+        withheld = withheld_functions(agent, catalog)
         scripts = scripts_enabled(agent)
         results: list[dict[str, Any]] = []
         for name in wanted[:MAX_DESCRIBED]:
+            if name in withheld:
+                results.append(
+                    {
+                        "name": name,
+                        "error": "Not available with this team's tool presentation setting.",
+                    }
+                )
+                continue
             tool_def = tools.get(name)
             if tool_def is None:
-                results.append({"name": name, "error": "No tool function has this name.", "closest": _closest_names(name, set(tools))})
+                results.append(
+                    {
+                        "name": name,
+                        "error": "No tool function has this name.",
+                        "closest": _closest_names(name, set(tools) - withheld),
+                    }
+                )
                 continue
             entry = described(name, tool_def, catalog, scripts=scripts)
             entry["you_hold_it"] = name in held
@@ -483,15 +505,12 @@ def call_tool(name: str, inputs: dict[str, Any] | None = None) -> str:
 
     # CallToolHook rewrites every valid call_tool invocation into the real tool
     # call before execution. This fallback body runs only if invoked directly
-    # outside the index runtime hook, and fails closed.
-    return _json(
-        {
-            "status": "error",
-            "error": (
-                f"call_tool cannot execute {name!r} outside the tool index runtime hook. "
-                "Call the target function directly or enable the tool index."
-            ),
-        }
+    # outside the index runtime hook, and fails closed by raising so Strands
+    # records status='error' (and ChangesFirstToolExecutor stops the step).
+    del name, inputs
+    raise RuntimeError(
+        "call_tool cannot execute outside the tool index runtime hook. "
+        "Call the target function directly or enable the tool index."
     )
 
 

@@ -46,6 +46,7 @@ from custom_agents.activity_callbacks import (
     TerminalReasoningCallbackHandler,
     TerminalReasoningDiagnosticsCallbackHandler,
 )
+from custom_agents.tool_use_unwrap import unwrap_tool_use
 from custom_agents.context_engine import (
     AssembledContext,
     ContextAssemblyRequest,
@@ -306,8 +307,6 @@ async def _finalize_objective_work_invocation(
         )
 
         def checkpoint_callback(**callback_kwargs: Any) -> None:
-            from custom_agents.tool_calling import unwrap_tool_use
-
             current_tool_use = callback_kwargs.get("current_tool_use") or {}
             if current_tool_use and current_tool_use.get("name"):
                 unwrapped = unwrap_tool_use(current_tool_use)

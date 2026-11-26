@@ -6,6 +6,8 @@ import json
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional
 
+from custom_agents.tool_use_unwrap import unwrap_tool_use
+
 
 def compact_debug_preview(value: Any, *, max_chars: int = 1200) -> str:
     try:
@@ -41,8 +43,6 @@ def collect_recent_strands_tool_transcript(strands_agent: Any, *, max_blocks: in
             if not isinstance(content_block, dict):
                 continue
             if "toolUse" in content_block and isinstance(content_block["toolUse"], dict):
-                from custom_agents.tool_calling import unwrap_tool_use
-
                 tool_use = content_block["toolUse"]
                 unwrapped = unwrap_tool_use(tool_use)
                 tool_name = unwrapped.name or tool_use.get("name")
@@ -136,8 +136,6 @@ class ToolCallLimitCallbackHandler:
 
     @staticmethod
     def _summarize_tool_use(current_tool_use: Dict[str, Any], *, sequence_number: int) -> Dict[str, Any]:
-        from custom_agents.tool_calling import unwrap_tool_use
-
         unwrapped = unwrap_tool_use(current_tool_use)
         tool_name = unwrapped.name or str(current_tool_use.get("name") or "unknown")
         tool_input = unwrapped.inputs if unwrapped.unwrapped and unwrapped.inputs is not None else current_tool_use.get("input")
@@ -154,8 +152,6 @@ class ToolCallLimitCallbackHandler:
     def __call__(self, **kwargs: Any) -> None:
         current_tool_use = kwargs.get("current_tool_use") or {}
         if current_tool_use and current_tool_use.get("name"):
-            from custom_agents.tool_calling import unwrap_tool_use
-
             normalized_tool_use = dict(current_tool_use)
             unwrapped = unwrap_tool_use(normalized_tool_use)
             tool_name = unwrapped.name or str(normalized_tool_use.get("name") or "unknown")
