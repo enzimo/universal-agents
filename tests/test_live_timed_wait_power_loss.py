@@ -7,17 +7,23 @@ JetStream folder across the restart), connects a real ``UniversalAgent`` running
 the real ``wait`` tool against a scripted Strands ``Model``, and then simulates
 abrupt power loss:
 
-1. ``SIGKILL`` (``process.kill()``) on ``nats-server``;
-2. Raw task cancellation on the agent without calling ``exit_agent()`` or
-   running exit DB/detach writes (cancelling 0.10's ``_self_refresh_task``,
-   ``_local_schedule_task``, and ``_scheduler_task``), asserting persisted
-   SQLite ``active_task_runtime`` rows and ``(agent_id, is_exiting)`` did not
-   change;
+1. The first agent runs in its own OS process
+   (``tests/live_power_loss_first_agent.py``) with its own process run id,
+   connected to the mapped server. Once its task is ``WAITING`` and the worker
+   slot is free, ``SIGKILL`` ends that process and then ``nats-server``: a real
+   process death, so nothing of the first agent (turn work, heartbeat, status
+   writes) can run or write afterwards. An in-process stand-in that cancelled
+   only the agent's tasks left paused-turn work writing its rows (F2);
+2. The saved ``WAITING`` task, its wait record and single charge, and the first
+   agent's status row (not exiting, still naming the killed process) are
+   checked in SQLite, and the row is checked again right before the second
+   agent starts;
 3. Advance the controllable clock (``timed_waits.utc_now``);
 4. Restart ``nats-server`` via ``own_nats_server_process`` on the SAME
    JetStream folder (picking a fresh ephemeral port), verify the prior
    file-backed work stream and consumers loaded from disk, and start a fresh
-   ``UniversalAgent`` on the same SQLite database.
+   ``UniversalAgent`` in the test process, under a new process run id, on the
+   same SQLite database.
 
 Covers all three power-loss scenarios:
 1. Restart before ``resume_at``: stays ``WAITING``, never resumes early,
@@ -40,6 +46,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -80,7 +87,6 @@ from tests.own_nats_server import own_nats_server_process
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration, pytest.mark.live, pytest.mark.nats]
 
 BASE_TIME = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
-_BACKGROUND_TASK_ATTRS = ("_local_schedule_task", "_self_refresh_task", "_scheduler_task")
 
 
 def _nats_server_binary() -> str:
@@ -116,60 +122,85 @@ def _snapshot_runtime_rows(db_path: Path) -> list[tuple[str, str]]:
     return [(str(owner), str(payload)) for owner, payload in rows]
 
 
-def _snapshot_agent_state_row(db_path: Path, agent_id: str) -> tuple[str, int] | None:
-    """Return ``(agent_id, is_exiting)`` without racing on concurrent heartbeat ``last_seen_at`` updates (F2)."""
+def _saved_task(db_path: Path, owner_agent_id: str, task_id: str) -> dict[str, Any]:
+    """The task as the owner last saved it (assembled the way recovery reads it)."""
+
+    from storage.runtime_state_repository import SqliteRuntimeStateRepository
+
+    rows = SqliteRuntimeStateRepository(str(db_path)).load_task_runtime_by_owner(owner_agent_id)
+    assert len(rows) == 1, f"expected one saved runtime row for {owner_agent_id}, got {len(rows)}"
+    payload = json.loads(rows[0].runtime_state_json)
+    saved = next(item for item in payload["tasks"] if item["task"]["task_id"] == task_id)
+    events = [(entry.get("details") or {}).get("event") for entry in saved["task"]["execution_history"]]
+    return {
+        "state": saved["state"],
+        "blocker_kind": (payload["human_interaction_blockers"].get(task_id) or {}).get("kind"),
+        "charges": events.count("timed_wait_started"),
+    }
+
+
+def _saved_agent_status(db_path: Path, agent_id: str) -> tuple[int, str | None]:
+    """``(is_exiting, process_identity)`` from the agent's ``agent_states`` row."""
+
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
-            "SELECT agent_id, is_exiting FROM agent_states WHERE agent_id = ?",
+            "SELECT is_exiting, full_status_json FROM agent_states WHERE agent_id = ?",
             (agent_id,),
         ).fetchone()
-    if row is None:
-        return None
-    return (str(row[0]), int(row[1]))
+    assert row is not None, f"agent {agent_id} wrote no status row"
+    return int(row[0]), json.loads(row[1]).get("process_identity")
 
 
-def _snapshot_full_agent_state_row(db_path: Path, agent_id: str) -> tuple[Any, ...] | None:
-    """Full status row for verifying a killed agent's heartbeat never writes again after abrupt kill (C02)."""
-    with sqlite3.connect(db_path) as conn:
-        return conn.execute(
-            "SELECT agent_id, is_exiting, last_seen_at, full_status_json FROM agent_states WHERE agent_id = ?",
-            (agent_id,),
-        ).fetchone()
+async def _start_first_agent_process(tmp_path: Path, args: dict[str, str], env: dict[str, str]) -> tuple[Any, str]:
+    """Start ``live_power_loss_first_agent.py``; return the process and its identity once its task is WAITING."""
+
+    project_root = Path(__file__).resolve().parents[1]
+    tests_dir = Path(__file__).resolve().parent
+    log_path = tmp_path / "first-agent.log"
+    log_handle = log_path.open("ab")
+    child_env = dict(env)
+    child_env["PYTHONPATH"] = os.pathsep.join([str(project_root), str(tests_dir)])
+    child_env["RTK_DB_PATH"] = ":memory:"
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(tests_dir / "live_power_loss_first_agent.py"),
+            json.dumps(args),
+            cwd=str(project_root),
+            env=child_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=log_handle,
+        )
+    finally:
+        log_handle.close()
+    assert process.stdout is not None
+    try:
+        while True:
+            line = await asyncio.wait_for(process.stdout.readline(), timeout=60.0)
+            if not line:
+                await process.wait()
+                pytest.fail(
+                    f"First agent process exited ({process.returncode}) before its task was WAITING:\n"
+                    + log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+                )
+            text = line.decode("utf-8", errors="replace").strip()
+            if text.startswith("READY "):
+                return process, str(json.loads(text[len("READY "):])["process_identity"])
+    except asyncio.TimeoutError:
+        await _sigkill_process(process)
+        pytest.fail(
+            "First agent process did not report a WAITING task within 60s:\n"
+            + log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+        )
 
 
-async def _abruptly_kill_agent(agent: UniversalAgent, agent_task: asyncio.Task[Any]) -> None:
-    """Simulate sudden process death without running ``exit_agent()`` or exit DB/detach writes (C02).
+async def _sigkill_process(process: Any) -> None:
+    """SIGKILL the first agent's process and reap it (a real, abrupt process death)."""
 
-    Mirrors release/0.10's ``_cleanup_nats_runtime_on_exit`` task list
-    (``_local_schedule_task``, ``_self_refresh_task``, ``_scheduler_task``) so
-    the dead agent's 20s heartbeat loop cannot keep running in-process after
-    the kill, while skipping ``detach_agent`` and ``_refresh_self_agent_state(is_exiting=True)``.
-    """
-    from custom_agents.agent_team_runtime import unregister_local_worker
-
-    async def _raw_task_and_socket_cleanup(adapter: Any) -> None:
-        unregister_local_worker(agent.id)
-        for attr in _BACKGROUND_TASK_ATTRS:
-            bg = getattr(agent, attr, None)
-            if bg is not None and not bg.done():
-                bg.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await asyncio.wait_for(bg, timeout=1.0)
-            setattr(agent, attr, None)
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(adapter.close(), timeout=2.0)
-
-    agent._cleanup_nats_runtime_on_exit = _raw_task_and_socket_cleanup  # type: ignore[method-assign]
-    if not agent_task.done():
-        agent_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await asyncio.wait_for(agent_task, timeout=5.0)
-
-
-def _assert_background_tasks_done(agent: UniversalAgent) -> None:
-    for attr in _BACKGROUND_TASK_ATTRS:
-        bg = getattr(agent, attr, None)
-        assert bg is None or bg.done(), f"Killed agent {agent.id} still has live task {attr}"
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await asyncio.wait_for(process.wait(), timeout=10.0)
 
 
 async def _assert_restarted_jetstream_loaded_store(
@@ -388,66 +419,48 @@ async def _run_power_loss_scenario(
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
-    # First runtime run identity (used by real agent_liveness to prove first process died after power loss).
-    monkeypatch.setenv(PROCESS_RUN_ID_ENV, f"run-before-{new_id('p')}")
-    monkeypatch.setenv(PROCESS_RUN_PROVEN_ENV, "1")
-    current_process_identity.cache_clear()
+    # The first agent's process run id; real agent_liveness later finds this process gone.
+    before_run_id = f"run-before-{new_id('p')}"
 
-    first_model = _PowerLossWaitModel(reason=reason, should_call_wait=True)
+    first_process: Any = None
     second_model = _PowerLossWaitModel(reason=reason, should_call_wait=False)
     second_agent_tasks: list[tuple[UniversalAgent, asyncio.Task[Any]]] = []
-    agent1: UniversalAgent | None = None
-    first_row_after_kill: tuple[Any, ...] | None = None
 
     try:
         with patch.object(timed_waits_rules, "utc_now", side_effect=lambda: now_box[0]):
-            # --- Phase 1 & 2: start isolated mapped nats-server + agent 1, call real wait(5), then SIGKILL ---
+            # --- Phase 1: agent 1 in its own process (mapped server) calls real wait(5) and saves WAITING ---
             with own_nats_server_process(nats_binary, nats_folder) as (nats_url_1, proc1):
-                transport_cfg_1 = TransportSettings(nats_url=nats_url_1, nats_servers=[nats_url_1], storage="file")
-                with patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=first_model):
-                    agent1 = _power_loss_agent(
-                        agent_id=first_agent_id,
-                        team_id=team_id,
-                        named_agent_type=named_type,
-                        db_path=db_path,
-                        workspace_dir=workspace,
-                        nats_url=nats_url_1,
-                        same_role_takeover=True,
-                    )
-                    set_agent_ref(agent1)
-                    async with LiveNatsClient(team_id, transport=transport_cfg_1, servers=[nats_url_1]) as client1:
-                        agent1_task = await _start_agent(agent1)
-                        await client1.publish(first_agent_id, _request_envelope(task_id, first_agent_id, reply_route))
-                        await _wait_for(
-                            lambda: (
-                                (info := agent1.task_manager.get_task_info(task_id)) is not None
-                                and info.state == ProgressState.WAITING
-                                and (get_human_interaction_blocker(agent1.task_manager, task_id) or {}).get("kind")
-                                == "timed_wait"
-                            ),
-                            timeout=15.0,
-                        )
-                        assert agent1.task_manager.task_state.current_in_progress_task_id is None
-                        assert first_model.wait_calls == 1
+                first_env = dict(os.environ)
+                first_env[PROCESS_RUN_ID_ENV] = before_run_id
+                first_env[PROCESS_RUN_PROVEN_ENV] = "1"
+                first_process, first_identity = await _start_first_agent_process(
+                    tmp_path,
+                    {
+                        "nats_url": nats_url_1,
+                        "db_path": str(db_path),
+                        "workspace": str(workspace),
+                        "team_id": team_id,
+                        "named_agent_type": named_type,
+                        "agent_id": first_agent_id,
+                        "task_id": task_id,
+                        "reply_route": reply_route,
+                        "reason": reason,
+                    },
+                    first_env,
+                )
+                assert before_run_id in first_identity
 
-                    # Simulate abrupt power loss: SIGKILL nats-server + raw task cancel without exit writes.
-                    rows_before_kill = _snapshot_runtime_rows(db_path)
-                    state_before_kill = _snapshot_agent_state_row(db_path, first_agent_id)
-                    assert rows_before_kill, "WAITING task must be persisted in SQLite before power loss"
-                    assert state_before_kill == (first_agent_id, 0)
-                    _sigkill_nats_server(proc1)
-                    await _abruptly_kill_agent(agent1, agent1_task)
-                    set_agent_ref(None)
-                    _assert_background_tasks_done(agent1)
-                    rows_after_kill = _snapshot_runtime_rows(db_path)
-                    state_after_kill = _snapshot_agent_state_row(db_path, first_agent_id)
-                    first_row_after_kill = _snapshot_full_agent_state_row(db_path, first_agent_id)
-                    assert rows_after_kill == rows_before_kill, (
-                        "Abrupt kill must not run shutdown mutations on active_task_runtime"
-                    )
-                    assert state_after_kill == state_before_kill == (first_agent_id, 0), (
-                        "Abrupt kill must not mark agent_states as exiting"
-                    )
+                # --- Phase 2: power loss: SIGKILL agent 1's process, then nats-server ---
+                await _sigkill_process(first_process)
+                _sigkill_nats_server(proc1)
+            assert _saved_task(db_path, first_agent_id, task_id) == {
+                "state": ProgressState.WAITING.value,
+                "blocker_kind": "timed_wait",
+                "charges": 1,
+            }
+            assert _saved_agent_status(db_path, first_agent_id) == (0, first_identity), (
+                "A power loss writes nothing: agent 1 is not exiting and its row names its killed process"
+            )
 
             # --- Phase 3: advance clock, restart nats-server from SAME JetStream folder, start fresh agent ---
             now_box[0] = BASE_TIME + restart_offset
@@ -459,6 +472,8 @@ async def _run_power_loss_scenario(
                 transport_cfg_2 = TransportSettings(nats_url=nats_url_2, nats_servers=[nats_url_2], storage="file")
                 # Prove the restarted nats-server loaded the prior file-backed work stream and consumers from disk.
                 await _assert_restarted_jetstream_loaded_store(team_id, transport_cfg_2, nats_url_2)
+                # Right before agent 2 starts, agent 1's row still names the killed process (nothing wrote since).
+                assert _saved_agent_status(db_path, first_agent_id) == (0, first_identity)
 
                 with patch("custom_agents.strands_agent.UniversalAgent._configure_model", return_value=second_model):
                     agent2 = _power_loss_agent(
@@ -509,19 +524,15 @@ async def _run_power_loss_scenario(
                         assert WaitLedger.from_history(archived["main_task"]).total_minutes == 5
                         assert second_model.wait_calls == 0
                         assert second_model.answer_calls == 1
-                        # C02: first agent's background tasks stayed dead and its row was never refreshed post-kill.
-                        assert agent1 is not None
-                        _assert_background_tasks_done(agent1)
-                        if different_instance_id:
-                            first_row_at_end = _snapshot_full_agent_state_row(db_path, first_agent_id)
-                            if first_row_at_end is not None:
-                                assert first_row_at_end == first_row_after_kill
                         # Stop agent2 before leaving own_nats_server_process so its graceful shutdown talks to live NATS.
                         await _stop_agents(second_agent_tasks)
                         second_agent_tasks.clear()
                         return reply, second_model, db_path, first_agent_id, second_agent_id
     finally:
         current_process_identity.cache_clear()
+        if first_process is not None:
+            with contextlib.suppress(Exception):
+                await _sigkill_process(first_process)
         with contextlib.suppress(Exception):
             await _stop_agents(second_agent_tasks)
         set_agent_ref(None)
