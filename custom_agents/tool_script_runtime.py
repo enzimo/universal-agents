@@ -50,7 +50,6 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -135,13 +134,13 @@ def check_call(agent: Any, catalog: Any, name: Any, inputs: Any, held: set[str])
 
     from custom_agents.tool_index import script_inputs
     from custom_agents.tool_loading import offered_names
-    from custom_agents.tool_sync import provider_tools
+    from custom_tools.tool_lookup import trusted_tools
 
     if not isinstance(name, str) or not name:
         return "A tool call needs a function name."
     if not isinstance(inputs, dict):
         return f"{name}'s inputs must be given by name."
-    tools = provider_tools()
+    tools = trusted_tools()
     if name not in tools:
         closest = difflib.get_close_matches(name, sorted(tools), n=3, cutoff=0.5)
         hint = f" The closest names are: {', '.join(closest)}." if closest else ""
@@ -218,7 +217,9 @@ def execute_call(
 
     from strands.types.tools import ToolResult, ToolUse
 
-    tool_use = cast(ToolUse, {"toolUseId": f"tooluse_script_{uuid.uuid4().hex[:12]}", "name": name, "input": dict(inputs)})
+    from id_generation import new_id
+
+    tool_use = cast(ToolUse, {"toolUseId": new_id("tooluse_script"), "name": name, "input": dict(inputs)})
     results: list[ToolResult] = []
     # A copy shares the turn's request state (call budget) and ToolStop, but Strands' updates stay here.
     state = dict(invocation_state or {})

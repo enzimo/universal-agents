@@ -197,6 +197,23 @@ must name `memory`. These lists cannot select individual actions; use
 [access blocks](permissions.md) for operation-specific restrictions. MCP server
 tools are not filtered by these lists and their names are refused.
 
+## How agents' tools are shown (experiment)
+
+`agent.tool_presentation` decides how the model sees an agent's tools. It is an
+experiment setting while its effect is measured:
+
+- `full_definitions` (default): every tool the agent holds is sent with its full
+  definition, except the groups that load on request.
+- `index`: only a small core keeps full definitions (messages to the person,
+  files, finding tools, asking for access, the plan and the task queue). Every
+  other tool the agent holds is listed in one line in its instructions and is
+  loaded when the agent needs it.
+- `index_and_scripts`: like `index`, and agents may also run a short script that
+  chains read-only tool lookups in one step. The script runs in the code
+  sandbox with no files and no network, so this needs the sandbox on.
+
+Access does not change with this setting: every tool call is still checked.
+
 ## Instance Folders
 
 Only the instance root is configurable (`instance_root` in

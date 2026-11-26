@@ -22,7 +22,8 @@ How a tool is scored for a query:
 - A query word adds the weight of the best field it appears in times its
   rarity across tools (inverse document frequency), so a word only a few
   tools use counts more than one every tool uses.
-- A query that names a function exactly puts that function's tool first.
+- A query that is exactly a function's name returns only that function's tool;
+  a query that contains one puts that tool first.
 
 Ties keep the catalog order (tool id), so the ranking is deterministic.
 """
@@ -171,6 +172,10 @@ def rank(documents: Sequence[ToolDocument], query: str) -> list[tuple[float, Too
     exact = set(_WORD.findall(str(query or "").lower())) | set(str(query or "").lower().split())
     if not wanted and not exact:
         return [(0.0, doc) for doc in documents]
+    named = [doc for doc in documents if exact & set(doc.functions)]
+    if named and str(query or "").strip().lower() in {name for doc in named for name in doc.functions}:
+        # The query is exactly a function's name: that tool is the answer, as before ranking existed.
+        return [(EXACT_FUNCTION_BONUS, doc) for doc in named]
     total = len(documents) or 1
     frequency = _frequencies(documents, wanted)
     scored = [(score, doc) for doc in documents if (score := _score(doc, wanted, frequency, total, exact)) > 0]

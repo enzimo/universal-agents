@@ -130,10 +130,13 @@ class Watch(HookProvider):
         from custom_tools.tool_script_context import in_tool_script
 
         result = event.result or {}
+        ok = _call_ok(result)
         self.calls.append({
             "tool": str(event.tool_use.get("name") or ""),
             "input": dict(event.tool_use.get("input") or {}),
-            "ok": _call_ok(result),
+            "ok": ok,
+            # What a failed call said and was given, kept short, to explain failures in the report.
+            "sample": "" if ok else json.dumps({"input": event.tool_use.get("input"), "result": result.get("content")}, default=str)[:700],
             "unknown": event.selected_tool is None,
             "from_script": in_tool_script(),
         })
@@ -312,6 +315,7 @@ def test_live_tool_presentation_comparison(tmp_path, monkeypatch, presentation: 
                         "script_calls": sum(1 for call in watch.calls if call["from_script"]),
                         "failed_calls": sum(1 for call in watch.calls if not call["ok"]),
                         "unknown_calls": sum(1 for call in watch.calls if call["unknown"]),
+                        "failure_samples": [call["sample"] for call in watch.calls if call["sample"]][:3],
                     })
                 with report.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(row) + "\n")

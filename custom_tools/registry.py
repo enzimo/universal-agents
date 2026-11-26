@@ -21,6 +21,7 @@ from custom_tools.non_interactive_file_tools import (
 )
 from custom_tools.non_interactive_shell import shell
 from custom_tools.provider_contract import ToolProvider, dedupe_tools, tool_name
+from custom_tools.tool_lookup import register_trusted_tools
 from custom_tools.providers.access import PROVIDER as ACCESS_PROVIDER
 from custom_tools.providers.access_proposals import PROVIDER as ACCESS_PROPOSALS_PROVIDER
 from custom_tools.providers.access_workflows import PROVIDER as ACCESS_WORKFLOWS_PROVIDER
@@ -170,3 +171,5 @@ def validate_tool_registry() -> None:
 
 
 validate_tool_registry()
+# Tools that look others up by name read them here without importing this module (custom_tools.tool_lookup).
+register_trusted_tools(ALL_PROVIDER_TOOLS)

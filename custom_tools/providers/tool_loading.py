@@ -59,9 +59,9 @@ def _use_tools_call(tool_id: str) -> str:
 def _function_texts(functions: list[str]) -> list[str]:
     """The descriptions of these trusted functions (MCP tool names have none here)."""
 
-    from custom_agents.tool_sync import provider_tools
+    from custom_tools.tool_lookup import trusted_tools
 
-    tools = provider_tools()
+    tools = trusted_tools()
     return [str((getattr(tools[name], "tool_spec", None) or {}).get("description") or "") for name in functions if name in tools]
 
 
@@ -441,7 +441,7 @@ def describe_tools(names: list[str]) -> str:
     from custom_agents.strands_parts import current_parts
     from custom_agents.tool_index import described, held_functions
     from custom_agents.tool_presentation import scripts_enabled
-    from custom_agents.tool_sync import provider_tools
+    from custom_tools.tool_lookup import trusted_tools
     from custom_tools.providers.access import _guarded
 
     def run() -> str:
@@ -450,7 +450,7 @@ def describe_tools(names: list[str]) -> str:
         if not wanted:
             raise ValueError("Name at least one tool function, for example names=['knowledge_search'].")
         catalog = runtime_access(agent).catalog
-        tools = provider_tools()
+        tools = trusted_tools()
         held = held_functions(agent, current_parts(agent))
         scripts = scripts_enabled(agent)
         results: list[dict[str, Any]] = []

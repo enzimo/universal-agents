@@ -593,3 +593,33 @@ def test_version_15_export_upgrades_with_blob_defaults_and_v16_carries_blob_sett
     imported_v16 = GatewayInstanceConfig.load(target2 / "instance_config.yaml")
     assert imported_v16.agent.blob_retention_days == 14
     assert imported_v16.transport.queues.max_bytes.blobs == 256 * MIB
+
+
+def test_version_16_export_upgrades_with_the_default_tool_presentation_and_v17_carries_it(tmp_path: Path) -> None:
+    """Settings v17 adds agent.tool_presentation (the tool index experiment) with v16 forward conversion."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    class ExportedAsV16(SettingsSection):
+        schema_version = 16
+
+        def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
+            record = SettingV1(path=("heartbeat", "enabled"), value=False)
+            return SectionExport(records=[record.model_dump(mode="json")])
+
+    path, _config = _old_instance(tmp_path)
+    target = tmp_path / "from-v16"
+    plan = _import(_export(tmp_path, path, ExportedAsV16()), target, dry_run=False)
+    assert not plan.by_outcome(RecordOutcome.REFUSED)
+    assert GatewayInstanceConfig.load(target / "instance_config.yaml").agent.tool_presentation == "full_definitions"
+
+    def with_index(config: Any) -> None:
+        config.agent.tool_presentation = "index"
+
+    path2, _config2 = _old_instance(tmp_path / "src-v17", with_index)
+    out2 = _export(tmp_path / "src-v17", path2)
+    assert {record.dotted: record.value for record in _records(out2)} == {"agent.tool_presentation": "index"}
+    target2 = tmp_path / "to-v17"
+    plan2 = _import(out2, target2, dry_run=False)
+    assert not plan2.by_outcome(RecordOutcome.REFUSED)
+    assert GatewayInstanceConfig.load(target2 / "instance_config.yaml").agent.tool_presentation == "index"

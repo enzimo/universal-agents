@@ -250,7 +250,7 @@ class ToolIndexHook(HookProvider):
         from custom_agents.access_runtime import runtime_access
         from custom_agents.tool_loading import offered_names, shown_names
         from custom_agents.tool_presentation import scripts_enabled, withheld_functions
-        from custom_agents.tool_sync import provider_tools
+        from custom_tools.tool_lookup import trusted_tools
 
         catalog = runtime_access(self.agent).catalog
         held = held_functions(self.agent, self.parts)
@@ -260,7 +260,7 @@ class ToolIndexHook(HookProvider):
             - shown_names(self.agent, catalog, held, at_start=True)
             - withheld_functions(self.agent, catalog)
         )
-        return index_text(catalog, indexed, provider_tools(), scripts=scripts_enabled(self.agent))
+        return index_text(catalog, indexed, trusted_tools(), scripts=scripts_enabled(self.agent))
 
 
 def held_functions(agent: Any, parts: Any) -> set[str]:

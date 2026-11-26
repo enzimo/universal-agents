@@ -556,9 +556,9 @@ class OnRequestToolHook(HookProvider):
 
         if event.selected_tool is not None:
             return
-        from custom_agents.tool_sync import provider_tools
+        from custom_tools.tool_lookup import trusted_tools
 
-        tool = provider_tools().get(name)
+        tool = trusted_tools().get(name)
         if tool is None or not offered(self.agent, [tool]) or not self._may_load(name):
             return
         event.selected_tool = tool
@@ -575,10 +575,10 @@ class OnRequestToolHook(HookProvider):
         import difflib
 
         from custom_agents.runtime_guardrails import TURN_ACTION_TYPES
-        from custom_agents.tool_sync import provider_tools
+        from custom_tools.tool_lookup import trusted_tools
 
         registry = getattr(getattr(event, "agent", None), "tool_registry", None)
-        known = set(provider_tools()) | (registry_names(registry) if registry is not None else set())
+        known = set(trusted_tools()) | (registry_names(registry) if registry is not None else set())
         # A turn action called as a tool gets the guardrails' own explanation
         # (custom_agents.runtime_guardrails), not a list of similar tool names.
         if not name or name in known or name in TURN_ACTION_TYPES:

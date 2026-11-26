@@ -553,6 +553,11 @@
           "title": "Tool Blocklist",
           "type": "array"
         },
+        "tool_presentation": {
+          "default": "full_definitions",
+          "title": "Tool Presentation",
+          "type": "string"
+        },
         "turn_action_outbox": {
           "additionalProperties": true,
           "title": "Turn Action Outbox",
@@ -953,6 +958,18 @@
           ],
           "default": null,
           "title": "Tool Blocklist"
+        },
+        "tool_presentation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool Presentation"
         },
         "turn_action_outbox": {
           "anyOf": [
