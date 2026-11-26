@@ -1,16 +1,19 @@
 ---
 name: agent-instantiation-skill
 description: Guide for selecting existing agent types and calling instantiate_agent correctly in this runtime. Use when TeamArchitect needs a specialist child or must map a task to an approved child-agent configuration.
+metadata:
+  ua-tools: fn:capabilities fn:runtime_settings
 ---
 
 # Agent Instantiation
 
 Use this skill when deciding whether to create a child agent or when preparing an `instantiate_agent(...)` call.
 
-Specialist planning (`fn:capabilities`), runtime settings (`fn:runtime_settings`),
-access proposals (`fn:access_proposals`) and worker pools (`fn:worker_pools`)
-load on request: call `use_tools(tool_ids=[...])` with the groups a step needs
-before using their functions.
+Specialist planning (`fn:capabilities`) and runtime settings (`fn:runtime_settings`)
+are made available when you activate this skill: with full tool definitions they are loaded, and with a tool index you call their functions through `call_tool`; the activation result says which. Access proposals (`fn:access_proposals`) and worker pools
+(`fn:worker_pools`) wait until a step needs them: call their functions through
+`call_tool` when they are in your tool index, or load them with
+`use_tools(tool_ids=[...])` first.
 
 If the team defines reusable starting teams in `TEAM_TEMPLATES.yaml`,
 you can also use `list_team_templates()` and `instantiate_team_template(...)` to
@@ -34,8 +37,7 @@ staged runtime-settings workflow for composition changes:
 and `set_ephemeral_agent_policy(...)` stage the same bounded plans; apply them
 with `apply_change`.
 
-The legacy raw `create_agent_definition_from_template(...)` entry point remains
-removed. Use the reviewed generated-definition workflow instead:
+Create a new specialist with the reviewed generated-definition workflow:
 `specialist_definitions(action="plan", ...)`, then `apply_change(change_id, reason)`:
 a person approves the exact specialist (with authorization off, pass
 `confirmed=true` after the person agrees). Use

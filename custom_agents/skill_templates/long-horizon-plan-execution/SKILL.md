@@ -1,6 +1,8 @@
 ---
 name: long-horizon-plan-execution
 description: This skill guides self-sustaining agentic teams through OODA-based execution of high-level, ambiguous, multi-step, delegated, long-running, recurring, stalled, or conflicting goals. It should be used when work needs a goal contract, collection and adaptation of domain procedures, a living plan, adaptive team shape, estimates, evidence-bearing milestones, per-objective health monitoring, recovery, deferment, abandonment, or verified closure. It should not be used for trivial one-step requests whose outcome, authority, method, and verification are already obvious.
+metadata:
+  ua-tools: fn:objectives
 ---
 
 # Long-Horizon Plan Execution
