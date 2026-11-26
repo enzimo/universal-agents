@@ -47,6 +47,7 @@ from custom_agents.task_steering_runtime import (
 )
 from custom_agents import paused_wait_resume, tool_setup_run_runtime
 from custom_agents.task_wait_reasons import SavedWork, WaitReason, saved_wait_reason
+from custom_agents.timed_waits import WAIT_TOOL_NAME, timed_wait_record
 from custom_agents.tool_setup_runs import DONE, RUN_FINISHED, RUN_WAITING, TOOL_SETUP_RUN_KIND, RunPieceV1, ToolSetupRunV1
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
@@ -641,7 +642,7 @@ async def test_a_finished_setup_run_whose_answer_waits_for_a_busy_lane_is_never_
     # Review C05: the owner's own held answer is what excuses the task.
     (row,) = [row for row in manager.runtime_state_store.peek_task_runtime_by_team("team") if row.owner_agent_id == "lead"]
     work = SavedWork.from_snapshot(decode_runtime_snapshot(row.runtime_state_json), owner_agent_id="lead")
-    assert saved_wait_reason(work, work.tasks["root"]) is WaitReason.SETUP_ANSWER_HELD
+    assert saved_wait_reason(work, work.tasks["root"]) is WaitReason.ANSWER_HELD
     first = datetime.now(timezone.utc)
     await report_stuck_tasks(lead, now=first)
     await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
@@ -891,6 +892,33 @@ def setup_answer_held_for_the_lane(lead):
     return [record("root", state=ProgressState.WAITING)], setup_wait(held_by="lead")
 
 
+def timed_wait(resume_at: datetime, *, held_by: str | None = None):
+    """The task's timed_wait record; ``held_by`` marks its answer as held for the lane."""
+    rec = timed_wait_record(
+        interrupt_id="int-tw",
+        call_id="call-tw",
+        tool=WAIT_TOOL_NAME,
+        tool_use_id="tu-tw",
+        minutes=240,
+        reason="Portainer redeploy",
+        requested_at=iso(resume_at - timedelta(hours=4)),
+        resume_at=iso(resume_at),
+    )
+    if held_by is not None:
+        rec |= {ANSWER_HELD_AT_KEY: iso(datetime.now(timezone.utc)), ANSWER_HELD_BY_KEY: held_by}
+    return {"human_interaction_blockers": {"root": rec}}
+
+
+def running_timed_wait(lead):
+    return [record("root", state=ProgressState.WAITING)], timed_wait(datetime.now(timezone.utc) + timedelta(hours=4))
+
+
+def timed_wait_answer_held_for_the_lane(lead):
+    return [record("root", state=ProgressState.WAITING)], timed_wait(
+        datetime.now(timezone.utc) - timedelta(hours=1), held_by="lead"
+    )
+
+
 def running_plan(lead):
     lead.task_manager.plan_repository.save_plan(
         PlanRecord(
@@ -977,6 +1005,8 @@ LEGITIMATE_WAITS = {
     # process holds its answer for the lane (task_wait_reasons, 2026-11-19).
     "setup run waiting for its page": waiting_setup_run,
     "setup answer held for the lane": setup_answer_held_for_the_lane,
+    "timed wait running": running_timed_wait,
+    "timed wait answer held for the lane": timed_wait_answer_held_for_the_lane,
     "plan in the store": running_plan,
     "retry timer in the schedule store": retry_timer,
 }
@@ -1014,6 +1044,29 @@ async def test_a_setup_run_record_that_nothing_will_resume_is_reported(lead, run
     first = datetime.now(timezone.utc)
     await report_stuck_tasks(lead, now=first)
     await report_stuck_tasks(lead, now=first + PAST_THRESHOLD)
+    assert waiting_reasons(lead) == {TASK_WAITING_ON_NOTHING}
+    assert STRANDED_TITLE in [notice.title for notice in notices(lead)]
+
+
+@pytest.mark.parametrize(
+    "held_by",
+    [None, "agent-before-restart"],
+    ids=["unheld overdue timed wait", "overdue timed wait held by an earlier process"],
+)
+@pytest.mark.asyncio
+async def test_an_overdue_timed_wait_beyond_grace_is_reported_as_waiting_on_nothing(lead, held_by):
+    """A6: an overdue timed wait beyond the grace period is reported stuck, never excused as a person decision."""
+    now = datetime.now(timezone.utc)
+    overdue_resume_at = now - timedelta(minutes=6)
+    save(
+        lead,
+        "lead",
+        "TeamArchitect",
+        [record("root", state=ProgressState.WAITING)],
+        **timed_wait(overdue_resume_at, held_by=held_by),
+    )
+    await report_stuck_tasks(lead, now=now)
+    await report_stuck_tasks(lead, now=now + PAST_THRESHOLD)
     assert waiting_reasons(lead) == {TASK_WAITING_ON_NOTHING}
     assert STRANDED_TITLE in [notice.title for notice in notices(lead)]
 

@@ -27,20 +27,26 @@ Read from the agent's saved work (``RuntimeSnapshotV3``):
   (``get_pending_recoverable_pause``).
 - ``PERSON_DECISION``: an access, change or proposal request's record
   (``task_human_interaction_blockers``). Every interrupt the code raises today
-  records one (a ``set_up_tools`` run's below), so a paused turn's live
-  session, which only its own process holds in memory, needs no saved record
-  of its own.
-- ``SETUP_ANSWER_HELD``: the task's ``set_up_tools`` run ended while its
-  paused turn was live, and the answer waits in memory for the task's lane,
-  which can be busy with another turn or paused (``execution_lanes_runtime``).
-  The run's record stays, marked with the agent process that holds the answer
-  (``mark_answer_held``), until the turn resumes. The runtime keeps a
-  mark only while a paused turn of that process waits for the answer
-  (``task_human_interaction_blockers``); agent start removes every mark. A
-  mark also counts only when that process owns the saved work, so one left
-  by another process (taken-over work, or a start that has not run its
-  recovery yet) falls back to the run's own state below, and the task is
-  reported once the run has ended.
+  records one (a ``set_up_tools`` run's and a ``wait``/``long_wait`` pause's
+  below), so a paused turn's live session, which only its own process holds in
+  memory, needs no saved record of its own.
+- ``ANSWER_HELD``: a ``set_up_tools`` run or ``wait``/``long_wait`` timer ended
+  while its paused turn was live, and the answer waits in memory for the task's
+  lane, which can be busy with another turn or paused
+  (``execution_lanes_runtime``). The wait's record stays, marked with the agent
+  process that holds the answer (``mark_answer_held``), until the turn resumes.
+  The runtime keeps a mark only while a paused turn of that process waits for
+  the answer (``task_human_interaction_blockers``); agent start removes every
+  mark. A mark also counts only when that process owns the saved work, so one
+  left by another process (taken-over work, or a start that has not run its
+  recovery yet) falls back to the wait's own rule below, and the task is
+  reported once the run has ended or the timer is overdue.
+- ``TIMED_WAIT``: a ``wait`` or ``long_wait`` record
+  (``task_human_interaction_blockers``, kind ``timed_wait``) whose timer is
+  still running (``timed_waits.timer_running``: its saved ``resume_at`` plus
+  ``OVERDUE_GRACE_SECONDS`` has not passed). Once overdue past the grace period
+  without a held answer from this process, it explains nothing so
+  ``task_waiting_on_nothing`` reports the task.
 - ``OUTSIDE_RESULT``: the task's latest action batch stopped to wait for a
   secure credential form or signup automation (the outbox's external-wait
   barrier, ``BATCH_WAITING_EXTERNAL_RESULT``), and since then neither has the
@@ -101,7 +107,12 @@ from custom_agents.task_steering_runtime import (
     INTERRUPT_REQUEST_EVENT,
     INTERRUPT_WAITS_ON_REQUESTER_KEY,
 )
-from custom_agents.task_human_interaction_blockers import answer_held, is_setup_run_blocker
+from custom_agents.task_human_interaction_blockers import (
+    answer_held,
+    is_setup_run_blocker,
+    is_timed_wait_blocker,
+)
+from custom_agents.timed_waits import timer_running, utc_now
 from custom_agents.tool_setup_runs import ToolSetupRunV1, still_waits
 from custom_messages.contracts.runtime_snapshot_v3 import (
     BATCH_WAITING_EXTERNAL_RESULT,
@@ -146,7 +157,8 @@ class WaitReason(StrEnum):
     PERSON_DECISION = "person_decision"
     OUTSIDE_RESULT = "outside_result"
     REQUESTER_ANSWER = "requester_answer"
-    SETUP_ANSWER_HELD = "setup_answer_held"
+    ANSWER_HELD = "answer_held"
+    TIMED_WAIT = "timed_wait"
     ISOLATED_RECOVERY = "isolated_recovery"
     QUEUE_PAUSE = "queue_pause"
     ACCESS_REQUEST = "access_request"
@@ -191,20 +203,37 @@ class SavedWork:
     roots_with_active_lease: frozenset[str]
     roots_with_pending_event: frozenset[str]
     tasks_in_isolated_recovery: frozenset[str]
-    # Records of waits for people (every kind but a setup run's).
+    # Records of waits for people (every kind but setup runs and timed waits).
     tasks_waiting_on_person: frozenset[str]
-    # Setup-run records whose answer this owner holds for the task's lane.
-    tasks_with_setup_answer_held: frozenset[str]
+    # Setup-run or timed-wait records whose answer this owner holds for the task's lane.
+    tasks_with_answer_held: frozenset[str]
+    # Timed-wait records whose timer (plus overdue grace) is still running.
+    tasks_with_running_timer: frozenset[str]
     # The run each other setup-run record names; the run store decides those.
     setup_run_waited: Mapping[str, str]
 
     @classmethod
-    def from_snapshot(cls, snapshot: RuntimeSnapshotV3, *, owner_agent_id: str) -> SavedWork:
+    def from_snapshot(
+        cls,
+        snapshot: RuntimeSnapshotV3,
+        *,
+        owner_agent_id: str,
+        now: datetime | None = None,
+    ) -> SavedWork:
+        moment = (now or utc_now()).astimezone(timezone.utc)
         tasks = {record.task_id: record for record in snapshot.tasks}
         blockers = snapshot.human_interaction_blockers
         setup_records = {task_id: blocker for task_id, blocker in blockers.items() if is_setup_run_blocker(blocker)}
+        timed_records = {task_id: blocker for task_id, blocker in blockers.items() if is_timed_wait_blocker(blocker)}
         held = frozenset(
-            task_id for task_id, blocker in setup_records.items() if answer_held(blocker, owner_agent_id)
+            task_id
+            for task_id, blocker in (*setup_records.items(), *timed_records.items())
+            if answer_held(blocker, owner_agent_id)
+        )
+        running_timers = frozenset(
+            task_id
+            for task_id, blocker in timed_records.items()
+            if task_id not in held and timer_running(blocker, moment)
         )
 
         def is_open(task_id: str) -> bool:
@@ -213,11 +242,11 @@ class SavedWork:
 
         latest: dict[str, tuple[datetime, str]] = {}
         for batch in snapshot.turn_action_batches.values():
-            moment = parse_utc(batch.created_at) or _UNDATED
+            batch_moment = parse_utc(batch.created_at) or _UNDATED
             known = latest.get(batch.source_task_id)
             # Ties keep the batch saved later (the snapshot keeps insertion order).
-            if known is None or moment >= known[0]:
-                latest[batch.source_task_id] = (moment, batch.status)
+            if known is None or batch_moment >= known[0]:
+                latest[batch.source_task_id] = (batch_moment, batch.status)
         return cls(
             snapshot=snapshot,
             owner_agent_id=owner_agent_id,
@@ -243,8 +272,9 @@ class SavedWork:
                 for link in snapshot.recovery_links.values()
                 if link.merge_status == UNMERGED_RECOVERY and is_open(link.recovery_task_id)
             ),
-            tasks_waiting_on_person=frozenset(set(blockers) - set(setup_records)),
-            tasks_with_setup_answer_held=held,
+            tasks_waiting_on_person=frozenset(set(blockers) - set(setup_records) - set(timed_records)),
+            tasks_with_answer_held=held,
+            tasks_with_running_timer=running_timers,
             setup_run_waited={
                 task_id: str(blocker.get("run_id") or "")
                 for task_id, blocker in setup_records.items()
@@ -345,7 +375,8 @@ def saved_wait_reason(work: SavedWork, record: TaskSnapshotRecord) -> WaitReason
         (WaitReason.DELEGATED_WORK, task_id in work.parents_with_open_delegations),
         (WaitReason.RECOVERABLE_PAUSE, task_id in work.tasks_with_pending_pause),
         (WaitReason.PERSON_DECISION, task_id in work.tasks_waiting_on_person),
-        (WaitReason.SETUP_ANSWER_HELD, task_id in work.tasks_with_setup_answer_held),
+        (WaitReason.ANSWER_HELD, task_id in work.tasks_with_answer_held),
+        (WaitReason.TIMED_WAIT, task_id in work.tasks_with_running_timer),
         (WaitReason.ISOLATED_RECOVERY, task_id in work.tasks_in_isolated_recovery),
     )
     for reason, holds in checks:

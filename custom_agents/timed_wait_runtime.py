@@ -31,7 +31,8 @@ Both tools pause the active turn with a local Strands interrupt
   paused turn, removes the held-answer mark, and resumes the task from a note.
 - **Scheduler wake cadence** (``seconds_until_next_resume``): reports the delay
   until the earliest unheld timed wait so the scheduler loop wakes near the
-  resume time without busy-looping while a held answer waits on a busy lane.
+  resume time without busy-looping while a held answer waits on a busy lane,
+  and backs off overdue unresumable waits up to ``MAX_SCHEDULER_SLEEP_SECONDS``.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from typing import Any
 
 from access_control.identity import ISSUER_SCHEDULER
 from custom_agents import timed_waits as timed_waits_rules
+from custom_agents.liveness_observation import MAX_SCHEDULER_SLEEP_SECONDS
 from custom_agents.paused_wait_resume import (
     WaitLogSpec,
     append_wait_history,
@@ -107,6 +109,42 @@ def _wake_scheduler(agent: Any) -> None:
     wake = getattr(agent, "_scheduler_wake", None)
     if wake is not None:
         wake.set()
+
+
+def _warned_anomalies(agent: Any) -> set[tuple[str, str, str, str]]:
+    """Per-record anomaly keys already logged at WARNING so repeated passes log at DEBUG."""
+
+    warned: set[tuple[str, str, str, str]] | None = getattr(agent, "_timed_wait_warned", None)
+    if warned is None:
+        warned = set()
+        agent._timed_wait_warned = warned
+    return warned
+
+
+def _anomaly_log_level(
+    agent: Any,
+    *,
+    task_id: str,
+    interrupt_id: str,
+    resume_at: str,
+    anomaly: str,
+) -> int:
+    """WARNING the first time an anomaly is seen for one blocker record, DEBUG afterwards."""
+
+    warned = _warned_anomalies(agent)
+    key = (task_id, interrupt_id, resume_at, anomaly)
+    if key in warned:
+        return logging.DEBUG
+    warned.add(key)
+    return logging.WARNING
+
+
+def _prune_warned_anomalies(agent: Any, active_records: set[tuple[str, str, str]]) -> None:
+    """Forget deduplication state for records that resumed, finished, or changed."""
+
+    warned: set[tuple[str, str, str, str]] | None = getattr(agent, "_timed_wait_warned", None)
+    if warned:
+        warned.intersection_update({key for key in warned if key[:3] in active_records})
 
 
 # -- recurring-schedule next-run check (shared by tools and begin_timed_wait) ----------------
@@ -563,8 +601,17 @@ async def _resume_one_due_task(agent: Any, task_id: str, moment: datetime, *, wa
         if blocker is None or not is_timed_wait_blocker(blocker) or not is_due(blocker, moment):
             return False
         interrupt_id = str(blocker.get("interrupt_id") or "")
+        resume_at_raw = str(blocker.get("resume_at") or "")
         if not interrupt_id:
-            logger.warning(
+            level = _anomaly_log_level(
+                agent,
+                task_id=task_id,
+                interrupt_id="",
+                resume_at=resume_at_raw,
+                anomaly="missing_interrupt_id",
+            )
+            logger.log(
+                level,
                 "Timed wait record has no interrupt_id; cannot resume. "
                 "event=timed_wait_resume_failed task_id=%s interrupt_id=- agent_id=%s reason=missing_interrupt_id",
                 task_id,
@@ -576,7 +623,15 @@ async def _resume_one_due_task(agent: Any, task_id: str, moment: datetime, *, wa
                 return False
             return await _answer_paused_turn(agent, task_id=task_id, blocker=blocker, now=moment)
         if await run_ops(manager.is_executing_state, task_info.state):
-            logger.warning(
+            level = _anomaly_log_level(
+                agent,
+                task_id=task_id,
+                interrupt_id=interrupt_id,
+                resume_at=resume_at_raw,
+                anomaly=f"executing_with_blocker:{task_info.state.value}",
+            )
+            logger.log(
+                level,
                 "Task is in an executing state with a due timed-wait record and no paused turn; leaving for next pass. "
                 "event=timed_wait_executing_with_blocker task_id=%s interrupt_id=%s state=%s agent_id=%s",
                 task_id,
@@ -611,23 +666,39 @@ async def resume_due_timed_waits(
     candidates = await manager.operations_runtime.run(partial(_timed_wait_tasks, agent))
     resumed = 0
     wake = not at_start
+    still_active: set[tuple[str, str, str]] = set()
     for task_id, blocker in candidates:
-        if not is_due(blocker, moment):
-            continue
         interrupt_id = str(blocker.get("interrupt_id") or "")
+        resume_at_raw = str(blocker.get("resume_at") or "")
+        record_key = (task_id, interrupt_id, resume_at_raw)
+        if not is_due(blocker, moment):
+            still_active.add(record_key)
+            continue
         try:
             if await _resume_one_due_task(agent, task_id, moment, wake=wake):
                 resumed += 1
+            else:
+                still_active.add(record_key)
         except Exception as exc:  # noqa: BLE001 - one task must not stop other due waits
-            logger.warning(
+            still_active.add(record_key)
+            level = _anomaly_log_level(
+                agent,
+                task_id=task_id,
+                interrupt_id=interrupt_id,
+                resume_at=resume_at_raw,
+                anomaly=f"resume_failed:{type(exc).__name__}",
+            )
+            logger.log(
+                level,
                 "Could not resume a due timed wait; the next pass will try again. "
                 "event=timed_wait_resume_failed task_id=%s interrupt_id=%s agent_id=%s error_type=%s",
                 task_id,
                 interrupt_id or "-",
                 getattr(agent, "id", "-"),
                 type(exc).__name__,
-                exc_info=exc,
+                exc_info=exc if level >= logging.WARNING else None,
             )
+    _prune_warned_anomalies(agent, still_active)
     return resumed
 
 
@@ -710,8 +781,21 @@ async def resume_without_paused_turn(agent: Any, task_id: str, steering: TaskSte
 # -- scheduler idle sleep helper -------------------------------------------------------------
 
 
+def _overdue_retry_delay(overdue_seconds: float) -> float:
+    """Back off an already-due wait that could not be resumed, up to the normal scheduler cadence."""
+
+    return min(MAX_SCHEDULER_SLEEP_SECONDS, max(1.0, overdue_seconds / 2.0))
+
+
 def _next_resume_delay_sync(agent: Any, moment: datetime) -> float | None:
-    """Seconds until the earliest unheld timed wait, or None if no unheld timed wait is active."""
+    """Seconds until the earliest unheld timed wait, or None if no unheld timed wait is active.
+
+    An already-due wait that is still present after the pass could not be
+    resumed (anomalous state, transient failure, or another answer pending);
+    its retry delay grows with how overdue it is up to
+    ``MAX_SCHEDULER_SLEEP_SECONDS`` so it does not wake the loop every second
+    while still allowing a healthy upcoming wait to wake on time.
+    """
 
     manager = getattr(agent, "task_manager", None)
     state = getattr(manager, "task_state", None)
@@ -733,13 +817,10 @@ def _next_resume_delay_sync(agent: Any, moment: datetime) -> float | None:
         target = resume_at_of(blocker)
         if target is None:
             continue
-        delay = (target - moment).total_seconds()
+        raw_delay = (target - moment).total_seconds()
+        delay = _overdue_retry_delay(-raw_delay) if raw_delay <= 0.0 else raw_delay
         if earliest_delay is None or delay < earliest_delay:
             earliest_delay = delay
-    if earliest_delay is None:
-        return None
-    if earliest_delay <= 0.0:
-        return 1.0
     return earliest_delay
 
 

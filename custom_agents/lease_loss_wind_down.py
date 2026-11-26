@@ -14,10 +14,12 @@ refused to start a replacement for the live worker. The wind-down instead:
    A running task whose final answer the outbox already sent is finished here
    instead: handing it back made another worker run it again and send a second
    answer (2026-10-17);
-3. keeps tasks that already started and now wait on a person or a subtask,
-   because their replies are addressed to this worker; they may finish here
-   until ``lease_loss_wait_timeout_seconds`` after the lease was lost, after
-   which they fail with an explanation to the requester;
+3. keeps tasks that already started and now wait on a person, a subtask or a
+   timed wait, because their replies or paused turns live on this worker; they
+   may finish here until ``lease_loss_wait_timeout_seconds`` after the lease
+   was lost (the wind-down loop resumes due timed waits because the scheduler
+   loop has stopped), after which they fail with an explanation to the
+   requester;
 4. exits once it holds no unfinished task.
 
 The worker keeps publishing presence while it winds down so a starting worker
@@ -38,7 +40,12 @@ from custom_agents.control_runtime import (
 )
 from custom_agents.pending_work_runtime import start_owned_task
 from custom_agents.sdk.strands.turn_tool_stop import ANSWERED_TASK_FINISHED_REASON, HANDBACK_REASON
+from custom_agents.task_human_interaction_blockers import (
+    get_human_interaction_blocker,
+    is_timed_wait_blocker,
+)
 from custom_agents.task_records import TaskInfo
+from custom_agents.timed_wait_runtime import resume_due_timed_waits
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
@@ -456,6 +463,18 @@ async def _wait_for_resumable_tasks(agent: Any, state: LeaseLossWindDown) -> Non
         if datetime.now(timezone.utc) >= state.deadline:
             await _end_at_deadline(agent, state, remaining)
             return
+        # The scheduler loop has already stopped during wind-down, so this loop
+        # resumes any timed wait that comes due before the deadline.
+        try:
+            await resume_due_timed_waits(agent)
+        except Exception:
+            agent._logger.warning(
+                "Could not check due timed waits during worker wind-down; retrying on the next poll. "
+                "event=worker_wind_down_timed_wait_check_failed agent_id=%s launch_id=%s",
+                agent.id,
+                state.evidence.launch_id,
+                exc_info=True,
+            )
         await asyncio.sleep(WIND_DOWN_POLL_SECONDS)
 
 
@@ -487,11 +506,20 @@ async def _fail_waiting_task(
     waited_minutes = round(
         (state.deadline - state.evidence.lease_lost_at_utc).total_seconds() / 60
     )
-    message = (
-        f"This task was waiting for a reply from a person or a delegated subtask "
-        f"when its worker lost its launch lease. No reply arrived within "
-        f"{waited_minutes} minutes, so the task ended without a result."
+    blocker = await agent.task_manager.operations_runtime.run(
+        partial(get_human_interaction_blocker, agent.task_manager), task_id
     )
+    if is_timed_wait_blocker(blocker):
+        message = (
+            f"This task was paused on a timed wait when its worker lost its launch lease. "
+            f"The wait did not finish within {waited_minutes} minutes, so the task ended without a result."
+        )
+    else:
+        message = (
+            f"This task was waiting for a reply from a person or a delegated subtask "
+            f"when its worker lost its launch lease. No reply arrived within "
+            f"{waited_minutes} minutes, so the task ended without a result."
+        )
     await _stop_pending_subtasks(agent, task_id, reason=message)
     # Failing the task runs the task-ended callbacks, which withdraw any
     # access request it waited on and end its task-bound grants

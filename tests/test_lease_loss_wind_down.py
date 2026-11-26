@@ -13,12 +13,18 @@ import pytest
 import custom_agents.lease_loss_wind_down as wind_down
 import tests.test_access_request_tools as access_tests
 from tests.task_work_support import TurnHost, register_turn
-from custom_agents import access_runtime
+from custom_agents import access_runtime, paused_wait_resume
+from custom_agents import timed_waits as timed_waits_rules
 from custom_agents.control_runtime import (
     handle_interrupted_turn,
 )
 from custom_agents.pending_work_runtime import close_pending_work
+from custom_agents.task_human_interaction_blockers import (
+    get_human_interaction_blocker,
+    record_human_interaction_blocker,
+)
 from custom_agents.task_manager import TaskManager
+from custom_agents.timed_waits import WAIT_TOOL_NAME, timed_wait_record
 from custom_agents.worker_handback_runtime import handle_worker_task_handback
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
@@ -658,3 +664,90 @@ async def test_shutdown_during_a_handback_keeps_the_tasks_not_yet_handed_back(ma
     assert agent.team_comms.handbacks() == []
     assert manager.get_task_info("running") is not None
     assert manager.get_task_info("queued") is not None
+
+
+@pytest.mark.asyncio
+async def test_wind_down_keeps_and_resumes_a_timed_wait_before_the_deadline(manager, monkeypatch):
+    """A6: wind-down keeps a timed-wait task and resumes it when due even though the scheduler loop stopped."""
+    start = datetime.now(timezone.utc)
+    now_box = [start]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+
+    _add(manager, "waiting", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "waiting",
+        timed_wait_record(
+            interrupt_id="int-wd",
+            call_id="call-wd",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-wd",
+            minutes=5,
+            reason="Portainer redeploy",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(minutes=5)).isoformat(),
+        ),
+    )
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    resumed_called = asyncio.Event()
+
+    def finish_resumed_task(_agent):
+        resumed_called.set()
+        manager.complete_task("waiting", now_box[0].isoformat())
+
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", finish_resumed_task)
+
+    state = wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    await asyncio.sleep(0.03)
+    # While the timer is still in the future, the task stays resumable on this worker (not handed back).
+    assert "waiting" in state.resumable_task_ids
+    assert agent.team_comms.handbacks() == []
+    assert not resumed_called.is_set()
+    assert not agent.exited
+
+    # Timer comes due before the wind-down deadline: wind-down resumes it and exits once finished.
+    now_box[0] = start + timedelta(minutes=6)
+    await _wait_for_exit(agent)
+
+    assert resumed_called.is_set()
+    assert agent.exited
+    assert agent.team_comms.handbacks() == []
+    agent._send_task_error_response.assert_not_awaited()
+    assert get_human_interaction_blocker(manager, "waiting") is None
+    archived = manager.get_task_from_db("waiting")
+    assert archived is not None and archived["status"] == ProgressState.COMPLETED.value
+
+
+@pytest.mark.asyncio
+async def test_wind_down_fails_a_late_timed_wait_at_the_deadline_with_clear_message(manager, monkeypatch):
+    """A6: a timed wait that outlasts the wind-down deadline fails cleanly and names the timed wait."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "waiting", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "waiting",
+        timed_wait_record(
+            interrupt_id="int-late",
+            call_id="call-late",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-late",
+            minutes=120,
+            reason="long redeploy",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+    agent = _worker(manager, wait_seconds=0.05, monkeypatch=monkeypatch)
+
+    wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    await _wait_for_exit(agent)
+
+    assert agent.exited
+    assert agent.team_comms.handbacks() == []
+    agent._send_task_error_response.assert_awaited_once()
+    sent_message = agent._send_task_error_response.await_args.args[3]
+    assert "timed wait" in sent_message
+    archived = manager.get_task_from_db("waiting")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value

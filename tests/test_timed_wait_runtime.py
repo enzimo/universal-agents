@@ -987,3 +987,203 @@ async def test_executing_state_anomaly_and_per_task_failure_isolation(
     assert agent.task_manager.get_task_info("task-good").state == ProgressState.ACCEPTED
     assert "event=timed_wait_executing_with_blocker" in caplog.text
     assert "event=timed_wait_resume_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_c19_unresumable_overdue_wait_backs_off_idle_sleep_and_warns_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    due_at = BASE_TIME + timedelta(minutes=5)
+    now_box = [due_at]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+
+    agent = _make_runtime_agent(tmp_path / "manager.db", task_id="task-exec")
+    record_human_interaction_blocker(
+        agent.task_manager,
+        "task-exec",
+        timed_wait_record(
+            interrupt_id="int-exec",
+            call_id="call-exec",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-exec",
+            minutes=5,
+            reason="anomaly",
+            requested_at=BASE_TIME.isoformat(),
+            resume_at=due_at.isoformat(),
+        ),
+    )
+
+    sleeps: list[float] = []
+    with caplog.at_level(logging.DEBUG, logger="custom_agents.timed_wait_runtime"):
+        for overdue_seconds in (0, 20, 60, 180, 10800):
+            now_box[0] = due_at + timedelta(seconds=overdue_seconds)
+            assert await resume_due_timed_waits(agent) == 0
+            sleeps.append(await scheduled_runtime._idle_sleep_seconds(agent, can_claim_scheduled_work=False))
+
+    assert sleeps == [1.0, 10.0, 30.0, 60.0, 60.0]
+
+    warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "event=timed_wait_executing_with_blocker" in rec.getMessage()
+    ]
+    debugs = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.DEBUG and "event=timed_wait_executing_with_blocker" in rec.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert len(debugs) == 4
+
+    # An overdue unresumable wait must not mask a healthy upcoming wait that comes due sooner.
+    agent.task_manager.add_task(
+        Task(task_id="task-upcoming", task_type=MessageMetaType.REQUEST, problem_statement="healthy wait"),
+        MessageHeader(from_agent_id="scheduler"),
+        MessageMeta(),
+        owner_person_id=None,
+    )
+    agent.task_manager.update_main_task_state("task-upcoming", ProgressState.WAITING, now_box[0].isoformat())
+    record_human_interaction_blocker(
+        agent.task_manager,
+        "task-upcoming",
+        timed_wait_record(
+            interrupt_id="int-up",
+            call_id="call-up",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-up",
+            minutes=1,
+            reason="healthy",
+            requested_at=now_box[0].isoformat(),
+            resume_at=(now_box[0] + timedelta(seconds=5)).isoformat(),
+        ),
+    )
+    assert await scheduled_runtime._idle_sleep_seconds(agent, can_claim_scheduled_work=False) == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_c19_repeated_resume_failure_warns_once_and_prunes_after_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    due_at = BASE_TIME + timedelta(minutes=5)
+    now_box = [due_at + timedelta(seconds=10)]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda _a: None)
+
+    agent = _make_runtime_agent(tmp_path / "manager.db", task_id="task-flaky")
+    agent.task_manager.update_main_task_state("task-flaky", ProgressState.WAITING, BASE_TIME.isoformat())
+    record_human_interaction_blocker(
+        agent.task_manager,
+        "task-flaky",
+        timed_wait_record(
+            interrupt_id="int-flaky",
+            call_id="call-flaky",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-flaky",
+            minutes=5,
+            reason="transient error",
+            requested_at=BASE_TIME.isoformat(),
+            resume_at=due_at.isoformat(),
+        ),
+    )
+
+    fail = [True]
+    orig_resume = timed_wait_runtime._resume_task_from_note
+
+    async def sometimes_fails(a: Any, *, task_id: str, blocker: dict[str, Any], now: datetime, wake: bool) -> bool:
+        if fail[0]:
+            raise RuntimeError("sqlite busy")
+        return await orig_resume(a, task_id=task_id, blocker=blocker, now=now, wake=wake)
+
+    monkeypatch.setattr(timed_wait_runtime, "_resume_task_from_note", sometimes_fails)
+
+    with caplog.at_level(logging.DEBUG, logger="custom_agents.timed_wait_runtime"):
+        assert await resume_due_timed_waits(agent) == 0
+        now_box[0] = due_at + timedelta(seconds=40)
+        assert await resume_due_timed_waits(agent) == 0
+        assert await seconds_until_next_resume(agent) == pytest.approx(20.0)
+
+        fail[0] = False
+        assert await resume_due_timed_waits(agent) == 1
+
+    warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "event=timed_wait_resume_failed" in rec.getMessage()
+    ]
+    debugs = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.DEBUG and "event=timed_wait_resume_failed" in rec.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert len(debugs) == 1
+    assert not getattr(agent, "_timed_wait_warned", set())
+
+
+# -- A6: runtime work summary and stop/cancel cleanup ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a6_runtime_work_summary_describes_timed_wait_blocker(tmp_path: Path) -> None:
+    from custom_agents.manager_control_runtime import _runtime_work_root_summary
+
+    agent = _make_runtime_agent(tmp_path / "manager.db")
+    agent.task_manager.update_main_task_state(TASK_ID, ProgressState.WAITING, BASE_TIME.isoformat())
+    record_human_interaction_blocker(
+        agent.task_manager,
+        TASK_ID,
+        timed_wait_record(
+            interrupt_id="int-sum",
+            call_id="call-sum",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-sum",
+            minutes=10,
+            reason="Portainer redeploy",
+            requested_at=BASE_TIME.isoformat(),
+            resume_at=(BASE_TIME + timedelta(minutes=10)).isoformat(),
+        ),
+    )
+    root = agent.task_manager.get_task_info(TASK_ID)
+    summary = await _runtime_work_root_summary(agent, root)
+    assert summary.blocker == "Waiting until 2026-11-26 12:10:00 UTC (10-minute wait: Portainer redeploy)."
+
+
+@pytest.mark.asyncio
+async def test_a6_stopping_a_waiting_task_clears_blocker_drops_turn_and_never_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+    woken: list[Any] = []
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", woken.append)
+
+    agent = _make_runtime_agent(tmp_path / "manager.db")
+    task_steering_runtime._register_terminal_task_steering_cleanup(agent)
+    model = _ScriptedWaitModel([[("tu-stop", "wait", {"minutes": 10, "reason": "Portainer redeploy"})]])
+    strands_agent = Agent(model=model, tools=[wait], callback_handler=None)
+
+    result, parts = await _invoke_and_pause(agent, strands_agent)
+    assert result.stop_reason == "interrupt"
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is not None
+    assert TASK_ID in agent._interrupted_turn_sessions
+
+    # Stop/cancel the waiting task: terminal cleanup removes the blocker and drops the paused turn.
+    now_box[0] = BASE_TIME + timedelta(minutes=2)
+    cancelled = await agent.task_manager.operations_runtime.run(
+        agent.task_manager.cancel_task,
+        TASK_ID,
+        "Stopped by person during timed wait.",
+        now_box[0].isoformat(),
+    )
+    assert cancelled is True
+    assert get_human_interaction_blocker(agent.task_manager, TASK_ID) is None
+    assert TASK_ID not in agent._interrupted_turn_sessions
+    assert TASK_ID not in agent._pending_interrupt_responses
+    assert parts.replace_before_next_turn is True
+
+    # Past the original resume time, nothing resumes or schedules a wake.
+    now_box[0] = BASE_TIME + timedelta(minutes=15)
+    assert await resume_due_timed_waits(agent) == 0
+    assert await seconds_until_next_resume(agent) is None
+    assert woken == []
+    assert TASK_ID not in agent.task_manager.task_state.task_queue

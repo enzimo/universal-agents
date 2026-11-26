@@ -422,7 +422,7 @@ def step_tool_call_id(
     step = _step_tracking_id(getattr(strands_agent, "messages", None), tool_use_id) if tool_use_id else None
     if step is None:
         logger.warning(
-            "A tool call is not in the agent's model history, so a one-time use it takes is bound to no call. "
+            "A tool call is not in the agent's model history, so it has no step-bound call id. "
             "event=tool_call_without_model_step agent_id=%s tool=%s tool_use_id=%s",
             getattr(agent, "id", None),
             tool_name,
