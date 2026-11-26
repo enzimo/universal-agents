@@ -1683,17 +1683,22 @@ records) through `custom_agents/paused_wait_resume.py` and
   window past `resume_at`) and a held answer as `WaitReason.ANSWER_HELD`, while
   overdue unheld waits are reported as stuck. During lease-loss wind-down
   (`custom_agents/lease_loss_wind_down.py`), `_wait_for_resumable_tasks`
-  resumes any already-due timed waits before checking the deadline, and fails
-  any `WAITING` timed wait whose `resume_at` falls after the deadline (or
-  within the final `WIND_DOWN_POLL_SECONDS` poll margin, with no held answer
-  and not yet resumed) immediately on entry and on each poll
+  fails any `WAITING` timed wait whose `resume_at` falls after the deadline (or
+  within the final `WIND_DOWN_POLL_SECONDS` poll margin, since the next poll
+  would come too late to resume it, with no held answer and not yet resumed)
+  immediately on entry and on each poll
   (`timed_wait_runtime.fail_timed_wait_outlasting_deadline`, logging
   `event=worker_wind_down_timed_wait_outlasts_deadline`), stops pending
   delegated subtasks, clears its blocker and paused turn, and tells the
-  requester with a dedicated early-shutdown message; waits due before the
+  requester with a dedicated early-shutdown message; it then resumes waits
+  already due. A poll that runs at or after the deadline resumes nothing and
+  fails the remaining waits with the deadline message. Waits due before the
   deadline still resume and finish on the winding-down worker, held answers are
   not failed early, and waits on people (`access_request`, `tool_setup_run`)
-  keep the full timeout. Stopping or cancelling a waiting task removes the
+  keep the full timeout. If failing the task raises, it counts as failed only
+  when the task is FAILED in memory or archived as FAILED; a task another agent
+  took over (`custody_loss.custody_moved`) is left to that agent with no
+  message and no subtask stop (`event=timed_wait_wind_down_custody_moved`). Stopping or cancelling a waiting task removes the
   blocker record and drops the paused turn so nothing resumes later.
 
 Rationale for a paused Strands interrupt plus a saved blocker record:
