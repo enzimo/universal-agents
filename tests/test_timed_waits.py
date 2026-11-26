@@ -1,0 +1,691 @@
+"""Tests for pure timed-wait rules, the ``wait`` / ``long_wait`` tools, and A4/A5 checks."""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from strands.interrupt import Interrupt, InterruptException, _InterruptState
+from strands.types.tools import ToolContext
+
+from access_control.identity import ENV_SCHEDULER_SIGNING_KEY, ISSUER_GATEWAY, ISSUER_SCHEDULER, ContextSigner
+from custom_agents import schedule_store as schedule_store_module
+from custom_agents.schedule_store import ScheduleStore
+from custom_agents.task_manager import TaskManager
+from custom_agents.timed_waits import (
+    LONG_WAIT_TOOL_ID,
+    LONG_WAIT_TOOL_NAME,
+    OVERDUE_GRACE_SECONDS,
+    TIMED_WAIT_KIND,
+    TIMED_WAIT_RESPONSE_KIND,
+    TIMED_WAIT_STARTED_EVENT,
+    WAIT_TOOL_NAME,
+    WaitLedger,
+    budget_refusal,
+    is_due,
+    next_run_refusal,
+    resume_note,
+    timed_wait_record,
+    timer_running,
+    validate_wait_args,
+    wait_summary,
+)
+from custom_messages.contracts.access_v2 import TaskContextV1
+from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
+from custom_messages.contracts.schedule_v1 import ScheduledMessage, is_recurring_schedule
+from custom_messages.contracts.task_v1 import Task
+from custom_messages.enums import (
+    MessageMetaType,
+    ScheduleManagementClass,
+    TaskHistoryImportance,
+    TaskHistoryType,
+)
+from custom_tools.providers import timed_waits as timed_waits_provider
+from custom_tools.providers.timed_waits import long_wait, wait
+from custom_tools.runtime_context import set_agent_ref, task_work
+from runtime_settings.timed_waits import TimedWaitLimits
+from tests.broker_access_support import (
+    TEST_TEAM,
+    context_signer,
+    forget_task_context_keys,
+    use_scheduler_key,
+)
+
+BASE_TIME = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
+TASK_ID = "task-timed-wait"
+AGENT_ID = "agent-worker-1"
+
+
+def _make_tool_context(tool_use_id: str, *, interrupt_state: _InterruptState | None = None) -> ToolContext:
+    state = interrupt_state if interrupt_state is not None else _InterruptState()
+    fake_strands = SimpleNamespace(_interrupt_state=state)
+    return ToolContext(
+        tool_use={"toolUseId": tool_use_id, "name": "wait", "input": {}},
+        agent=fake_strands,  # type: ignore[arg-type]
+        invocation_state={},
+    )
+
+
+def _record_started_wait(
+    manager: TaskManager,
+    task_id: str,
+    *,
+    tool_use_id: str,
+    minutes: int,
+    tool: str = WAIT_TOOL_NAME,
+    requested_at: datetime = BASE_TIME,
+    reason: str = "wait for deploy",
+) -> None:
+    resume_at = requested_at + timedelta(minutes=minutes)
+    manager.append_history_entry(
+        task_id,
+        f"Waiting {minutes} minutes.",
+        entry_type=TaskHistoryType.QUERY_EVENT,
+        importance=TaskHistoryImportance.HIGH,
+        details={
+            "event": TIMED_WAIT_STARTED_EVENT,
+            "tool": tool,
+            "tool_use_id": tool_use_id,
+            "minutes": minutes,
+            "requested_at": requested_at.isoformat(),
+            "resume_at": resume_at.isoformat(),
+            "reason": reason,
+        },
+    )
+
+
+def _make_manager(db_path: Path, *, task_id: str = TASK_ID, meta: MessageMeta | None = None) -> TaskManager:
+    mgr = TaskManager(db_path=str(db_path))
+    mgr.set_owner_identity(AGENT_ID, "Worker", TEST_TEAM, "Worker")
+    assert mgr.add_task(
+        Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="run check"),
+        MessageHeader(from_agent_id="gateway"),
+        meta or MessageMeta(),
+        owner_person_id=None,
+    )
+    return mgr
+
+
+def _reload_manager(db_path: Path) -> TaskManager:
+    mgr = TaskManager(db_path=str(db_path))
+    mgr.set_owner_identity(AGENT_ID, "Worker", TEST_TEAM, "Worker")
+    mgr.restore_runtime_state()
+    return mgr
+
+
+def _make_agent(
+    manager: TaskManager,
+    *,
+    limits: TimedWaitLimits | None = None,
+    auth_enabled: bool = True,
+    tools: tuple[Any, ...] = (wait,),
+    schedule_store: Any = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=AGENT_ID,
+        team_id=TEST_TEAM,
+        named_agent_type="Worker",
+        task_manager=manager,
+        timed_wait_limits=limits or TimedWaitLimits(),
+        authorization_config={"enabled": auth_enabled},
+        tools=list(tools),
+        _schedule_store=schedule_store,
+    )
+
+
+# -- Pure rules (Unit 10) -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("minutes", "reason"),
+    [
+        (0, "ok"),
+        (-5, "ok"),
+        (True, "ok"),
+        (False, "ok"),
+        (1.5, "ok"),
+        (5, ""),
+        (5, "   "),
+        (5, "x" * 501),
+    ],
+)
+def test_validate_wait_args_rejects_invalid_inputs(minutes: Any, reason: Any) -> None:
+    with pytest.raises(ValueError):
+        validate_wait_args(minutes, reason)
+
+
+def test_validate_wait_args_accepts_whole_minutes_and_trims_reason() -> None:
+    assert validate_wait_args(1, "  redeploy  ") == (1, "redeploy")
+    assert validate_wait_args(1440, "a" * 500) == (1440, "a" * 500)
+
+
+def test_wait_ledger_counts_both_tools_deduplicates_tool_use_id_and_survives_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "manager.db"
+    mgr = _make_manager(db_path)
+    _record_started_wait(mgr, TASK_ID, tool_use_id="tu-1", minutes=8, tool=WAIT_TOOL_NAME)
+    _record_started_wait(mgr, TASK_ID, tool_use_id="tu-1", minutes=8, tool=WAIT_TOOL_NAME)  # duplicate
+    _record_started_wait(mgr, TASK_ID, tool_use_id="tu-2", minutes=30, tool=LONG_WAIT_TOOL_NAME)
+    mgr.append_history_entry(TASK_ID, "unrelated event", details={"event": "other", "minutes": 999})
+
+    ledger = WaitLedger.from_history(mgr.get_task_info(TASK_ID))
+    assert ledger.total_minutes == 38
+    assert ledger.has_started("tu-1")
+    assert ledger.has_started("tu-2")
+
+    # Reload from SQLite in a brand-new TaskManager (restart).
+    restarted = _reload_manager(db_path)
+    restarted_ledger = WaitLedger.from_history(restarted.get_task_info(TASK_ID))
+    assert restarted_ledger.total_minutes == 38
+    assert restarted_ledger.entry_for("tu-2") is not None
+    assert restarted_ledger.entry_for("tu-2").minutes == 30  # type: ignore[union-attr]
+
+
+def test_budget_refusal_messages_match_auth_mode_and_limits() -> None:
+    ledger = WaitLedger(entries_by_tool_use_id={}, total_minutes=15)
+    limits = TimedWaitLimits(without_approval=20, with_approval=1440)
+
+    assert budget_refusal(ledger, 5, WAIT_TOOL_NAME, limits) is None
+
+    # Auth on: mentions used/left, request_access, fn:long_wait, long_wait, 24 hours.
+    msg_auth_on = budget_refusal(ledger, 6, WAIT_TOOL_NAME, limits, authorization_on=True)
+    assert msg_auth_on is not None
+    assert "15 minutes already used" in msg_auth_on
+    assert "5 minutes left" in msg_auth_on
+    assert "request_access" in msg_auth_on
+    assert LONG_WAIT_TOOL_ID in msg_auth_on
+    assert LONG_WAIT_TOOL_NAME in msg_auth_on
+    assert "24 hours" in msg_auth_on
+
+    # Auth off, agent has long_wait (C04).
+    msg_auth_off_has = budget_refusal(ledger, 6, WAIT_TOOL_NAME, limits, authorization_on=False, has_long_wait_tool=True)
+    assert msg_auth_off_has is not None
+    assert "Use long_wait instead" in msg_auth_off_has
+    assert "request_access" not in msg_auth_off_has
+
+    # Auth off, agent lacks long_wait (C04).
+    msg_auth_off_missing = budget_refusal(
+        ledger, 6, WAIT_TOOL_NAME, limits, authorization_on=False, has_long_wait_tool=False
+    )
+    assert msg_auth_off_missing is not None
+    assert "default_tools" in msg_auth_off_missing
+    assert LONG_WAIT_TOOL_ID in msg_auth_off_missing
+    assert "request_access" not in msg_auth_off_missing
+
+    # long_wait ceiling.
+    heavy_ledger = WaitLedger(entries_by_tool_use_id={}, total_minutes=1430)
+    assert budget_refusal(heavy_ledger, 10, LONG_WAIT_TOOL_NAME, limits) is None
+    msg_ceiling = budget_refusal(heavy_ledger, 11, LONG_WAIT_TOOL_NAME, limits)
+    assert msg_ceiling is not None
+    assert "1430 minutes already used" in msg_ceiling
+    assert "10 minutes left" in msg_ceiling
+    assert "24 hours" in msg_ceiling
+
+
+def test_next_run_refusal_rules_and_boundaries() -> None:
+    next_fire = BASE_TIME + timedelta(minutes=10)
+    recurring = ScheduledMessage(
+        schedule_id="sched-rec",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_id="t1", task_type=MessageMetaType.REQUEST, problem_statement="check"),
+        interval_ms=10 * 60 * 1000,
+        repeat_count=None,
+        next_fire_at=next_fire.isoformat(),
+        enabled=True,
+    )
+    assert is_recurring_schedule(recurring)
+
+    # Exactly at next_fire_at -> refused, naming next fire time and longest fitting wait (9 min).
+    at_boundary = next_run_refusal(recurring, next_fire, now=BASE_TIME)
+    assert at_boundary is not None
+    assert next_fire.isoformat() in at_boundary
+    assert "9 minutes" in at_boundary
+
+    # 1 second before next_fire_at -> allowed.
+    assert next_run_refusal(recurring, next_fire - timedelta(seconds=1), now=BASE_TIME) is None
+
+    # Finishing final run or disabled schedule -> allowed.
+    assert next_run_refusal(recurring, next_fire, now=BASE_TIME, finishing=True) is None
+    assert next_run_refusal(recurring.model_copy(update={"enabled": False}), next_fire, now=BASE_TIME) is None
+
+    # Expired before next_fire -> allowed.
+    expired = recurring.model_copy(update={"expires_at_utc": next_fire.isoformat()})
+    assert next_run_refusal(expired, next_fire, now=BASE_TIME) is None
+
+    # Paused until later -> effective next fire shifts to paused_until.
+    paused = recurring.model_copy(update={"paused_until": (BASE_TIME + timedelta(minutes=25)).isoformat()})
+    assert next_run_refusal(paused, BASE_TIME + timedelta(minutes=20), now=BASE_TIME) is None
+    assert next_run_refusal(paused, BASE_TIME + timedelta(minutes=25), now=BASE_TIME) is not None
+
+    # One-time schedule -> allowed.
+    one_time = ScheduledMessage(
+        schedule_id="sched-once",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_id="t2", task_type=MessageMetaType.REQUEST, problem_statement="once"),
+        repeat_count=1,
+        next_fire_at=BASE_TIME.isoformat(),
+        enabled=True,
+    )
+    assert not is_recurring_schedule(one_time)
+    assert next_run_refusal(one_time, next_fire, now=BASE_TIME) is None
+
+
+def test_timer_running_is_due_summary_and_resume_note() -> None:
+    resume_at = BASE_TIME + timedelta(minutes=10)
+    record = timed_wait_record(
+        interrupt_id="i-1",
+        tool=WAIT_TOOL_NAME,
+        tool_use_id="tu-1",
+        minutes=10,
+        reason="Portainer redeploy",
+        requested_at=BASE_TIME.isoformat(),
+        resume_at=resume_at.isoformat(),
+    )
+    assert record["kind"] == TIMED_WAIT_KIND
+    assert wait_summary(record) == "Waiting until 2026-11-26 12:10:00 UTC (10-minute wait: Portainer redeploy)."
+
+    assert not is_due(record, BASE_TIME + timedelta(minutes=9, seconds=59))
+    assert timer_running(record, BASE_TIME + timedelta(minutes=9, seconds=59))
+
+    assert is_due(record, resume_at)
+    assert timer_running(record, resume_at + timedelta(seconds=OVERDUE_GRACE_SECONDS))
+    assert not timer_running(record, resume_at + timedelta(seconds=OVERDUE_GRACE_SECONDS + 1))
+
+    # Malformed record is not excused as a running timer.
+    assert not timer_running({"kind": TIMED_WAIT_KIND, "resume_at": "not-a-date"}, BASE_TIME)
+    assert not is_due({"kind": TIMED_WAIT_KIND}, BASE_TIME)
+
+    note = resume_note(record, resume_at + timedelta(seconds=5))
+    assert "10-minute wait (Portainer redeploy)" in note
+    assert "2026-11-26 12:10:05 UTC" in note
+
+
+# -- Tool tests: pause, resume, A4 budgets, C04 auth-off ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wait_raises_interrupt_and_resumed_call_returns_waited_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now_box = [BASE_TIME]
+    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: now_box[0])
+
+    mgr = _make_manager(tmp_path / "manager.db")
+    agent = _make_agent(mgr)
+    state = _InterruptState()
+    ctx = _make_tool_context("tu-pause-1", interrupt_state=state)
+
+    set_agent_ref(agent)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID):
+            with pytest.raises(InterruptException) as exc_info:
+                await wait(10, "Portainer redeploy", ctx)
+    finally:
+        set_agent_ref(None)
+
+    interrupt = exc_info.value.interrupt
+    assert interrupt.name == TIMED_WAIT_KIND
+    assert interrupt.reason["kind"] == TIMED_WAIT_KIND
+    assert interrupt.reason["tool"] == WAIT_TOOL_NAME
+    assert interrupt.reason["tool_use_id"] == "tu-pause-1"
+    assert interrupt.reason["minutes"] == 10
+    assert interrupt.reason["reason"] == "Portainer redeploy"
+    assert interrupt.reason["requested_at"] == BASE_TIME.isoformat()
+    assert interrupt.reason["resume_at"] == (BASE_TIME + timedelta(minutes=10)).isoformat()
+
+    # Simulate begin_timed_wait recording the start entry and the timer answering the interrupt 10m later.
+    _record_started_wait(mgr, TASK_ID, tool_use_id="tu-pause-1", minutes=10, requested_at=BASE_TIME)
+    interrupt.response = {"kind": TIMED_WAIT_RESPONSE_KIND, "interrupt_id": interrupt.id}
+    now_box[0] = BASE_TIME + timedelta(minutes=10, seconds=6)
+
+    set_agent_ref(agent)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID):
+            raw = await wait(10, "Portainer redeploy", ctx)
+    finally:
+        set_agent_ref(None)
+
+    result = json.loads(raw)
+    assert result["status"] == "waited"
+    assert result["minutes"] == 10
+    assert result["waited_minutes"] == 10.1
+    assert result["now_utc"] == now_box[0].isoformat()
+    assert result["next_step"]
+
+
+@pytest.mark.asyncio
+async def test_wait_resumed_with_non_timer_answer_returns_ended_early_and_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    now_box = [BASE_TIME + timedelta(minutes=3)]
+    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: now_box[0])
+
+    mgr = _make_manager(tmp_path / "manager.db")
+    _record_started_wait(mgr, TASK_ID, tool_use_id="tu-early", minutes=10, requested_at=BASE_TIME)
+    agent = _make_agent(mgr)
+    state = _InterruptState()
+    ctx = _make_tool_context("tu-early", interrupt_state=state)
+    interrupt_id = ctx._interrupt_id(TIMED_WAIT_KIND)
+
+    state.interrupts[interrupt_id] = Interrupt(interrupt_id, TIMED_WAIT_KIND, reason={}, response="human message")
+
+    set_agent_ref(agent)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID), caplog.at_level(logging.WARNING):
+            raw = await wait(10, "Portainer redeploy", ctx)
+    finally:
+        set_agent_ref(None)
+
+    result = json.loads(raw)
+    assert result["status"] == "ended_early"
+    assert result["waited_minutes"] == 3.0
+    assert "event=timed_wait_answered_by_other" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wait_and_long_wait_share_persisted_budget_across_restart_and_auth_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: BASE_TIME)
+    db_path = tmp_path / "manager.db"
+    mgr = _make_manager(db_path)
+    _record_started_wait(mgr, TASK_ID, tool_use_id="tu-prior", minutes=12, tool=WAIT_TOOL_NAME)
+
+    # Fresh TaskManager simulates restart.
+    restarted = _reload_manager(db_path)
+    agent_on = _make_agent(restarted, auth_enabled=True)
+
+    set_agent_ref(agent_on)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID):
+            # 12 + 9 = 21 > 20 -> refused with long_wait + request_access guidance.
+            refused = json.loads(await wait(9, "too long", _make_tool_context("tu-over")))
+            assert refused["status"] == "refused"
+            assert "12 minutes already used" in refused["reason"]
+            assert "8 minutes left" in refused["reason"]
+            assert "long_wait" in refused["reason"]
+            assert "request_access" in refused["reason"]
+
+            # 12 + 8 = 20 -> allowed.
+            with pytest.raises(InterruptException):
+                await wait(8, "fits exactly", _make_tool_context("tu-fit"))
+
+            # long_wait counts the 12 minutes already used by wait.
+            refused_long = json.loads(await long_wait(1429, "over 24h", _make_tool_context("tu-long-over")))
+            assert refused_long["status"] == "refused"
+            assert "12 minutes already used" in refused_long["reason"]
+            assert "1428 minutes left" in refused_long["reason"]
+
+            with pytest.raises(InterruptException):
+                await long_wait(1428, "fits 24h", _make_tool_context("tu-long-fit"))
+    finally:
+        set_agent_ref(None)
+
+    # C04: auth-off refusal text depends on whether the agent holds long_wait.
+    agent_off_no_long = _make_agent(restarted, auth_enabled=False, tools=(wait,))
+    set_agent_ref(agent_off_no_long)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID):
+            refused_no_long = json.loads(await wait(9, "over", _make_tool_context("tu-off-1")))
+            assert "default_tools" in refused_no_long["reason"]
+            assert LONG_WAIT_TOOL_ID in refused_no_long["reason"]
+            assert "request_access" not in refused_no_long["reason"]
+    finally:
+        set_agent_ref(None)
+
+    agent_off_with_long = _make_agent(restarted, auth_enabled=False, tools=(wait, long_wait))
+    set_agent_ref(agent_off_with_long)  # type: ignore[arg-type]
+    try:
+        with task_work(TASK_ID):
+            refused_with_long = json.loads(await wait(9, "over", _make_tool_context("tu-off-2")))
+            assert "Use long_wait instead" in refused_with_long["reason"]
+            assert "request_access" not in refused_with_long["reason"]
+    finally:
+        set_agent_ref(None)
+
+
+# -- A5 + C06: recurring schedule next-run check with real ScheduleStore --------------------
+
+
+def _scheduler_signed_meta(schedule_id: str) -> MessageMeta:
+    import os
+
+    now = datetime.now(timezone.utc)
+    signer = ContextSigner.from_value(ISSUER_SCHEDULER, os.environ[ENV_SCHEDULER_SIGNING_KEY])
+    signed = signer.sign(
+        TaskContextV1(
+            context_id=f"ctx-sched-{schedule_id}",
+            issuer=ISSUER_SCHEDULER,
+            team_id=TEST_TEAM,
+            person_id="alice",
+            person_roles=("member",),
+            schedule_id=schedule_id,
+            issued_at_utc=now,
+            expires_at_utc=now + timedelta(hours=1),
+        )
+    )
+    return MessageMeta(gateway_context=GatewayContext(task_context=signed))
+
+
+def _gateway_signed_meta(schedule_id: str | None = None) -> MessageMeta:
+    now = datetime.now(timezone.utc)
+    signed = context_signer().sign(
+        TaskContextV1(
+            context_id=f"ctx-gw-{schedule_id or 'chat'}",
+            issuer=ISSUER_GATEWAY,
+            team_id=TEST_TEAM,
+            person_id="alice",
+            person_roles=("member",),
+            schedule_id=schedule_id,
+            issued_at_utc=now,
+            expires_at_utc=now + timedelta(hours=1),
+        )
+    )
+    return MessageMeta(gateway_context=GatewayContext(task_context=signed))
+
+
+def _claim_and_advance(store: ScheduleStore, schedule_id: str) -> ScheduledMessage:
+    claimed = store.claim_next_due(
+        claimer_agent_id=AGENT_ID,
+        claimer_named_agent_type="Worker",
+        claimer_team_id=TEST_TEAM,
+        allow_unscoped=True,
+    )
+    assert claimed is not None and claimed["schedule_id"] == schedule_id
+    outcome = store.update_after_fire(
+        schedule_id,
+        claim_token=claimed["claim_token"],
+        claimer_agent_id=AGENT_ID,
+        due_at=claimed["next_fire_at"],
+    )
+    assert outcome.value in {"advanced", "finished", "finishing"}
+    loaded = store.read_scheduled_message(schedule_id)
+    assert loaded is not None
+    return loaded
+
+
+@pytest.mark.asyncio
+async def test_recurring_interval_and_cron_schedules_refuse_overlapping_wait_via_real_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_scheduler_key(monkeypatch)
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: now)
+    try:
+        db_path = tmp_path / "team.db"
+        store = ScheduleStore(db_path=str(db_path))
+
+        # 1. Recurring interval schedule (every 10 minutes), claimed and advanced normally.
+        interval_sched = ScheduledMessage(
+            schedule_id="sched-interval",
+            management_class=ScheduleManagementClass.USER,
+            payload=Task(task_id="t-int", task_type=MessageMetaType.REQUEST, problem_statement="interval job"),
+            interval_ms=10 * 60 * 1000,
+            repeat_count=None,
+            next_fire_at=(now - timedelta(seconds=5)).isoformat(),
+            enabled=True,
+        )
+        store.add(interval_sched)
+        advanced_interval = _claim_and_advance(store, "sched-interval")
+        assert advanced_interval.next_fire_at is not None
+
+        mgr = _make_manager(db_path, task_id="task-int", meta=_scheduler_signed_meta("sched-interval"))
+        agent = _make_agent(mgr, schedule_store=store)
+
+        set_agent_ref(agent)  # type: ignore[arg-type]
+        try:
+            with task_work("task-int"):
+                # 11 minutes is definitely >= next_fire_at (~10 minutes away).
+                refused = json.loads(await wait(11, "too long for interval", _make_tool_context("tu-int-over")))
+                assert refused["status"] == "refused"
+                assert advanced_interval.next_fire_at in refused["reason"]
+                assert "next run" in refused["reason"]
+
+                # 5 minutes fits well before the next fire.
+                with pytest.raises(InterruptException):
+                    await wait(5, "fits before next interval", _make_tool_context("tu-int-ok"))
+        finally:
+            set_agent_ref(None)
+
+        # 2. Recurring cron schedule (every 15 minutes), claimed and advanced normally.
+        cron_sched = ScheduledMessage(
+            schedule_id="sched-cron",
+            management_class=ScheduleManagementClass.USER,
+            payload=Task(task_id="t-cron", task_type=MessageMetaType.REQUEST, problem_statement="cron job"),
+            cron_expression="*/15 * * * *",
+            cron_timezone="UTC",
+            repeat_count=None,
+            next_fire_at=(now - timedelta(seconds=5)).isoformat(),
+            enabled=True,
+        )
+        store.add(cron_sched)
+        advanced_cron = _claim_and_advance(store, "sched-cron")
+        assert advanced_cron.next_fire_at is not None
+
+        mgr.add_task(
+            Task(task_id="task-cron", task_type=MessageMetaType.REQUEST, problem_statement="cron"),
+            MessageHeader(from_agent_id="scheduler"),
+            _scheduler_signed_meta("sched-cron"),
+            owner_person_id=None,
+        )
+        set_agent_ref(agent)  # type: ignore[arg-type]
+        try:
+            with task_work("task-cron"):
+                refused_cron = json.loads(await wait(16, "past next cron fire", _make_tool_context("tu-cron-over")))
+                assert refused_cron["status"] == "refused"
+                assert advanced_cron.next_fire_at in refused_cron["reason"]
+        finally:
+            set_agent_ref(None)
+    finally:
+        forget_task_context_keys()
+
+
+@pytest.mark.asyncio
+async def test_one_time_schedule_finishing_final_run_chat_and_missing_or_unreadable_schedule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    use_scheduler_key(monkeypatch)
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    monkeypatch.setattr(timed_waits_provider, "utc_now", lambda: now)
+    try:
+        db_path = tmp_path / "team.db"
+        store = ScheduleStore(db_path=str(db_path))
+
+        # One-time schedule kept in store.
+        one_time = ScheduledMessage(
+            schedule_id="sched-one-time",
+            management_class=ScheduleManagementClass.USER,
+            payload=Task(task_id="t-once", task_type=MessageMetaType.REQUEST, problem_statement="one-time"),
+            repeat_count=1,
+            next_fire_at=(now - timedelta(seconds=5)).isoformat(),
+            enabled=True,
+        )
+        store.add(one_time)
+
+        # Counted recurring schedule on its final run, retained as finishing (remaining_count == 0).
+        finishing_sched = ScheduledMessage(
+            schedule_id="sched-final",
+            management_class=ScheduleManagementClass.USER,
+            payload=Task(task_id="t-final", task_type=MessageMetaType.REQUEST, problem_statement="final"),
+            interval_ms=5 * 60 * 1000,
+            repeat_count=2,
+            next_fire_at=(now - timedelta(seconds=5)).isoformat(),
+            enabled=True,
+        )
+        store.add(finishing_sched)
+        # Simulate that the 2nd (final) run was admitted and retained as finishing.
+        monkeypatch.setattr(schedule_store_module, "is_finishing", lambda row: row.get("schedule_id") == "sched-final")
+
+        mgr = _make_manager(db_path, task_id="task-once", meta=_scheduler_signed_meta("sched-one-time"))
+        mgr.add_task(
+            Task(task_id="task-final", task_type=MessageMetaType.REQUEST, problem_statement="final"),
+            MessageHeader(from_agent_id="scheduler"),
+            _scheduler_signed_meta("sched-final"),
+            owner_person_id=None,
+        )
+        mgr.add_task(
+            Task(task_id="task-missing", task_type=MessageMetaType.REQUEST, problem_statement="deleted"),
+            MessageHeader(from_agent_id="scheduler"),
+            _scheduler_signed_meta("sched-does-not-exist"),
+            owner_person_id=None,
+        )
+        mgr.add_task(
+            Task(task_id="task-chat", task_type=MessageMetaType.REQUEST, problem_statement="chat"),
+            MessageHeader(from_agent_id="gateway"),
+            _gateway_signed_meta(schedule_id=None),
+            owner_person_id=None,
+        )
+        mgr.add_task(
+            Task(task_id="task-forged-sched", task_type=MessageMetaType.REQUEST, problem_statement="chat"),
+            MessageHeader(from_agent_id="gateway"),
+            _gateway_signed_meta(schedule_id="sched-one-time"),
+            owner_person_id=None,
+        )
+
+        agent = _make_agent(mgr, schedule_store=store)
+        set_agent_ref(agent)  # type: ignore[arg-type]
+        try:
+            # One-time schedule allows waiting.
+            with task_work("task-once"), pytest.raises(InterruptException):
+                await wait(15, "one-time wait", _make_tool_context("tu-once"))
+
+            # Finishing final run of counted recurring schedule allows waiting.
+            with task_work("task-final"), pytest.raises(InterruptException):
+                await wait(15, "final run wait", _make_tool_context("tu-final"))
+
+            # Chat task allows waiting.
+            with task_work("task-chat"), pytest.raises(InterruptException):
+                await wait(15, "chat wait", _make_tool_context("tu-chat"))
+
+            # Non-scheduler signed context naming a schedule_id is ignored.
+            with task_work("task-forged-sched"), caplog.at_level(logging.WARNING), pytest.raises(InterruptException):
+                await wait(15, "ignored schedule id", _make_tool_context("tu-forged"))
+            assert "event=schedule_id_from_non_scheduler_ignored" in caplog.text
+
+            # Missing schedule row allows waiting and logs schedule_id at INFO (C06).
+            caplog.clear()
+            with task_work("task-missing"), caplog.at_level(logging.INFO), pytest.raises(InterruptException):
+                await wait(10, "deleted schedule", _make_tool_context("tu-missing"))
+            assert "event=timed_wait_schedule_missing" in caplog.text
+            assert "schedule_id=sched-does-not-exist" in caplog.text
+
+            # Schedule read error refuses waiting with event=timed_wait_refused reason=schedule_unreadable (C06).
+            def failing_read(_schedule_id: str) -> tuple[Any, bool]:
+                raise RuntimeError("sqlite locked")
+
+            monkeypatch.setattr(store, "read_next_fire_schedule", failing_read)
+            caplog.clear()
+            with task_work("task-once"), caplog.at_level(logging.WARNING):
+                refused_err = json.loads(await wait(10, "db error", _make_tool_context("tu-err")))
+            assert refused_err["status"] == "refused"
+            assert "sched-one-time" in refused_err["reason"]
+            assert "event=timed_wait_refused" in caplog.text
+            assert "reason=schedule_unreadable" in caplog.text
+        finally:
+            set_agent_ref(None)
+    finally:
+        forget_task_context_keys()
