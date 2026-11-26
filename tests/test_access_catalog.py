@@ -932,3 +932,350 @@ tools:
     message = str(caught.value)
     assert str(idn_file) in message
     assert "xn--bcher-kva.example.com" in message
+
+
+# gh api method parsing and classification ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["api", "repos/o/r", "-X", "GET", "-X", "DELETE"],
+        ["api", "repos/o/r", "--method=GET", "--method=DELETE"],
+        ["api", "graphql", "-X", "GET", "-X", "POST", "-f", "query=mutation{x}"],
+        ["api", "repos/o/r", "-X", "GET", "--method=GET"],
+        ["api", "repos/o/r", "--method=", "-f", "title=x"],
+        ["api", "graphql", "--method=", "-f", "query=mutation{x}"],
+    ],
+)
+def test_gh_api_rejects_repeated_or_empty_method_flags(catalog, argv) -> None:
+    from access_catalog.cli_tables import CommandLineRejected, gh_api_method, parse_command_line
+
+    policy = load_cli_policy("gh")
+    parsed = parse_command_line(argv, policy.table)
+    with pytest.raises(CommandLineRejected):
+        gh_api_method(parsed)
+
+    resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
+    assert resolution.tool_id == "cli:github"
+    assert resolution.operation == "command:unparsed"
+    assert resolution.level is FULL
+    assert resolution.source is ClassificationSource.UNREVIEWED
+    assert resolution.detail
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_method"),
+    [
+        (["api", "repos/o/r/issues", "--template", "--method=GET", "-f", "title=x"], "POST"),
+        (["api", "repos/o/r/issues", "--jq", "--method=GET", "-f", "title=x"], "POST"),
+        (["api", "repos/o/r/issues", "-H", "--method=GET", "-f", "title=x"], "POST"),
+        (["api", "repos/o/r/issues", "-f", "--method=GET"], "POST"),
+        (["api", "repos/o/r/issues", "-F", "a=1"], "POST"),
+        (["api", "repos/o/r/issues", "--input", "-"], "POST"),
+    ],
+)
+def test_gh_api_hidden_method_in_value_flags_and_implicit_post_classify_full(
+    catalog, argv, expected_method
+) -> None:
+    from access_catalog.cli_tables import gh_api_method, parse_command_line
+
+    policy = load_cli_policy("gh")
+    parsed = parse_command_line(argv, policy.table)
+    assert gh_api_method(parsed) == expected_method
+
+    resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
+    assert resolution.tool_id == "cli:github"
+    assert resolution.operation == "command:api"
+    assert resolution.level is FULL
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_method"),
+    [
+        (["api", "repos/o/r"], "GET"),
+        (["api", "repos/o/r", "--jq", ".name"], "GET"),
+        (["api", "repos/o/r", "-q", ".name"], "GET"),
+        (["api", "repos/o/r", "-H", "Accept: application/vnd.github+json"], "GET"),
+        (["api", "repos/o/r", "--paginate"], "GET"),
+        (["api", "repos/o/r/issues", "--paginate", "--slurp"], "GET"),
+        (["api", "repos/o/r", "--allow-escape-sequences"], "GET"),
+        (["api", "repos/o/r", "--paginate=true", "--silent=false", "-i"], "GET"),
+        (["api", "repos/o/r", "--cache", "1h", "-p", "nebula", "--template", "{{.name}}"], "GET"),
+        (["api", "-X", "GET", "repos/o/r"], "GET"),
+        (["api", "--method=get", "repos/o/r"], "GET"),
+        (["api", "-X", "HEAD", "repos/o/r"], "HEAD"),
+        # A repo named "graphql" under repos/ is not the GraphQL endpoint.
+        (["api", "repos/o/graphql"], "GET"),
+    ],
+)
+def test_gh_api_ordinary_reads_classify_read(catalog, argv, expected_method) -> None:
+    from access_catalog.cli_tables import gh_api_method, parse_command_line
+
+    policy = load_cli_policy("gh")
+    parsed = parse_command_line(argv, policy.table)
+    assert gh_api_method(parsed) == expected_method
+
+    resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
+    assert resolution.tool_id == "cli:github"
+    assert resolution.operation == "command:api"
+    assert resolution.level is READ
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_method"),
+    [
+        (["api", "repos/o/r/issues", "-X", "POST"], "POST"),
+        (["api", "repos/o/r/issues/1", "-X", "PATCH"], "PATCH"),
+        (["api", "repos/o/r/issues/1", "-X", "PUT"], "PUT"),
+        (["api", "repos/o/r/issues/1", "-X", "DELETE"], "DELETE"),
+        (["api", "repos/o/r", "--method= GET "], " GET "),
+        # Body/field flags on GET or HEAD never classify as read.
+        (["api", "repos/o/r", "-X", "GET", "--input", "-"], "GET"),
+        (["api", "repos/o/r", "-X", "HEAD", "--input", "-"], "HEAD"),
+        (["api", "repos/o/r", "-X", "GET", "-f", "a=b"], "GET"),
+        (["api", "repos/o/r", "-X", "GET", "-F", "a=1"], "GET"),
+        (["api", "repos/o/r", "-X", "HEAD", "-f", "a=b"], "HEAD"),
+        # GraphQL endpoint always classifies as full regardless of HTTP method.
+        (["api", "graphql"], "GET"),
+        (["api", "graphql", "-X", "GET"], "GET"),
+        (["api", "graphql", "--method=GET"], "GET"),
+        (["api", "graphql", "-X", "HEAD"], "HEAD"),
+        (["api", "graphql", "-X", "GET", "-f", "query=mutation{x}"], "GET"),
+        (["api", "graphql", "-X", "GET", "--input", "-"], "GET"),
+        (["api", "/graphql", "-X", "GET"], "GET"),
+        (["api", "///GraphQL", "-X", "GET"], "GET"),
+        (["api", "https://api.github.com/graphql", "-X", "GET"], "GET"),
+        (["api", "https://api.github.com/GRAPHQL?query=x", "-X", "GET"], "GET"),
+        (["api", "repos/../graphql", "-X", "GET"], "GET"),
+        (["api", "/%67raphql", "-X", "GET"], "GET"),
+        (["api", "/api/graphql", "-X", "GET"], "GET"),
+        (["api", "https://github.enterprise.example/api/graphql", "-X", "GET"], "GET"),
+    ],
+)
+def test_gh_api_writes_read_bodies_and_graphql_classify_full(catalog, argv, expected_method) -> None:
+    from access_catalog.cli_tables import gh_api_method, parse_command_line
+
+    policy = load_cli_policy("gh")
+    parsed = parse_command_line(argv, policy.table)
+    assert gh_api_method(parsed) == expected_method
+
+    resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
+    assert resolution.tool_id == "cli:github"
+    assert resolution.operation == "command:api"
+    assert resolution.level is FULL
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["api", "repos/o/r", "--unknown-flag"],
+        ["api", "repos/o/r", "-z"],
+        ["api", "repos/o/r", "-5"],
+        ["api", "repos/o/r", "-X"],
+        ["api", "repos/o/r", "--template"],
+        ["api", "repos/o/r", "--jq"],
+        ["api", "repos/o/r", "-H"],
+        ["api", "repos/o/r", "-f"],
+        ["api", "repos/o/r", "--input"],
+        ["api", "repos/o/r", "--paginate=maybe"],
+    ],
+)
+def test_gh_api_rejects_unknown_or_malformed_flags(catalog, argv) -> None:
+    from access_catalog.cli_tables import CommandLineRejected, gh_api_method, parse_command_line
+
+    policy = load_cli_policy("gh")
+    parsed = parse_command_line(argv, policy.table)
+    with pytest.raises(CommandLineRejected):
+        gh_api_method(parsed)
+
+    resolution = catalog.resolve_broker_action("github", "gh.exec", {"argv": argv})
+    assert resolution.tool_id == "cli:github"
+    assert resolution.operation == "command:unparsed"
+    assert resolution.level is FULL
+    assert resolution.source is ClassificationSource.UNREVIEWED
+    assert resolution.detail
+
+
+def test_gh_api_body_flags_match_gh_yaml_and_position_blind_helpers_are_removed() -> None:
+    from access_catalog.cli_commands import ParsedCommandLine
+    from access_catalog.cli_tables import _GH_API_BODY_FLAGS
+
+    rules = load_cli_policy("gh").rules_for("api")
+    assert _GH_API_BODY_FLAGS == rules.field_flags | rules.stdin_only_flags
+    assert not hasattr(ParsedCommandLine, "flag_values")
+    assert not hasattr(ParsedCommandLine, "has_flag")
+
+
+def _closed_loopback_proxy_url() -> str:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    return f"http://127.0.0.1:{port}"
+
+
+def _run_offline_gh_api(argv: list[str], tmp_path, *, stdin_text: str = "") -> str:
+    import os
+    import subprocess
+
+    proxy = _closed_loopback_proxy_url()
+    config_dir = tmp_path / "gh-config"
+    config_dir.mkdir(exist_ok=True)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path),
+        "GH_TOKEN": "dummy-token-for-offline-test",
+        "GH_HOST": "nonexistent.invalid",
+        "GH_CONFIG_DIR": str(config_dir),
+        "GH_DEBUG": "api",
+        "HTTP_PROXY": proxy,
+        "HTTPS_PROXY": proxy,
+        "NO_PROXY": "",
+    }
+    proc = subprocess.run(
+        ["gh", *argv],
+        input=stdin_text,
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=10,
+        check=False,
+    )
+    return f"{proc.stdout}\n{proc.stderr}"
+
+
+def _extract_gh_debug_method(output: str) -> str | None:
+    import re
+
+    match = re.search(r"^> ([A-Z]+) \S+ HTTP/1\.1$", output, flags=re.MULTILINE)
+    return match.group(1) if match else None
+
+
+@pytest.mark.parametrize(
+    ("argv", "stdin_text"),
+    [
+        (["api", "repos/o/r"], ""),
+        (["api", "repos/o/r", "-X", "GET"], ""),
+        (["api", "repos/o/r", "--method=HEAD"], ""),
+        (["api", "repos/o/r", "-X", "DELETE"], ""),
+        (["api", "repos/o/r", "--method=PATCH"], ""),
+        (["api", "repos/o/r", "--method=PUT"], ""),
+        (["api", "repos/o/r/issues", "--template", "--method=GET", "-f", "title=x"], ""),
+        (["api", "repos/o/r/issues", "--jq", "--method=GET", "-f", "title=x"], ""),
+        (["api", "repos/o/r/issues", "-H", "X-Test: --method=GET", "-f", "title=x"], ""),
+        (["api", "repos/o/r/issues", "-f", "--method=GET"], ""),
+        (["api", "repos/o/r/issues", "-F", "a=1"], ""),
+        (["api", "repos/o/r/issues", "--input", "-"], "{}"),
+        (["api", "repos/o/r", "--paginate=true"], ""),
+        (["api", "repos/o/r", "--paginate=false"], ""),
+        (["api", "repos/o/r", "--jq=.name", "--include=true"], ""),
+        (["api", "repos/o/r", "--silent=true"], ""),
+        (["api", "graphql", "-f", "query={viewer{login}}"], ""),
+        (["api", "graphql", "-X", "GET", "-f", "query=x"], ""),
+    ],
+)
+def test_gh_api_method_matches_real_gh_wire_request(tmp_path, argv, stdin_text) -> None:
+    import shutil
+
+    if shutil.which("gh") is None:
+        pytest.skip("gh binary not on PATH")
+
+    from access_catalog.cli_tables import gh_api_method, parse_command_line
+
+    policy = load_cli_policy("gh")
+    parsed = parse_command_line(argv, policy.table)
+    output = _run_offline_gh_api(argv, tmp_path, stdin_text=stdin_text)
+    wire_method = _extract_gh_debug_method(output)
+    assert wire_method is not None, f"expected gh to emit an HTTP request line, got:\n{output}"
+    assert gh_api_method(parsed) == wire_method
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_wire_method"),
+    [
+        (["api", "repos/o/r", "-X", "GET", "-X", "DELETE"], "DELETE"),
+        (["api", "repos/o/r", "--method=GET", "--method=DELETE"], "DELETE"),
+        (["api", "graphql", "-X", "GET", "-X", "POST", "-f", "query=x"], "POST"),
+        (["api", "repos/o/r", "--method=", "-f", "title=x"], "GET"),
+    ],
+)
+def test_gh_api_refuses_audit_probes_that_real_gh_would_send(tmp_path, argv, expected_wire_method) -> None:
+    import shutil
+
+    if shutil.which("gh") is None:
+        pytest.skip("gh binary not on PATH")
+
+    from access_catalog.cli_tables import CommandLineRejected, gh_api_method, parse_command_line
+
+    output = _run_offline_gh_api(argv, tmp_path)
+    assert _extract_gh_debug_method(output) == expected_wire_method
+
+    policy = load_cli_policy("gh")
+    parsed = parse_command_line(argv, policy.table)
+    with pytest.raises(CommandLineRejected):
+        gh_api_method(parsed)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["api", "repos/o/r", "--unknown-flag"],
+        ["api", "repos/o/r", "-5"],
+        ["api", "repos/o/r", "-X"],
+        ["api", "repos/o/r", "--template"],
+        ["api", "repos/o/r", "--paginate=maybe"],
+    ],
+)
+def test_gh_api_errors_send_no_request_in_real_gh(tmp_path, argv) -> None:
+    import shutil
+
+    if shutil.which("gh") is None:
+        pytest.skip("gh binary not on PATH")
+
+    from access_catalog.cli_tables import CommandLineRejected, gh_api_method, parse_command_line
+
+    output = _run_offline_gh_api(argv, tmp_path)
+    assert _extract_gh_debug_method(output) is None
+
+    policy = load_cli_policy("gh")
+    parsed = parse_command_line(argv, policy.table)
+    with pytest.raises(CommandLineRejected):
+        gh_api_method(parsed)
+
+
+def test_gh_api_flag_tables_cover_installed_gh_help() -> None:
+    import re
+    import shutil
+    import subprocess
+
+    if shutil.which("gh") is None:
+        pytest.skip("gh binary not on PATH")
+
+    from access_catalog.cli_tables import _GH_API_BOOL_FLAGS, _GH_API_VALUE_FLAGS
+
+    proc = subprocess.run(["gh", "api", "--help"], text=True, capture_output=True, timeout=10, check=True)
+    in_flags = False
+    seen_flags: set[str] = set()
+    for line in proc.stdout.splitlines():
+        if line in {"FLAGS", "INHERITED FLAGS"}:
+            in_flags = True
+            continue
+        if in_flags and line and not line.startswith(" "):
+            in_flags = False
+            continue
+        if not in_flags or not line.strip():
+            continue
+        match = re.match(r"^\s+(?:(-[A-Za-z]),\s+)?(--[a-z0-9-]+)(?:\s+(\S+))?\s{2,}", line)
+        assert match is not None, f"could not parse gh api --help flag line: {line!r}"
+        short_flag, long_flag, value_type = match.groups()
+        target = _GH_API_VALUE_FLAGS if value_type else _GH_API_BOOL_FLAGS
+        assert long_flag in target, f"{long_flag} missing from expected gh api flag table"
+        seen_flags.add(long_flag)
+        if short_flag:
+            assert short_flag in target, f"{short_flag} missing from expected gh api flag table"
+            seen_flags.add(short_flag)
+    assert "--method" in seen_flags and "--paginate" in seen_flags
+
+
