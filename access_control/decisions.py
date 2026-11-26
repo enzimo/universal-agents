@@ -32,7 +32,7 @@ from typing import Any, Callable, Iterable
 
 from access_catalog.catalog import ToolCatalog
 from access_control.cedar import AccessEvaluationError, CedarAccessClient
-from access_control.folders import FOLDER_ROOT_USERS, covers, folder_chain, folder_owner, grantable_folder_id
+from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, covers, folder_chain, folder_owner, grantable_folder_id
 from access_control.grant_entries import GrantPlan, entry_key, plan_grants
 from access_control.people import is_administrator
 from access_control.standard_grants import is_standard_grant, standard_grants
@@ -252,6 +252,16 @@ class AccessService:
             if lead or not _lasting_consent(grant)
         ]
 
+    def _shared_grants_for_agent(self, agent: AgentPrincipal, person_grants: list[GrantV1]) -> list[GrantV1]:
+        agent_subject = SubjectRefV1(kind=SubjectKind.AGENT, id=agent.agent_id)
+        return [
+            grant.model_copy(update={"grant_id": f"{SHARED_GRANT_PREFIX}{grant.grant_id}", "subject": agent_subject})
+            for grant in person_grants
+            if grant.kind is GrantKind.ACCESS
+            and grant.target.kind in {TargetKind.FOLDER, TargetKind.FILE}
+            and grant.target.id.split("/", 1)[0] == FOLDER_ROOT_USERS
+        ]
+
     def shared_with(self, agent: AgentPrincipal, person: PersonPrincipal | None, task_id: str | None) -> list[GrantV1]:
         """What people shared with the task's person, as grants for the agent (decision D15).
 
@@ -263,14 +273,7 @@ class AccessService:
 
         if person is None:
             return []
-        agent_subject = SubjectRefV1(kind=SubjectKind.AGENT, id=agent.agent_id)
-        return [
-            grant.model_copy(update={"grant_id": f"{SHARED_GRANT_PREFIX}{grant.grant_id}", "subject": agent_subject})
-            for grant in self.valid_grants(person.subjects(), task_id=task_id)
-            if grant.kind is GrantKind.ACCESS
-            and grant.target.kind in {TargetKind.FOLDER, TargetKind.FILE}
-            and grant.target.id.split("/", 1)[0] == FOLDER_ROOT_USERS
-        ]
+        return self._shared_grants_for_agent(agent, self.valid_grants(person.subjects(), task_id=task_id))
 
     # -- evaluation -------------------------------------------------------------
 
@@ -992,6 +995,53 @@ class AccessService:
             task_id=task_id,
         )
 
+    def _folder_allowance_sides(
+        self,
+        *,
+        agent: AgentPrincipal,
+        person: PersonPrincipal | None,
+        folder_id: str,
+        level: AccessLevel,
+        task_id: str | None,
+    ) -> list[GrantV1] | None:
+        """Evaluate ``Folder::<folder_id>`` on both sides without one-time grants.
+
+        Loads each side's grants once and evaluates ``Folder::<folder_id>`` once
+        per side. Returns all loaded grants from both sides when both allow the
+        whole folder at ``level``, or ``None`` if either side denies. Nothing is
+        recorded or consumed.
+        """
+
+        chain = folder_chain(folder_id)
+        person_id = person.person_id if person else None
+        if person is None and agent.role != AGENT_ROLE_SYSTEM:
+            return None
+        resource, entities = folder_entities(
+            self.team_id, chain[0], is_file=False, owner=folder_owner(chain[0], person_id)
+        )
+        agent_grants = self._principal_grants(agent, task_id=task_id, person_id=person_id)
+        person_grants = self.valid_grants(person.subjects(), task_id=task_id) if person is not None else []
+        shared = self._shared_grants_for_agent(agent, person_grants)
+        sides: list[tuple[dict[str, str], list[dict[str, Any]], list[GrantV1], str | None]] = [
+            (agent.uid(), agent_entities(agent), agent_grants + shared, person_id)
+        ]
+        if person is not None:
+            sides.append((person.uid(), person_entities(person), person_grants, None))
+        for principal, principal_entities, side_grants, context_person in sides:
+            grants = [grant for grant in side_grants if grant.uses_remaining is None]
+            if not self._evaluate(
+                principal=principal,
+                principal_entities=principal_entities,
+                grants=grants,
+                action=f"use.{level.value}",
+                resource=resource,
+                resource_entities=entities,
+                task_id=task_id,
+                context_person=context_person,
+            ).allowed:
+                return None
+        return agent_grants + person_grants
+
     def may_use_folder(
         self,
         *,
@@ -1007,35 +1057,41 @@ class AccessService:
         one-time grants never count, because a mount lasts a whole command.
         """
 
-        chain = folder_chain(folder_id)
-        person_id = person.person_id if person else None
-        if person is None and agent.role != AGENT_ROLE_SYSTEM:
-            return False
-        resource, entities = folder_entities(
-            self.team_id, chain[0], is_file=False, owner=folder_owner(chain[0], person_id)
-        )
-        agent_grants = self._principal_grants(agent, task_id=task_id, person_id=person_id)
-        sides: list[tuple[dict[str, str], list[dict[str, Any]], list[GrantV1], str | None]] = [
-            (agent.uid(), agent_entities(agent), agent_grants + self.shared_with(agent, person, task_id), person_id)
-        ]
-        if person is not None:
-            sides.append(
-                (person.uid(), person_entities(person), self.valid_grants(person.subjects(), task_id=task_id), None)
+        return (
+            self._folder_allowance_sides(
+                agent=agent, person=person, folder_id=folder_id, level=level, task_id=task_id
             )
-        for principal, principal_entities, side_grants, context_person in sides:
-            grants = [grant for grant in side_grants if grant.uses_remaining is None]
-            if not self._evaluate(
-                principal=principal,
-                principal_entities=principal_entities,
-                grants=grants,
-                action=f"use.{level.value}",
-                resource=resource,
-                resource_entities=entities,
-                task_id=task_id,
-                context_person=context_person,
-            ).allowed:
-                return False
-        return True
+            is not None
+        )
+
+    def reusable_folder_allowance(
+        self,
+        *,
+        agent: AgentPrincipal,
+        person: PersonPrincipal | None,
+        folder_id: str,
+        level: AccessLevel,
+        task_id: str | None,
+    ) -> frozenset[str] | None:
+        """Direct-child paths blocked inside ``folder_id`` when a folder answer is reusable, or ``None``.
+
+        A folder-level allowance covers direct file children ``File::<child>`` of
+        ``Folder::<folder_id>`` at ``level`` (excluding one-time grants) except
+        for children targeted by an active block on either side. Returns
+        ``None`` when either side denies ``Folder::<folder_id>`` or any folder
+        id cannot be normalized.
+        """
+
+        try:
+            canonical_folder = folder_chain(folder_id)[0]
+        except FolderIdError:
+            return None
+        grants = self._folder_allowance_sides(
+            agent=agent, person=person, folder_id=canonical_folder, level=level, task_id=task_id
+        )
+        if grants is None:
+            return None
+        return _blocked_direct_children(canonical_folder, grants)
 
     def person_owned(self, tool_id: str) -> bool:
         """Whether a tool is each person's own (``OwnerScope.PERSON``, such as their history clean-up)."""
@@ -1699,6 +1755,28 @@ def _folder_next_step(agent_type: str, level: AccessLevel, folder_id: str, resul
         f"Call request_access with folder={folder_id!r} and level={level.value!r}, saying why you need it; "
         f"TeamLead or a person who can give {level.value} access to it decides."
     )
+
+
+def _blocked_direct_children(folder_id: str, grants: Iterable[GrantV1]) -> frozenset[str] | None:
+    """Direct child paths of ``folder_id`` targeted by an active block grant, or ``None`` on invalid ids."""
+
+    blocked: set[str] = set()
+    for grant in grants:
+        if grant.kind is not GrantKind.BLOCK or grant.target.kind not in {TargetKind.FOLDER, TargetKind.FILE}:
+            continue
+        try:
+            target_chain = folder_chain(grant.target.id)
+        except FolderIdError:
+            logger.warning(
+                "Skipping folder allowance reuse due to invalid block target id. "
+                "event=folder_allowance_invalid_block_target grant_id=%s target_id=%s",
+                grant.grant_id,
+                grant.target.id,
+            )
+            return None
+        if len(target_chain) > 1 and target_chain[1] == folder_id:
+            blocked.add(target_chain[0])
+    return frozenset(blocked)
 
 
 def _blocks(policy_ids: tuple[str, ...]) -> tuple[str, ...]:
