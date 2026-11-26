@@ -352,6 +352,9 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
         credential_catalog["collection_session_ttl_seconds"] = env_value
     if env_value := os.getenv("SECURE_TOOL_BROKER_SECRET_CACHE_TTL_SECONDS"):
         credential_catalog["secret_cache_ttl_seconds"] = env_value
+    if env_value := os.getenv("SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE"):
+        if env_value.strip():
+            credential_catalog["notify_on_agent_capture"] = env_value
     if credential_catalog:
         config["security_layer"]["credential_catalog"] = credential_catalog
     sealbox = dict(config["security_layer"].get("sealbox") or {})

@@ -988,6 +988,7 @@ _INSTANCE_CONFIG_COMMENTS: Dict[str, str] = {
     "security_layer.credential_catalog.openshell_binding_ttl_seconds": "Per-use OpenShell credential binding lease lifetime.",
     "security_layer.credential_catalog.collection_session_ttl_seconds": "Secure broker form session lifetime.",
     "security_layer.credential_catalog.secret_cache_ttl_seconds": "In-memory broker cache TTL for resolved catalog secrets; 0 disables.",
+    "security_layer.credential_catalog.notify_on_agent_capture": "Send the person one Inbox notice when an agent stores a temporary credential via credential.capture_file.",
     "security_layer.bitwarden_server_url": "Optional Bitwarden/Vaultwarden server URL configured before broker-side bw commands.",
     "security_layer.sealbox": "Independent encrypted credential service used by the broker; relative client paths resolve under broker_credentials_dir.",
     "security_layer.sealbox.enabled": "Configure Sealbox as a broker credential source.",

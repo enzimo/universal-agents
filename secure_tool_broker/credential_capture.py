@@ -66,7 +66,9 @@ CAPTURE_TEAM_SCOPE_REFUSED = "capture_team_scope_refused"
 CAPTURE_UNEXPECTED_PARAMS = "capture_unexpected_params"
 CAPTURE_INVALID_PARAMS = "capture_invalid_params"
 CAPTURE_PATH_OUTSIDE_SCOPE = "capture_path_outside_scope"
+CAPTURE_ACCESS_GATE_REQUIRED = "capture_access_gate_required"
 CAPTURE_FOLDER_ACCESS_DENIED = "capture_folder_access_denied"
+CAPTURE_FOLDER_CHECK_UNAVAILABLE = "capture_folder_check_unavailable"
 CAPTURE_SYMLINK_REFUSED = "capture_symlink_refused"
 CAPTURE_NOT_REGULAR_FILE = "capture_not_regular_file"
 CAPTURE_FILE_NOT_FOUND = "capture_file_not_found"
@@ -78,6 +80,10 @@ CAPTURE_TEAM_KEY_REFUSED = "capture_team_key_refused"
 CAPTURE_EXTERNAL_SOURCE_KEY_REFUSED = "capture_external_source_key_refused"
 CAPTURE_PERSON_CREDENTIAL_REFUSED = "capture_person_credential_refused"
 CAPTURE_FIELD_NAME_MISMATCH = "capture_field_name_mismatch"
+
+NOTICE_STATUS_SENT = "sent"
+NOTICE_STATUS_OFF = "off"
+NOTICE_STATUS_FAILED = "failed"
 
 _ALLOWED_PARAMS = frozenset(
     {"path", "credential_key", "display_name", "purpose", "field_name", "expires_at"}
@@ -301,7 +307,21 @@ def _check_folder_access(
     *,
     credential_key: str,
 ) -> ToolResult | None:
-    if access_gate is None or access_gate.access is None:
+    if access_gate is None:
+        LOGGER.warning(
+            "Refusing credential.capture_file because no BrokerAccessGate was provided. "
+            "event=credential_capture_access_gate_missing credential_key=%s person_id=%s folder_id=%s",
+            credential_key,
+            context.canonical_user_id,
+            located.folder_id,
+        )
+        return _refuse(
+            CAPTURE_ACCESS_GATE_REQUIRED,
+            "credential.capture_file requires the broker access gate to enforce folder access.",
+            credential_key=credential_key,
+            folder_id=located.folder_id,
+        )
+    if access_gate.access is None:
         return None
     try:
         decision = access_gate.decide_folder_for_context(
@@ -310,10 +330,25 @@ def _check_folder_access(
             is_file=True,
             level=AccessLevel.WRITE,
         )
-    except (FolderIdError, RuntimeError) as exc:
+    except FolderIdError as exc:
         return _refuse(
             CAPTURE_FOLDER_ACCESS_DENIED,
             f"Folder access check refused this file path ({exc}).",
+            credential_key=credential_key,
+            folder_id=located.folder_id,
+        )
+    except RuntimeError as exc:
+        LOGGER.warning(
+            "Folder access check could not run for credential.capture_file. "
+            "event=credential_capture_folder_check_failed credential_key=%s person_id=%s folder_id=%s error=%s",
+            credential_key,
+            context.canonical_user_id,
+            located.folder_id,
+            type(exc).__name__,
+        )
+        return _refuse(
+            CAPTURE_FOLDER_CHECK_UNAVAILABLE,
+            f"The folder access check for {located.folder_id} could not run: {exc}.",
             credential_key=credential_key,
             folder_id=located.folder_id,
         )
@@ -531,29 +566,50 @@ def _delete_source_file(
 
 
 def _deliver_capture_notice(
-    access_gate: BrokerAccessGate | None,
+    access_gate: BrokerAccessGate,
     notice: AccessNoticeV1 | None,
     *,
     credential_key: str,
     person_id: str,
-) -> bool:
-    if notice is None or access_gate is None or access_gate.links is None:
-        return False
+) -> tuple[bool, str]:
+    if notice is None:
+        return False, NOTICE_STATUS_OFF
+    if access_gate.links is None:
+        LOGGER.warning(
+            "Captured credential was stored, but the Inbox notice could not be sent because the "
+            "broker access store is unavailable. "
+            "event=credential_capture_notice_unavailable credential_key=%s person_id=%s notice_id=%s",
+            credential_key,
+            person_id,
+            notice.notice_id,
+        )
+        return False, NOTICE_STATUS_FAILED
     try:
-        return bool(access_gate.links.create_notice_if_absent(notice))
+        delivered = bool(access_gate.links.create_notice_if_absent(notice))
     except Exception as exc:  # noqa: BLE001 - never undo a committed capture on notice failure
         LOGGER.warning(
             "Captured credential was stored, but sending the Inbox notice failed. "
-            "event=credential_capture_notice_failed credential_key=%s person_id=%s error=%s",
+            "event=credential_capture_notice_failed credential_key=%s person_id=%s notice_id=%s error=%s",
             credential_key,
             person_id,
+            notice.notice_id,
             type(exc).__name__,
         )
-        return False
+        return False, NOTICE_STATUS_FAILED
+    if not delivered:
+        LOGGER.warning(
+            "Captured credential was stored, but the Inbox notice was not recorded. "
+            "event=credential_capture_notice_not_recorded credential_key=%s person_id=%s notice_id=%s",
+            credential_key,
+            person_id,
+            notice.notice_id,
+        )
+        return False, NOTICE_STATUS_FAILED
+    return True, NOTICE_STATUS_SENT
 
 
 def _plan_capture_notice(
-    access_gate: BrokerAccessGate | None,
+    access_gate: BrokerAccessGate,
     *,
     person_id: str,
     agent_type: str,
@@ -562,7 +618,7 @@ def _plan_capture_notice(
 ) -> AccessNoticeV1 | ToolResult | None:
     """Build and validate the Inbox notice pre-write so metadata errors never follow a commit."""
 
-    if not notify_on_agent_capture_enabled() or access_gate is None or access_gate.links is None:
+    if not notify_on_agent_capture_enabled():
         return None
     try:
         return _build_capture_notice(
@@ -659,8 +715,22 @@ def capture_file_credential(
     if isinstance(validated, ToolResult):
         return validated
 
-    team_id = str((access_gate.team_id if access_gate is not None else None) or context.team_id or "").strip() or None
     agent_type = str(context.named_agent_type or context.agent_id or "agent").strip() or "agent"
+    if access_gate is None:
+        LOGGER.warning(
+            "Refusing credential.capture_file because no BrokerAccessGate was provided. "
+            "event=credential_capture_access_gate_missing credential_key=%s person_id=%s agent_type=%s",
+            validated.credential_key,
+            person_id,
+            agent_type,
+        )
+        return _refuse(
+            CAPTURE_ACCESS_GATE_REQUIRED,
+            "credential.capture_file requires the broker access gate to enforce folder access.",
+            credential_key=validated.credential_key,
+        )
+
+    team_id = str(access_gate.team_id or context.team_id or "").strip() or None
 
     planned_notice = _plan_capture_notice(
         access_gate,
@@ -721,7 +791,7 @@ def capture_file_credential(
         credential_key=validated.credential_key,
         person_id=person_id,
     )
-    notice_sent = _deliver_capture_notice(
+    notice_sent, notice_status = _deliver_capture_notice(
         access_gate,
         planned_notice,
         credential_key=validated.credential_key,
@@ -731,7 +801,7 @@ def capture_file_credential(
     LOGGER.info(
         "Stored captured file credential. event=credential_file_captured "
         "credential_key=%s field_name=%s person_id=%s agent_type=%s expires_at=%s "
-        "source_file_deleted=%s notice_sent=%s",
+        "source_file_deleted=%s notice_sent=%s notice_status=%s",
         validated.credential_key,
         validated.field_name,
         person_id,
@@ -739,6 +809,7 @@ def capture_file_credential(
         validated.expires_at_iso,
         deleted,
         notice_sent,
+        notice_status,
     )
 
     result_content: dict[str, Any] = {
@@ -752,6 +823,7 @@ def capture_file_credential(
         "metadata": store_result.content.get("metadata"),
         "source_file_deleted": deleted,
         "notice_sent": notice_sent,
+        "notice_status": notice_status,
     }
     if not deleted and delete_reason:
         result_content["source_file_delete_reason"] = delete_reason
@@ -759,6 +831,7 @@ def capture_file_credential(
 
 
 __all__ = [
+    "CAPTURE_ACCESS_GATE_REQUIRED",
     "CAPTURE_APPROVAL_SOURCE",
     "CAPTURE_DISPLAY_NAME_MAX_CHARS",
     "CAPTURE_EXTERNAL_SOURCE_KEY_REFUSED",
@@ -769,6 +842,7 @@ __all__ = [
     "CAPTURE_FILE_TOO_LARGE",
     "CAPTURE_FILE_UNREADABLE",
     "CAPTURE_FOLDER_ACCESS_DENIED",
+    "CAPTURE_FOLDER_CHECK_UNAVAILABLE",
     "CAPTURE_INVALID_PARAMS",
     "CAPTURE_NOT_REGULAR_FILE",
     "CAPTURE_PATH_OUTSIDE_SCOPE",
@@ -781,6 +855,9 @@ __all__ = [
     "CAPTURE_TEAM_SCOPE_REFUSED",
     "CAPTURE_UNEXPECTED_PARAMS",
     "DEFAULT_CAPTURE_FIELD_NAME",
+    "NOTICE_STATUS_FAILED",
+    "NOTICE_STATUS_OFF",
+    "NOTICE_STATUS_SENT",
     "capture_file_credential",
     "is_agent_captured_for_person",
 ]

@@ -35,6 +35,7 @@ from runtime_settings.instance_layout import InstanceLayout
 from secure_tool_broker import credential_capture, credential_catalog
 from secure_tool_broker.access_gate import BrokerAccessGate
 from secure_tool_broker.credential_capture import (
+    CAPTURE_ACCESS_GATE_REQUIRED,
     CAPTURE_APPROVAL_SOURCE,
     CAPTURE_EXTERNAL_SOURCE_KEY_REFUSED,
     CAPTURE_FIELD_NAME_MISMATCH,
@@ -43,6 +44,7 @@ from secure_tool_broker.credential_capture import (
     CAPTURE_FILE_NOT_FOUND,
     CAPTURE_FILE_TOO_LARGE,
     CAPTURE_FOLDER_ACCESS_DENIED,
+    CAPTURE_FOLDER_CHECK_UNAVAILABLE,
     CAPTURE_INVALID_PARAMS,
     CAPTURE_NOT_REGULAR_FILE,
     CAPTURE_PATH_OUTSIDE_SCOPE,
@@ -53,6 +55,9 @@ from secure_tool_broker.credential_capture import (
     CAPTURE_TEAM_KEY_REFUSED,
     CAPTURE_TEAM_SCOPE_REFUSED,
     CAPTURE_UNEXPECTED_PARAMS,
+    NOTICE_STATUS_FAILED,
+    NOTICE_STATUS_OFF,
+    NOTICE_STATUS_SENT,
     capture_file_credential,
     is_agent_captured_for_person,
 )
@@ -310,6 +315,7 @@ async def test_http_capture_file_stores_with_ttl_deletes_source_sends_one_notice
     assert content["expires_at"] == expiry_iso
     assert content["source_file_deleted"] is True
     assert content["notice_sent"] is True
+    assert content["notice_status"] == NOTICE_STATUS_SENT
     assert not source.exists()
 
     # Secret stored in person scope with TTL and exact stripped multi-line content.
@@ -934,8 +940,19 @@ def test_race_between_person_form_and_capture_never_leaves_agent_value_after_for
         t_cap.start()
         t_form.join(timeout=10)
         t_cap.join(timeout=10)
+        assert not t_form.is_alive()
+        assert not t_cap.is_alive()
 
         assert outcomes["form"].status == "success", outcomes["form"].error
+        cap_result = outcomes["capture"]
+        if cap_result.status == "success":
+            assert cap_result.content["source_file_deleted"] is True
+            assert not src.exists()
+        else:
+            assert cap_result.status == "error"
+            assert cap_result.content["error_code"] == CAPTURE_PERSON_CREDENTIAL_REFUSED
+            assert cap_result.content["source_file_deleted"] is False
+            assert src.exists()
         saved = load_catalog(scope=alice_scope).credentials["race_key"]
         assert not is_agent_captured_for_person(saved, PERSON_ID)
         assert saved.approval.get("approved_by") == "user"
@@ -1172,3 +1189,361 @@ def test_captured_credential_obeys_immediate_expiry_janitor_and_team_transfer(
     assert "lifecycle_key" not in load_catalog(scope=alice_scope).credentials
     assert store.active_link(TEST_TEAM, "http:tavily", link.owner_kind, PERSON_ID, purpose=LinkPurpose.ACCOUNT) is None
     assert not any(k.endswith("lifecycle_key:api_key") for k in sealbox.secrets)
+
+
+# --- C10, C11, C12, Lead ruling, and B4 settings plumbing ---------------------
+
+
+def test_capture_without_access_gate_refuses_and_leaves_file_in_place(
+    env_setup,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C10 + Lead ruling: missing access_gate must fail closed, log a warning, and keep the file."""
+
+    from secure_tool_broker.executors import execute_validated_action
+    from secure_tools.providers import ValidatedAction
+
+    layout, _sealbox, _store, _gate = env_setup
+    source = layout.person_dir(PERSON_ID) / "scratch" / "no_gate.txt"
+    source.write_text("no-gate-secret", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        direct = capture_file_credential(
+            _valid_params(path="scratch/no_gate.txt", credential_key="no_gate_key", now=BASE_NOW),
+            context=_person_context(),
+            access_gate=None,
+            now=BASE_NOW,
+        )
+    assert direct.status == "error"
+    assert direct.content["error_code"] == CAPTURE_ACCESS_GATE_REQUIRED
+    assert direct.content["source_file_deleted"] is False
+    assert source.exists()
+    assert "no_gate_key" not in load_catalog(scope=CredentialOwnerScope.user(PERSON_ID)).credentials
+    assert "credential_capture_access_gate_missing" in caplog.text
+
+    # Also verify execute_validated_action without access_gate fails closed.
+    action = ValidatedAction(
+        provider="credential_catalog",
+        action="credential.capture_file",
+        params=_valid_params(
+            path="scratch/no_gate.txt",
+            credential_key="no_gate_exec_key",
+            expires_at=format_utc_timestamp(datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)),
+        ),
+    )
+    via_exec = execute_validated_action(action, _person_context(), access_gate=None)
+    assert via_exec.status == "error"
+    assert via_exec.content["error_code"] == CAPTURE_ACCESS_GATE_REQUIRED
+    assert via_exec.content["source_file_deleted"] is False
+    assert source.exists()
+
+
+def test_second_overwrite_guard_call_refuses_on_concurrent_team_key_and_keeps_file_and_catalog_row(
+    env_setup,
+) -> None:
+    """C11: a conflicting team key created mid-write triggers the second guard call and keeps the file."""
+
+    layout, sealbox, _store, gate = env_setup
+    alice_scope = CredentialOwnerScope.user(PERSON_ID)
+    team_scope = CredentialOwnerScope.team(TEST_TEAM)
+
+    first_src = layout.person_dir(PERSON_ID) / "scratch" / "guard_first.txt"
+    first_src.write_text("initial-secret", encoding="utf-8")
+    first_expiry = format_utc_timestamp(BASE_NOW + timedelta(hours=1))
+    first = capture_file_credential(
+        _valid_params(
+            path="scratch/guard_first.txt",
+            credential_key="guard_race_key",
+            expires_at=first_expiry,
+            now=BASE_NOW,
+        ),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert first.status == "success", first.error
+    assert not first_src.exists()
+
+    second_src = layout.person_dir(PERSON_ID) / "scratch" / "guard_second.txt"
+    second_src.write_text("updated-secret", encoding="utf-8")
+    injected = {"done": False}
+
+    def inject_team_key_during_write(_cmd: list[str], _key: str, _val: str | None) -> None:
+        if injected["done"]:
+            return
+        injected["done"] = True
+        team_cred = CatalogCredential(
+            display_name="Team Key Added Mid-Write",
+            purpose="Concurrent team key",
+            fields={
+                "secret": CatalogCredentialField(
+                    kind="token",
+                    visibility="secret",
+                    value_source="user_input",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id="team-guard:secret", field_ref="value")
+                    ],
+                )
+            },
+        )
+        credential_catalog._save_catalog_credential("guard_race_key", team_cred, scope=team_scope)
+
+    sealbox.on_set_hook = inject_team_key_during_write
+    second = capture_file_credential(
+        _valid_params(
+            path="scratch/guard_second.txt",
+            credential_key="guard_race_key",
+            expires_at=format_utc_timestamp(BASE_NOW + timedelta(days=30)),
+            now=BASE_NOW,
+        ),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert injected["done"] is True
+    assert second.status == "error"
+    assert second.content["error_code"] == CAPTURE_TEAM_KEY_REFUSED
+    assert second.content["source_file_deleted"] is False
+    assert second_src.exists()
+    # The person's catalog row kept its original 1-hour expiry.
+    assert load_catalog(scope=alice_scope).credentials["guard_race_key"].expires_at == first_expiry
+
+
+def test_operability_messages_folder_check_runtime_error_and_notice_status(
+    env_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C12 + Lead ruling: moving-clock expiry wording, register_existing_source wording,
+    RuntimeError folder-check code/wording, and distinct notice_status values."""
+
+    layout, _sealbox, _store, gate = env_setup
+
+    # 1. Too-soon refusal explains that the earliest time moves with the clock.
+    src_soon = layout.person_dir(PERSON_ID) / "scratch" / "soon.txt"
+    src_soon.write_text("soon-secret", encoding="utf-8")
+    too_soon = capture_file_credential(
+        _valid_params(
+            path="scratch/soon.txt",
+            credential_key="soon_key",
+            expires_at=format_utc_timestamp(BASE_NOW + timedelta(seconds=60)),
+            now=BASE_NOW,
+        ),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert too_soon.status == "error"
+    assert too_soon.content["error_code"] == CREDENTIAL_EXPIRY_TOO_SOON
+    assert "moves with the clock" in str(too_soon.error)
+    assert src_soon.exists()
+
+    # 2. register_existing_source over a temporary credential names credential.capture_file.
+    src_temp = layout.person_dir(PERSON_ID) / "scratch" / "temp_for_reg.txt"
+    src_temp.write_text("temp-secret", encoding="utf-8")
+    stored = capture_file_credential(
+        _valid_params(path="scratch/temp_for_reg.txt", credential_key="temp_reg_key", now=BASE_NOW),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert stored.status == "success", stored.error
+    assert stored.content["notice_sent"] is True
+    assert stored.content["notice_status"] == NOTICE_STATUS_SENT
+
+    reg_refused = register_existing_source(
+        {
+            "credential_key": "temp_reg_key",
+            "field_name": "secret",
+            "source": "bitwarden",
+            "item_id": "bw-1",
+            "field_ref": "password",
+        },
+        scope=CredentialOwnerScope.user(PERSON_ID),
+    )
+    assert reg_refused.status == "error"
+    assert "credential.capture_file" in str(reg_refused.error)
+
+    # 3. RuntimeError from folder decision returns CAPTURE_FOLDER_CHECK_UNAVAILABLE with "could not run".
+    src_err = layout.person_dir(PERSON_ID) / "scratch" / "folder_err.txt"
+    src_err.write_text("folder-err-secret", encoding="utf-8")
+
+    class _BrokenAccessGate(BrokerAccessGate):
+        def decide_folder_for_context(self, *args: Any, **kwargs: Any):  # type: ignore[override]
+            raise RuntimeError("cedar helper exited unexpectedly")
+
+    broken_gate = _BrokenAccessGate(
+        catalogs=gate.catalogs,
+        verifier=gate.verifier,
+        team_id=gate.team_id,
+        access=object(),  # type: ignore[arg-type]
+        links=gate.links,
+    )
+    with caplog.at_level(logging.WARNING):
+        folder_err = capture_file_credential(
+            _valid_params(path="scratch/folder_err.txt", credential_key="folder_err_key", now=BASE_NOW),
+            context=_person_context(),
+            access_gate=broken_gate,
+            now=BASE_NOW,
+        )
+    assert folder_err.status == "error"
+    assert folder_err.content["error_code"] == CAPTURE_FOLDER_CHECK_UNAVAILABLE
+    assert "could not run" in str(folder_err.error)
+    assert folder_err.content["source_file_deleted"] is False
+    assert src_err.exists()
+    assert "credential_capture_folder_check_failed" in caplog.text
+
+    # 4. notice_status distinguishes "off" vs "failed" (missing store or write error, both logged).
+    caplog.clear()
+    src_off = layout.person_dir(PERSON_ID) / "scratch" / "notice_off.txt"
+    src_off.write_text("notice-off-secret", encoding="utf-8")
+    monkeypatch.setenv(ENV_NOTIFY_ON_AGENT_CAPTURE, "false")
+    res_off = capture_file_credential(
+        _valid_params(path="scratch/notice_off.txt", credential_key="notice_off_key", now=BASE_NOW),
+        context=_person_context(),
+        access_gate=gate,
+        now=BASE_NOW,
+    )
+    assert res_off.status == "success", res_off.error
+    assert res_off.content["notice_sent"] is False
+    assert res_off.content["notice_status"] == NOTICE_STATUS_OFF
+
+    monkeypatch.setenv(ENV_NOTIFY_ON_AGENT_CAPTURE, "true")
+    no_store_gate = BrokerAccessGate(
+        catalogs=gate.catalogs,
+        verifier=gate.verifier,
+        team_id=gate.team_id,
+        access=None,
+        links=None,
+    )
+    src_no_store = layout.person_dir(PERSON_ID) / "scratch" / "notice_nostore.txt"
+    src_no_store.write_text("notice-nostore-secret", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        res_no_store = capture_file_credential(
+            _valid_params(path="scratch/notice_nostore.txt", credential_key="notice_nostore_key", now=BASE_NOW),
+            context=_person_context(),
+            access_gate=no_store_gate,
+            now=BASE_NOW,
+        )
+    assert res_no_store.status == "success", res_no_store.error
+    assert res_no_store.content["notice_sent"] is False
+    assert res_no_store.content["notice_status"] == NOTICE_STATUS_FAILED
+    assert "credential_capture_notice_unavailable" in caplog.text
+
+    caplog.clear()
+    src_fail = layout.person_dir(PERSON_ID) / "scratch" / "notice_fail.txt"
+    src_fail.write_text("notice-fail-secret", encoding="utf-8")
+
+    def boom(_notice: Any) -> bool:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gate.links, "create_notice_if_absent", boom)
+    with caplog.at_level(logging.WARNING):
+        res_fail = capture_file_credential(
+            _valid_params(path="scratch/notice_fail.txt", credential_key="notice_fail_key", now=BASE_NOW),
+            context=_person_context(),
+            access_gate=gate,
+            now=BASE_NOW,
+        )
+    assert res_fail.status == "success", res_fail.error
+    assert res_fail.content["notice_sent"] is False
+    assert res_fail.content["notice_status"] == NOTICE_STATUS_FAILED
+    assert "credential_capture_notice_failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_notify_on_agent_capture_setting_schemas_config_loader_and_launch_plumbing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4: security_layer.credential_catalog.notify_on_agent_capture across schemas,
+    config.example.yaml, config_loader, GatewayInstanceConfig, docker launch, and assistant_cli."""
+
+    import yaml
+
+    from assistant_cli import _run_secure_tool_broker_service
+    from assistant_gateway.config import _INSTANCE_CONFIG_COMMENTS, GatewayInstanceConfig
+    from config_loader import CONFIG_SCHEMA_VERSION, load_config, resolve_agent_type_settings
+    from default_values import SECURITY_LAYER_DEFAULTS
+    from docker.launch_headless import build_instance_env_defaults
+    from runtime_settings.security import CredentialCatalogSettings
+
+    # 1. Defaults, validation, and instance config comments.
+    assert SECURITY_LAYER_DEFAULTS.credential_catalog_notify_on_agent_capture.value is True
+    assert CredentialCatalogSettings().notify_on_agent_capture is True
+    assert CredentialCatalogSettings(notify_on_agent_capture=False).notify_on_agent_capture is False
+    assert CredentialCatalogSettings(notify_on_agent_capture="false").notify_on_agent_capture is False  # type: ignore[arg-type]
+    assert CredentialCatalogSettings(notify_on_agent_capture="off").notify_on_agent_capture is False  # type: ignore[arg-type]
+    assert CredentialCatalogSettings(notify_on_agent_capture="yes").notify_on_agent_capture is True  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="notify_on_agent_capture"):
+        CredentialCatalogSettings(notify_on_agent_capture="maybe")  # type: ignore[arg-type]
+    assert "security_layer.credential_catalog.notify_on_agent_capture" in _INSTANCE_CONFIG_COMMENTS
+
+    # 2. config.example.yaml documents it with an inline comment and default true.
+    example_text = Path("config.example.yaml").read_text(encoding="utf-8")
+    example_data = yaml.safe_load(example_text)
+    assert example_data["security_layer"]["credential_catalog"]["notify_on_agent_capture"] is True
+    matching_lines = [line for line in example_text.splitlines() if "notify_on_agent_capture:" in line]
+    assert len(matching_lines) == 1 and "#" in matching_lines[0]
+
+    # 3. config_loader (config.yaml schema) + env override.
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": CONFIG_SCHEMA_VERSION,
+                "security_layer": {
+                    "mode": "broker",
+                    "credential_catalog": {"notify_on_agent_capture": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(ENV_NOTIFY_ON_AGENT_CAPTURE, raising=False)
+    loaded_cfg = load_config(str(cfg_path))
+    assert (
+        resolve_agent_type_settings(loaded_cfg, "TeamArchitect")["secure_tool_broker_credential_catalog"][
+            "notify_on_agent_capture"
+        ]
+        is False
+    )
+
+    monkeypatch.setenv(ENV_NOTIFY_ON_AGENT_CAPTURE, "true")
+    loaded_override = load_config(str(cfg_path))
+    assert (
+        resolve_agent_type_settings(loaded_override, "TeamArchitect")["secure_tool_broker_credential_catalog"][
+            "notify_on_agent_capture"
+        ]
+        is True
+    )
+    monkeypatch.delenv(ENV_NOTIFY_ON_AGENT_CAPTURE, raising=False)
+
+    # 4. GatewayInstanceConfig save/load + docker/launch_headless env plumbing.
+    inst = GatewayInstanceConfig.create(
+        instance_name="capture_notice_test",
+        instance_root=str(tmp_path / "instance"),
+        team_id="team_capture_test",
+        timezone="UTC",
+    )
+    assert inst.security_layer.credential_catalog.notify_on_agent_capture is True
+    assert build_instance_env_defaults(inst)[ENV_NOTIFY_ON_AGENT_CAPTURE] == "true"
+
+    inst.security_layer.credential_catalog.notify_on_agent_capture = False
+    saved_path = inst.save()
+    reloaded = GatewayInstanceConfig.load(saved_path)
+    assert reloaded.security_layer.credential_catalog.notify_on_agent_capture is False
+    assert build_instance_env_defaults(reloaded)[ENV_NOTIFY_ON_AGENT_CAPTURE] == "false"
+
+    # 5. assistant_cli._run_secure_tool_broker_service exports the setting to the broker env.
+    observed: dict[str, object] = {}
+    monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN", "test-token")
+    monkeypatch.setenv(ENV_NOTIFY_ON_AGENT_CAPTURE, "unset-sentinel")
+    monkeypatch.delenv(ENV_NOTIFY_ON_AGENT_CAPTURE, raising=False)
+
+    async def fake_run_secure_tool_broker(*, host, port, token, **_kwargs):
+        observed["notify_env"] = os.environ.get(ENV_NOTIFY_ON_AGENT_CAPTURE)
+
+    monkeypatch.setattr("assistant_cli.run_secure_tool_broker", fake_run_secure_tool_broker)
+    await _run_secure_tool_broker_service(str(saved_path))
+    assert observed["notify_env"] == "false"

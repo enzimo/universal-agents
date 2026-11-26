@@ -980,7 +980,11 @@ def collect_credential(
     Sealbox record with the remaining TTL, or refuses if the expiry has already
     passed. When provided, ``overwrite_guard`` runs under the key and scope
     locks before writing to the credential store and again before committing
-    the catalog row, returning a ``ToolResult`` to refuse the write.
+    the catalog row, returning a ``ToolResult`` to refuse the write. A refusal
+    at the second guard call occurs after the credential store write (for
+    example if a conflicting team key was created concurrently during the
+    Sealbox write); any written Sealbox record keeps its TTL while the catalog
+    row is left unchanged.
     """
 
     try:
@@ -996,7 +1000,7 @@ def collect_credential(
                     status="error",
                     error=(
                         "Temporary credential expiry can only be changed through the secure "
-                        "broker form or trusted transfer import."
+                        "broker form, trusted transfer import, or credential.capture_file for agent-captured keys."
                     ),
                     content={"error_code": CREDENTIAL_EXPIRY_FORM_ONLY, "credential_key": credential_key},
                 )
@@ -1276,7 +1280,8 @@ def register_existing_source(
                 status="error",
                 error=(
                     f"Cannot register an existing source over temporary credential {credential_key}; "
-                    "temporary credentials can only be replaced or cleared through the secure broker form."
+                    "temporary credentials can only be replaced or cleared through the secure broker form "
+                    "(or replaced with credential.capture_file for agent-captured keys)."
                 ),
                 content={
                     "error_code": CREDENTIAL_EXPIRY_FORM_ONLY,
@@ -1387,7 +1392,8 @@ def register_existing_source(
                         status="error",
                         error=(
                             f"Cannot register an existing source over temporary credential {credential_key}; "
-                            "temporary credentials can only be replaced or cleared through the secure broker form."
+                            "temporary credentials can only be replaced or cleared through the secure broker form "
+                            "(or replaced with credential.capture_file for agent-captured keys)."
                         ),
                         content={
                             "error_code": CREDENTIAL_EXPIRY_FORM_ONLY,

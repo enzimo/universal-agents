@@ -213,6 +213,9 @@ class CredentialCatalogSettings(BaseModel):
     secret_cache_ttl_seconds: int = (
         SECURITY_LAYER_DEFAULTS.credential_catalog_secret_cache_ttl_seconds.value
     )
+    notify_on_agent_capture: bool = (
+        SECURITY_LAYER_DEFAULTS.credential_catalog_notify_on_agent_capture.value
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -286,6 +289,21 @@ class CredentialCatalogSettings(BaseModel):
                 "credential catalog secret cache TTL must be non-negative."
             )
         return parsed
+
+    @field_validator("notify_on_agent_capture", mode="before")
+    @classmethod
+    def _validate_notify_on_agent_capture(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        raise ValueError(
+            "security_layer.credential_catalog.notify_on_agent_capture must be a boolean."
+        )
 
 
 # Settings of the single-tenant Sealbox setup and of the one-time takeover of

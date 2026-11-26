@@ -593,3 +593,47 @@ def test_version_15_export_upgrades_with_blob_defaults_and_v16_carries_blob_sett
     imported_v16 = GatewayInstanceConfig.load(target2 / "instance_config.yaml")
     assert imported_v16.agent.blob_retention_days == 14
     assert imported_v16.transport.queues.max_bytes.blobs == 256 * MIB
+
+
+def test_version_16_export_upgrades_with_capture_notice_default_and_v17_carries_choice(
+    tmp_path: Path,
+) -> None:
+    """Settings v17 adds security_layer.credential_catalog.notify_on_agent_capture with v16 forward conversion."""
+
+    from assistant_gateway.config import GatewayInstanceConfig
+
+    class ExportedAsV16(SettingsSection):
+        schema_version = 16
+
+        def export(self, source: ExportSource, files: SectionFiles) -> SectionExport:
+            record = SettingV1(path=("heartbeat", "enabled"), value=False)
+            return SectionExport(records=[record.model_dump(mode="json")])
+
+    path, _config = _old_instance(tmp_path / "src-v16")
+    target = tmp_path / "from-v16"
+    plan = _import(_export(tmp_path / "src-v16", path, ExportedAsV16()), target, dry_run=False)
+    assert not plan.by_outcome(RecordOutcome.REFUSED)
+    imported_v16 = GatewayInstanceConfig.load(target / "instance_config.yaml")
+    assert imported_v16.security_layer.credential_catalog.notify_on_agent_capture is True
+
+    # Default instance omits notify_on_agent_capture from exported changed settings.
+    default_path, _default_cfg = _old_instance(tmp_path / "src-default")
+    default_export = _export(tmp_path / "src-default", default_path)
+    assert "security_layer.credential_catalog.notify_on_agent_capture" not in {
+        record.dotted for record in _records(default_export)
+    }
+
+    # Explicit false travels with the team under settings v17.
+    def disable_capture_notice(config: Any) -> None:
+        config.security_layer.credential_catalog.notify_on_agent_capture = False
+
+    path2, _config2 = _old_instance(tmp_path / "src-v17", disable_capture_notice)
+    out2 = _export(tmp_path / "src-v17", path2)
+    assert {record.dotted: record.value for record in _records(out2)} == {
+        "security_layer.credential_catalog.notify_on_agent_capture": False,
+    }
+    target2 = tmp_path / "to-v17"
+    plan2 = _import(out2, target2, dry_run=False)
+    assert not plan2.by_outcome(RecordOutcome.REFUSED)
+    imported_v17 = GatewayInstanceConfig.load(target2 / "instance_config.yaml")
+    assert imported_v17.security_layer.credential_catalog.notify_on_agent_capture is False

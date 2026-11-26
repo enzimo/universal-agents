@@ -235,7 +235,11 @@ def validate_capture_expiry(
 
     current = _utc_now(now)
     broker_now, earliest, latest = capture_expiry_window(now=current)
-    window_note = f"Broker UTC time is {broker_now}; accepted expires_at range is {earliest} to {latest}."
+    window_note = (
+        f"Broker UTC time is {broker_now}; accepted expires_at range at this instant is "
+        f"{earliest} to {latest} (the earliest time moves with the clock, so pick a time "
+        "several minutes ahead)."
+    )
     if expires_at is None or (isinstance(expires_at, str) and not expires_at.strip()):
         raise CredentialExpiryError(
             CREDENTIAL_EXPIRY_REQUIRED,

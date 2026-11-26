@@ -847,6 +847,8 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
     monkeypatch.delenv(
         "SECURE_TOOL_BROKER_CREDENTIAL_TEMPLATE_OVERRIDES_PATH", raising=False
     )
+    monkeypatch.setenv("SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE", "unset-sentinel")
+    monkeypatch.delenv("SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE", raising=False)
 
     async def fake_run_secure_tool_broker(*, host, port, token, **authorization):
         observed.update(
@@ -933,6 +935,8 @@ async def test_run_secure_tool_broker_service_sets_broker_credential_state_env(
     monkeypatch.delenv(
         "SECURE_TOOL_BROKER_CREDENTIAL_TEMPLATE_OVERRIDES_PATH", raising=False
     )
+    monkeypatch.setenv("SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE", "unset-sentinel")
+    monkeypatch.delenv("SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE", raising=False)
 
     async def fake_run_secure_tool_broker(*, host, port, token, **_authorization):
         observed["credentials_dir"] = os.environ.get(
@@ -951,6 +955,9 @@ async def test_run_secure_tool_broker_service_sets_broker_credential_state_env(
         )
         observed["secret_cache_ttl"] = os.environ.get(
             "SECURE_TOOL_BROKER_SECRET_CACHE_TTL_SECONDS"
+        )
+        observed["notify_on_agent_capture"] = os.environ.get(
+            "SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE"
         )
         observed["token"] = token
 
@@ -972,6 +979,7 @@ async def test_run_secure_tool_broker_service_sets_broker_credential_state_env(
         (config.instance_root_path / "credential_template_overrides.yaml").resolve()
     )
     assert observed["secret_cache_ttl"] == "300"
+    assert observed["notify_on_agent_capture"] == "true"
     assert observed["token"] == "test-token"
 
 
