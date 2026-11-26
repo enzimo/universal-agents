@@ -229,6 +229,36 @@ def test_tree_manifest_from_files_matches_disk_and_enforces_limits(tmp_path: Pat
             [("SKILL.md", b"a"), ("extra.txt", b"b")],
             max_files=1,
         )
+    for colliding in (
+        [("SKILL.md", b"a"), ("docs", b"b"), ("docs/x.md", b"c")],
+        [("SKILL.md", b"a"), ("docs/x.md", b"c"), ("docs", b"b")],
+        [("SKILL.md", b"a"), ("Docs/x.md", b"c"), ("docs", b"b")],
+        [("SKILL.md", b"a"), ("docs", b"b"), ("Docs/x.md", b"c")],
+    ):
+        with pytest.raises(SkillRepositoryError, match="colliding file and folder paths"):
+            build_skill_tree_manifest_from_files(colliding)
+
+
+def test_tree_manifest_on_disk_keeps_allowing_backslash_names_while_in_memory_refuses(
+    tmp_path: Path,
+) -> None:
+    skill = _write_skill(tmp_path, "skills/backslash-skill")
+    backslash_file = skill / "notes\\draft.md"
+    try:
+        backslash_file.write_bytes(b"draft\n")
+    except OSError:
+        pytest.skip("filesystem does not allow backslash in file names")
+
+    disk_manifest = build_skill_tree_manifest(skill)
+    assert [entry.path for entry in disk_manifest.entries] == ["SKILL.md", "notes\\draft.md"]
+
+    with pytest.raises(SkillRepositoryError, match="normalized relative POSIX path"):
+        build_skill_tree_manifest_from_files(
+            [
+                ("SKILL.md", (skill / "SKILL.md").read_bytes()),
+                ("notes\\draft.md", b"draft\n"),
+            ]
+        )
 
 
 def test_skillspector_static_scan_accepts_only_complete_safe_report(

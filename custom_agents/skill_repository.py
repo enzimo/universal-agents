@@ -401,9 +401,13 @@ def select_skill_candidate(
     )
 
 
-def _validate_skill_tree_path(relative: str) -> str:
+def _check_skill_tree_control_characters(relative: str) -> None:
     if any(ord(character) < 32 for character in relative):
         raise SkillRepositoryError("Skill paths must not contain control characters.")
+
+
+def _validate_skill_tree_path(relative: str) -> str:
+    _check_skill_tree_control_characters(relative)
     pure = PurePosixPath(relative)
     if (
         not relative
@@ -419,24 +423,56 @@ def _validate_skill_tree_path(relative: str) -> str:
     return relative
 
 
-def build_skill_tree_manifest_from_files(
+def _parent_directory_paths(relative: str) -> Iterator[str]:
+    parts = relative.split("/")
+    for index in range(1, len(parts)):
+        yield "/".join(parts[:index]).casefold()
+
+
+def _register_skill_tree_path(
+    relative: str,
+    casefold_paths: set[str],
+    directory_paths: set[str],
+    *,
+    check_parent_collisions: bool,
+) -> None:
+    _check_skill_tree_control_characters(relative)
+    casefolded = relative.casefold()
+    if casefolded in casefold_paths:
+        raise SkillRepositoryError(f"Skill contains case-colliding paths: {relative}")
+    if check_parent_collisions:
+        if casefolded in directory_paths:
+            raise SkillRepositoryError(
+                f"Skill contains colliding file and folder paths: {relative}"
+            )
+        for parent in _parent_directory_paths(relative):
+            if parent in casefold_paths:
+                raise SkillRepositoryError(
+                    f"Skill contains colliding file and folder paths: {relative}"
+                )
+            directory_paths.add(parent)
+    casefold_paths.add(casefolded)
+
+
+def _build_skill_tree_manifest_core(
     files: Iterable[tuple[str, bytes]],
     *,
     max_files: int = MAX_SKILL_FILES,
     max_total_bytes: int = MAX_SKILL_BYTES,
     max_single_file_bytes: int = MAX_SINGLE_FILE_BYTES,
+    check_parent_collisions: bool = False,
 ) -> SkillTreeManifest:
-    """Validate and digest one skill tree from ``(relative_posix_path, bytes)`` pairs."""
-
     entries: list[SkillTreeEntry] = []
     casefold_paths: set[str] = set()
+    directory_paths: set[str] = set()
     total_bytes = 0
     for relative, data in files:
-        _validate_skill_tree_path(relative)
-        casefolded = relative.casefold()
-        if casefolded in casefold_paths:
-            raise SkillRepositoryError(f"Skill contains case-colliding paths: {relative}")
-        casefold_paths.add(casefolded)
+        _register_skill_tree_path(
+            relative,
+            casefold_paths,
+            directory_paths,
+            check_parent_collisions=check_parent_collisions,
+        )
         if data.startswith(_LFS_POINTER_PREFIX):
             raise SkillRepositoryError(f"Git LFS pointer was not materialized: {relative}")
         if len(data) > max_single_file_bytes:
@@ -464,22 +500,47 @@ def build_skill_tree_manifest_from_files(
     )
 
 
+def build_skill_tree_manifest_from_files(
+    files: Iterable[tuple[str, bytes]],
+    *,
+    max_files: int = MAX_SKILL_FILES,
+    max_total_bytes: int = MAX_SKILL_BYTES,
+    max_single_file_bytes: int = MAX_SINGLE_FILE_BYTES,
+) -> SkillTreeManifest:
+    """Validate and digest one skill tree from ``(relative_posix_path, bytes)`` pairs."""
+
+    validated = ((_validate_skill_tree_path(relative), data) for relative, data in files)
+    return _build_skill_tree_manifest_core(
+        validated,
+        max_files=max_files,
+        max_total_bytes=max_total_bytes,
+        max_single_file_bytes=max_single_file_bytes,
+        check_parent_collisions=True,
+    )
+
+
+def _validate_walk_directories(
+    skill_root: Path, current: Path, directories: Sequence[str]
+) -> None:
+    for name in directories:
+        path = current / name
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
+            raise SkillRepositoryError(
+                f"Skill contains a symbolic link: {path.relative_to(skill_root)}"
+            )
+        if not stat.S_ISDIR(mode):
+            raise SkillRepositoryError(
+                f"Skill contains a non-directory tree entry: {path.relative_to(skill_root)}"
+            )
+
+
 def _iter_skill_tree_files(skill_root: Path) -> Iterator[tuple[str, bytes]]:
     if skill_root.is_symlink() or not skill_root.is_dir():
         raise SkillRepositoryError("Selected skill root must be a regular directory.")
     for current_root, directories, files in os.walk(skill_root, followlinks=False):
         current = Path(current_root)
-        for name in list(directories):
-            path = current / name
-            mode = path.lstat().st_mode
-            if stat.S_ISLNK(mode):
-                raise SkillRepositoryError(
-                    f"Skill contains a symbolic link: {path.relative_to(skill_root)}"
-                )
-            if not stat.S_ISDIR(mode):
-                raise SkillRepositoryError(
-                    f"Skill contains a non-directory tree entry: {path.relative_to(skill_root)}"
-                )
+        _validate_walk_directories(skill_root, current, list(directories))
         for name in files:
             path = current / name
             mode = path.lstat().st_mode
@@ -488,7 +549,7 @@ def _iter_skill_tree_files(skill_root: Path) -> Iterator[tuple[str, bytes]]:
                 raise SkillRepositoryError(f"Skill contains a symbolic link: {relative}")
             if not stat.S_ISREG(mode):
                 raise SkillRepositoryError(f"Skill contains a non-regular file: {relative}")
-            _validate_skill_tree_path(relative)
+            _check_skill_tree_control_characters(relative)
             yield relative, path.read_bytes()
 
 
@@ -501,11 +562,12 @@ def build_skill_tree_manifest(
 ) -> SkillTreeManifest:
     """Validate and digest every regular file in one selected skill tree."""
 
-    return build_skill_tree_manifest_from_files(
+    return _build_skill_tree_manifest_core(
         _iter_skill_tree_files(skill_root),
         max_files=max_files,
         max_total_bytes=max_total_bytes,
         max_single_file_bytes=max_single_file_bytes,
+        check_parent_collisions=False,
     )
 
 
