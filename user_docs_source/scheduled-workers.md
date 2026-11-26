@@ -672,7 +672,8 @@ While a task is in a timed wait:
   tool setup) keep the normal wind-down timeout.
 - **Restarts and power loss keep the wait and budget.** A task's wait charge
   and scheduled resume time are saved together before the task enters the
-  waiting state, and resuming from a note commits atomically in one write:
+  waiting state, and the wait and its resume are each saved in one step so a
+  crash cannot leave them half done:
   - If the system restarts before the scheduled resume time, the task stays
     waiting and resumes once when the timer comes due (never early).
   - If the system is down past the resume time (even for hours), the task
@@ -857,7 +858,9 @@ worker then winds down instead of continuing without custody:
 - Tasks that were waiting for an answer from a person or a delegated subtask may
   still finish on that worker for up to `lease_loss_wait_timeout_seconds`
   (30 minutes by default). After that, the requester receives a failed result
-  explaining that no reply arrived in time.
+  explaining that no reply arrived in time. A timed wait due before that
+  deadline is also kept and resumed on that worker, while a timed wait that ends
+  after the deadline fails immediately with a message to the requester.
 - The worker exits once it holds no unfinished task.
 
 The TeamLead sends returned tasks to another worker of the same type, starting

@@ -952,11 +952,16 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    status, `held_back`, so such a task is
    handed back, and the next worker is not told the held-back answer was sent.
 3. It keeps tasks that already started and now wait on a person or subtask,
-   because replies are addressed to this worker's id. They may finish until
-   `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)
-   after the lease was lost; then they fail with an explanation to the requester,
-   their pending subtasks are asked to stop, and an access request they were
-   waiting on is withdrawn so the reviewer is not left with an open item.
+   because replies are addressed to this worker's id, and keeps timed waits
+   whose `resume_at` falls before the deadline so they can resume and finish.
+   They may finish until `agent.schedule_workers.lease_loss_wait_timeout_seconds`
+   (default 30 minutes) after the lease was lost; then they fail with an
+   explanation to the requester, their pending subtasks are asked to stop, and
+   an access request they were waiting on is withdrawn so the reviewer is not
+   left with an open item. A timed wait whose `resume_at` falls after that
+   deadline (and that does not already hold an answer) fails immediately with a
+   message to the requester, clears its wait record, and asks pending subtasks
+   to stop instead of holding the worker open until the timeout.
 4. It exits once it holds no unfinished task. Until then it keeps publishing
    presence, so a starting worker of the same type does not adopt its tasks.
 
@@ -1620,14 +1625,14 @@ records) through `custom_agents/paused_wait_resume.py` and
   record `answer_held` while it waits for a busy lane, without overwriting
   another pending answer). When the resumed turn consumes the blocker
   (`clear_answered_blocker_with_resume_note`), trusted code atomically removes
-  the blocker and saves a past-fact `resume_note(record, now=...)` (replacing
-  any earlier live-wait note in the same turn so repeated waits keep at most
-  one stored note, and restoring the blocker unmarked if the save fails so the
-  task stays recoverable). `TurnStartNotes.with_live_wait_directive` releases
-  that note when the turn records its decision; if the worker crashes after
-  clearing the blocker or before recording a decision, restart recovery
-  delivers the note so the next turn knows the wait already ended and never
-  double-charges the budget.
+  the blocker and records a past-fact `resume_note(record, now=...)` via
+  `TurnStartNotes.with_live_wait_directive` (replacing any earlier live-wait
+  note in the same turn so repeated waits keep at most one stored note, and
+  restoring the blocker unmarked if the save fails so the task stays
+  recoverable). `release_turn_start_notes` releases that note when the turn
+  records its decision; if the worker crashes after clearing the blocker or
+  before recording a decision, restart recovery delivers the note so the next
+  turn knows the wait already ended and never double-charges the budget.
 - **Restart, power loss, or takeover**: `runtime_recovery.recover_runtime_after_restart`
   clears stale `answer_held` marks (for both same-id restarts and new-id
   takeovers), keeps not-yet-due waits `WAITING` until `resume_at`, and resumes

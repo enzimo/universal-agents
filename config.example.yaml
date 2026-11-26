@@ -240,7 +240,7 @@ agent:
     max_launch_attempts_per_occurrence: 2        # Operator ceiling for retries of the same occurrence.
     max_idle_ttl_seconds: 86400                  # Operator ceiling for an explicit automatic-worker TTL.
     lease_seconds: 120                          # Launch-custody lease; independent of claim wait.
-    lease_loss_wait_timeout_seconds: 1800       # After losing its lease, a worker hands back unstarted and running tasks, keeps tasks waiting on a person or subtask this long, then fails them and exits.
+    lease_loss_wait_timeout_seconds: 1800       # After losing its lease, a worker hands back unstarted and running tasks, keeps tasks waiting on a person, subtask, or a timed wait due before this deadline, and fails timed waits ending after it immediately with a message to the requester before exiting at the timeout.
     max_consecutive_interruptions: 3            # Lost-lease interruptions in a row (per task, or per schedule) before the task is cancelled and the TeamLead investigates.
     review_interval_seconds: 3600               # How long a schedule may stay stuck before its owner (and administrators, when only they can fix it) are told in the Inbox and in chat.
     missed_one_time_after_seconds: 3600         # A schedule's last run this late (a one-time reminder, or the last of a counted series) is turned off and its owner told, so it never arrives late.
