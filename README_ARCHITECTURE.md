@@ -1616,8 +1616,9 @@ Moving the task to `WAITING` releases the worker's main slot so other work can
 run while the timer ticks.
 
 Once the charge, the record and `WAITING` have committed, the pause is flushed
-to disk once (`task_steering_runtime._make_pause_durable`, the same for a
-setup run's record, which lives in the same database). SQLite stores commit
+to disk once (`task_steering_runtime._make_pause_durable`). Setup-run and
+access-request pauses get the same flush; their records live in the same
+database, so one flush covers them. SQLite stores commit
 with `synchronous=NORMAL` in WAL mode, which survives a process crash but can
 roll back the last commits on a power cut. Losing a pause that way would bring
 the task back as an interrupted running turn, re-run from the start or failed

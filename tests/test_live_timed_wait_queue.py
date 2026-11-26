@@ -41,7 +41,7 @@ from custom_agents.task_human_interaction_blockers import answer_held, get_human
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.task_v1 import Task
-from custom_messages.enums import MessageMetaType, RequesterType
+from custom_messages.enums import MessageMetaType, ProgressState, RequesterType
 from custom_tools.providers.timed_waits import wait
 from custom_tools.runtime_context import set_agent_ref
 from id_generation import new_id
@@ -245,8 +245,11 @@ async def test_live_timed_wait_allows_b_meanwhile_resumes_a_and_runs_c() -> None
 
                 # 1. Task A runs real wait(5, "Portainer redeploy") and frees the worker slot.
                 await channel.publish(manager_id, _chat(task_a, "TASK_A_WAIT: wait 5 minutes", replies.name, manager_id))
+                # The record is saved before WAITING, and only WAITING frees the slot,
+                # so wait for both before checking the slot.
                 await _wait_for(
-                    lambda: (get_human_interaction_blocker(tasks, task_a) or {}).get("kind") == "timed_wait",
+                    lambda: (get_human_interaction_blocker(tasks, task_a) or {}).get("kind") == "timed_wait"
+                    and getattr(tasks.get_task_info(task_a), "state", None) == ProgressState.WAITING,
                     timeout=15.0,
                 )
                 assert tasks.task_state.current_in_progress_task_id is None

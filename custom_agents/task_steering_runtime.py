@@ -1654,7 +1654,7 @@ async def send_interrupt_request_for_result(
         ProgressState.WAITING,
         datetime.now(timezone.utc).isoformat(),
     )
-    if staged_setup_run_ids or timed_wait_decisions:
+    if access_interrupts or staged_setup_run_ids or timed_wait_decisions:
         await _make_pause_durable(agent, task.task_id)
     for run_id in staged_setup_run_ids:
         # set_up_tools paused the turn (now waiting); trusted code announces the workflow and opens its pages.
@@ -1693,17 +1693,19 @@ async def send_interrupt_request_for_result(
 
 
 async def _make_pause_durable(agent: Any, task_id: str) -> None:
-    """Flush a timed wait's or setup run's pause to disk once, after WAITING is saved.
+    """Flush a local pause (timed wait, setup run, access request) to disk once, after WAITING is saved.
 
-    These pauses can last hours and the work after them starts from the saved
-    record alone. SQLite commits with ``synchronous=NORMAL``, so a power cut can
-    roll back the last commits; losing this pause (the wait's charge and record,
-    the setup-run record, WAITING) would bring the task back as an interrupted
+    These pauses can last hours (a person may decide an access request much
+    later) and the work after them starts from the saved record alone. SQLite
+    commits with ``synchronous=NORMAL``, so a power cut can roll back the last
+    commits; losing this pause (the wait's charge and record, the setup-run or
+    access-request record, WAITING) would bring the task back as an interrupted
     turn that is re-run from the start, or failed as stale after
     ``restart_executing_task_grace_seconds``. One flush per pause is cheap. The
-    setup-run store shares the runtime store's database, so the same flush
-    covers it. A failed flush is logged and the pause stays: the commits stand,
-    they are only exposed to a power cut as every other write is.
+    setup-run and access stores share the runtime store's database, so the same
+    flush covers their records. A failed flush is logged and the pause stays:
+    the commits stand, they are only exposed to a power cut as every other
+    write is.
     """
 
     try:
