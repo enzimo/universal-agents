@@ -20,7 +20,9 @@ from custom_agents.control_runtime import (
 )
 from custom_agents.pending_work_runtime import close_pending_work
 from custom_agents.task_human_interaction_blockers import (
+    answer_held,
     get_human_interaction_blocker,
+    mark_answer_held,
     record_human_interaction_blocker,
 )
 from custom_agents.task_manager import TaskManager
@@ -768,11 +770,19 @@ async def test_wind_down_keeps_and_resumes_a_timed_wait_before_the_deadline(mana
 
 
 @pytest.mark.asyncio
-async def test_wind_down_fails_a_late_timed_wait_at_the_deadline_with_clear_message(manager, monkeypatch):
-    """A6: a timed wait that outlasts the wind-down deadline fails cleanly and names the timed wait."""
+async def test_wind_down_fails_hopeless_timed_wait_immediately_at_classification(
+    manager, monkeypatch, caplog
+):
+    """#210 / P1 / C05: a WAITING timed wait whose resume_at outlasts the 30-minute deadline fails immediately."""
+    from custom_agents.timed_wait_runtime import resume_due_timed_waits
+
     start = datetime.now(timezone.utc)
+    now_box = [start]
+    monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now_box[0])
+
     _add(manager, "waiting", ProgressState.IN_PROGRESS)
     manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
+    resume_at = (start + timedelta(hours=2)).isoformat()
     record_human_interaction_blocker(
         manager,
         "waiting",
@@ -784,26 +794,412 @@ async def test_wind_down_fails_a_late_timed_wait_at_the_deadline_with_clear_mess
             minutes=120,
             reason="long redeploy",
             requested_at=start.isoformat(),
-            resume_at=(start + timedelta(hours=2)).isoformat(),
+            resume_at=resume_at,
         ),
     )
-    agent = _worker(manager, wait_seconds=0.05, monkeypatch=monkeypatch)
+    # Full 30-minute wind-down deadline: waiting for it would time out the test.
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    fake_strands = SimpleNamespace(replace_before_next_turn=False)
+    agent._interrupted_turn_sessions = {
+        "waiting": SimpleNamespace(
+            task_id="waiting",
+            interrupts=[SimpleNamespace(interrupt_id="int-late")],
+            strands=fake_strands,
+        )
+    }
+    agent._pending_interrupt_responses = {}
 
-    wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
-    await _wait_for_exit(agent)
+    with caplog.at_level(logging.WARNING):
+        wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+        await _wait_for_exit(agent, timeout=2.0)
 
     assert agent.exited
     assert agent.team_comms.handbacks() == []
     agent._send_task_error_response.assert_awaited_once()
     sent_message = agent._send_task_error_response.await_args.args[3]
-    assert "timed wait" in sent_message and "lost its launch lease" in sent_message
+    assert sent_message == (
+        "This task paused for 120 minutes, but its worker is shutting down before the wait ends, "
+        "so the task was stopped. Ask again to rerun it."
+    )
+    assert "within 30 minutes" not in sent_message
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" in caplog.text
+    assert "agent_id=worker_1" in caplog.text
+    assert "task_id=waiting" in caplog.text
+    assert "cause=launch_lease_lost" in caplog.text
+    assert f"resume_at={resume_at}" in caplog.text
+    assert get_human_interaction_blocker(manager, "waiting") is None
+    assert "waiting" not in agent._interrupted_turn_sessions
+    assert fake_strands.replace_before_next_turn is True
+    archived = manager.get_task_from_db("waiting")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+
+    # Moving past the original resume_at does not resume anything.
+    now_box[0] = start + timedelta(hours=3)
+    assert await resume_due_timed_waits(agent) == 0
+
+
+@pytest.mark.asyncio
+async def test_wind_down_fails_hopeless_timed_wait_started_after_classification_on_next_poll(
+    manager, monkeypatch, caplog
+):
+    """#210 / P1: a resumable task that enters a hopeless timed wait after classification fails on the next poll."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "waiting", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
+    # Initially waiting on a person (not hopeless at classification).
+    record_human_interaction_blocker(
+        manager,
+        "waiting",
+        {"kind": "access_request", "access_request_id": "req-1"},
+    )
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    with caplog.at_level(logging.WARNING):
+        state = wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+        await asyncio.sleep(0.03)
+        assert "waiting" in state.resumable_task_ids
+        assert not agent.exited
+
+        # The task now enters a 90-minute timed wait (past the 30-minute deadline).
+        record_human_interaction_blocker(
+            manager,
+            "waiting",
+            timed_wait_record(
+                interrupt_id="int-after",
+                call_id="call-after",
+                tool=WAIT_TOOL_NAME,
+                tool_use_id="tu-after",
+                minutes=90,
+                reason="long migration",
+                requested_at=start.isoformat(),
+                resume_at=(start + timedelta(minutes=90)).isoformat(),
+            ),
+        )
+        await _wait_for_exit(agent, timeout=2.0)
+
+    assert agent.exited
+    agent._send_task_error_response.assert_awaited_once()
+    sent_message = agent._send_task_error_response.await_args.args[3]
+    assert sent_message == (
+        "This task paused for 90 minutes, but its worker is shutting down before the wait ends, "
+        "so the task was stopped. Ask again to rerun it."
+    )
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" in caplog.text
     archived = manager.get_task_from_db("waiting")
     assert archived is not None and archived["status"] == ProgressState.FAILED.value
 
 
 @pytest.mark.asyncio
-async def test_wind_down_for_another_contract_fails_late_timed_wait_naming_that_cause(manager, monkeypatch):
-    """On release/0.10, a late timed wait during contract drain names the contract cause, not a lost lease."""
+async def test_wind_down_keeps_deadline_message_when_timed_wait_expires_at_deadline(
+    manager, monkeypatch, caplog
+):
+    """C05: a timed wait still unfinished at the deadline uses the deadline-expiry message, not the early message."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "waiting", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
+    # Held answer prevents early failure even if resume_at is after the short test deadline.
+    record_human_interaction_blocker(
+        manager,
+        "waiting",
+        timed_wait_record(
+            interrupt_id="int-held-expire",
+            call_id="call-held-expire",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-held-expire",
+            minutes=5,
+            reason="short wait",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(minutes=5)).isoformat(),
+        ),
+    )
+    mark_answer_held(
+        manager,
+        "waiting",
+        "timed_wait",
+        "int-held-expire",
+        holder_id="worker_1",
+        at=start.isoformat(),
+    )
+    agent = _worker(manager, wait_seconds=0.05, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    with caplog.at_level(logging.WARNING):
+        wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+        await _wait_for_exit(agent, timeout=2.0)
+
+    assert agent.exited
+    agent._send_task_error_response.assert_awaited_once()
+    sent_message = agent._send_task_error_response.await_args.args[3]
+    assert sent_message.startswith(
+        "This task was paused on a timed wait when its worker lost its launch lease. "
+        "The wait did not finish within "
+    )
+    assert "event=worker_wind_down_wait_expired" in caplog.text
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" not in caplog.text
+    archived = manager.get_task_from_db("waiting")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_wind_down_does_not_early_fail_held_answer_or_person_waits(manager, monkeypatch):
+    """#210 / P1: a held timed-wait answer is not failed early, and person/setup waits keep their normal timeout."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "held_wait", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("held_wait", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "held_wait",
+        timed_wait_record(
+            interrupt_id="int-held",
+            call_id="call-held",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-held",
+            minutes=120,
+            reason="already answered",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+    mark_answer_held(
+        manager,
+        "held_wait",
+        "timed_wait",
+        "int-held",
+        holder_id="worker_1",
+        at=start.isoformat(),
+    )
+
+    _add(manager, "person_wait", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("person_wait", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "person_wait",
+        {"kind": "access_request", "access_request_id": "req-keep"},
+    )
+
+    _add(manager, "setup_wait", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("setup_wait", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "setup_wait",
+        {"kind": "tool_setup_run", "run_id": "run-keep", "interrupt_id": "int-setup"},
+    )
+
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    state = wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    await asyncio.sleep(0.04)
+
+    # None of the three tasks were failed early.
+    assert state.resumable_task_ids == {"held_wait", "person_wait", "setup_wait"}
+    assert answer_held(get_human_interaction_blocker(manager, "held_wait"), "worker_1")
+    agent._send_task_error_response.assert_not_awaited()
+    assert not agent.exited
+
+    # All three finish normally before the 30-minute deadline; worker exits cleanly.
+    for task_id in ("held_wait", "person_wait", "setup_wait"):
+        manager.complete_task(task_id, start.isoformat())
+    await _wait_for_exit(agent, timeout=2.0)
+
+    assert agent.exited
+    agent._send_task_error_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wind_down_isolates_hopeless_timed_wait_error_from_handbacks_and_retries_on_poll(
+    manager, monkeypatch, caplog
+):
+    """C04: a failure while stopping a hopeless timed wait never blocks handbacks and retries on the next poll."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "queued")
+    _add(manager, "waiting", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "waiting",
+        timed_wait_record(
+            interrupt_id="int-flaky",
+            call_id="call-flaky",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-flaky",
+            minutes=120,
+            reason="flaky db",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    orig_fail = wind_down.fail_timed_wait_outlasting_deadline
+    attempts = [0]
+
+    async def fail_once(*args, **kwargs):
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise RuntimeError("sqlite busy")
+        return await orig_fail(*args, **kwargs)
+
+    monkeypatch.setattr(wind_down, "fail_timed_wait_outlasting_deadline", fail_once)
+
+    with caplog.at_level(logging.WARNING):
+        wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+        await _wait_for_exit(agent, timeout=2.0)
+
+    assert attempts[0] == 2
+    assert agent.exited
+    assert [item.handed_back.task_id for item in agent.team_comms.handbacks()] == ["queued"]
+    assert "event=worker_wind_down_timed_wait_fail_error" in caplog.text
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" in caplog.text
+    agent._send_task_error_response.assert_awaited_once()
+    archived = manager.get_task_from_db("waiting")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_wind_down_early_failure_stops_pending_subtasks(manager, monkeypatch):
+    """C13: failing a hopeless timed wait early still sends stop requests for its pending delegated subtasks."""
+    start = datetime.now(timezone.utc)
+    _add(manager, "parent", ProgressState.IN_PROGRESS)
+    subtask = Task(
+        task_id="child",
+        parent_task_id="parent",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Do child work",
+    )
+    manager.add_subtask(
+        "parent",
+        subtask,
+        MessageHeader(from_agent_id="worker_1", to_routing_path="specialist_1"),
+        MessageMeta(),
+    )
+    manager.update_main_task_state("parent", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "parent",
+        timed_wait_record(
+            interrupt_id="int-parent",
+            call_id="call-parent",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-parent",
+            minutes=120,
+            reason="long redeploy",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+
+    stop_requests: list[tuple[str, str, str]] = []
+
+    async def record_stop(_agent, *, parent_task_id, subtask_info, reason):
+        stop_requests.append((parent_task_id, subtask_info.task.task_id, reason))
+
+    monkeypatch.setattr(wind_down, "request_subtask_stop", record_stop)
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    wind_down.start_lease_loss_wind_down(agent, reason="stale_launch_lease")
+    await _wait_for_exit(agent, timeout=2.0)
+
+    assert agent.exited
+    archived = manager.get_task_from_db("parent")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+    expected_message = (
+        "This task paused for 120 minutes, but its worker is shutting down before the wait ends, "
+        "so the task was stopped. Ask again to rerun it."
+    )
+    assert stop_requests == [("parent", "child", expected_message)]
+    agent._send_task_error_response.assert_awaited_once()
+    assert agent._send_task_error_response.await_args.args[3] == expected_message
+
+
+@pytest.mark.asyncio
+async def test_wind_down_for_another_contract_fails_hopeless_timed_wait_immediately(
+    manager, monkeypatch, caplog
+):
+    """P1 on release/0.10: a hopeless timed wait during contract-drain wind-down fails at once with cause logged."""
+    from custom_messages.contracts.worker_handback_v1 import WIND_DOWN_OTHER_CONTRACT
+
+    start = datetime.now(timezone.utc)
+    _add(manager, "waiting", ProgressState.IN_PROGRESS)
+    subtask = Task(
+        task_id="child-drain",
+        parent_task_id="waiting",
+        task_type=MessageMetaType.REQUEST,
+        problem_statement="Child work",
+    )
+    manager.add_subtask(
+        "waiting",
+        subtask,
+        MessageHeader(from_agent_id="worker_1", to_routing_path="specialist_1"),
+        MessageMeta(),
+    )
+    manager.update_main_task_state("waiting", ProgressState.WAITING, start.isoformat())
+    resume_at = (start + timedelta(hours=2)).isoformat()
+    record_human_interaction_blocker(
+        manager,
+        "waiting",
+        timed_wait_record(
+            interrupt_id="int-contract-early",
+            call_id="call-contract-early",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-contract-early",
+            minutes=120,
+            reason="long redeploy",
+            requested_at=start.isoformat(),
+            resume_at=resume_at,
+        ),
+    )
+    stop_requests: list[tuple[str, str, str]] = []
+
+    async def record_stop(_agent, *, parent_task_id, subtask_info, reason):
+        stop_requests.append((parent_task_id, subtask_info.task.task_id, reason))
+
+    monkeypatch.setattr(wind_down, "request_subtask_stop", record_stop)
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    with caplog.at_level(logging.WARNING, logger="test.wind_down"):
+        wind_down.start_lease_loss_wind_down(
+            agent,
+            reason="Its process runs another message contract than its installation.",
+            cause=WIND_DOWN_OTHER_CONTRACT,
+        )
+        await _wait_for_exit(agent, timeout=2.0)
+
+    assert agent.exited
+    agent._send_task_error_response.assert_awaited_once()
+    sent_message = agent._send_task_error_response.await_args.args[3]
+    expected_message = (
+        "This task paused for 120 minutes, but its worker is shutting down before the wait ends, "
+        "so the task was stopped. Ask again to rerun it."
+    )
+    assert sent_message == expected_message
+    assert "lease" not in sent_message.lower()
+    assert stop_requests == [("waiting", "child-drain", expected_message)]
+    assert get_human_interaction_blocker(manager, "waiting") is None
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" in logged
+    assert "cause=other_message_contract" in logged
+    assert f"resume_at={resume_at}" in logged
+    assert "lease" not in logged.lower()
+    archived = manager.get_task_from_db("waiting")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_wind_down_for_another_contract_fails_late_timed_wait_naming_that_cause(
+    manager, monkeypatch, caplog
+):
+    """On release/0.10, a held timed wait that expires at the contract-drain deadline names that cause, not a lost lease."""
     from custom_messages.contracts.worker_handback_v1 import WIND_DOWN_OTHER_CONTRACT
 
     start = datetime.now(timezone.utc)
@@ -817,25 +1213,38 @@ async def test_wind_down_for_another_contract_fails_late_timed_wait_naming_that_
             call_id="call-contract",
             tool=WAIT_TOOL_NAME,
             tool_use_id="tu-contract",
-            minutes=120,
-            reason="long redeploy",
+            minutes=5,
+            reason="short redeploy",
             requested_at=start.isoformat(),
-            resume_at=(start + timedelta(hours=2)).isoformat(),
+            resume_at=(start + timedelta(minutes=5)).isoformat(),
         ),
     )
-    agent = _worker(manager, wait_seconds=0.05, monkeypatch=monkeypatch)
-
-    wind_down.start_lease_loss_wind_down(
-        agent,
-        reason="Its process runs another message contract than its installation.",
-        cause=WIND_DOWN_OTHER_CONTRACT,
+    mark_answer_held(
+        manager,
+        "waiting",
+        "timed_wait",
+        "int-contract",
+        holder_id="worker_1",
+        at=start.isoformat(),
     )
-    await _wait_for_exit(agent)
+    agent = _worker(manager, wait_seconds=0.05, monkeypatch=monkeypatch)
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+
+    with caplog.at_level(logging.WARNING, logger="test.wind_down"):
+        wind_down.start_lease_loss_wind_down(
+            agent,
+            reason="Its process runs another message contract than its installation.",
+            cause=WIND_DOWN_OTHER_CONTRACT,
+        )
+        await _wait_for_exit(agent, timeout=2.0)
 
     assert agent.exited
     agent._send_task_error_response.assert_awaited_once()
     sent_message = agent._send_task_error_response.await_args.args[3]
     assert "timed wait" in sent_message
     assert "another message contract" in sent_message and "lease" not in sent_message.lower()
+    assert "event=worker_wind_down_wait_expired" in caplog.text
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" not in caplog.text
     archived = manager.get_task_from_db("waiting")
     assert archived is not None and archived["status"] == ProgressState.FAILED.value

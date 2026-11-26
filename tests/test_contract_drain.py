@@ -215,3 +215,142 @@ def test_a_draining_lead_fires_no_schedule_and_the_next_lead_fires_it_once(tmp_p
     assert datetime.fromisoformat(moved_on) > datetime.now(timezone.utc)
     asyncio.run(_scheduler_pass(successor, {}, sleep))
     assert successor.enqueued == [(schedule.schedule_id, schedule.schedule_id)]
+
+
+@pytest.mark.asyncio
+async def test_contract_drain_pool_worker_fails_hopeless_timed_wait_only_once_wind_down_starts(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """C03 / P1: a draining pool worker keeps a hopeless timed wait while a running turn finishes
+    (no deadline yet), then fails it immediately once real wind-down starts with cause=other_message_contract."""
+
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+
+    from custom_agents.task_human_interaction_blockers import (
+        get_human_interaction_blocker,
+        record_human_interaction_blocker,
+    )
+    from custom_agents.timed_waits import WAIT_TOOL_NAME, timed_wait_record
+    from tests.test_lease_loss_wind_down import _add, _wait_for_exit, _worker
+
+    start = datetime.now(timezone.utc)
+    manager = TaskManager(db_path=str(tmp_path / "drain_worker.db"))
+    manager.set_owner_identity("worker_1", "Worker", "team_1", "Worker")
+    _add(manager, "running_task", ProgressState.IN_PROGRESS)
+    _add(manager, "waiting_task", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("waiting_task", ProgressState.WAITING, start.isoformat())
+    resume_at = (start + timedelta(hours=2)).isoformat()
+    record_human_interaction_blocker(
+        manager,
+        "waiting_task",
+        timed_wait_record(
+            interrupt_id="int-drain-hopeless",
+            call_id="call-drain-hopeless",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-drain-hopeless",
+            minutes=120,
+            reason="long redeploy",
+            requested_at=start.isoformat(),
+            resume_at=resume_at,
+        ),
+    )
+
+    agent = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    agent._worker_ready = True
+    agent._interrupted_turn_sessions = {}
+    agent._pending_interrupt_responses = {}
+    agent.deferred_inbox = SimpleNamespace(messages=[], remove_messages=AsyncMock())
+
+    running = {"running_task"}
+    monkeypatch.setattr(contract_drain, "TURN_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(turn_registry, "executing_task_ids", lambda _agent: set(running))
+
+    with caplog.at_level(logging.WARNING, logger="test.wind_down"):
+        await drain_agent(agent, REASON)
+        await asyncio.sleep(0.05)
+
+        # Running turn has not ended yet: no wind-down deadline exists, so the timed wait has not failed.
+        assert getattr(agent, "_lease_loss_wind_down", None) is None
+        assert manager.get_task_info("waiting_task").state == ProgressState.WAITING
+        assert get_human_interaction_blocker(manager, "waiting_task") is not None
+        agent._send_task_error_response.assert_not_awaited()
+        assert not agent.exited
+
+        # Once the running turn completes, real wind-down starts with cause=other_message_contract
+        # and immediately fails the hopeless timed wait instead of waiting out the 30-minute deadline.
+        manager.complete_task("running_task", start.isoformat())
+        running.clear()
+        await asyncio.wait_for(agent._contract_drain.task, timeout=2.0)
+        await _wait_for_exit(agent, timeout=2.0)
+
+    assert agent.exited
+    agent._send_task_error_response.assert_awaited_once()
+    sent_message = agent._send_task_error_response.await_args.args[3]
+    assert sent_message == (
+        "This task paused for 120 minutes, but its worker is shutting down before the wait ends, "
+        "so the task was stopped. Ask again to rerun it."
+    )
+    assert get_human_interaction_blocker(manager, "waiting_task") is None
+    archived = manager.get_task_from_db("waiting_task")
+    assert archived is not None and archived["status"] == ProgressState.FAILED.value
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=worker_wind_down_timed_wait_outlasts_deadline" in logged
+    assert "cause=other_message_contract" in logged
+    assert f"resume_at={resume_at}" in logged
+    assert "lease" not in logged.lower()
+
+
+@pytest.mark.asyncio
+async def test_contract_drain_team_lead_keeps_long_timed_wait_without_early_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """C03 boundary: a draining TeamLead (no launch record / no wind-down deadline) keeps its timed waits."""
+
+    from datetime import timedelta
+    from unittest.mock import AsyncMock
+
+    from custom_agents.task_human_interaction_blockers import (
+        get_human_interaction_blocker,
+        record_human_interaction_blocker,
+    )
+    from custom_agents.timed_waits import WAIT_TOOL_NAME, timed_wait_record
+    from tests.test_lease_loss_wind_down import _add, _worker
+
+    start = datetime.now(timezone.utc)
+    manager = TaskManager(db_path=str(tmp_path / "drain_lead.db"))
+    manager.set_owner_identity("lead_1", "TeamArchitect", "team_1", "TeamArchitect")
+    _add(manager, "lead_wait", ProgressState.IN_PROGRESS)
+    manager.update_main_task_state("lead_wait", ProgressState.WAITING, start.isoformat())
+    record_human_interaction_blocker(
+        manager,
+        "lead_wait",
+        timed_wait_record(
+            interrupt_id="int-lead-wait",
+            call_id="call-lead-wait",
+            tool=WAIT_TOOL_NAME,
+            tool_use_id="tu-lead-wait",
+            minutes=120,
+            reason="long redeploy",
+            requested_at=start.isoformat(),
+            resume_at=(start + timedelta(hours=2)).isoformat(),
+        ),
+    )
+
+    lead = _worker(manager, wait_seconds=1800.0, monkeypatch=monkeypatch)
+    lead.id = "lead_1"
+    lead._worker_launch = None  # TeamLead / startup agent: not a pool worker
+    lead._worker_ready = True
+    lead.deferred_inbox = SimpleNamespace(messages=[], remove_messages=AsyncMock())
+
+    await drain_agent(lead, REASON)
+    await asyncio.sleep(0.04)
+
+    assert is_contract_draining(lead)
+    assert lead._contract_drain.task is None
+    assert getattr(lead, "_lease_loss_wind_down", None) is None
+    assert await holds_work(lead) is True
+    assert manager.get_task_info("lead_wait").state == ProgressState.WAITING
+    assert get_human_interaction_blocker(manager, "lead_wait") is not None
+    lead._send_task_error_response.assert_not_awaited()
+    assert not lead.exited

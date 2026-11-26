@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -955,10 +956,97 @@ async def seconds_until_next_resume(agent: Any, *, now: datetime | None = None) 
     return result
 
 
+# -- wind-down early failure for timed waits past a shutdown deadline ------------------------
+
+
+@dataclass(frozen=True)
+class HopelessTimedWaitFailure:
+    """Outcome of failing a WAITING timed wait whose resume time outlasts a shutdown deadline."""
+
+    task_info: Any
+    resume_at: str
+    message: str
+    pending_subtasks: tuple[Any, ...] = ()
+
+
+def _hopeless_timed_wait_snapshot(
+    agent: Any,
+    manager: Any,
+    task_id: str,
+    deadline_utc: datetime,
+) -> tuple[Any, dict[str, Any], tuple[Any, ...]] | None:
+    """Return ``(task_info, blocker, pending_subtasks)`` if ``task_id`` is an unheld WAITING wait past ``deadline_utc``."""
+
+    task_info = manager.get_task_info(task_id)
+    if task_info is None or task_info.state != ProgressState.WAITING:
+        return None
+    if task_id in manager.task_state.task_queue:
+        return None
+    blocker = get_human_interaction_blocker(manager, task_id)
+    if blocker is None or not is_timed_wait_blocker(blocker):
+        return None
+    target = resume_at_of(blocker)
+    if target is None or target <= deadline_utc:
+        return None
+    if answer_held(blocker):
+        return None
+    if task_id in (getattr(agent, "_pending_interrupt_responses", None) or {}):
+        return None
+    pending_subtasks = tuple(manager.get_pending_subtasks(task_id))
+    return task_info, blocker, pending_subtasks
+
+
+async def fail_timed_wait_outlasting_deadline(
+    agent: Any,
+    task_id: str,
+    *,
+    deadline: datetime,
+    message_for_blocker: Callable[[Mapping[str, Any]], str],
+    discard_steering: Callable[..., Awaitable[Any]],
+) -> HopelessTimedWaitFailure | None:
+    """Fail ``task_id`` under its timed-wait lock if it is an unheld WAITING wait past ``deadline``.
+
+    Holds the per-task lock only across the re-check (including capturing any
+    pending delegated subtasks before ``fail_task`` archives and forgets them),
+    ``fail_task``, and ``discard_steering`` cleanup; callers send network
+    notifications (stopping subtasks, sending the requester error response)
+    after this returns.
+    """
+
+    manager = getattr(agent, "task_manager", None)
+    if manager is None:
+        return None
+    run_ops = manager.operations_runtime.run
+    deadline_utc = deadline.astimezone(timezone.utc)
+    async with _lock(agent, task_id):
+        found = await run_ops(partial(_hopeless_timed_wait_snapshot, agent, manager), task_id, deadline_utc)
+        if found is None:
+            return None
+        task_info, blocker, pending_subtasks = found
+        message = message_for_blocker(blocker)
+        now_iso = timed_waits_rules.utc_now().isoformat()
+        failed = bool(await run_ops(manager.fail_task, task_id, message, now_iso))
+        if not failed:
+            return None
+        await discard_steering(
+            agent,
+            task_id=task_id,
+            reason="wind_down_timed_wait_outlasts_deadline",
+        )
+        return HopelessTimedWaitFailure(
+            task_info=task_info,
+            resume_at=str(blocker.get("resume_at") or ""),
+            message=message,
+            pending_subtasks=pending_subtasks,
+        )
+
+
 __all__ = [
+    "HopelessTimedWaitFailure",
     "TimedWaitDecision",
     "check_schedule_next_run",
     "decide_timed_wait",
+    "fail_timed_wait_outlasting_deadline",
     "finish_timed_wait",
     "resume_due_timed_waits",
     "resume_without_paused_turn",
