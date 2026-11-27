@@ -43,6 +43,7 @@ import json
 from typing import Any, Iterable, Mapping, Optional
 
 from custom_agents.structured_llm_messages import is_worker_result_escalation
+from custom_agents.tool_use_unwrap import unwrap_tool_use
 from custom_messages.contracts.credentials_v1 import SecureCredentialCollectionRequest
 from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery
 from custom_messages.enums import MessageMetaType
@@ -127,12 +128,18 @@ def tool_calls_from_messages(
 
 
 def _tool_call(tool_use: Mapping[str, Any], excluded: set[str]) -> Optional[dict[str, Any]]:
-    name = str(tool_use.get("name") or "")
+    unwrapped = unwrap_tool_use(tool_use)
+    if unwrapped.unwrapped and unwrapped.name:
+        name = unwrapped.name
+        tool_input = unwrapped.inputs
+    else:
+        name = str(tool_use.get("name") or "")
+        tool_input = tool_use.get("input")
     if not name or name in excluded:
         return None
     return {
         "tool": name,
-        "input": _preview(tool_use.get("input"), MAX_INPUT_PREVIEW_CHARS),
+        "input": _preview(tool_input, MAX_INPUT_PREVIEW_CHARS),
         "status": "no_result",
     }
 

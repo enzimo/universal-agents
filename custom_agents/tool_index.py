@@ -37,6 +37,7 @@ from typing import Any
 
 from strands.hooks import BeforeModelCallEvent, HookProvider, HookRegistry
 
+from custom_agents.tool_presentation import CALL_TOOL_NAME
 from custom_messages.contracts.access_v2 import AccessLevel
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,13 @@ logger = logging.getLogger(__name__)
 TOOL_INDEX_HOOK_ORDER = -90.0
 # The longest first sentence an index line may carry (tests/test_tool_index.py checks every tool).
 MAX_INDEX_SENTENCE_CHARS = 160
+# Index lines carry a compact signature so the model can call through call_tool without
+# describe_tools: the required inputs (short enums inlined as a|b|c, at most COMPACT_SIGNATURE_MAX_ENUM
+# values; lists marked [] and objects {}) and a count of the optional ones ("+N optional").
+# Full typed signatures on every line cost the team lead ~59% of full definitions (budget is 50%).
+# Optional names without their allowed values made models guess them in the live comparison
+# (calculator(mode='exact'), get_self_status(info_type='basic'), refused and retried every run).
+COMPACT_SIGNATURE_MAX_ENUM = 6
 # Catalog tools whose functions never run from a tool script: loading and finding
 # tools, the script tool itself, and model-context loading, which only a direct
 # call can hand to the model.
@@ -108,9 +116,12 @@ def script_note(catalog: Any, name: str) -> str:
 
 INDEX_HEADER = (
     "Your other tools:",
-    "Each line below is a tool function you may use but whose full definition is not in your tool list. "
-    "To use one, load its group with use_tools(tool_ids=['<group id>']) (it is in your tool list from your "
-    "next step), or call it by name. describe_tools(names=['<function>']) gives its exact inputs first.",
+    "Each line below is a tool function you hold whose full definition is not in your tool list. "
+    f"Call it in one step with {CALL_TOOL_NAME}(name='<function>', inputs={{...}}) "
+    f"(tools already in your tool list are called directly, not through {CALL_TOOL_NAME}). "
+    "A line shows the required inputs; '+N optional' counts the optional ones. "
+    "describe_tools(names=['<function>']) gives the optional inputs and their allowed values, "
+    "and use_tools(tool_ids=['<group id>']) loads a group's full definitions.",
 )
 INDEX_SCRIPT_NOTE = (
     "Functions marked script also run from run_tool_script without loading: use it to chain several "
@@ -135,7 +146,8 @@ def _group_lines(catalog: Any, tool_id: str, names: list[str], tools: Mapping[st
     for name in names:
         note = script_note(catalog, name) if scripts else ""
         marker = f" [{note}]" if note else ""
-        lines.append(f"- {name}{marker}: {first_sentence(_description(tools[name]))}")
+        label = signature(name, tools[name], compact=True)
+        lines.append(f"- {label}{marker}: {first_sentence(_description(tools[name]))}")
     return lines
 
 
@@ -180,9 +192,47 @@ def _type_of(schema: Mapping[str, Any]) -> str:
     return _JSON_TYPES.get(str(kind), "Any")
 
 
-def signature(name: str, tool: Any) -> str:
-    """A Python-style signature from the tool's input schema: required inputs first, then optional ones."""
+def _compact_arg(argument: str, prop: Mapping[str, Any]) -> str:
+    """Format one required argument for a compact index signature (short enum choices inline, list/object marked)."""
 
+    enum_values = prop.get("enum")
+    if (
+        isinstance(enum_values, list)
+        and 1 <= len(enum_values) <= COMPACT_SIGNATURE_MAX_ENUM
+        and all(isinstance(v, (str, int, float, bool)) for v in enum_values)
+    ):
+        return f"{argument}={'|'.join(str(v) for v in enum_values)}"
+    # A required list or object is marked ([] or {}) so the model does not send it as text;
+    # Strands' input validation does not turn a string into a list or a dict.
+    kind = _type_of(prop)
+    return argument + ("[]" if kind.startswith("list[") else "{}" if kind.startswith("dict") else "")
+
+
+def _compact_signature(name: str, tool: Any) -> str:
+    """Compact signature for index lines: the required args, then how many optional ones there are."""
+
+    schema = _schema_of(tool)
+    properties: Mapping[str, Any] = schema.get("properties") or {}
+    required = set(schema.get("required") or ())
+    shown = [
+        _compact_arg(argument, prop if isinstance(prop, Mapping) else {})
+        for argument, prop in properties.items()
+        if argument in required
+    ]
+    optional = len(properties) - len(shown)
+    return f"{name}({', '.join([*shown, *([f'+{optional} optional'] if optional else [])])})"
+
+
+def signature(name: str, tool: Any, *, compact: bool = False) -> str:
+    """A Python-style signature from the tool's input schema: required inputs first, then optional ones.
+
+    With ``compact=True``, omits types and defaults, inlines short required enums
+    (up to ``COMPACT_SIGNATURE_MAX_ENUM`` values), and counts the optional
+    inputs (``+N optional``) instead of naming them.
+    """
+
+    if compact:
+        return _compact_signature(name, tool)
     schema = _schema_of(tool)
     properties: Mapping[str, Any] = schema.get("properties") or {}
     required = set(schema.get("required") or ())
@@ -276,10 +326,11 @@ def held_functions(agent: Any, parts: Any) -> set[str]:
 
 
 __all__ = [
-    "ScriptInputs",
+    "COMPACT_SIGNATURE_MAX_ENUM",
     "MAX_INDEX_SENTENCE_CHARS",
     "SCRIPT_EXCLUDED_FUNCTIONS",
     "SCRIPT_EXCLUDED_TOOLS",
+    "ScriptInputs",
     "TOOL_INDEX_HOOK_ORDER",
     "ToolIndexHook",
     "described",

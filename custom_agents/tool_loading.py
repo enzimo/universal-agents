@@ -31,6 +31,13 @@ How it works:
   when the agent's task changes. Model calls are counted rather than time,
   because a task may wait days for an approval and the count behaves the same
   on every run. Loading again brings a group back.
+- **Loaded by a skill.** A skill names the groups its procedure needs in its
+  SKILL.md frontmatter, under the Agent Skills ``metadata`` map, key
+  ``ua-tools`` (``SKILL_TOOLS_METADATA_KEY``), as space-separated catalog
+  tool ids. Activating it with the skills tool loads them for the task
+  through the same per-group path as ``use_tools``
+  (``custom_tools.providers.tool_loading.load_skill_tool_groups``), so only
+  held, offered groups load, within the cap, and nothing is granted.
 - **Loaded for the work.** An objective work session's turns have
   ``fn:objectives``: their checkpoint pass must call
   ``record_objective_work_checkpoint`` (``custom_agents.sdk.strands.turn``).
@@ -77,6 +84,25 @@ TOOL_LIMIT_HOOK_ORDER = -40.0
 ON_REQUEST_TOOL_HOOK_ORDER = -10.0
 # Where an agent without Strands parts (one built without a model) keeps its record.
 _STATE_ATTRIBUTE = "_loaded_tools"
+# SKILL.md frontmatter: metadata: {ua-tools: "fn:access_workflows fn:changes"} names the groups a skill needs.
+SKILL_TOOLS_METADATA_KEY = "ua-tools"
+
+
+def declared_skill_tool_ids(metadata: Any, *, skill_name: str = "") -> list[str]:
+    """The catalog tool ids a skill declares under ``ua-tools``, in order without repeats; [] when none or invalid."""
+
+    if not isinstance(metadata, dict) or SKILL_TOOLS_METADATA_KEY not in metadata:
+        return []
+    value = metadata[SKILL_TOOLS_METADATA_KEY]
+    if not isinstance(value, str):
+        logger.warning(
+            "A skill's ua-tools metadata is not a space-separated string; ignoring it. "
+            "event=skill_tools_metadata_invalid skill_name=%s value_type=%s",
+            skill_name,
+            type(value).__name__,
+        )
+        return []
+    return list(dict.fromkeys(value.split()))
 
 
 @dataclass
@@ -513,12 +539,16 @@ class OnRequestToolHook(HookProvider):
         registry.add_callback(BeforeToolCallEvent, self.before_tool_call, order=ON_REQUEST_TOOL_HOOK_ORDER)
 
     def before_tool_call(self, event: BeforeToolCallEvent) -> None:
+        if getattr(event, "cancel_tool", False):
+            return
         from custom_agents.access_runtime import runtime_access
 
         name = str(event.tool_use.get("name") or "")
         catalog = runtime_access(self.agent).catalog
         if in_tool_script():
             self._script_call(event, name)
+            return
+        if name in catalog.not_offered or name in withheld_functions(self.agent, catalog):
             return
         tool_id = group_of(self.agent, name, catalog)
         if tool_id is None:
@@ -579,45 +609,54 @@ class OnRequestToolHook(HookProvider):
         event.selected_tool = tool
 
     def _no_such_tool(self, event: BeforeToolCallEvent, name: str) -> None:
-        """A name that is no tool at all gets the closest real names instead of only "Unknown tool".
-
-        Names of real tools the agent does not have keep Strands' answer: the
-        access hook and find_tools explain those. With a tool index the model
-        sees names without definitions, so a near miss ("knowledge_lookup")
-        is worth correcting at once.
-        """
-
-        import difflib
-
-        from custom_agents.runtime_guardrails import TURN_ACTION_TYPES
-        from custom_tools.tool_lookup import trusted_tools
+        """A name that is no tool at all gets the closest real names instead of only "Unknown tool" (``unknown_tool_refusal``)."""
 
         registry = getattr(getattr(event, "agent", None), "tool_registry", None)
-        known = set(trusted_tools()) | (registry_names(registry) if registry is not None else set())
-        # A turn action called as a tool gets the guardrails' own explanation
-        # (custom_agents.runtime_guardrails), not a list of similar tool names.
-        if not name or name in known or name in TURN_ACTION_TYPES:
-            return
-        closest = difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.5)
-        hint = f" The closest tool names are: {', '.join(closest)}." if closest else ""
-        event.cancel_tool = (
-            f"No tool is named {name!r}.{hint} describe_tools(names=[...]) gives a function's exact inputs, "
-            "and find_tools searches for tools by purpose."
-        )
-        logger.info(
-            "The model called a tool name that does not exist. event=tool_name_unknown agent_id=%s tool=%s closest=%s",
-            getattr(self.agent, "id", None),
-            name,
-            ",".join(closest),
-        )
+        refusal = unknown_tool_refusal(self.agent, registry, name)
+        if refusal is not None:
+            event.cancel_tool = refusal
 
+
+def unknown_tool_refusal(agent: Any, registry: Any, name: str) -> str | None:
+    """The answer for a name that is no tool at all, with the closest real names; None when the name is a tool.
+
+    Names of real tools the agent does not have keep Strands' answer: the
+    access hook and find_tools explain those. With a tool index the model
+    sees names without definitions, so a near miss ("knowledge_lookup") is
+    worth correcting at once. A turn action called as a tool also returns
+    None: the guardrails explain it (custom_agents.runtime_guardrails).
+    ``call_tool`` uses this too (custom_agents.tool_calling).
+    """
+
+    import difflib
+
+    from custom_agents.runtime_guardrails import TURN_ACTION_TYPES
+    from custom_tools.tool_lookup import trusted_tools
+
+    known = set(trusted_tools()) | (registry_names(registry) if registry is not None else set())
+    if not name or name in known or name in TURN_ACTION_TYPES:
+        return None
+    closest = difflib.get_close_matches(name, sorted(known), n=3, cutoff=0.5)
+    hint = f" The closest tool names are: {', '.join(closest)}." if closest else ""
+    logger.info(
+        "The model called a tool name that does not exist. event=tool_name_unknown agent_id=%s tool=%s closest=%s",
+        getattr(agent, "id", None),
+        name,
+        ",".join(closest),
+    )
+    return (
+        f"No tool is named {name!r}.{hint} describe_tools(names=[...]) gives a function's exact inputs, "
+        "and find_tools searches for tools by purpose."
+    )
 
 __all__ = [
     "LOADED_TOOL_IDLE_MODEL_CALLS",
     "LoadedTools",
     "OBJECTIVES_TOOL_ID",
     "OnRequestToolHook",
+    "SKILL_TOOLS_METADATA_KEY",
     "ToolLimitHook",
+    "declared_skill_tool_ids",
     "definition_tool_ids",
     "group_of",
     "group_functions",
@@ -634,6 +673,7 @@ __all__ = [
     "shown_count",
     "shown_names",
     "tool_limit",
+    "unknown_tool_refusal",
     "work_key",
     "work_preloaded",
 ]

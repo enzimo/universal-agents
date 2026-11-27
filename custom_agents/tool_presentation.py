@@ -66,19 +66,30 @@ def scripts_enabled(agent: Any) -> bool:
 
 
 TOOL_SCRIPTS_TOOL_ID = "fn:tool_scripts"
+CALL_TOOL_NAME = "call_tool"
 
 
 def withheld_functions(agent: Any, catalog: Any) -> frozenset[str]:
-    """Functions never shown to this agent: the tool script functions unless tool scripts are on.
+    """Functions never shown to this agent for its tool presentation setting.
 
-    Every agent holds ``fn:tool_scripts`` by its role, so the setting, not a
-    grant, decides whether the model sees it; ``run_tool_script`` itself also
-    refuses when scripts are off.
+    - ``call_tool`` is shown only when the tool index is on (``index`` or
+      ``index_and_scripts``); ``full_definitions`` withholds it.
+    - ``fn:tool_scripts`` functions (``run_tool_script``) are shown only when
+      tool scripts are on (``index_and_scripts``).
+
+    Every agent holds ``fn:tool_loading`` and ``fn:tool_scripts`` by its role,
+    so the setting, not a grant, decides whether the model sees them; both
+    ``CallToolHook`` and ``run_tool_script`` also refuse when their mode is off.
     """
 
-    if scripts_enabled(agent):
-        return frozenset()
-    return frozenset(name for name, binding in catalog.functions.items() if binding.tool_id == TOOL_SCRIPTS_TOOL_ID)
+    withheld: set[str] = set()
+    if not index_enabled(agent):
+        withheld.add(CALL_TOOL_NAME)
+    if not scripts_enabled(agent):
+        withheld.update(
+            name for name, binding in catalog.functions.items() if binding.tool_id == TOOL_SCRIPTS_TOOL_ID
+        )
+    return frozenset(withheld)
 
 
 def on_request_groups(agent: Any, catalog: Any) -> Mapping[str, frozenset[str]]:
@@ -105,6 +116,7 @@ def on_request_groups(agent: Any, catalog: Any) -> Mapping[str, frozenset[str]]:
 
 
 __all__ = [
+    "CALL_TOOL_NAME",
     "index_enabled",
     "on_request_groups",
     "presentation",

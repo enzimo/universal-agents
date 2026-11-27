@@ -2,10 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from typing import Any, Callable, Dict, Optional, TextIO
 
+from custom_agents.tool_use_unwrap import unwrap_tool_use
 from custom_messages.enums import TaskActivityStage, TaskActivityType
+
+
+def _input_signature(raw_input: Any) -> str:
+    if isinstance(raw_input, str):
+        return raw_input
+    if raw_input is None:
+        return ""
+    try:
+        return json.dumps(raw_input, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return str(raw_input)
 
 
 class ActivityPhaseCallbackHandler:
@@ -20,16 +33,27 @@ class ActivityPhaseCallbackHandler:
         self.emit_activity = emit_activity
         self.task_id = task_id
         self.previous_tool_use: Optional[Dict[str, Any]] = None
+        # The call streaming now, (toolUseId, tool_name) and its input so far: its chunks emit once.
+        # Only that call is remembered, and a finished message clears it, so a later step that
+        # reuses the id (some model servers do) is reported again, even with the same input.
+        self._streaming: Optional[tuple[tuple[str, str], str]] = None
 
     def __call__(self, **kwargs: Any) -> None:
+        if kwargs.get("message") is not None:
+            self._streaming = None  # a model step (or its tool results) ended
         current_tool_use = kwargs.get("current_tool_use") or {}
         if not current_tool_use or not current_tool_use.get("name"):
             return
-        normalized_tool_use = dict(current_tool_use)
-        if self.previous_tool_use == normalized_tool_use:
+        unwrapped = unwrap_tool_use(current_tool_use)
+        if not unwrapped.name:
+            if not unwrapped.complete:
+                # Streaming call_tool chunks before the target name is readable wait until it arrives.
+                return
+            tool_name = str(current_tool_use.get("name") or "")
+        else:
+            tool_name = unwrapped.name
+        if self._already_reported(current_tool_use, tool_name):
             return
-        self.previous_tool_use = normalized_tool_use
-        tool_name = str(normalized_tool_use.get("name") or "unknown")
         summary, detail = self._classify_tool_use(tool_name)
         self.emit_activity(
             activity_type=TaskActivityType.TOOL_PHASE,
@@ -39,6 +63,21 @@ class ActivityPhaseCallbackHandler:
             detail=detail,
             details={"tool_name": tool_name},
         )
+
+    def _already_reported(self, current_tool_use: Dict[str, Any], tool_name: str) -> bool:
+        """Whether this streamed piece continues a call already reported (and remember it)."""
+
+        tool_use_id = current_tool_use.get("toolUseId")
+        if not tool_use_id:
+            normalized_tool_use = dict(current_tool_use)
+            repeated = self.previous_tool_use == normalized_tool_use
+            self.previous_tool_use = normalized_tool_use
+            return repeated
+        call_key = (str(tool_use_id), tool_name)
+        input_text = _input_signature(current_tool_use.get("input"))
+        previous_input = self._streaming[1] if self._streaming is not None and self._streaming[0] == call_key else None
+        self._streaming = (call_key, input_text)
+        return previous_input is not None and input_text.startswith(previous_input)
 
     @staticmethod
     def _classify_tool_use(tool_name: str) -> tuple[str, str]:

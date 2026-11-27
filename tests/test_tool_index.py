@@ -148,6 +148,38 @@ def test_a_signature_lists_required_inputs_first_with_types() -> None:
     assert signature("knowledge_search", TOOLS["knowledge_search"]).startswith("knowledge_search(query: str")
 
 
+def test_compact_signature_inlines_short_enums_and_caps_optional_args() -> None:
+    fake = SimpleNamespace(
+        tool_spec={
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "create", "delete"]},
+                        "big_enum": {"type": "string", "enum": ["a", "b", "c", "d", "e", "f", "g"]},
+                        "urls": {"type": "array", "items": {"type": "string"}},
+                        "proposal": {"type": "object"},
+                        "opt1": {"type": "string"},
+                        "opt2": {"type": "integer"},
+                        "opt3": {"type": "boolean"},
+                        "opt4": {"type": "string"},
+                        "opt5": {"type": "string"},
+                        "opt6": {"type": "string"},
+                    },
+                    "required": ["action", "big_enum", "urls", "proposal"],
+                }
+            }
+        }
+    )
+    assert signature("demo", fake, compact=True) == "demo(action=list|create|delete, big_enum, urls[], proposal{}, +6 optional)"
+    no_args = SimpleNamespace(tool_spec={"inputSchema": {"json": {"type": "object", "properties": {}}}})
+    assert signature("ping", no_args, compact=True) == "ping()"
+    assert signature("exa_get_contents", TOOLS["exa_get_contents"], compact=True).startswith("exa_get_contents(urls[],")
+    assert signature("memory", TOOLS["memory"], compact=True).startswith(
+        "memory(action=list|create|replace|delete|undo, bank=coremem|usermem,"
+    )
+
+
 # -- the index text -----------------------------------------------------------------------------
 
 
@@ -155,17 +187,23 @@ def test_the_index_groups_functions_by_the_group_use_tools_loads() -> None:
     text = index_text(CATALOG, {"knowledge_search", "knowledge_write", "memory"}, TOOLS, scripts=False)
     lines = text.splitlines()
     assert lines[0] == "Your other tools:"
+    assert "call_tool(name='<function>', inputs={...})" in lines[1]
+    assert "already in your tool list are called directly" in lines[1]
     assert "fn:knowledge (Knowledge base)" in lines and "fn:memory (Team and personal memory)" in lines
-    assert any(line.startswith("- knowledge_search: Search the shared knowledge base") for line in lines)
+    assert any(line.startswith("- knowledge_search(+") and " optional): Search the shared knowledge base" in line for line in lines)
+    assert "optional inputs and their allowed values" in lines[1], "optional names are not listed; describe_tools gives them"
+    assert "?" not in text.split("\n", 2)[2].replace("? ", ""), "no optional names on index lines"
+    assert any(line.startswith("- memory(action=list|create|replace|delete|undo, bank=coremem|usermem,") for line in lines)
     assert "script" not in text.split("\n", 2)[2], "no script marks without tool scripts"
     assert index_text(CATALOG, set(), TOOLS, scripts=False) == ""
 
 
 def test_with_scripts_the_index_marks_what_a_script_may_call() -> None:
     text = index_text(CATALOG, {"knowledge_search", "knowledge_write", "memory"}, TOOLS, scripts=True)
-    assert "- knowledge_search [script]:" in text
-    assert "- knowledge_write:" in text, "write level has no mark"
-    assert "- memory [script: action=" in text and "run_tool_script" in text
+    assert any(line.startswith("- knowledge_search(") and ") [script]:" in line for line in text.splitlines())
+    assert any(line.startswith("- knowledge_write(") and "[script" not in line for line in text.splitlines())
+    assert any(line.startswith("- memory(") and "[script: action=" in line for line in text.splitlines())
+    assert "run_tool_script" in text
 
 
 # -- a real team lead with an index ----------------------------------------------------------------
@@ -195,12 +233,12 @@ def test_with_an_index_the_team_lead_starts_with_its_core_and_the_index_lists_th
     prompt = prompt_after_call(lead, registry, hook)
 
     core = functions_of_tools(CATALOG, CATALOG.always_shown)
-    assert {"notify_user", "file_read", "find_tools", "describe_tools", "use_tools", "request_access"} <= shown
+    assert {"notify_user", "file_read", "find_tools", "describe_tools", "use_tools", "call_tool", "request_access"} <= shown
     assert "knowledge_search" not in shown and "memory" not in shown, "outside the core"
     assert "plan_runtime_setting_change" in shown, "kept-shown functions stay shown"
     assert prompt.startswith("BASE\n\nYour other tools:")
-    assert "- knowledge_search:" in prompt and "- memory:" in prompt
-    assert not any(f"- {name}:" in prompt for name in core), "the core is not repeated in the index"
+    assert "- knowledge_search(" in prompt and "- memory(" in prompt
+    assert not any(f"- {name}(" in prompt for name in core), "the core is not repeated in the index"
 
 
 @needs_cedar
@@ -270,7 +308,40 @@ def test_with_full_definitions_nothing_changes(storage, tmp_path) -> None:
     shown = next_model_call(hook, registry)
 
     assert "knowledge_search" in shown and "memory" in shown
+    assert "call_tool" not in shown, "call_tool is withheld in full_definitions mode"
     assert "objectives" not in shown, "the catalog's on_request groups still wait"
+
+    # C11: find_tools and describe_tools leave out functions this setting withholds.
+    found = json.loads(tool_loading.find_tools(query="find_tools"))["tools"]
+    [loading_group] = [item for item in found if item["tool_id"] == "fn:tool_loading"]
+    assert loading_group["in_your_tool_list"] is True
+    assert loading_group["functions"] == ["describe_tools", "find_tools", "use_tools"]
+
+    described = json.loads(tool_loading.describe_tools(names=["call_tool", "run_tool_script"]))["tools"]
+    assert [entry["name"] for entry in described] == ["call_tool", "run_tool_script"]
+    for entry in described:
+        assert entry["error"] == tool_loading.WITHHELD_FUNCTION_ERROR
+        assert "you_hold_it" not in entry and "signature" not in entry
+
+    # C16: a group whose every function this setting withholds is not offered at all.
+    for query in ("run_tool_script", "tool scripts", "run a script that calls several tools"):
+        found = json.loads(tool_loading.find_tools(query=query))["tools"]
+        assert "fn:tool_scripts" not in [item["tool_id"] for item in found], query
+
+
+@needs_cedar
+def test_with_full_definitions_and_authorization_off_find_tools_leaves_out_call_tool(storage, tmp_path) -> None:
+    lead = index_lead(storage, tmp_path, "full_definitions", enabled=False)
+    registry, hook = model_view(lead)
+    next_model_call(hook, registry)
+
+    found = json.loads(tool_loading.find_tools(query="find_tools"))["tools"]
+
+    [loading_group] = [item for item in found if item["tool_id"] == "fn:tool_loading"]
+    assert loading_group["in_your_tool_list"] is True
+    assert "call_tool" not in loading_group["functions"]
+    scripts_found = json.loads(tool_loading.find_tools(query="run_tool_script"))["tools"]
+    assert "fn:tool_scripts" not in [item["tool_id"] for item in scripts_found]
 
 
 @needs_cedar

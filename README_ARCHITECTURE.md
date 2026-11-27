@@ -4536,7 +4536,22 @@ automatically hand on, using `AccessService.may_hand_on_for_task`: it shares
 the actual delegation checks but writes nothing. The call's access decision
 still rechecks and creates the task grant. A default tool grants no access,
 and a successful load reports only functions the agent's definition and
-operator settings offer. TeamLead asks for a
+operator settings offer. A skill may name the groups its procedure uses in its
+`SKILL.md` frontmatter (`metadata: {ua-tools: "..."}`); activating it runs the
+same per-group load (`custom_tools/providers/tool_loading.py`
+`load_skill_tool_groups`), names groups the agent lacks as not available without
+suggesting `request_access` (a declaration says what the skill can use, not what
+one task needs), and never loads an MCP server, whose tools load on their own
+from access. With the experimental `agent.tool_presentation` index setups, held
+tools outside a small core wait in a one-line prompt index with their required
+inputs, and the always-shown `call_tool(name, inputs)` reaches any of them in
+one model step (`custom_agents/tool_calling.py`): model APIs only let a model
+call tools in its tool list, so without it every indexed call cost a
+`use_tools` step first. Its hook decides `call_tool` itself with the access
+hook's `decide_call`, then rewrites the call to the real function before every
+other hook, so the access hook, approvals, the trail and changes-first ordering
+act on that function; skills then report their catalog groups as callable
+through `call_tool` instead of loading their definitions. TeamLead asks for a
 higher cap with the runtime setting `model.max_tools_per_request`
 (`custom_agents/model_tool_limit.py`), for its own model or, with
 `target_agent_type`, a worker type's (workers at their cap report it in their

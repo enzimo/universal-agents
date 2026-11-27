@@ -6,6 +6,8 @@ import json
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional
 
+from custom_agents.tool_use_unwrap import CALL_TOOL_NAME, unwrap_tool_use
+
 
 def compact_debug_preview(value: Any, *, max_chars: int = 1200) -> str:
     try:
@@ -42,13 +44,15 @@ def collect_recent_strands_tool_transcript(strands_agent: Any, *, max_blocks: in
                 continue
             if "toolUse" in content_block and isinstance(content_block["toolUse"], dict):
                 tool_use = content_block["toolUse"]
-                tool_input = tool_use.get("input")
+                unwrapped = unwrap_tool_use(tool_use)
+                tool_name = unwrapped.name or tool_use.get("name")
+                tool_input = unwrapped.inputs if unwrapped.unwrapped and unwrapped.inputs is not None else tool_use.get("input")
                 input_keys = sorted(str(key) for key in tool_input.keys()) if isinstance(tool_input, dict) else None
                 blocks.append(
                     {
                         "role": role,
                         "event": "toolUse",
-                        "name": tool_use.get("name"),
+                        "name": tool_name,
                         "toolUseId": tool_use.get("toolUseId"),
                         "input_type": type(tool_input).__name__,
                         "input_keys": input_keys,
@@ -121,6 +125,7 @@ class ToolCallLimitCallbackHandler:
         self.tool_sequence: List[str] = []
         self.tool_observations: List[Dict[str, Any]] = []
         self._tool_index_by_key: Dict[str, int] = {}
+        self._limit_checked: set[str] = set()  # tool keys whose limit check ran (once per call)
         self.limit_error: Optional[ToolCallLimitExceeded] = None
 
     @staticmethod
@@ -132,11 +137,13 @@ class ToolCallLimitCallbackHandler:
 
     @staticmethod
     def _summarize_tool_use(current_tool_use: Dict[str, Any], *, sequence_number: int) -> Dict[str, Any]:
-        tool_input = current_tool_use.get("input")
+        unwrapped = unwrap_tool_use(current_tool_use)
+        tool_name = unwrapped.name or str(current_tool_use.get("name") or "unknown")
+        tool_input = unwrapped.inputs if unwrapped.unwrapped and unwrapped.inputs is not None else current_tool_use.get("input")
         input_keys = sorted(str(key) for key in tool_input.keys()) if isinstance(tool_input, dict) else None
         return {
             "sequence": sequence_number,
-            "name": str(current_tool_use.get("name") or "unknown"),
+            "name": tool_name,
             "toolUseId": current_tool_use.get("toolUseId"),
             "input_type": type(tool_input).__name__,
             "input_keys": input_keys,
@@ -147,15 +154,18 @@ class ToolCallLimitCallbackHandler:
         current_tool_use = kwargs.get("current_tool_use") or {}
         if current_tool_use and current_tool_use.get("name"):
             normalized_tool_use = dict(current_tool_use)
+            unwrapped = unwrap_tool_use(normalized_tool_use)
+            tool_name = unwrapped.name or str(normalized_tool_use.get("name") or "unknown")
             tool_key = self._tool_key(normalized_tool_use)
             existing_index = self._tool_index_by_key.get(tool_key)
             if existing_index is not None:
+                if unwrapped.name:
+                    self.tool_sequence[existing_index] = unwrapped.name
                 self.tool_observations[existing_index] = self._summarize_tool_use(
                     normalized_tool_use,
                     sequence_number=existing_index + 1,
                 )
             else:
-                tool_name = str(normalized_tool_use.get("name") or "unknown")
                 self.tool_sequence.append(tool_name)
                 self._tool_index_by_key[tool_key] = len(self.tool_observations)
                 self.tool_observations.append(
@@ -164,19 +174,29 @@ class ToolCallLimitCallbackHandler:
                         sequence_number=len(self.tool_sequence),
                     )
                 )
-                observed_tool_calls = len(self.tool_sequence)
-                if observed_tool_calls > self.max_tool_calls:
-                    self.limit_error = ToolCallLimitExceeded(
-                        max_tool_calls=self.max_tool_calls,
-                        observed_tool_calls=observed_tool_calls,
-                        tool_sequence=self.tool_sequence,
-                        last_attempted_tool=tool_name,
-                        recent_tool_uses=self.tool_observations[-8:],
-                    )
-                    if self.cancel_callback is not None:
-                        self.cancel_callback()
-                    if self.raise_on_exceeded:
-                        raise self.limit_error
+            # A streamed call_tool names its function only once "name" is readable; the stored limit
+            # record must name that function, so its check waits for the name or the complete input.
+            target_pending = normalized_tool_use.get("name") == CALL_TOOL_NAME and not unwrapped.name and not unwrapped.complete
+            if tool_key not in self._limit_checked and not target_pending:
+                self._limit_checked.add(tool_key)
+                self._check_limit(self._tool_index_by_key[tool_key] + 1, tool_name)
 
         if self.delegate is not None:
             self.delegate(**kwargs)
+
+    def _check_limit(self, observed_tool_calls: int, tool_name: str) -> None:
+        """Record and raise the limit error when this call (its 1-based position) is over the cap."""
+
+        if observed_tool_calls <= self.max_tool_calls:
+            return
+        self.limit_error = ToolCallLimitExceeded(
+            max_tool_calls=self.max_tool_calls,
+            observed_tool_calls=observed_tool_calls,
+            tool_sequence=self.tool_sequence,
+            last_attempted_tool=tool_name,
+            recent_tool_uses=self.tool_observations[-8:],
+        )
+        if self.cancel_callback is not None:
+            self.cancel_callback()
+        if self.raise_on_exceeded:
+            raise self.limit_error

@@ -1,6 +1,8 @@
 ---
 name: runtime-operations-workflows
 description: Use for worker pools and delegated work (many tasks in parallel, pool sizes, worker pool reviews), complete visual access workflows, asking for several staged changes together, reviewed GitHub skill installation/removal, inert installed-permission proposals and invocation, deterministic execution jobs/services/SSH, local scheduled workers, default worker startup policies, memory-review upgrades and tool-readiness checks, runtime configuration changes, heartbeat items, proactive notifications, delivery policy, and binary artifact workflows.
+metadata:
+  ua-tools: fn:capabilities
 ---
 
 # Runtime Operations Workflows
@@ -9,15 +11,15 @@ When a person asks how access, approvals, tools, sharing or MCP servers work
 here, read [Access, approvals and tools](references/access-and-approvals.md)
 and answer for their situation.
 
-Several tool groups this skill uses load on request, so they are not in your
-tool list until you load them for the task: worker pools (`fn:worker_pools`),
-access workflows (`fn:access_workflows`), access proposals
-(`fn:access_proposals`), MCP servers and specialists (`fn:capabilities`),
-runtime settings (`fn:runtime_settings`), the heartbeat checklist
-(`fn:heartbeat`) and team skills (`fn:team_skill_plans`). Before a step calls
-one of their functions, load its group, for example
-`use_tools(tool_ids=['fn:access_workflows'])`; it is in your list from your
-next step.
+MCP servers and specialists (`fn:capabilities`) are made available when you activate this skill: with full tool definitions they are loaded, and with a tool index you call their functions through `call_tool`; the activation result says which.
+Other groups this skill uses wait until a step needs them: worker pools
+(`fn:worker_pools`), access workflows (`fn:access_workflows`), access proposals
+(`fn:access_proposals`), runtime settings (`fn:runtime_settings`), the
+heartbeat checklist (`fn:heartbeat`) and team skills (`fn:team_skill_plans`).
+Call their functions through `call_tool` when they are in your tool index;
+otherwise load the group first, for example
+`use_tools(tool_ids=['fn:access_workflows'])`, and it is in your list from
+your next step.
 
 Delegated tasks wait in their worker type's shared queue until a free worker
 takes one, and the runtime starts workers up to each type's pool size. Read

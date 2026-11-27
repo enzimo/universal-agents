@@ -582,10 +582,15 @@ tools:
       restrict_access: write
       revoke_access: write
 
-  # Searching the catalog and adding tools that load on request (on_request
-  # below) to the agent's tool list for its task. It changes what the model is
-  # shown, never what it may use, so it is read and works in both
-  # authorization modes (custom_agents.tool_loading).
+  # Searching the catalog, inspecting tool inputs, adding tools that load on
+  # request (on_request below) to the agent's tool list for its task, and
+  # invoking an indexed function in one step (call_tool). find_tools,
+  # describe_tools and use_tools only change what the model is shown, never what
+  # it may use. call_tool is also read level because CallToolHook rewrites it to
+  # the target function before AccessDecisionHook runs, so the target function's
+  # own level and grants decide every call (and call_tool's fallback body raises
+  # if called without the hook). Works in both authorization modes
+  # (custom_agents.tool_loading, custom_agents.tool_calling).
   - tool_id: fn:tool_loading
     provider: tool_loading
     display_name: Finding and loading tools
@@ -595,6 +600,7 @@ tools:
       find_tools: read
       describe_tools: read
       use_tools: read
+      call_tool: read
 
   # A short sandboxed script that chains read-level tool calls (agent.tool_presentation
   # index_and_scripts; custom_agents.tool_script_runtime). The script reaches

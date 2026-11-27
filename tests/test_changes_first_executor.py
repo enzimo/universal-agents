@@ -303,3 +303,93 @@ def test_the_shipped_catalog_names_which_calls_change_records(
     function: str, arguments: dict[str, Any], kind: ChangeRecordKind | None
 ) -> None:
     assert builtin_tool_catalog().record_kind(function, arguments) is kind
+
+
+class _UnwrapForTestHook(HookProvider):
+    """Minimal call_tool rewriter for ChangesFirstToolExecutor tests without an access store."""
+
+    def __init__(self, tools_by_name: Mapping[str, Any]) -> None:
+        self._tools = dict(tools_by_name)
+
+    def register_hooks(self, registry: HookRegistry, **_kwargs: Any) -> None:
+        registry.add_callback(BeforeToolCallEvent, self._before, order=-200.0)
+
+    def _before(self, event: BeforeToolCallEvent) -> None:
+        from custom_agents.tool_use_unwrap import CALL_TOOL_NAME, resolve_tool_use
+
+        if event.tool_use.get("name") != CALL_TOOL_NAME:
+            return
+        resolved = resolve_tool_use(event.tool_use)
+        assert resolved.error is None
+        event.tool_use = {"toolUseId": event.tool_use["toolUseId"], "name": resolved.name, "input": resolved.inputs}
+        event.selected_tool = self._tools.get(resolved.name)
+
+
+@pytest.mark.parametrize("outcome", ["refused", "raises"])
+def test_a_failed_record_change_through_call_tool_runs_first_and_skips_later_calls(
+    outcome: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    tools_by_name = {t.tool_name: t for t in TOOLS}
+    agent = make_agent(
+        [
+            ("call_tool", {"name": "read_note", "inputs": {}}),
+            ("call_tool", {"name": "change_a", "inputs": {"outcome": outcome}}),
+            ("call_tool", {"name": "change_b", "inputs": {}}),
+            ("read_note", {}),
+        ],
+        hooks=[_UnwrapForTestHook(tools_by_name)],
+    )
+
+    with caplog.at_level("INFO", logger="custom_agents.sdk.strands.changes_first"):
+        asyncio.run(agent.invoke_async("go"))
+
+    assert CALLS == [f"change_a:{outcome}"]
+    results = step_results(agent)
+    assert [result["toolUseId"] for result in results] == ["call-0", "call-1", "call-2", "call-3"]
+    assert results[1]["status"] == "error" and not not_run(results[1])
+    assert [not_run(results[index]) for index in (0, 2, 3)] == [True, True, True]
+    assert "tool=change_a" in caplog.text
+    assert "skipped=change_b,read_note,read_note" in caplog.text
+
+
+def test_a_paused_record_change_through_call_tool_skips_other_calls_and_resumes_only_itself() -> None:
+    tools_by_name = {t.tool_name: t for t in TOOLS}
+    agent = make_agent(
+        [
+            ("call_tool", {"name": "read_note", "inputs": {}}),
+            ("call_tool", {"name": "change_after_approval", "inputs": {}}),
+            ("call_tool", {"name": "change_b", "inputs": {}}),
+        ],
+        hooks=[_UnwrapForTestHook(tools_by_name)],
+    )
+
+    paused = asyncio.run(agent.invoke_async("go"))
+
+    assert paused.stop_reason == "interrupt"
+    assert CALLS == ["change_after_approval:start"]
+    pending = agent._interrupt_state.pending_tool_execution
+    assert {result["toolUseId"] for result in pending.completed_tool_results} == {"call-0", "call-2"}
+    agent._interrupt_state = _InterruptState.from_dict(json.loads(json.dumps(agent._interrupt_state.to_dict())))
+
+    interrupt = paused.interrupts[0]
+    asyncio.run(agent.invoke_async([{"interruptResponse": {"interruptId": interrupt.id, "response": "approved"}}]))
+
+    assert CALLS == [
+        "change_after_approval:start",
+        "change_after_approval:start",
+        "change_after_approval:approved",
+    ]
+    results = {result["toolUseId"]: result for result in step_results(agent)}
+    assert not_run(results["call-0"]) and not_run(results["call-2"])
+    assert results["call-1"]["status"] == "success"
+
+
+def test_json_string_inputs_in_call_tool_still_classify_record_changes() -> None:
+    executor = ChangesFirstToolExecutor(builtin_tool_catalog().record_kind)
+    uses: list[Any] = [
+        {"toolUseId": "c1", "name": "call_tool", "input": {"name": "memory", "inputs": '{"action": "list"}'}},
+        {"toolUseId": "c2", "name": "call_tool", "input": {"name": "memory", "inputs": '{"action": "replace"}'}},
+    ]
+    changes, others = executor._split(uses)
+    assert [u["toolUseId"] for u in changes] == ["c2"]
+    assert [u["toolUseId"] for u in others] == ["c1"]

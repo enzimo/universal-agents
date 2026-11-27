@@ -49,6 +49,7 @@ from strands.types._events import ToolInterruptEvent, ToolResultEvent, TypedEven
 from strands.types.tools import ToolResult, ToolUse
 from typing_extensions import override
 
+from custom_agents.tool_use_unwrap import resolve_tool_use
 from custom_messages.enums import ChangeRecordKind
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -79,8 +80,10 @@ class ChangesFirstToolExecutor(ConcurrentToolExecutor):
         changes: list[ToolUse] = []
         others: list[ToolUse] = []
         for tool_use in tool_uses:
-            arguments = tool_use.get("input")
-            kind = self._record_kind_of(tool_use["name"], arguments if isinstance(arguments, Mapping) else {})
+            resolved = resolve_tool_use(tool_use)
+            # A valid name decides, even when call_tool's inputs are unusable: such a record change is refused
+            # (CallToolHook cancels it) and must stop the step like a direct call with unreadable arguments.
+            kind = self._record_kind_of(resolved.name, resolved.inputs or {}) if resolved.name else None
             (others if kind is None else changes).append(tool_use)
         return changes, others
 
@@ -114,6 +117,11 @@ class ChangesFirstToolExecutor(ConcurrentToolExecutor):
         _keep_call_order(tool_results, first_result, tool_uses)
 
 
+def _display_name(tool_use: ToolUse) -> str:
+    resolved = resolve_tool_use(tool_use)
+    return resolved.name or str(tool_use.get("name") or "")
+
+
 def _skip(
     agent: "Agent", failed: ToolUse, paused: bool, skipped: list[ToolUse], tool_results: list[ToolResult]
 ) -> list[ToolResultEvent]:
@@ -129,10 +137,10 @@ def _skip(
             "A change in a model step did not go through; skipped the step's later calls. "
             "event=changes_first_step_stopped agent=%s tool=%s tool_use_id=%s outcome=%s skipped=%s",
             getattr(agent, "name", ""),
-            failed["name"],
+            _display_name(failed),
             failed["toolUseId"],
             "paused" if paused else "failed",
-            ",".join(tool_use["name"] for tool_use in skipped),
+            ",".join(_display_name(tool_use) for tool_use in skipped),
         )
     return events
 

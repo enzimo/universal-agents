@@ -115,6 +115,15 @@ def test_a_script_returns_its_value_and_what_it_printed(monkeypatch) -> None:
 
 
 @needs_sandbox
+def test_a_script_that_closes_stdout_still_returns_its_result_or_its_error(monkeypatch) -> None:
+    ok_payload = sandboxed("import sys\nsys.stdout.close()\nreturn 42", monkeypatch)
+    assert ok_payload["status"] == "success" and ok_payload["result"] == 42
+
+    err_payload = sandboxed('import sys\nsys.stdout.close()\nraise ValueError("after close")', monkeypatch)
+    assert err_payload["status"] == "error" and "after close" in err_payload["error"]
+
+
+@needs_sandbox
 def test_a_script_reads_no_instance_or_person_files(tmp_path: Path, monkeypatch) -> None:
     secret = tmp_path / "workspaces" / "users" / "alice" / "notes.txt"
     secret.parent.mkdir(parents=True)
@@ -244,7 +253,9 @@ def test_a_real_team_lead_chains_index_tools_in_one_script_without_loading_them(
     [payload] = results
     assert "run_tool_script" in first and "describe_tools" in first
     assert "get_self_status" not in first and "calculator" not in first, "both wait in the index"
-    assert "- get_self_status [script]:" in inner.system_prompt and "- calculator [script]:" in inner.system_prompt
+    prompt_lines = inner.system_prompt.splitlines()
+    assert any(line.startswith("- get_self_status(") and ") [script]:" in line for line in prompt_lines)
+    assert any(line.startswith("- calculator(expression,") and ") [script]:" in line for line in prompt_lines)
     assert payload["status"] == "success", payload
     assert payload["result"]["total"] and payload["result"]["status_kind"] in {"dict", "str", "list"}
     assert "changes things" in payload["result"]["write"]

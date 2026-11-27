@@ -46,6 +46,7 @@ from custom_agents.activity_callbacks import (
     TerminalReasoningCallbackHandler,
     TerminalReasoningDiagnosticsCallbackHandler,
 )
+from custom_agents.tool_use_unwrap import unwrap_tool_use
 from custom_agents.context_engine import (
     AssembledContext,
     ContextAssemblyRequest,
@@ -307,12 +308,20 @@ async def _finalize_objective_work_invocation(
 
         def checkpoint_callback(**callback_kwargs: Any) -> None:
             current_tool_use = callback_kwargs.get("current_tool_use") or {}
-            tool_name = str(current_tool_use.get("name") or "")
-            if tool_name and tool_name != "record_objective_work_checkpoint":
-                raise RuntimeError(
-                    "Checkpoint-only invocation attempted a non-checkpoint tool: "
-                    f"{tool_name}"
-                )
+            if current_tool_use and current_tool_use.get("name"):
+                unwrapped = unwrap_tool_use(current_tool_use)
+                if unwrapped.name is None:
+                    if unwrapped.complete:
+                        outer_name = str(current_tool_use.get("name") or "")
+                        raise RuntimeError(
+                            "Checkpoint-only invocation attempted a non-checkpoint tool: "
+                            f"{outer_name}"
+                        )
+                elif unwrapped.name != "record_objective_work_checkpoint":
+                    raise RuntimeError(
+                        "Checkpoint-only invocation attempted a non-checkpoint tool: "
+                        f"{unwrapped.name}"
+                    )
             checkpoint_handler(**callback_kwargs)
 
         checkpoint_kwargs = {

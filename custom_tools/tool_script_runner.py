@@ -113,6 +113,17 @@ def _error_text(exc: BaseException) -> str:
     return "\n".join([*where[-3:], message])
 
 
+def _flush_streams() -> None:
+    """Flush stdout/stderr before sending the done/error line, ignoring closed or replaced streams."""
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None and not getattr(stream, "closed", False):
+                stream.flush()
+        except Exception:  # noqa: BLE001 - a script may close or replace stdout/stderr
+            pass
+
+
 def main(argv: list[str]) -> int:
     request_fd, reply_fd, script_path = int(argv[1]), int(argv[2]), argv[3]
     memory_bytes, cpu_seconds = int(argv[4]), int(argv[5])
@@ -124,8 +135,10 @@ def main(argv: list[str]) -> int:
         namespace: dict[str, Any] = {"__name__": "__tool_script__", "__builtins__": __builtins__}
         exec(code, namespace)
         result = namespace[FUNCTION_NAME](_Tools(bridge), ToolError)
+        _flush_streams()
         bridge.send({"kind": "done", "result": result})
     except BaseException as exc:  # noqa: BLE001 - every failure goes back to the agent as text
+        _flush_streams()
         bridge.send({"kind": "error", "error": _error_text(exc)})
     return 0
 

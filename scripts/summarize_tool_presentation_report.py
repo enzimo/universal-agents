@@ -3,8 +3,10 @@
 
 Reads the JSON Lines report and prints, per model and presentation: runs,
 successes, mean input and output tokens per task, mean model calls, failed and
-unknown tool calls, and calls made from scripts; then the change in input
-tokens against ``full_definitions``, and each task's success per presentation.
+unknown tool calls, calls made from scripts, and calls that went through
+``call_tool`` or were ``use_tools`` or ``describe_tools`` (rows from reports
+before these counts existed count 0); then the change in input tokens against
+``full_definitions``, and each task's success per presentation.
 
 Run: ``.venv/bin/python scripts/summarize_tool_presentation_report.py <report.jsonl> [--markdown]``
 """
@@ -16,17 +18,20 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 from statistics import mean
+from typing import Any
 
 BASELINE = "full_definitions"
+# Per-row call counts the summary adds up per model and presentation.
+COUNTED = ("failed_calls", "unknown_calls", "script_calls", "call_tool_calls", "use_tools_calls", "describe_tools_calls")
 ORDER = ("full_definitions", "index", "index_and_scripts")
 
 
-def load(path: Path) -> list[dict]:
+def load(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def summarize(rows: list[dict]) -> list[dict]:
-    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         groups[(row["model"], row["presentation"])].append(row)
     summary = []
@@ -40,9 +45,7 @@ def summarize(rows: list[dict]) -> list[dict]:
             "input_tokens": round(mean(row["inputTokens"] for row in measured)) if measured else 0,
             "output_tokens": round(mean(row["outputTokens"] for row in measured)) if measured else 0,
             "model_calls": round(mean(row.get("model_calls") or 0 for row in items), 1),
-            "failed_calls": sum(row.get("failed_calls") or 0 for row in items),
-            "unknown_calls": sum(row.get("unknown_calls") or 0 for row in items),
-            "script_calls": sum(row.get("script_calls") or 0 for row in items),
+            **{field: sum(row.get(field) or 0 for row in items) for field in COUNTED},
             "seconds": round(mean(row.get("seconds") or 0 for row in items), 1),
         })
     baseline = {row["model"]: row["input_tokens"] for row in summary if row["presentation"] == BASELINE}
@@ -52,7 +55,7 @@ def summarize(rows: list[dict]) -> list[dict]:
     return summary
 
 
-def per_task(rows: list[dict]) -> dict[tuple[str, str], dict[str, str]]:
+def per_task(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, str]]:
     table: dict[tuple[str, str], dict[str, list[bool]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
         table[(row["model"], row["task"])][row["presentation"]].append(bool(row.get("success")))
@@ -68,7 +71,7 @@ def main(argv: list[str]) -> int:
         return 2
     rows = load(Path(argv[1]))
     columns = ["model", "presentation", "runs", "successes", "input_tokens", "input_vs_full", "output_tokens",
-               "model_calls", "failed_calls", "unknown_calls", "script_calls", "seconds"]
+               "model_calls", *COUNTED, "seconds"]
     summary = summarize(rows)
     if "--markdown" in argv:
         print("| " + " | ".join(columns) + " |")

@@ -205,14 +205,38 @@ experiment setting while its effect is measured:
 - `full_definitions` (default): every tool the agent holds is sent with its full
   definition, except the groups that load on request.
 - `index`: only a small core keeps full definitions (messages to the person,
-  files, finding tools, asking for access, the plan and the task queue). Every
-  other tool the agent holds is listed in one line in its instructions and is
-  loaded when the agent needs it.
+  files, finding and calling tools, asking for access, the plan and the task
+  queue). Every other tool the agent holds is listed in one line in its
+  instructions, with its required inputs and a count of its optional ones
+  (`describe_tools` gives the optional inputs and their allowed values), and
+  the agent can call any listed
+  function in one step through `call_tool(name, inputs)` without loading its
+  group first. Tools already in the agent's tool list and MCP server tools are
+  still called directly; MCP server tools load on their own before the agent's
+  next model call once it has access, and `use_tools` loads a group's full
+  definitions when the agent wants them.
 - `index_and_scripts`: like `index`, and agents may also run a short script that
   chains read-only tool lookups in one step. The script runs in the code
   sandbox with no files and no network, so this needs the sandbox on.
 
-Access does not change with this setting: every tool call is still checked.
+Measured first-request tool context per role (`scripts/measure_tool_context.py`,
+`o200k_base` tokens):
+
+| Role | `full_definitions` | `index` | `index_and_scripts` |
+| --- | ---: | ---: | ---: |
+| `worker` | 11,665 tokens (47 shown) | 4,421 tokens (20 shown, 28 indexed) | 4,779 tokens (21 shown, 28 indexed) |
+| `team_lead` | 18,641 tokens (77 shown) | 8,382 tokens (31 shown, 92 indexed) | 8,863 tokens (32 shown, 92 indexed) |
+| `system` | 15,135 tokens (57 shown) | 4,773 tokens (20 shown, 38 indexed) | 5,166 tokens (21 shown, 38 indexed) |
+
+Skills that name the tool groups they use (`ua-tools`, see [Skills](skills.md))
+work in every setting. With `full_definitions`, activating such a skill loads
+its groups for the task, within the model's tool cap. With `index` and
+`index_and_scripts` the groups are not loaded, because the index already lists
+their functions; the skill result tells the agent to call them through
+`call_tool`.
+
+Access does not change with this setting: every tool call is still checked,
+including calls made through `call_tool`.
 
 ## Instance Folders
 

@@ -96,7 +96,12 @@ def test_every_group_that_loads_on_request_is_a_function_tool_and_kept_functions
         assert tool_id in CATALOG.tools and tool_id.startswith("fn:"), tool_id
         assert kept <= functions_of_tools(CATALOG, {tool_id}), tool_id
     loading = CATALOG.tools["fn:tool_loading"]
-    assert "agent_runtime" in loading.tool_sets and {o.name for o in loading.operations} == {"find_tools", "describe_tools", "use_tools"}
+    assert "agent_runtime" in loading.tool_sets and {o.name for o in loading.operations} == {
+        "find_tools",
+        "describe_tools",
+        "use_tools",
+        "call_tool",
+    }
     assert "fn:schedule_runs" not in CATALOG.on_request, "scheduled runs must record themselves"
 
 

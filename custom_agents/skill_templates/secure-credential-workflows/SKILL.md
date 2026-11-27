@@ -1,6 +1,8 @@
 ---
 name: secure-credential-workflows
 description: Use for credentialed tools, secure_cli, credential catalog work, password-manager storage, account links, brokered auth, secure HTTP requests, OpenShell credential leases, signup flows, or GitHub/Google/Bitwarden/Home Assistant credential workflows.
+metadata:
+  ua-tools: fn:access_workflows fn:access_proposals
 ---
 
 # Secure Credential Workflows
@@ -13,8 +15,7 @@ or catalog-managed tokens.
 For a goal that also needs tool access or subsequent work, first map the complete
 flow with `submit_access_workflow` as described in `runtime-operations-workflows`.
 Access workflows (`fn:access_workflows`) and `propose_access_change`
-(`fn:access_proposals`) load on request: load them with
-`use_tools(tool_ids=['fn:access_workflows', 'fn:access_proposals'])` first.
+(`fn:access_proposals`) are made available when you activate this skill: with full tool definitions they are loaded, and with a tool index you call their functions through `call_tool`; the activation result says which.
 Keep account links and later reviews on that workflow. Reuse an existing account
 link; a later setup timeout does not justify linking the account again.
 

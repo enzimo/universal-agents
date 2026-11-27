@@ -5,6 +5,7 @@ Helpers for wiring Strands' official AgentSkills plugin into this runtime.
 from __future__ import annotations
 
 from custom_tools.runtime_context import bound_task_id
+import asyncio
 import logging
 import json
 from collections.abc import Collection
@@ -207,7 +208,9 @@ class PromptBoundedAgentSkills(AgentSkills if AgentSkills is not None else objec
         _LOGGER.debug("skill_name=<%s> | skill activated", skill_name)
         self._track_activated_skill(sdk_agent, skill_name)
         await _record_objective_work_skill_activation(runtime_agent, skill_name)
-        return await self._format_skill_response(found, sdk_agent.sandbox)
+        response = await self._format_skill_response(found, sdk_agent.sandbox)
+        note = await _load_declared_tool_groups(runtime_agent, found)
+        return f"{response}\n\n{note}" if note else response
 
 
 def is_agent_skills_plugin(plugin: Any) -> bool:
@@ -230,6 +233,33 @@ def _complete_bundled_skill_instructions(skill: Any) -> str:
             title = reference_path.stem.replace("-", " ").title()
             sections.append(f"---\n\n# Bundled Reference: {title}\n\n{reference_text}")
     return "\n\n".join(sections)
+
+
+async def _load_declared_tool_groups(runtime_agent: Any, skill: Any) -> str:
+    """Load the tool groups the skill declares under ``ua-tools`` (custom_agents.tool_loading); the note for its result.
+
+    Runs in a thread like ``use_tools``: the access decisions read stores.
+    A failure never stops the skill: its instructions still return, with a
+    note saying how to reach the groups (call_tool in the index setups,
+    use_tools otherwise).
+    """
+
+    from custom_agents.tool_loading import declared_skill_tool_ids
+
+    metadata = getattr(skill, "metadata", None)
+    if runtime_agent is None or not declared_skill_tool_ids(metadata, skill_name=skill.name):
+        return ""
+    from custom_tools.providers.tool_loading import load_skill_tool_groups, skill_tools_fallback_note
+
+    try:
+        return await asyncio.to_thread(load_skill_tool_groups, runtime_agent, skill.name, metadata)
+    except Exception:  # noqa: BLE001 - the skill's instructions matter more than preloading its tools
+        _LOGGER.exception(
+            "Could not load the tool groups a skill declares. event=skill_tool_groups_failed agent_id=%s skill_name=%s",
+            getattr(runtime_agent, "id", None),
+            skill.name,
+        )
+        return skill_tools_fallback_note(runtime_agent, declared_skill_tool_ids(metadata, skill_name=skill.name))
 
 
 async def _record_objective_work_skill_activation(
