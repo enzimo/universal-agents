@@ -33,6 +33,7 @@ from referencing.jsonschema import DRAFT202012
 from custom_messages.contracts.access_v2 import MESSAGE_CONTEXT_ID_PREFIX, SCHEDULE_RUN_ID_PREFIX
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal
 from custom_messages.wire import canonical, frame as wire_frame, kinds, models, topology, trust as wire_trust
+from custom_messages.wire.authority_bindings import UNVOUCHED_RUN_CONTEXT_PREFIX
 from custom_messages.wire.canonical import CanonicalJsonError
 from custom_messages.wire.frame import (
     FrameRefused,
@@ -1601,13 +1602,16 @@ def test_a_command_token_lasts_no_longer_than_other_tokens() -> None:
         EXPORT.check_registry(registry, TRANSPORT, EXPORT.load_yaml("team-topologies.yaml"), EXPORT.load_schemas())
 
 
-# Today's signed task context ids, the forms a root-task token's request id takes (README,
-# "On behalf of a person"), by prefix: the gateway's message-bound contexts
-# (access_control.ownership), runs from a schedule permit (custom_agents.schedule_permits), and
-# every other context (access_control.identity.ContextSigner.issue's default).
+# The four root-task authority-token request id forms (README, "On behalf of a person"),
+# by prefix: gateway message-bound requests (access_control.ownership), vouched scheduled
+# runs (custom_agents.schedule_permits and team_services.scheduler), unvouched scheduled
+# runs whose resolved roles are empty (team_services.scheduler), and other root-task
+# tokens such as upload-free gateway requests and scheduler-signed system work
+# (custom_transport.protocol1.authority_tokens).
 REQUEST_ID_FORMS = {
     MESSAGE_CONTEXT_ID_PREFIX: rf"{MESSAGE_CONTEXT_ID_PREFIX}_[0-9a-f]{{64}}",
     SCHEDULE_RUN_ID_PREFIX: rf"{SCHEDULE_RUN_ID_PREFIX}_[0-9a-f]{{{RANDOM_ID_SUFFIX_LENGTH}}}",
+    UNVOUCHED_RUN_CONTEXT_PREFIX.rstrip("_"): rf"{UNVOUCHED_RUN_CONTEXT_PREFIX}[0-9a-f]{{{RANDOM_ID_SUFFIX_LENGTH}}}",
     "task_context": rf"task_context_[0-9a-f]{{{RANDOM_ID_SUFFIX_LENGTH}}}",
 }
 

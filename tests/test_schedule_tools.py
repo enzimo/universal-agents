@@ -1784,7 +1784,6 @@ async def test_schedule_install_client_resends_same_request_id_and_rereads_store
         extract_task_authority_token,
         install_schedule_via_team_services,
         install_schedule_via_team_services_sync,
-        logical_install_request_id,
     )
     from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, ServiceUnavailable
 
@@ -1799,8 +1798,6 @@ async def test_schedule_install_client_resends_same_request_id_and_rereads_store
         interval_ms=3_600_000,
         claim_team_id="team_1",
     )
-    expected_req_id = logical_install_request_id("sched_retry_1", mode="create", authority_token=token)
-    assert expected_req_id == logical_install_request_id("sched_retry_1", mode="create", authority_token=token)
 
     # 1. First attempt times out -> resends once with the exact same request_id and succeeds.
     seen_request_ids: list[str] = []
@@ -1822,7 +1819,9 @@ async def test_schedule_install_client_resends_same_request_id_and_rereads_store
         agent, sched, mode="create", authority_token=token, timeout=2.0
     )
     assert reply["outcome"] == "ok"
-    assert seen_request_ids == [expected_req_id, expected_req_id]
+    assert len(seen_request_ids) == 2
+    assert seen_request_ids[0] == seen_request_ids[1]
+    assert seen_request_ids[0].startswith("sched_install_")
 
     # 2. Both attempts fail with TeamServicesUnavailable AFTER commit -> re-reads store and confirms.
     committed_sched = sched.model_copy(deep=True)
@@ -1893,3 +1892,181 @@ async def test_schedule_install_client_resends_same_request_id_and_rereads_store
         bg_loop.call_soon_threadsafe(bg_loop.stop)
         bg_thread.join(timeout=2.0)
         bg_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_schedule_install_client_separate_installs_get_distinct_request_ids_c51(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """C51: separate installs with the same schedule_id get fresh request_ids while outbox retries keep theirs."""
+    import custom_agents.schedule_install_client as install_client
+    from access_control.people_directory import PeopleDirectory
+    from custom_agents.schedule_install_client import (
+        extract_task_authority_token,
+        install_schedule_via_team_services,
+    )
+    from custom_agents.schedule_installation import (
+        create_schedule_from_turn_action,
+        turn_action_install_request_id,
+    )
+    from custom_agents.schedule_store import schedule_record_digest
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from team_services.schedules import ScheduleOperations
+    from tests.people_directory_support import access_store_at
+    from tests.team_services_support import checked_reply, stand_in_frame
+
+    db_path = str(tmp_path / "c51_installs.db")
+    agent = _FakeAgent(db_path)
+    token = extract_task_authority_token(agent.task_manager._task_info.meta)
+    person_ref = str(token["person"])
+    now = datetime.now(timezone.utc)
+
+    access = access_store_at(tmp_path / "access")
+    access.record_person(
+        TeamPersonV1(
+            team_id="team_1",
+            person_id="alice",
+            person_ref=person_ref,
+            standing=PersonStanding.ACTIVE,
+            roles=("member",),
+            changed_at_utc=now,
+        )
+    )
+    operations = ScheduleOperations(
+        agent._schedule_store,
+        PeopleDirectory(access, "team_1"),
+        None,
+        lambda _person: True,
+        lambda: datetime.now(timezone.utc),
+        logging.getLogger("test.c51_installs"),
+    )
+
+    sent_request_ids: list[str] = []
+
+    async def _real_team_services(_agent, kind, body, *, authority=None, timeout=None):
+        assert kind == "schedules.install"
+        sent_request_ids.append(body["request_id"])
+        frame = stand_in_frame(
+            "team_1",
+            kind,
+            body,
+            person_ref=person_ref,
+            request_id=str(token["bound_to"]["id"]),
+            sender_roles=frozenset({"lead_host"}),
+            binding="root_task",
+        )
+        frame.frame.issuer.agent = "lead_1"
+        frame.authority.token.schedule_id = None
+        return checked_reply(kind, operations.answer(frame))
+
+    monkeypatch.setattr(install_client, "ask_team", _real_team_services)
+
+    def _build_sched(schedule_id: str, instruction: str) -> ScheduledMessage:
+        return ScheduledMessage(
+            schedule_id=schedule_id,
+            management_class=ScheduleManagementClass.USER,
+            payload=Task(task_type=MessageMetaType.REQUEST, problem_statement=instruction),
+            payload_meta=agent.task_manager._task_info.meta.model_copy(deep=True),
+            interval_ms=3_600_000,
+            claim_team_id="team_1",
+        )
+
+    # 1. Delete + re-create with the exact same schedule_id and definition within the 7-day retention window.
+    sched_recreate = _build_sched("objwork_sched_1", "Run objective work session A.")
+    first = await install_schedule_via_team_services(agent, sched_recreate, mode="create", authority_token=token)
+    assert first["state"] == "installed"
+    assert agent._schedule_store.get_scheduled_message("objwork_sched_1") is not None
+
+    assert agent._schedule_store.remove("objwork_sched_1") is True
+    assert agent._schedule_store.get_scheduled_message("objwork_sched_1") is None
+
+    second = await install_schedule_via_team_services(agent, sched_recreate, mode="create", authority_token=token)
+    assert second["state"] == "installed"
+    assert sent_request_ids[0] != sent_request_ids[1]
+    recreated = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert recreated is not None
+    assert recreated.payload.problem_statement == "Run objective work session A."
+
+    # 2. Replace A -> B -> A -> B inside the 7-day retention window must actually write B on the third replace.
+    sched_b = _build_sched("objwork_sched_1", "Run objective work session B.")
+    sched_a = _build_sched("objwork_sched_1", "Run objective work session A.")
+
+    saved_1 = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert saved_1 is not None
+    r1 = await install_schedule_via_team_services(
+        agent, sched_b, mode="replace", authority_token=token, seen_version=schedule_record_digest(saved_1)
+    )
+    assert r1["state"] == "replaced"
+
+    saved_2 = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert saved_2 is not None and saved_2.payload.problem_statement == "Run objective work session B."
+    r2 = await install_schedule_via_team_services(
+        agent, sched_a, mode="replace", authority_token=token, seen_version=schedule_record_digest(saved_2)
+    )
+    assert r2["state"] == "replaced"
+
+    saved_3 = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert saved_3 is not None and saved_3.payload.problem_statement == "Run objective work session A."
+    r3 = await install_schedule_via_team_services(
+        agent, sched_b, mode="replace", authority_token=token, seen_version=schedule_record_digest(saved_3)
+    )
+    assert r3["state"] == "replaced"
+    saved_4 = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert saved_4 is not None
+    assert saved_4.payload.problem_statement == "Run objective work session B."
+    assert len(set(sent_request_ids)) == len(sent_request_ids)
+
+    # 3. A refusal stored in protocol1_operation_outcomes does not poison a later create after the owner is active.
+    access.record_person(
+        TeamPersonV1(
+            team_id="team_1",
+            person_id="alice",
+            person_ref=person_ref,
+            standing=PersonStanding.DISABLED,
+            roles=(),
+            changed_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    sched_after_refusal = _build_sched("sched_retry_after_refusal", "Check after reactivation.")
+    with pytest.raises(PermissionError):
+        await install_schedule_via_team_services(agent, sched_after_refusal, mode="create", authority_token=token)
+    assert agent._schedule_store.get_scheduled_message("sched_retry_after_refusal") is None
+
+    access.record_person(
+        TeamPersonV1(
+            team_id="team_1",
+            person_id="alice",
+            person_ref=person_ref,
+            standing=PersonStanding.ACTIVE,
+            roles=("member",),
+            changed_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    recovered = await install_schedule_via_team_services(
+        agent, sched_after_refusal, mode="create", authority_token=token
+    )
+    assert recovered["state"] == "installed"
+    assert agent._schedule_store.get_scheduled_message("sched_retry_after_refusal") is not None
+
+    # 4. Turn-action outbox passes a request_id tied to its durable action_id so retries share one id across restarts.
+    outbox_req_1 = turn_action_install_request_id("turn_batch_abc123def456_action_0")
+    outbox_req_2 = turn_action_install_request_id("turn_batch_999888777666_action_0")
+    assert outbox_req_1 == turn_action_install_request_id("turn_batch_abc123def456_action_0")
+    assert outbox_req_1 != outbox_req_2
+
+    sched_outbox = _build_sched("sched_outbox_1", "Remind me at 5pm.")
+    before_count = len(sent_request_ids)
+    await create_schedule_from_turn_action(
+        agent,
+        sched_outbox,
+        msg_meta=agent.task_manager._task_info.meta,
+        request_id=outbox_req_1,
+    )
+    await create_schedule_from_turn_action(
+        agent,
+        sched_outbox,
+        msg_meta=agent.task_manager._task_info.meta,
+        request_id=outbox_req_1,
+    )
+    assert sent_request_ids[before_count:] == [outbox_req_1, outbox_req_1]
+    assert agent._schedule_store.get_scheduled_message("sched_outbox_1") is not None

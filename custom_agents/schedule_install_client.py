@@ -13,7 +13,6 @@ evaluation.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -37,29 +36,6 @@ logger = logging.getLogger(__name__)
 INLINE_INSTRUCTION_MAX_CHARS = 32_768
 INSTALL_TIMEOUT_SECONDS = 30.0
 INSTALL_SEND_ATTEMPTS = 2
-
-
-def logical_install_request_id(
-    schedule_id: str,
-    *,
-    mode: str,
-    authority_token: Optional[Mapping[str, Any]] = None,
-    seen_version: Optional[str] = None,
-) -> str:
-    """One stable ``request_id`` per logical install so resends hit stored outcomes instead of duplicating (F5).
-
-    Includes the token's ``person`` reference so two different people colliding on the same
-    ``schedule_id`` never share a retry key in ``protocol1_operation_outcomes``.
-    """
-
-    person_ref = str((authority_token or {}).get("person") or "")
-    if mode in ("create", "ensure"):
-        digest = hashlib.sha256(f"{mode}:{person_ref}:{schedule_id}".encode("utf-8")).hexdigest()[:24]
-        return f"sched_install_{digest}"
-    if mode == "replace" and seen_version:
-        digest = hashlib.sha256(f"{mode}:{person_ref}:{schedule_id}:{seen_version}".encode("utf-8")).hexdigest()[:24]
-        return f"sched_install_{digest}"
-    return new_id("sched_install")
 
 
 class ScheduleInstallError(ValueError):
@@ -410,17 +386,13 @@ async def install_schedule_via_team_services(
 ) -> dict[str, Any]:
     """Send ``schedules.install`` to ``svc.team`` carrying ``authority_token`` and verify the reply.
 
-    Uses one stable ``request_id`` per logical install, resends once under that same id on
-    timeout or team-services unavailability within one overall ``timeout`` deadline, and
-    re-reads the store before reporting the install as not created (F5).
+    Uses one ``request_id`` per logical install (fresh per call, or caller-supplied when tied
+    to a durable operation such as a turn-action outbox record), resends once under that same id
+    on timeout or team-services unavailability within one overall ``timeout`` deadline, and
+    re-reads the store before reporting the install as not created (F5, C51).
     """
 
-    req_id = request_id or logical_install_request_id(
-        schedule.schedule_id,
-        mode=mode,
-        authority_token=authority_token,
-        seen_version=seen_version,
-    )
+    req_id = request_id or new_id("sched_install")
     resolved_delivery_ref = delivery_ref or extract_task_delivery_ref(schedule.payload_meta)
     instruction = str(getattr(schedule.payload, "problem_statement", "") or "").strip()
 
@@ -530,6 +502,5 @@ __all__ = [
     "extract_task_delivery_ref",
     "install_schedule_via_team_services",
     "install_schedule_via_team_services_sync",
-    "logical_install_request_id",
     "schedule_install_body",
 ]

@@ -18,7 +18,10 @@ from custom_agents.delegated_work_runtime import (
     record_publish_sequence,
 )
 from custom_agents.pending_work_runtime import wake_pending_work_after
-from custom_agents.schedule_installation import create_schedule_from_turn_action
+from custom_agents.schedule_installation import (
+    create_schedule_from_turn_action,
+    turn_action_install_request_id,
+)
 from custom_agents.task_runtime_state import TurnStartNotes
 from custom_agents.task_records import TaskInfo, task_answer_text
 from custom_agents.worker_result_reports import is_worker_result_report, prepare_worker_result_report
@@ -1713,9 +1716,15 @@ async def _execute_turn_action_record(
         if content.payload_meta is None:
             content.payload_meta = incoming_meta.model_copy(deep=True)
         # A model's action only creates a schedule; changes to existing ones go
-        # through the schedule tools (owner and version checks).
+        # through the schedule tools (owner and version checks). Tie the install
+        # request_id to this durable outbox record so retries across restarts hit
+        # its stored outcome without colliding with any other install (C51).
         await create_schedule_from_turn_action(
-            self, content, msg_header=incoming_header, msg_meta=incoming_meta
+            self,
+            content,
+            msg_header=incoming_header,
+            msg_meta=incoming_meta,
+            request_id=turn_action_install_request_id(record_id),
         )
         await self.task_manager.operations_runtime.run(
             self.task_manager.mark_turn_action_record,

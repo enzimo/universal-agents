@@ -1545,8 +1545,9 @@ async def enqueue_fired_scheduled_task(
 ) -> bool:
     """Handle one fire: the runtime's own kinds by their paths, anything else as a run for its owner.
 
-    ``claim_token`` is this agent's claim on the schedule row; a worker
-    without the scheduler key shows it to the manager to get the run signed.
+    ``claim_token`` is this agent's claim on the schedule row; an agent host
+    without a standing permit shows it to ``team_services.scheduler``
+    (``run_context.sign`` on ``svc.scheduler``) to get the run signed.
     """
 
     if str(scheduled_message.schedule_name or "").startswith(OBSOLETE_DELEGATION_ASSURANCE_PREFIX):

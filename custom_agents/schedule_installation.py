@@ -18,6 +18,8 @@ the reserved internal improvement schedule is checked in
 
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Any, Optional
 
 from custom_agents.schedule_conversation_context import ensure_dedicated_schedule_conversation
@@ -32,6 +34,19 @@ from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.enums import RequesterType
+
+
+_CONTRACT_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
+
+
+def turn_action_install_request_id(action_id: str) -> str:
+    """Stable contract-valid ``schedules.install`` request id tied to one durable turn-action record (C51)."""
+
+    candidate = f"sched_install_{action_id}"
+    if _CONTRACT_RECORD_ID_RE.fullmatch(candidate):
+        return candidate
+    digest = hashlib.sha256(action_id.encode("utf-8")).hexdigest()[:24]
+    return f"sched_install_{digest}"
 
 
 class ScheduleActionInstallRefused(TurnActionRefused):
@@ -139,6 +154,7 @@ async def create_schedule_from_turn_action(
     *,
     msg_header: Optional[MessageHeader] = None,
     msg_meta: Optional[MessageMeta] = None,
+    request_id: Optional[str] = None,
 ) -> None:
     """Create the schedule a model's ``schedule_message`` action describes; never change a stored one.
 
@@ -179,6 +195,7 @@ async def create_schedule_from_turn_action(
             schedule_msg,
             mode="ensure",
             authority_token=authority_token,
+            request_id=request_id,
             delivery_ref=delivery_ref,
         )
     except ScheduleInstallError as exc:
