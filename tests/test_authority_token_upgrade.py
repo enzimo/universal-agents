@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from access_control.authority_verifier import AuthorityTokenVerifier, set_process_verifier
 from access_control.ownership import request_context_id, sent_files_access
 from access_control.people import PERSON_ROLE_ADMIN
-from access_control.task_identity import resolve_task_identity
+from access_control.task_identity import reported_schedule_run, resolve_task_identity
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_messages.contracts.access_v2 import (
     AccessNoticeKind,
@@ -399,11 +399,13 @@ def test_09_sqlite_first_start_conversion_end_to_end(tmp_path: Path, caplog: pyt
         }
 
         # Schedules:
-        # 1) Active vouched schedule with 30-day permit (capped to 7 days).
+        # 1) Active vouched schedule with 0.9 gateway context naming its own schedule_id (DI1)
+        #    plus a 30-day permit (capped to 7 days).
         sched_ada_ctx = gw_signer.sign_context(
             context_id="task_context_sched_ada",
             team_id=TEAM,
             person_id="ada",
+            schedule_id="sched_ada_active",
             issued_at=past_issue,
             expires_at=end_3d,
         )
@@ -415,11 +417,12 @@ def test_09_sqlite_first_start_conversion_end_to_end(tmp_path: Path, caplog: pyt
             issued_at=past_issue,
             expires_at=end_30d,
         )
-        # 2) Schedule with EXPIRED saved gateway context and no permit -> still vouched, gets fresh permit.
+        # 2) Schedule with EXPIRED saved gateway context (also naming its own schedule_id) and no permit -> still vouched, gets fresh permit.
         sched_bo_expired_ctx = gw_signer.sign_context(
             context_id="task_context_sched_bo_old",
             team_id=TEAM,
             person_id="bo",
+            schedule_id="sched_bo_expired_ctx",
             issued_at=now - timedelta(days=10),
             expires_at=expired_end,
         )
@@ -432,11 +435,12 @@ def test_09_sqlite_first_start_conversion_end_to_end(tmp_path: Path, caplog: pyt
             issued_at=past_issue,
             expires_at=end_3d,
         )
-        # 4) System-work maintenance schedule with vouched admin owner + system-work permit.
+        # 4) System-work maintenance schedule with vouched admin owner (naming its own schedule_id) + system-work permit.
         sched_maint_ctx = gw_signer.sign_context(
             context_id="task_context_sched_maint",
             team_id=TEAM,
             person_id="ada",
+            schedule_id="sched_internal_imp",
             issued_at=past_issue,
             expires_at=end_3d,
         )
@@ -569,7 +573,9 @@ def test_09_sqlite_first_start_conversion_end_to_end(tmp_path: Path, caplog: pyt
 
         assert result.already_done is False
         assert result.had_legacy_records is True
-        assert result.counts.converted_contexts >= 6
+        # 8 contexts: wait_ctx, outbox_ctx, deferred_ctx, handback_ctx, conv_link wait_ctx,
+        # sched_ada_ctx, sched_maint_ctx, delivery_ctx.
+        assert result.counts.converted_contexts == 8
         assert result.counts.converted_schedule_runs == 1
         assert result.counts.converted_permits == 3
         assert result.counts.vouched_schedules == 4
@@ -578,6 +584,7 @@ def test_09_sqlite_first_start_conversion_end_to_end(tmp_path: Path, caplog: pyt
         assert result.counts.expired == 1  # task_expired_ada
         assert result.counts.unverifiable == 2  # task_forged + sched_forged
         assert result.counts.expiry_capped == 1  # 30d permit capped to 7d
+        assert result.counts.schedule_names_dropped == 3  # sched_ada_ctx, sched_bo_expired_ctx, sched_maint_ctx
         assert result.notice_stored is True
         assert set(result.removed_keys_still_set) == {"ACCESS_CONTEXT_VERIFY_KEYS", "ACCESS_GATEWAY_SIGNING_KEY"}
         assert authority_tokens_upgrade_done(config) is True
@@ -585,6 +592,7 @@ def test_09_sqlite_first_start_conversion_end_to_end(tmp_path: Path, caplog: pyt
         assert "event=authority_token_conversion_unverifiable" in caplog.text
         assert "event=authority_token_conversion_expired" in caplog.text
         assert "event=authority_token_conversion_remove_old_keys" in caplog.text
+        assert "event=authority_token_conversion_schedule_name_dropped" in caplog.text
         assert "event=authority_tokens_upgraded" in caplog.text
 
         # Real trust store & verifier for verifying every converted token!
@@ -713,6 +721,37 @@ def test_09_sqlite_first_start_conversion_end_to_end(tmp_path: Path, caplog: pyt
         )
         assert deliv_identity.person_id == "ada" and deliv_identity.context_id == "task_context_delivery_1"
 
+        # 4b. Outbox record and conversation_task_links row both converted to valid gateway tokens (EA-7).
+        with sqlite3.connect(str(manager_db)) as conn:
+            outbox_after = json.loads(
+                conn.execute(
+                    "SELECT payload_json FROM active_task_runtime_records WHERE owner_agent_id = 'lead_1' AND section = 'turn_action_outbox' AND record_id = 'act_1'"
+                ).fetchone()[0]
+            )
+            link_after = json.loads(
+                conn.execute(
+                    "SELECT gateway_context_json FROM conversation_task_links WHERE conversation_id = 'conv_ada' AND task_id = 'task_wait_ada'"
+                ).fetchone()[0]
+            )
+        outbox_identity = resolve_task_identity(
+            verifier=verifier,
+            team_id=TEAM,
+            task_context=outbox_after["payload_json"]["gateway_context"]["task_context"],
+            schedule_run=None,
+            schedule_runs=None,
+            now=now + timedelta(seconds=5),
+        )
+        assert outbox_identity.person_id == "ada" and outbox_identity.context_id == "task_context_outbox_1"
+        link_identity = resolve_task_identity(
+            verifier=verifier,
+            team_id=TEAM,
+            task_context=link_after["task_context"],
+            schedule_run=None,
+            schedule_runs=None,
+            now=now + timedelta(seconds=5),
+        )
+        assert link_identity.person_id == "ada" and link_identity.context_id == "task_context_wait_ada"
+
         # 5. Schedules: vouched marks, permits, expiry capping, system-work owner permit, forged schedule preserved.
         with sqlite3.connect(str(manager_db)) as conn:
             sched_rows = {
@@ -788,6 +827,676 @@ def test_09_sqlite_first_start_conversion_end_to_end(tmp_path: Path, caplog: pyt
         assert after_scheds == before_scheds
     finally:
         set_process_verifier(None)
+        forget_task_context_keys()
+
+
+def test_09_gateway_contexts_with_schedule_id_and_scheduler_saved_contexts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F1 (DI1, FA-6, C-1): 0.9 gateway saved contexts naming their own schedule vouch and keep
+    their permit; gateway contexts naming a schedule elsewhere convert to gateway root-task tokens
+    with schedule_id dropped (never scheduler-signed); a saved context naming another schedule
+    does not vouch and is reported; a verified scheduler-issued saved context becomes unvouched
+    with no issue and no permit clearing."""
+
+    forget_task_context_keys()
+    try:
+        config = _make_config(tmp_path)
+        manager_db = Path(config.manager_storage_settings.sqlite_path or "")
+        gateway_db = Path(config.state_storage_settings.sqlite_path or "")
+        _init_09_sqlite(manager_db)
+        _init_09_sqlite(gateway_db)
+
+        gw_signer = _Legacy09Signer("gateway", "gateway-f1")
+        sched_signer = _Legacy09Signer("scheduler", "scheduler-f1")
+        old_env = {"ACCESS_CONTEXT_VERIFY_KEYS": json.dumps([gw_signer.verify_entry, sched_signer.verify_entry])}
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        past = now - timedelta(hours=2)
+        end_3d = now + timedelta(days=3)
+
+        # 1. 0.9 gateway-created schedule: saved context names its own schedule_id.
+        own_ctx = gw_signer.sign_context(
+            context_id="task_context_own",
+            team_id=TEAM,
+            person_id="ada",
+            schedule_id="sched_own",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        own_permit = sched_signer.sign_permit(
+            permit_id="permit_own",
+            team_id=TEAM,
+            schedule_id="sched_own",
+            person_id="ada",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        # 2. Saved gateway context naming a DIFFERENT schedule -> must NOT vouch, reported unverifiable.
+        other_sched_ctx = gw_signer.sign_context(
+            context_id="task_context_other",
+            team_id=TEAM,
+            person_id="ada",
+            schedule_id="sched_someone_else",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        other_permit = sched_signer.sign_permit(
+            permit_id="permit_other",
+            team_id=TEAM,
+            schedule_id="sched_wrong_name",
+            person_id="ada",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        # 3. Verified scheduler-issued saved schedule context (FA-6) -> owner_vouched=0, NO issue, no permit cleared.
+        sched_issued_ctx = sched_signer.sign_context(
+            context_id="task_context_from_run",
+            team_id=TEAM,
+            person_id="ada",
+            schedule_id="sched_parent",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        # 4. Gateway context naming a schedule inside payload_json and gateway_deliveries (C-1 guard):
+        #    must convert as gateway-issued with schedule_id dropped, never scheduler-signed.
+        payload_gw_ctx = gw_signer.sign_context(
+            context_id="task_context_payload_gw",
+            team_id=TEAM,
+            person_id="ada",
+            root_task_id="task_payload_1",
+            schedule_id="sched_own",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        deliv_gw_ctx = gw_signer.sign_context(
+            context_id="task_context_deliv_gw",
+            team_id=TEAM,
+            person_id="ada",
+            root_task_id="task_deliv_1",
+            schedule_id="sched_own",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+
+        with sqlite3.connect(str(manager_db)) as conn:
+            iso = past.isoformat()
+            conn.execute(
+                "INSERT INTO access_people (team_id, person_id, payload_json, changed_at) VALUES (?, ?, ?, ?)",
+                (TEAM, "ada", _legacy_person_row(TEAM, "ada", ["owner"], "active", iso), iso),
+            )
+            conn.execute(
+                "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id, run_permit_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "sched_own",
+                    json.dumps({"gateway_context": {"canonical_user_id": "ada", "task_context": payload_gw_ctx}}),
+                    json.dumps(_schedule_dict(schedule_id="sched_own", name="Own", owner_id="ada", task_context=own_ctx)),
+                    "Own",
+                    end_3d.isoformat(),
+                    iso,
+                    1,
+                    TEAM,
+                    "ada",
+                    json.dumps(own_permit),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id, run_permit_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "sched_wrong_name",
+                    "{}",
+                    json.dumps(_schedule_dict(schedule_id="sched_wrong_name", name="Wrong", owner_id="ada", task_context=other_sched_ctx)),
+                    "Wrong",
+                    end_3d.isoformat(),
+                    iso,
+                    1,
+                    TEAM,
+                    "ada",
+                    json.dumps(other_permit),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id, run_permit_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "sched_child",
+                    "{}",
+                    json.dumps(_schedule_dict(schedule_id="sched_child", name="Child", owner_id="ada", task_context=sched_issued_ctx)),
+                    "Child",
+                    end_3d.isoformat(),
+                    iso,
+                    1,
+                    TEAM,
+                    "ada",
+                    None,
+                ),
+            )
+            conn.commit()
+
+        deliv_env = {
+            "msg_header": {"message_id": "msg_f1", "from_agent_id": "lead_1", "agent_signature": ""},
+            "msg_meta": {"gateway_context": {"canonical_user_id": "ada", "task_context": deliv_gw_ctx}},
+            "msg_content": {"message_class": "Task", "task_id": "task_deliv_1", "task_type": "response", "problem_statement": "Ok."},
+        }
+        with sqlite3.connect(str(gateway_db)) as conn:
+            conn.execute(
+                "INSERT INTO gateway_deliveries (delivery_id, correlation_id, session_key, origin_kind, payload_json, rendered_text, available_after, owner_canonical_user_id, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("deliv_f1", "corr_f1", "website:ada:chat", "response", json.dumps(deliv_env), "Ok.", now.isoformat(), "ada", "pending", past.isoformat()),
+            )
+            conn.commit()
+
+        identities = _signing_identities(TEAM)
+        with caplog.at_level(logging.INFO, logger="instance_upgrades.authority_tokens"):
+            result = upgrade_authority_tokens(config, env=old_env, identities=identities, now=now)
+
+        # Only sched_wrong_name is an issue; sched_own and sched_child produce zero issues.
+        assert [(i.category, i.record_id) for i in result.issues] == [("unverifiable", "sched_wrong_name")]
+        assert "names another schedule" in result.issues[0].reason
+        assert result.counts.schedule_names_dropped == 3  # own_ctx, payload_gw_ctx, deliv_gw_ctx
+        assert "event=authority_token_conversion_schedule_name_dropped" in caplog.text
+
+        trust = broker_trust_store()
+        access_repo = AccessRepository(config.manager_storage_settings)
+        verifier = AuthorityTokenVerifier(trust, people=access_repo, installation=identities.gateway.installation)
+
+        with sqlite3.connect(str(manager_db)) as conn:
+            rows = {
+                r[0]: r[1:]
+                for r in conn.execute(
+                    "SELECT schedule_id, owner_vouched, run_permit_json, schedule_json, payload_json FROM scheduled_messages"
+                ).fetchall()
+            }
+
+        # sched_own: vouched, permit preserved, saved token is gateway-signed with no schedule_id.
+        own_vouched, own_rp, own_sjson, own_pjson = rows["sched_own"]
+        assert own_vouched == 1 and own_rp is not None
+        own_sched = ScheduledMessage.model_validate_json(own_sjson)
+        assert own_sched.payload_meta.gateway_context.task_context is not None
+        own_tok = verifier.verify_root_task(
+            own_sched.payload_meta.gateway_context.task_context,
+            team_id=TEAM,
+            require_issuer="gateway",
+            now=now + timedelta(seconds=5),
+        )
+        assert own_tok.person_id == "ada" and own_tok.schedule_id is None
+        # payload_json gateway context: converted as gateway-issued with schedule_id=None (no C-1 widening).
+        payload_tok = verifier.verify_root_task(
+            json.loads(own_pjson)["gateway_context"]["task_context"],
+            team_id=TEAM,
+            require_issuer="gateway",
+            now=now + timedelta(seconds=5),
+        )
+        assert payload_tok.person_id == "ada" and payload_tok.schedule_id is None
+        assert payload_tok.request_id == "task_context_payload_gw"
+
+        # gateway_deliveries gateway context: converted as gateway-issued with schedule_id=None.
+        with sqlite3.connect(str(gateway_db)) as conn:
+            deliv_after = MessageEnvelope.model_validate_json(
+                conn.execute("SELECT payload_json FROM gateway_deliveries WHERE delivery_id = 'deliv_f1'").fetchone()[0]
+            )
+        deliv_tok = verifier.verify_root_task(
+            deliv_after.msg_meta.gateway_context.task_context,
+            team_id=TEAM,
+            require_issuer="gateway",
+            now=now + timedelta(seconds=5),
+        )
+        assert deliv_tok.person_id == "ada" and deliv_tok.schedule_id is None
+        assert deliv_tok.request_id == "task_context_deliv_gw"
+
+        # sched_wrong_name: unvouched, cleared.
+        wrong_vouched, wrong_rp, wrong_sjson, _ = rows["sched_wrong_name"]
+        assert wrong_vouched == 0 and wrong_rp is None
+        assert ScheduledMessage.model_validate_json(wrong_sjson).payload_meta.gateway_context.task_context is None
+
+        # sched_child (FA-6): unvouched, context cleared, no issue.
+        child_vouched, child_rp, child_sjson, _ = rows["sched_child"]
+        assert child_vouched == 0 and child_rp is None
+        assert ScheduledMessage.model_validate_json(child_sjson).payload_meta.gateway_context.task_context is None
+    finally:
+        forget_task_context_keys()
+
+
+def test_09_scheduled_run_problems_converted_keeping_original_start_time(tmp_path: Path) -> None:
+    """F6 (DI2): 0.9 scheduled_run_problems rows (failed_json and recovered_json, even when already
+    expired) are detected, converted, kept readable by ScheduledRunProblems.problems(), and preserve
+    their original run start time in reported_schedule_run()."""
+
+    from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
+    from storage.scheduled_run_problems import ScheduledRunProblems, ScheduledRunRecordV1
+
+    forget_task_context_keys()
+    try:
+        config = _make_config(tmp_path)
+        manager_db = Path(config.manager_storage_settings.sqlite_path or "")
+        _init_09_sqlite(manager_db)
+
+        sched_signer = _Legacy09Signer("scheduler", "scheduler-f6")
+        old_env = {"ACCESS_CONTEXT_VERIFY_KEYS": json.dumps([sched_signer.verify_entry])}
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        failed_started = now - timedelta(days=4)
+        failed_ended = failed_started + timedelta(minutes=2)
+        recovered_started = now - timedelta(days=2)
+        recovered_ended = recovered_started + timedelta(minutes=1)
+
+        # Already-expired 0.9 scheduler-issued task_context in failed_json.
+        failed_ctx = sched_signer.sign_context(
+            context_id="task_context_failed_run",
+            team_id=TEAM,
+            person_id="ada",
+            schedule_id="sched_daily",
+            issued_at=failed_started,
+            expires_at=failed_started + timedelta(days=1),
+        )
+        # Already-expired 0.9 schedule_run in recovered_json.
+        recovered_permit = sched_signer.sign_permit(
+            permit_id="permit_recovered",
+            team_id=TEAM,
+            schedule_id="sched_daily",
+            person_id="ada",
+            issued_at=recovered_started - timedelta(days=1),
+            expires_at=recovered_started + timedelta(hours=12),
+        )
+        recovered_run = {
+            "permit": recovered_permit,
+            "context_id": "schedule_run_rec123",
+            "conversation_id": None,
+            "started_at_utc": recovered_started.isoformat(),
+        }
+
+        def _raw_problem_doc(task_id: str, ended: datetime, *, tc: Any = None, sr: Any = None) -> str:
+            rec = ScheduledRunRecordV1(
+                task_id=task_id,
+                agent_id="lead_1",
+                header=MessageHeader(message_id=f"m_{task_id}", timestamp=ended.isoformat()),
+                meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="ada", scheduled_job_id="sched_daily")),
+                ended_at_utc=ended,
+                schedule_name="Daily digest",
+            )
+            doc = json.loads(rec.model_dump_json())
+            doc["meta"]["gateway_context"]["task_context"] = tc
+            doc["meta"]["gateway_context"]["schedule_run"] = sr
+            return json.dumps(doc)
+
+        forged_ctx = dict(failed_ctx, signature=_b64(b"f" * 64))
+
+        with sqlite3.connect(str(manager_db)) as conn:
+            iso = now.isoformat()
+            conn.execute(
+                "INSERT INTO access_people (team_id, person_id, payload_json, changed_at) VALUES (?, ?, ?, ?)",
+                (TEAM, "ada", _legacy_person_row(TEAM, "ada", ["owner"], "active", iso), iso),
+            )
+            conn.execute(
+                "INSERT INTO scheduled_run_problems (team_id, schedule_id, failed_task_id, failed_json, recovered_json) VALUES (?, ?, ?, ?, ?)",
+                (
+                    TEAM,
+                    "sched_daily",
+                    "task_fail_1",
+                    _raw_problem_doc("task_fail_1", failed_ended, tc=failed_ctx),
+                    _raw_problem_doc("task_rec_1", recovered_ended, sr=recovered_run),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO scheduled_run_problems (team_id, schedule_id, failed_task_id, failed_json, recovered_json) VALUES (?, ?, ?, ?, ?)",
+                (
+                    TEAM,
+                    "sched_bad",
+                    "task_bad_1",
+                    _raw_problem_doc("task_bad_1", failed_ended, tc=forged_ctx),
+                    None,
+                ),
+            )
+            conn.commit()
+
+        assert has_legacy_authority_records(config, env=old_env) is True
+        identities = _signing_identities(TEAM)
+        result = upgrade_authority_tokens(config, env=old_env, identities=identities, now=now)
+        assert result.had_legacy_records is True
+        assert has_legacy_authority_records(config, env=old_env) is False
+        assert [(i.category, i.table, i.record_id) for i in result.issues] == [
+            ("unverifiable", "scheduled_run_problems", "sched_bad:failed_json")
+        ]
+
+        # problems() must read both rows without deleting them on ValidationError.
+        problems_store = ScheduledRunProblems(config.manager_storage_settings)
+        loaded = {p.schedule_id: p for p in problems_store.problems(TEAM)}
+        assert set(loaded) == {"sched_daily", "sched_bad"}
+
+        trust = broker_trust_store()
+        access_repo = AccessRepository(config.manager_storage_settings)
+        verifier = AuthorityTokenVerifier(trust, people=access_repo, installation=identities.gateway.installation)
+
+        daily = loaded["sched_daily"]
+        assert daily.recovered is not None
+        # Both failed and recovered verify even after their 1-second historical permit expires,
+        # and report the EXACT original start times (not conversion time!).
+        rep_failed = reported_schedule_run(
+            verifier=verifier,
+            team_id=TEAM,
+            task_context=daily.failed.meta.gateway_context.task_context,
+            schedule_run=daily.failed.meta.gateway_context.schedule_run,
+        )
+        assert rep_failed is not None
+        assert rep_failed.schedule_id == "sched_daily"
+        assert rep_failed.person_id == "ada"
+        assert rep_failed.started_at_utc == failed_started
+
+        rep_recovered = reported_schedule_run(
+            verifier=verifier,
+            team_id=TEAM,
+            task_context=daily.recovered.meta.gateway_context.task_context,
+            schedule_run=daily.recovered.meta.gateway_context.schedule_run,
+        )
+        assert rep_recovered is not None
+        assert rep_recovered.schedule_id == "sched_daily"
+        assert rep_recovered.person_id == "ada"
+        assert rep_recovered.started_at_utc == recovered_started
+
+        # Forged row was preserved with its identity cleared.
+        assert loaded["sched_bad"].failed.meta.gateway_context.task_context is None
+        assert loaded["sched_bad"].failed.meta.gateway_context.schedule_run is None
+    finally:
+        forget_task_context_keys()
+
+
+def test_09_nested_json_strings_in_held_rows_and_retired_runtime(tmp_path: Path) -> None:
+    """F7 (DI3, EA-1): legacy contexts stored inside JSON strings in person_held_rows
+    (via PersonDepartureRepository.hold_person_records) and retired_task_runtime.records_json
+    are detected by has_legacy_authority_records and converted cleanly."""
+
+    from storage.person_departure_repository import PersonDepartureRepository
+
+    forget_task_context_keys()
+    try:
+        config = _make_config(tmp_path)
+        manager_db = Path(config.manager_storage_settings.sqlite_path or "")
+        _init_09_sqlite(manager_db)
+
+        gw_signer = _Legacy09Signer("gateway", "gateway-f7")
+        old_env = {"ACCESS_CONTEXT_VERIFY_KEYS": json.dumps([gw_signer.verify_entry])}
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        past = now - timedelta(hours=1)
+        end_3d = now + timedelta(days=3)
+
+        held_ctx = gw_signer.sign_context(
+            context_id="task_context_held",
+            team_id=TEAM,
+            person_id="cy",
+            root_task_id="task_held",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        retired_ctx = gw_signer.sign_context(
+            context_id="task_context_retired",
+            team_id=TEAM,
+            person_id="cy",
+            root_task_id="task_ret",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        pjson = canonical_json(_task_record_dict(task_id="task_ret", owner_person_id="cy", task_context=retired_ctx))
+        retired_records = [
+            {
+                "owner_agent_id": "lead_1",
+                "section": "tasks",
+                "record_id": "task_ret",
+                "payload_json": pjson,
+                "payload_digest": payload_digest(pjson),
+            }
+        ]
+        retired_header = canonical_json(
+            {"layout_version": 1, "task_order": ["task_ret"], "header": {"schema_version": 3, "task_queue": []}}
+        )
+
+        with sqlite3.connect(str(manager_db)) as conn:
+            iso = past.isoformat()
+            conn.execute(
+                "INSERT INTO access_people (team_id, person_id, payload_json, changed_at) VALUES (?, ?, ?, ?)",
+                (TEAM, "cy", _legacy_person_row(TEAM, "cy", ["member"], "active", iso), iso),
+            )
+            conn.execute(
+                "INSERT INTO conversation_task_links (conversation_id, task_id, turn_index, owner_canonical_user_id, gateway_context_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("conv_cy", "task_held", 1, "cy", json.dumps({"canonical_user_id": "cy", "task_context": held_ctx}), iso, iso),
+            )
+            conn.execute(
+                "INSERT INTO retired_task_runtime (archive_id, owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, runtime_state_json, updated_at, records_json, retired_at, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("runtime_retirement_f7", "lead_1", "Lead", TEAM, "TeamArchitect", retired_header, iso, json.dumps(retired_records), iso, "test"),
+            )
+            conn.commit()
+
+        # Move conversation_task_links into person_held_rows using the real departure repository.
+        dep_repo = PersonDepartureRepository(config.manager_storage_settings)
+        assert dep_repo.hold_person_records(TEAM, "cy", at=now) == 1
+
+        assert has_legacy_authority_records(config, env=old_env) is True
+        identities = _signing_identities(TEAM)
+        result = upgrade_authority_tokens(config, env=old_env, identities=identities, now=now)
+        assert result.had_legacy_records is True
+        assert result.counts.converted_contexts == 2
+        assert result.issues == ()
+        assert has_legacy_authority_records(config, env=old_env) is False
+
+        trust = broker_trust_store()
+        access_repo = AccessRepository(config.manager_storage_settings)
+        verifier = AuthorityTokenVerifier(trust, people=access_repo, installation=identities.gateway.installation)
+
+        # Restoring the held person's records yields a valid protocol 1 gateway token.
+        assert dep_repo.restore_person_records(TEAM, "cy") == 1
+        with sqlite3.connect(str(manager_db)) as conn:
+            restored_gw = json.loads(
+                conn.execute(
+                    "SELECT gateway_context_json FROM conversation_task_links WHERE conversation_id = 'conv_cy' AND task_id = 'task_held'"
+                ).fetchone()[0]
+            )
+            retired_after = json.loads(
+                conn.execute("SELECT records_json FROM retired_task_runtime WHERE archive_id = 'runtime_retirement_f7'").fetchone()[0]
+            )
+
+        held_identity = resolve_task_identity(
+            verifier=verifier,
+            team_id=TEAM,
+            task_context=restored_gw["task_context"],
+            schedule_run=None,
+            schedule_runs=None,
+            now=now + timedelta(seconds=5),
+        )
+        assert held_identity.person_id == "cy" and held_identity.context_id == "task_context_held"
+
+        retired_entry = retired_after[0]
+        assert retired_entry["payload_digest"] == payload_digest(retired_entry["payload_json"])
+        retired_rec = TaskSnapshotRecord.model_validate_json(retired_entry["payload_json"])
+        retired_identity = resolve_task_identity(
+            verifier=verifier,
+            team_id=TEAM,
+            task_context=retired_rec.meta.gateway_context.task_context,
+            schedule_run=None,
+            schedule_runs=None,
+            now=now + timedelta(seconds=5),
+        )
+        assert retired_identity.person_id == "cy" and retired_identity.context_id == "task_context_retired"
+    finally:
+        forget_task_context_keys()
+
+
+def test_09_system_work_classification_uses_effective_kind(tmp_path: Path) -> None:
+    """F8 (G3): system-work classification uses is_system_work_kind(effective_system_schedule_kind):
+    after_action_report_review is person-scoped (gets a person run permit and regular run identity,
+    no owner permit), while knowledge_curation_team is system work (gets a no-person run permit
+    and admin owner permit)."""
+
+    forget_task_context_keys()
+    try:
+        config = _make_config(tmp_path)
+        manager_db = Path(config.manager_storage_settings.sqlite_path or "")
+        _init_09_sqlite(manager_db)
+
+        gw_signer = _Legacy09Signer("gateway", "gateway-f8")
+        sched_signer = _Legacy09Signer("scheduler", "scheduler-f8")
+        old_env = {"ACCESS_CONTEXT_VERIFY_KEYS": json.dumps([gw_signer.verify_entry, sched_signer.verify_entry])}
+
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        past = now - timedelta(hours=2)
+        end_3d = now + timedelta(days=3)
+        expired_end = now - timedelta(hours=1)
+
+        aar_ctx = gw_signer.sign_context(
+            context_id="task_context_aar",
+            team_id=TEAM,
+            person_id="ada",
+            schedule_id="sched_aar",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        aar_waiting_permit = sched_signer.sign_permit(
+            permit_id="permit_aar_wait",
+            team_id=TEAM,
+            schedule_id="sched_aar",
+            person_id="ada",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        aar_waiting_run = {
+            "permit": aar_waiting_permit,
+            "context_id": "schedule_run_aar1",
+            "conversation_id": None,
+            "started_at_utc": past.isoformat(),
+        }
+
+        cur_ctx = gw_signer.sign_context(
+            context_id="task_context_cur",
+            team_id=TEAM,
+            person_id="ada",
+            schedule_id="sched_cur_team",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        cur_expired_permit = sched_signer.sign_permit(
+            permit_id="permit_cur_exp",
+            team_id=TEAM,
+            schedule_id="sched_cur_team",
+            person_id=None,
+            issued_at=now - timedelta(days=10),
+            expires_at=expired_end,
+        )
+        cur_no_ctx_expired_permit = sched_signer.sign_permit(
+            permit_id="permit_cur_noctx",
+            team_id=TEAM,
+            schedule_id="sched_cur_team_noctx",
+            person_id=None,
+            issued_at=now - timedelta(days=10),
+            expires_at=expired_end,
+        )
+
+        with sqlite3.connect(str(manager_db)) as conn:
+            iso = past.isoformat()
+            conn.execute(
+                "INSERT INTO access_people (team_id, person_id, payload_json, changed_at) VALUES (?, ?, ?, ?)",
+                (TEAM, "ada", _legacy_person_row(TEAM, "ada", ["owner"], "active", iso), iso),
+            )
+            header = canonical_json(
+                {"layout_version": 1, "task_order": ["task_aar_wait"], "header": {"schema_version": 3, "task_queue": []}}
+            )
+            conn.execute(
+                "INSERT INTO active_task_runtime (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, runtime_state_json, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("lead_1", "Lead", TEAM, "TeamArchitect", header, iso),
+            )
+            aar_pjson = canonical_json(
+                _task_record_dict(task_id="task_aar_wait", owner_person_id="ada", schedule_run=aar_waiting_run)
+            )
+            conn.execute(
+                "INSERT INTO active_task_runtime_records (owner_agent_id, section, record_id, payload_json, payload_digest) VALUES (?, ?, ?, ?, ?)",
+                ("lead_1", "tasks", "task_aar_wait", aar_pjson, payload_digest(aar_pjson)),
+            )
+            for sid, name, kind, ctx_val, permit_val in (
+                ("sched_aar", "after_action_report_batch_review:ada", "after_action_report_review", aar_ctx, None),
+                ("sched_cur_team", "knowledge_curation:team:inst", "knowledge_curation_team", cur_ctx, json.dumps(cur_expired_permit)),
+                ("sched_cur_team_noctx", "knowledge_curation:team:inst2", "knowledge_curation_team", None, json.dumps(cur_no_ctx_expired_permit)),
+            ):
+                conn.execute(
+                    "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id, run_permit_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        sid,
+                        "{}",
+                        json.dumps(
+                            _schedule_dict(
+                                schedule_id=sid,
+                                name=name,
+                                owner_id="ada",
+                                task_context=ctx_val,
+                                management_class="system",
+                                system_schedule_kind=kind,
+                            )
+                        ),
+                        name,
+                        end_3d.isoformat(),
+                        iso,
+                        1,
+                        TEAM,
+                        "ada",
+                        permit_val,
+                    ),
+                )
+            conn.commit()
+
+        identities = _signing_identities(TEAM)
+        result = upgrade_authority_tokens(config, env=old_env, identities=identities, now=now)
+        assert result.issues == ()
+
+        trust = broker_trust_store()
+        access_repo = AccessRepository(config.manager_storage_settings)
+        ada = access_repo.team_person(TEAM, "ada")
+        assert ada is not None
+
+        with sqlite3.connect(str(manager_db)) as conn:
+            rows = {
+                r[0]: r[1:]
+                for r in conn.execute(
+                    "SELECT schedule_id, owner_vouched, run_permit_owner, run_permit_json, owner_permit_json FROM scheduled_messages"
+                ).fetchall()
+            }
+            aar_task_raw = conn.execute(
+                "SELECT payload_json FROM active_task_runtime_records WHERE record_id = 'task_aar_wait'"
+            ).fetchone()[0]
+
+        # after_action_report_review: person-scoped -> person run permit, NO owner_permit_json!
+        aar_vouched, aar_rpo, aar_rp, aar_op = rows["sched_aar"]
+        assert aar_vouched == 1
+        assert aar_rpo == "ada"
+        assert aar_op is None
+        assert aar_rp is not None
+        aar_tok = _verify_real_token(aar_rp, trust, now + timedelta(seconds=5))
+        assert aar_tok.token.person == ada.person_ref
+        assert aar_tok.token.bound_to.id == "schedule_permit:sched_aar"
+
+        # Waiting AAR run must keep regular schedule_permit binding (NOT schedule_owner_permit).
+        aar_rec = TaskSnapshotRecord.model_validate_json(aar_task_raw)
+        assert aar_rec.meta.gateway_context.schedule_run is not None
+        assert aar_rec.meta.gateway_context.schedule_run.permit.bound_to.id == "schedule_permit:sched_aar"
+
+        # knowledge_curation_team: system work -> no-person run permit + admin owner_permit_json!
+        cur_vouched, cur_rpo, cur_rp, cur_op = rows["sched_cur_team"]
+        assert cur_vouched == 1
+        assert cur_rpo is None
+        assert cur_rp is not None and cur_op is not None
+        cur_rp_tok = _verify_real_token(cur_rp, trust, now + timedelta(seconds=5))
+        cur_op_tok = _verify_real_token(cur_op, trust, now + timedelta(seconds=5))
+        assert cur_rp_tok.token.bound_to.id == "schedule_permit:sched_cur_team"
+        assert cur_op_tok.token.bound_to.id == "schedule_owner_permit:sched_cur_team"
+        assert cur_op_tok.token.person == ada.person_ref
+
+        # knowledge_curation_team with expired permit and no saved context -> still gets fresh system-work permit.
+        cur2_vouched, cur2_rpo, cur2_rp, cur2_op = rows["sched_cur_team_noctx"]
+        assert cur2_vouched == 0 and cur2_rpo is None and cur2_op is None and cur2_rp is not None
+        cur2_tok = _verify_real_token(cur2_rp, trust, now + timedelta(seconds=5))
+        assert cur2_tok.token.bound_to.id == "schedule_permit:sched_cur_team_noctx"
+    finally:
         forget_task_context_keys()
 
 
@@ -1372,6 +2081,7 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
             context_id="task_context_pg_sched",
             team_id=pg_team,
             person_id="ada",
+            schedule_id="sched_pg_1",
             issued_at=past,
             expires_at=end_3d,
         )

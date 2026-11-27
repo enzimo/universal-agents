@@ -50,6 +50,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from cryptography.exceptions import InvalidSignature
@@ -58,6 +59,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from access_control.people import PERSON_ROLE_ADMIN
+from custom_agents.schedule_management import effective_system_schedule_kind
 from custom_messages.contracts.access_v2 import (
     AccessNoticeKind,
     AccessNoticeV1,
@@ -65,6 +67,8 @@ from custom_messages.contracts.access_v2 import (
     SCHEDULE_RUN_ID_PREFIX,
     TeamPersonV1,
 )
+from custom_messages.enums import ScheduleManagementClass
+from custom_messages.system_schedules import is_system_work_kind
 from custom_messages.wire.authority_bindings import AuthorityTokenRecord
 from custom_messages.wire.kinds import AUTHORITY_TOKEN_MAX_SECONDS
 from custom_transport.protocol1.authority_tokens import root_task_token, schedule_permit_token
@@ -88,7 +92,6 @@ _ENV_GATEWAY_SIGNING_KEY: Final = "ACCESS_GATEWAY_SIGNING_KEY"
 _ENV_SCHEDULER_SIGNING_KEY: Final = "ACCESS_SCHEDULER_SIGNING_KEY"
 _ENV_VERIFY_KEYS: Final = "ACCESS_CONTEXT_VERIFY_KEYS"
 _PERMIT_RENEW_LEAD: Final = timedelta(days=2)
-_SYSTEM_WORK_KINDS: Final = frozenset({"internal_improvement", "memory_review_cleanup", "after_action_report_review"})
 
 
 class MissingLegacyVerifyKeysError(RuntimeError):
@@ -127,6 +130,7 @@ class ConversionCounts:
     expired: int = 0
     unverifiable: int = 0
     expiry_capped: int = 0
+    schedule_names_dropped: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -139,6 +143,7 @@ class ConversionCounts:
             "expired": self.expired,
             "unverifiable": self.unverifiable,
             "expiry_capped": self.expiry_capped,
+            "schedule_names_dropped": self.schedule_names_dropped,
         }
 
 
@@ -282,8 +287,6 @@ class _LegacyKeyring:
         self._verify_sig(public_key, envelope.signature, _canonical_legacy_bytes(_LEGACY_CONTEXT_DOMAIN, envelope.context), "task context")
         if envelope.context.team_id != team_id:
             raise _LegacyVerifyError(f"context belongs to another team ({envelope.context.team_id!r})")
-        if envelope.context.issuer == "gateway" and envelope.context.schedule_id is not None:
-            raise _LegacyVerifyError("gateway context unexpectedly names a schedule")
         return envelope.context
 
     def verify_permit(self, raw: Mapping[str, Any], *, team_id: str, expected_schedule_id: str | None = None) -> _LegacySchedulePermit:
@@ -341,21 +344,33 @@ def _is_legacy_schedule_run(value: Any) -> bool:
     return isinstance(value, Mapping) and _is_legacy_signed_permit(value.get("permit"))
 
 
-def _contains_legacy_payload(value: Any) -> bool:
+def _contains_legacy_payload(value: Any, *, _depth: int = 0) -> bool:
+    if _depth > 8:
+        return False
     if isinstance(value, Mapping):
         if _is_legacy_signed_context(value) or _is_legacy_signed_permit(value) or _is_legacy_schedule_run(value):
             return True
-        return any(_contains_legacy_payload(child) for child in value.values())
+        return any(_contains_legacy_payload(child, _depth=_depth + 1) for child in value.values())
     if isinstance(value, list):
-        return any(_contains_legacy_payload(item) for item in value)
+        return any(_contains_legacy_payload(item, _depth=_depth + 1) for item in value)
+    if isinstance(value, str) and "key_id" in value and "signature" in value:
+        stripped = value.lstrip()
+        if stripped.startswith(("{", "[")):
+            try:
+                nested = json.loads(stripped)
+            except ValueError:
+                return False
+            return _contains_legacy_payload(nested, _depth=_depth + 1)
     return False
 
 
 def _raw_json_has_legacy_payload(raw: Any) -> bool:
     if not isinstance(raw, str) or not raw.strip():
         return False
-    # Fast text pre-filter: every legacy context or permit carries "key_id" and "signature".
-    if '"key_id"' not in raw or '"signature"' not in raw:
+    # Fast text pre-filter: every legacy context or permit carries key_id and signature
+    # (unquoted so JSON nested inside JSON strings, e.g. person_held_rows and retired_task_runtime,
+    # still matches before decoding).
+    if "key_id" not in raw or "signature" not in raw:
         return False
     try:
         parsed = json.loads(raw)
@@ -449,6 +464,7 @@ _SCAN_SPEC: Final[tuple[tuple[str, tuple[str, ...], str | None], ...]] = (
     ("agent_deferred_messages", ("messages_json",), "team_id"),
     ("worker_task_handbacks", ("payload_json",), "team_id"),
     ("scheduled_messages", ("schedule_json", "payload_json", "run_permit_json"), "claim_team_id"),
+    ("scheduled_run_problems", ("failed_json", "recovered_json"), "team_id"),
     ("schedule_worker_bindings", ("pending_schedule_json",), "team_id"),
     ("conversation_task_links", ("gateway_context_json",), None),
     ("person_held_rows", ("row_json",), "team_id"),
@@ -589,11 +605,25 @@ class _ConversionContext:
             return None, None
         expires_at = self.bounded_expiry(legacy.expires_at_utc, table=table, record_id=record_id)
         identities = self._require_identities()
-        identity = (
-            identities.gateway
-            if legacy.issuer == "gateway" and legacy.schedule_id is None
-            else identities.scheduler
-        )
+        if legacy.issuer == "gateway":
+            if person_ref is None:
+                self.add_issue("unverifiable", table, record_id, "gateway context names no person")
+                return None, None
+            identity = identities.gateway
+            target_schedule_id: str | None = None
+            if legacy.schedule_id is not None:
+                self.counts.schedule_names_dropped += 1
+                LOGGER.info(
+                    "Dropped schedule name from converted 0.9 gateway context (schedule names on 0.9 gateway "
+                    "contexts carried no scheduler authority). "
+                    "event=authority_token_conversion_schedule_name_dropped table=%s record_id=%s schedule_id=%s",
+                    table,
+                    record_id,
+                    legacy.schedule_id,
+                )
+        else:
+            identity = identities.scheduler
+            target_schedule_id = legacy.schedule_id
         root_task_id = legacy.root_task_id or task_id_hint or legacy.context_id
         try:
             token = root_task_token(
@@ -603,7 +633,7 @@ class _ConversionContext:
                 request_id=legacy.context_id,
                 issued=self.now,
                 person_ref=person_ref,
-                schedule_id=legacy.schedule_id,
+                schedule_id=target_schedule_id,
                 expires_at=expires_at,
             )
         except ValueError as exc:
@@ -754,8 +784,17 @@ def _extract_task_id(node: Any) -> str | None:
 def _is_system_work_schedule_doc(schedule_doc: Mapping[str, Any] | None) -> bool:
     if not isinstance(schedule_doc, Mapping):
         return False
-    kind = str(schedule_doc.get("system_schedule_kind") or "").strip().lower()
-    return kind in _SYSTEM_WORK_KINDS
+    raw_class = str(schedule_doc.get("management_class") or "").strip().lower()
+    try:
+        management_class: ScheduleManagementClass | None = ScheduleManagementClass(raw_class) if raw_class else None
+    except ValueError:
+        management_class = None
+    stub = SimpleNamespace(
+        management_class=management_class,
+        system_schedule_kind=schedule_doc.get("system_schedule_kind"),
+        schedule_name=schedule_doc.get("schedule_name"),
+    )
+    return is_system_work_kind(effective_system_schedule_kind(stub))
 
 
 def _load_system_work_schedule_ids(conn: Any, dialect: SqlDialect, team_id: str) -> frozenset[str]:
@@ -840,7 +879,7 @@ def _convert_active_task_runtime(conn: Any, dialect: SqlDialect, ctx: _Conversio
             *,
             _owner: str = owner_person_id,
         ) -> None:
-            if legacy.issuer == "gateway" and legacy.schedule_id is None and _owner and legacy.person_id == _owner:
+            if legacy.issuer == "gateway" and _owner and legacy.person_id == _owner:
                 token_json = AuthorityTokenRecord.model_validate(new_token).model_dump_json()
                 digest = hashlib.sha256(token_json.encode("utf-8")).hexdigest()
                 ctx.ledger_backfills.append((ctx.team_id, legacy.context_id, _owner, digest))
@@ -901,16 +940,76 @@ def _convert_retired_task_runtime(conn: Any, dialect: SqlDialect, ctx: _Conversi
             if state_changed:
                 new_state = canonical_json(updated)
         if _raw_json_has_legacy_payload(raw_records):
-            updated, records_changed = _convert_json_tree(
-                json.loads(raw_records), ctx=ctx, table="retired_task_runtime", record_id=str(archive_id)
+            parsed_records = json.loads(raw_records)
+            updated_records, records_changed = _convert_retired_records_list(
+                parsed_records, ctx=ctx, archive_id=str(archive_id)
             )
             if records_changed:
-                new_records = canonical_json(updated)
+                new_records = canonical_json(updated_records)
         if state_changed or records_changed:
             conn.execute(
                 f"UPDATE retired_task_runtime SET runtime_state_json = {p}, records_json = {p} WHERE archive_id = {p}",
                 (new_state, new_records, archive_id),
             )
+
+
+def _convert_retired_records_list(
+    parsed_records: Any,
+    *,
+    ctx: _ConversionContext,
+    archive_id: str,
+) -> tuple[Any, bool]:
+    """Convert legacy contexts inside ``retired_task_runtime.records_json`` (including stringified ``payload_json``)."""
+
+    if not isinstance(parsed_records, list):
+        return _convert_json_tree(
+            parsed_records, ctx=ctx, table="retired_task_runtime", record_id=archive_id
+        )
+    changed = False
+    updated_list: list[Any] = []
+    for idx, item in enumerate(parsed_records):
+        if isinstance(item, dict):
+            item_copy = dict(item)
+            item_changed = False
+            rec_id = str(item_copy.get("record_id") or idx)
+            section = str(item_copy.get("section") or "")
+            raw_pjson = item_copy.get("payload_json")
+            if isinstance(raw_pjson, str) and _raw_json_has_legacy_payload(raw_pjson):
+                converted_payload, payload_changed = _convert_json_tree(
+                    json.loads(raw_pjson),
+                    ctx=ctx,
+                    table="retired_task_runtime",
+                    record_id=f"{archive_id}:{rec_id}",
+                    task_id_hint=rec_id if section == "tasks" else None,
+                )
+                if payload_changed:
+                    serialized_payload = canonical_json(converted_payload)
+                    item_copy["payload_json"] = serialized_payload
+                    if "payload_digest" in item_copy:
+                        item_copy["payload_digest"] = payload_digest(serialized_payload)
+                    item_changed = True
+            if _contains_legacy_payload({k: v for k, v in item_copy.items() if k != "payload_json"}):
+                converted_item, direct_changed = _convert_json_tree(
+                    item_copy,
+                    ctx=ctx,
+                    table="retired_task_runtime",
+                    record_id=f"{archive_id}:{rec_id}",
+                )
+                if direct_changed:
+                    item_copy = converted_item
+                    item_changed = True
+            updated_list.append(item_copy)
+            changed = changed or item_changed
+        else:
+            converted_item, item_changed = _convert_json_tree(
+                item,
+                ctx=ctx,
+                table="retired_task_runtime",
+                record_id=f"{archive_id}[{idx}]",
+            )
+            updated_list.append(converted_item)
+            changed = changed or item_changed
+    return (updated_list, True) if changed else (parsed_records, False)
 
 
 def _convert_simple_json_table(
@@ -989,7 +1088,7 @@ def _convert_person_held_rows(conn: Any, dialect: SqlDialect, ctx: _ConversionCo
     ).fetchall()
     for row in rows:
         held_row_id, source_table, raw_row_json = _row_values(row)
-        if not raw_row_json or '"key_id"' not in raw_row_json:
+        if not _raw_json_has_legacy_payload(raw_row_json):
             continue
         try:
             row_doc = json.loads(raw_row_json)
@@ -997,6 +1096,7 @@ def _convert_person_held_rows(conn: Any, dialect: SqlDialect, ctx: _ConversionCo
             continue
         if not isinstance(row_doc, dict):
             continue
+        task_id_hint = str(row_doc.get("task_id") or "").strip() or None
         changed = False
         for col, val in list(row_doc.items()):
             if isinstance(val, str) and _raw_json_has_legacy_payload(val):
@@ -1005,6 +1105,7 @@ def _convert_person_held_rows(conn: Any, dialect: SqlDialect, ctx: _ConversionCo
                     ctx=ctx,
                     table=f"person_held_rows:{source_table}",
                     record_id=str(held_row_id),
+                    task_id_hint=task_id_hint,
                 )
                 if col_changed:
                     row_doc[col] = json.dumps(updated)
@@ -1015,6 +1116,7 @@ def _convert_person_held_rows(conn: Any, dialect: SqlDialect, ctx: _ConversionCo
                     ctx=ctx,
                     table=f"person_held_rows:{source_table}",
                     record_id=str(held_row_id),
+                    task_id_hint=task_id_hint,
                 )
                 if col_changed:
                     row_doc[col] = updated
@@ -1240,59 +1342,78 @@ def _convert_schedule_doc(
             gw["task_context"] = None
             unverifiable = True
         else:
-            if legacy.issuer != "gateway":
-                ctx.add_issue(
-                    "unverifiable",
-                    "scheduled_messages",
-                    schedule_id,
-                    f"saved schedule context was issued by {legacy.issuer!r}, expected 'gateway'",
-                    schedule_label,
-                )
+            if legacy.issuer == "scheduler":
+                # 0.9 schedules created inside a scheduled run saved that run's scheduler-signed
+                # context and were treated as unvouched (not unverifiable). Drop the legacy saved
+                # context cleanly without raising an issue or clearing any verified permit.
                 gw["task_context"] = None
-                unverifiable = True
-            elif owner_id and legacy.person_id != owner_id:
-                ctx.add_issue(
-                    "unverifiable",
-                    "scheduled_messages",
-                    schedule_id,
-                    f"saved schedule context names person {legacy.person_id!r}, expected owner {owner_id!r}",
-                    schedule_label,
-                )
-                gw["task_context"] = None
-                unverifiable = True
             else:
-                person_ref, person_err = ctx.resolve_person_ref(legacy.person_id)
-                if person_err is not None or person_ref is None:
+                allowed_schedule_ids = {schedule_id}
+                row_job_id = gw.get("scheduled_job_id")
+                if isinstance(row_job_id, str) and row_job_id.strip():
+                    allowed_schedule_ids.add(row_job_id.strip())
+                if legacy.schedule_id is not None and legacy.schedule_id not in allowed_schedule_ids:
                     ctx.add_issue(
                         "unverifiable",
                         "scheduled_messages",
                         schedule_id,
-                        person_err or "saved schedule context names no person",
+                        f"saved schedule context names another schedule {legacy.schedule_id!r}",
+                        schedule_label,
+                    )
+                    gw["task_context"] = None
+                    unverifiable = True
+                elif owner_id and legacy.person_id != owner_id:
+                    ctx.add_issue(
+                        "unverifiable",
+                        "scheduled_messages",
+                        schedule_id,
+                        f"saved schedule context names person {legacy.person_id!r}, expected owner {owner_id!r}",
                         schedule_label,
                     )
                     gw["task_context"] = None
                     unverifiable = True
                 else:
-                    vouched = True
-                    verified_person_id = legacy.person_id
-                    if _utc(legacy.expires_at_utc) > ctx.now:
-                        expires_at = ctx.bounded_expiry(
-                            legacy.expires_at_utc, table="scheduled_messages", record_id=schedule_id
+                    person_ref, person_err = ctx.resolve_person_ref(legacy.person_id)
+                    if person_err is not None or person_ref is None:
+                        ctx.add_issue(
+                            "unverifiable",
+                            "scheduled_messages",
+                            schedule_id,
+                            person_err or "saved schedule context names no person",
+                            schedule_label,
                         )
-                        gw["task_context"] = root_task_token(
-                            ctx._require_identities().gateway,
-                            team=ctx.team_id,
-                            root_task_id=legacy.root_task_id or legacy.context_id,
-                            request_id=legacy.context_id,
-                            issued=ctx.now,
-                            person_ref=person_ref,
-                            expires_at=expires_at,
-                        )
-                        ctx.counts.converted_contexts += 1
-                    else:
-                        # Expired saved gateway context still proves vouching (owner_vouched=1),
-                        # but we never sign an already-expired protocol 1 token.
                         gw["task_context"] = None
+                        unverifiable = True
+                    else:
+                        vouched = True
+                        verified_person_id = legacy.person_id
+                        if legacy.schedule_id is not None:
+                            ctx.counts.schedule_names_dropped += 1
+                            LOGGER.info(
+                                "Dropped schedule name from converted 0.9 saved gateway schedule context. "
+                                "event=authority_token_conversion_schedule_name_dropped "
+                                "table=scheduled_messages record_id=%s schedule_id=%s",
+                                schedule_id,
+                                legacy.schedule_id,
+                            )
+                        if _utc(legacy.expires_at_utc) > ctx.now:
+                            expires_at = ctx.bounded_expiry(
+                                legacy.expires_at_utc, table="scheduled_messages", record_id=schedule_id
+                            )
+                            gw["task_context"] = root_task_token(
+                                ctx._require_identities().gateway,
+                                team=ctx.team_id,
+                                root_task_id=legacy.root_task_id or legacy.context_id,
+                                request_id=legacy.context_id,
+                                issued=ctx.now,
+                                person_ref=person_ref,
+                                expires_at=expires_at,
+                            )
+                            ctx.counts.converted_contexts += 1
+                        else:
+                            # Expired saved gateway context still proves vouching (owner_vouched=1),
+                            # but we never sign an already-expired protocol 1 token.
+                            gw["task_context"] = None
 
     if isinstance(gw, dict) and _is_legacy_schedule_run(gw.get("schedule_run")):
         gw["schedule_run"] = None
@@ -1348,6 +1469,200 @@ def _convert_schedule_row_permit(
     )
     ctx.counts.converted_permits += 1
     return token, expires_at, vouched, False, False, permit.person_id
+
+
+def _convert_scheduled_run_problems(conn: Any, dialect: SqlDialect, ctx: _ConversionContext) -> None:
+    """Convert legacy 0.9 run identities inside ``scheduled_run_problems`` preserving original start times."""
+
+    if not _table_exists(conn, dialect, "scheduled_run_problems"):
+        return
+    p = dialect.bind
+    rows = conn.execute(
+        f"SELECT schedule_id, failed_json, recovered_json FROM scheduled_run_problems WHERE team_id = {p}",
+        (ctx.team_id,),
+    ).fetchall()
+    for row in rows:
+        schedule_id, raw_failed, raw_recovered = _row_values(row)
+        schedule_id = str(schedule_id)
+        failed_changed = False
+        recovered_changed = False
+        new_failed = raw_failed
+        new_recovered = raw_recovered
+        if _raw_json_has_legacy_payload(raw_failed):
+            updated, failed_changed = _convert_scheduled_run_problem_record(
+                json.loads(raw_failed),
+                ctx=ctx,
+                schedule_id=schedule_id,
+                column="failed_json",
+            )
+            if failed_changed:
+                new_failed = json.dumps(updated)
+        if _raw_json_has_legacy_payload(raw_recovered):
+            updated, recovered_changed = _convert_scheduled_run_problem_record(
+                json.loads(raw_recovered),
+                ctx=ctx,
+                schedule_id=schedule_id,
+                column="recovered_json",
+            )
+            if recovered_changed:
+                new_recovered = json.dumps(updated)
+        if failed_changed or recovered_changed:
+            conn.execute(
+                f"UPDATE scheduled_run_problems SET failed_json = {p}, recovered_json = {p} "
+                f"WHERE team_id = {p} AND schedule_id = {p}",
+                (new_failed, new_recovered, ctx.team_id, schedule_id),
+            )
+
+
+def _sign_historical_problem_permit(
+    ctx: _ConversionContext,
+    *,
+    record_id: str,
+    schedule_id: str,
+    person_id: str | None,
+) -> dict[str, Any] | None:
+    """Sign a 1-second historical scheduler permit for a converted ``scheduled_run_problems`` record."""
+
+    person_ref, person_err = ctx.resolve_person_ref(person_id)
+    if person_err is not None:
+        ctx.add_issue("unverifiable", "scheduled_run_problems", record_id, person_err)
+        return None
+    is_owner_permit = person_id is not None and schedule_id in ctx.system_work_schedule_ids
+    try:
+        return schedule_permit_token(
+            ctx._require_identities().scheduler,
+            team=ctx.team_id,
+            schedule_id=schedule_id,
+            issued=ctx.now,
+            person_ref=person_ref,
+            owner_permit=is_owner_permit,
+            expires_at=ctx.now + timedelta(seconds=1),
+        )
+    except ValueError as exc:
+        ctx.add_issue(
+            "unverifiable",
+            "scheduled_run_problems",
+            record_id,
+            f"could not sign converted scheduled run problem identity: {exc}",
+        )
+        return None
+
+
+def _convert_problem_task_context(
+    gw: dict[str, Any], *, ctx: _ConversionContext, record_id: str
+) -> None:
+    try:
+        legacy = ctx.keyring.verify_context(gw["task_context"], team_id=ctx.team_id)
+    except _LegacyVerifyError as exc:
+        ctx.add_issue("unverifiable", "scheduled_run_problems", record_id, str(exc))
+        gw["task_context"] = None
+        return
+    if legacy.issuer != "scheduler" or not legacy.schedule_id:
+        ctx.add_issue(
+            "unverifiable",
+            "scheduled_run_problems",
+            record_id,
+            "scheduled run problem context was not a scheduler-issued run context",
+        )
+        gw["task_context"] = None
+        return
+    permit_token = _sign_historical_problem_permit(
+        ctx, record_id=record_id, schedule_id=legacy.schedule_id, person_id=legacy.person_id
+    )
+    gw["task_context"] = None
+    if permit_token is None:
+        return
+    run_context_id = (
+        legacy.context_id
+        if legacy.context_id.startswith(f"{SCHEDULE_RUN_ID_PREFIX}_")
+        else f"{SCHEDULE_RUN_ID_PREFIX}_{hashlib.sha256(legacy.context_id.encode('utf-8')).hexdigest()[:24]}"
+    )
+    gw["schedule_run"] = {
+        "permit": permit_token,
+        "context_id": run_context_id,
+        "conversation_id": legacy.conversation_id,
+        "started_at_utc": _utc(legacy.issued_at_utc).isoformat(),
+    }
+    ctx.counts.converted_contexts += 1
+
+
+def _convert_problem_schedule_run(
+    gw: dict[str, Any], *, ctx: _ConversionContext, record_id: str
+) -> None:
+    raw_run = gw["schedule_run"]
+    raw_permit = raw_run.get("permit") if isinstance(raw_run, Mapping) else None
+    context_id = str(raw_run.get("context_id") or "").strip() if isinstance(raw_run, Mapping) else ""
+    if not isinstance(raw_permit, Mapping) or not context_id.startswith(f"{SCHEDULE_RUN_ID_PREFIX}_"):
+        ctx.add_issue(
+            "unverifiable",
+            "scheduled_run_problems",
+            record_id,
+            f"invalid schedule_run identity in scheduled_run_problems ({context_id!r})",
+        )
+        gw["schedule_run"] = None
+        return
+    try:
+        permit = ctx.keyring.verify_permit(raw_permit, team_id=ctx.team_id)
+    except _LegacyVerifyError as exc:
+        ctx.add_issue("unverifiable", "scheduled_run_problems", record_id, str(exc))
+        gw["schedule_run"] = None
+        return
+    permit_token = _sign_historical_problem_permit(
+        ctx, record_id=record_id, schedule_id=permit.schedule_id, person_id=permit.person_id
+    )
+    if permit_token is None:
+        gw["schedule_run"] = None
+        return
+    updated_run = dict(raw_run)
+    updated_run["permit"] = permit_token
+    gw["schedule_run"] = updated_run
+    ctx.counts.converted_schedule_runs += 1
+
+
+def _convert_scheduled_run_problem_record(
+    doc: Any,
+    *,
+    ctx: _ConversionContext,
+    schedule_id: str,
+    column: str,
+) -> tuple[Any, bool]:
+    """Convert one ``ScheduledRunRecordV1`` JSON document for historical failure/recovery reporting.
+
+    ``reported_schedule_run`` checks historical signatures with ``check_expiry=False`` and reads the
+    run's start time from ``schedule_run.started_at_utc`` (or ``task_context.issued_at``). Because
+    the new 0.10 host certificate cannot sign tokens back-dated before its own ``not_before``, a
+    verified legacy scheduler ``task_context`` is converted into a ``schedule_run`` carrying a
+    1-second historical permit issued at conversion time and the original ``issued_at_utc`` as
+    ``started_at_utc`` (granting zero live authority while preserving the exact start time).
+    """
+
+    record_id = f"{schedule_id}:{column}"
+    if not isinstance(doc, dict):
+        return _convert_json_tree(doc, ctx=ctx, table="scheduled_run_problems", record_id=record_id)
+
+    result = dict(doc)
+    meta = result.get("meta")
+    gw = meta.get("gateway_context") if isinstance(meta, dict) else None
+    changed = False
+
+    if isinstance(meta, dict) and isinstance(gw, dict):
+        gw = dict(gw)
+        meta = dict(meta)
+        meta["gateway_context"] = gw
+        result["meta"] = meta
+        if _is_legacy_signed_context(gw.get("task_context")):
+            _convert_problem_task_context(gw, ctx=ctx, record_id=record_id)
+            changed = True
+        elif _is_legacy_schedule_run(gw.get("schedule_run")):
+            _convert_problem_schedule_run(gw, ctx=ctx, record_id=record_id)
+            changed = True
+
+    if _contains_legacy_payload(result):
+        result, tree_changed = _convert_json_tree(
+            result, ctx=ctx, table="scheduled_run_problems", record_id=record_id
+        )
+        changed = changed or tree_changed
+    return (result, True) if changed else (doc, False)
 
 
 # ---------------------------------------------------------------------------
@@ -1780,6 +2095,7 @@ def upgrade_authority_tokens(
                     json_column="payload_json", team_column="team_id",
                 )
                 _convert_scheduled_messages(conn, dialect, ctx)
+                _convert_scheduled_run_problems(conn, dialect, ctx)
                 _convert_simple_json_table(
                     conn, dialect, ctx, table="schedule_worker_bindings", pk_column="schedule_id",
                     json_column="pending_schedule_json", team_column="team_id",
