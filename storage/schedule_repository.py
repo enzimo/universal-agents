@@ -273,6 +273,9 @@ class _RelationalScheduleRepository:
 
     _dialect: SqlDialect
 
+    def _connect(self) -> Any:
+        raise NotImplementedError
+
 
     def _init_schema(self) -> None:
         if repositories_are_read_only():
@@ -614,7 +617,7 @@ class _RelationalScheduleRepository:
                 (schedule_id, claim_token, claimer_agent_id),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            return bool(cursor.rowcount > 0)
 
     def prune_expired(self, *, now: datetime) -> list[RemovedSchedule]:
         """Remove finished or expired schedules once no admitted run still needs them.
@@ -760,7 +763,7 @@ class _RelationalScheduleRepository:
                 ),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            return bool(cursor.rowcount > 0)
 
     def mark_owner_vouched(self, schedule_id: str, *, checked_owner: str) -> bool:
         """Durably record ``owner_vouched = 1`` while the row's owner is still ``checked_owner``."""
@@ -779,7 +782,7 @@ class _RelationalScheduleRepository:
                 (schedule_id, checked_owner),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            return bool(cursor.rowcount > 0)
 
 
 class SqliteScheduleRepository(_RelationalScheduleRepository):
@@ -865,7 +868,7 @@ class SqliteScheduleRepository(_RelationalScheduleRepository):
                 ),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            return bool(cursor.rowcount > 0)
 
 
     def claim_next_due(
@@ -1021,7 +1024,7 @@ class PostgresScheduleRepository(_RelationalScheduleRepository):
                 ),
             )
             conn.commit()
-            return cursor.rowcount > 0
+            return bool(cursor.rowcount > 0)
 
     def claim_next_due(
         self,

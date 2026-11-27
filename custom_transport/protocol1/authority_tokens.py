@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 from custom_messages.contracts.access_v2 import is_person_ref
 from custom_messages.wire.authority_bindings import (
+    AUTHORITY_ISSUER_ROLES,
     GATEWAY_ISSUER_ROLE,
     ROOT_TASK_BINDING,
     SCHEDULER_ISSUER_ROLE,
@@ -48,9 +49,7 @@ from custom_messages.wire.authority_bindings import (
 )
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import (
-    AUTHORITY_ISSUER_ROLES,
     COMMAND_BINDING,
-    SCHEDULE_ISSUER_ROLE,
     sign_authority_token,
 )
 from custom_messages.wire.kinds import AUTHORITY_TOKEN_MAX_SECONDS, COMMAND_TOKEN_MAX_SECONDS, KINDS
@@ -58,6 +57,7 @@ from custom_messages.wire.models import AuthorityToken
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.ids import new_message_id
 
+SCHEDULE_ISSUER_ROLE = SCHEDULER_ISSUER_ROLE
 _BODY_POINTER = "/body/"
 
 

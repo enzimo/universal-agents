@@ -318,8 +318,9 @@ kept as they were:
   whose value mentions the old id, other than the message prefix and the
   gateway's reply queue (which follow the new id), is imported as it is and
   listed for you to check.
-- Schedules' signed contexts name the old id, so they are not carried; the
-  import and the new instance's first start sign them again.
+- Schedules carry their vouched-owner mark (`owner_vouched`) without any old
+  signing keys; team services on the new instance issues fresh scheduler-signed
+  permits after import.
 - Agent types, agent ids, person ids, grant ids and your schedules' ids keep
   theirs. Ids the team builds from its own id follow the new one: the
   built-in maintenance schedule's id and name, and a hosted MCP server's id

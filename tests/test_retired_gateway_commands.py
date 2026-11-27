@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, get_args
@@ -40,7 +41,6 @@ from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_tools.providers.communication import send_message
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.broker_access_support import (
-    context_signer,
     forget_task_context_keys,
     signed_scheduler_token,
     signed_task_token,
@@ -118,7 +118,11 @@ def _queued_0_9_command(
     context["canonical_user_id"] = claimed_person
     if signed == "gateway":
         signed = signed_task_token(PERSON, team_id=world.lead.team_id, roles=("owner",))
-    context["task_context"] = None if signed is None else signed.model_dump(mode="json")
+    context["task_context"] = (
+        None
+        if signed is None
+        else (signed if isinstance(signed, dict) else signed.model_dump(mode="json"))
+    )
     return json.dumps(document).encode()
 
 
@@ -342,7 +346,21 @@ async def test_agents_cannot_send_a_retired_gateway_command() -> None:
 async def test_a_0_9_command_carrying_a_legacy_signed_context_is_set_aside_once_per_c07(world) -> None:
     """C07: an old 0.9 message carrying a legacy SignedTaskContextV1 fails decode and is set aside once."""
 
-    legacy = context_signer().issue(team_id=world.lead.team_id, person_id=PERSON, person_roles=("owner",))
+    now = datetime.now(timezone.utc)
+    legacy = {
+        "context": {
+            "schema_version": 1,
+            "context_id": "task_context_legacy_c07",
+            "issuer": "gateway",
+            "team_id": world.lead.team_id,
+            "person_id": PERSON,
+            "person_roles": ["owner"],
+            "issued_at_utc": now.isoformat(),
+            "expires_at_utc": (now + timedelta(days=7)).isoformat(),
+        },
+        "key_id": "gateway-legacy-c07",
+        "signature": "A" * 86,
+    }
     payload = _queued_0_9_command(world, signed=legacy)
     message = _JsMessage("legacy_0_9_cmd", data=payload, delivered=1, subject="team_test.agent.manager_1234.control")
     adapter = _adapter()

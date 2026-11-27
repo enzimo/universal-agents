@@ -1084,11 +1084,11 @@ def prepare_authority_tokens_for_launch(
 
     - Marker already present for this team (and no pending conversion report): refuse any removed
       signing-key variable immediately.
-    - Marker missing and no legacy rows exist, but a pending conversion report remains from an
-      earlier crashed or failed notice delivery: strip removed keys so runtime services never see
-      them, deliver the pending report and write the marker now (no NATS needed).
-    - Marker missing and no legacy rows exist (fresh 0.10 install): refuse any removed signing-key
-      variable immediately; otherwise write the marker without touching NATS.
+    - Marker missing and no legacy rows exist (fresh 0.10 install, an upgraded 0.9 instance with
+      nothing to convert, or a pending conversion report whose rows are already converted): strip
+      removed signing-key variables from ``inherited_env`` so runtime services never see them,
+      finish any pending report, write the marker without touching NATS, and log a warning naming
+      any removed variables that must be deleted before the next restart.
     - Marker missing and legacy rows exist (upgraded 0.9.x install): move the old signing/verify
       variables out of ``inherited_env`` (so no runtime service ever receives them) into the
       one-shot ``assistant_cli upgrade authority-tokens`` command that runs after
@@ -1108,12 +1108,8 @@ def prepare_authority_tokens_for_launch(
         return None
 
     if not has_legacy_authority_records(config, env=inherited_env):
-        if pending_report:
-            legacy_keys = _strip_removed_signing_keys(inherited_env)
-            upgrade_authority_tokens(config, env={**inherited_env, **legacy_keys})
-            return None
-        reject_removed_signing_key_env_vars(inherited_env)
-        upgrade_authority_tokens(config, env=inherited_env)
+        legacy_keys = _strip_removed_signing_keys(inherited_env)
+        upgrade_authority_tokens(config, env={**inherited_env, **legacy_keys})
         return None
 
     legacy_keys = _strip_removed_signing_keys(inherited_env)

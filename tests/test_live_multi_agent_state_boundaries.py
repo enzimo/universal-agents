@@ -83,7 +83,7 @@ from custom_transport.base import TransportPublishOptions
 from custom_transport.nats_adapter import NatsTransportAdapter
 from custom_transport.subjects import NatsSubjectMapper
 from id_generation import new_id, new_id_suffix
-from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import forget_task_context_keys, signed_task_token, use_scheduler_key
 from tests.test_live_team_services import broker  # noqa: F401 - isolated NATS fixture
 
 
@@ -211,7 +211,7 @@ def signed_person(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], G
     def for_team(team_id: str) -> GatewayContext:
         return GatewayContext(
             canonical_user_id=LIVE_AAR_PERSON,
-            task_context=context_signer().issue(team_id=team_id, person_id=LIVE_AAR_PERSON, person_roles=("member",)),
+            task_context=signed_task_token(LIVE_AAR_PERSON, team_id=team_id, roles=("member",)),
         )
 
     yield for_team

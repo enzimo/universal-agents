@@ -96,7 +96,7 @@ async def test_a_persons_task_list_is_relayed_to_the_agents_host_and_back(
         reply = await gateway.command("tasks.list", body, person_ref=PERSON)
         assert reply.raw["body"].get("queue_digest") == "digest-1", reply.raw["body"]
         # The agent saw the gateway's token, relayed by the team services.
-        assert asked == [(r1, PERSON, frozenset({"team_services"}))]
+        assert asked == [(r1, PERSON, frozenset({"team_services", "scheduler"}))]
 
         # A slow relay must not hold the team's session request queue.
         waiting = asyncio.create_task(gateway.command("tasks.list", {**body, "request_id": "slow-command"},

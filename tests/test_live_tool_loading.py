@@ -99,12 +99,12 @@ def team_lead(tmp_path, monkeypatch, authorization: bool):
     from custom_messages.contracts.task_v1 import Task
     from custom_messages.enums import MessageMetaType
     from tests.task_work_support import bind_task, set_agent_ref
-    from tests.broker_access_support import context_signer, context_verify_keys
+    from tests.broker_access_support import signed_task_token, use_broker_authority_verifier
 
     base, model_id, values = _settings()
     if authorization and not CEDAR_BINARY.is_file():
         pytest.skip("build ua-cedar-authorizer first (cargo build)")
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    use_broker_authority_verifier()
     access_runtime._runtime_access.cache_clear()
     keys = ModelKeys(None, env_lookup=values.get)
     model = build_strands_model(
@@ -127,8 +127,8 @@ def team_lead(tmp_path, monkeypatch, authorization: bool):
     set_agent_ref(agent)
     meta = MessageMeta(conversation_id="conv-live")
     meta.gateway_context = type("Gateway", (), {})()
-    meta.gateway_context.task_context = context_signer().issue(
-        team_id="team_live", person_id="usr_live_owner", person_roles=("owner",)
+    meta.gateway_context.task_context = signed_task_token(
+        "usr_live_owner", team_id="team_live", roles=("owner",)
     )
     agent.task_manager.add_task(Task(task_id="task-live", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
     bind_task("task-live")
@@ -233,12 +233,12 @@ def test_team_lead_raises_a_real_models_cap_through_staging_and_apply(tmp_path, 
     from custom_tools.providers.runtime_settings import plan_runtime_setting_change
     from tests.task_work_support import set_agent_ref
     from custom_agents import access_runtime
-    from tests.broker_access_support import context_verify_keys
+    from tests.broker_access_support import use_broker_authority_verifier
     from tests.test_runtime_settings_tools import _apply_settings_change, _fake_agent, _overrides_path, _write_config
 
     base, model_id, values = _settings()
-    # The gateway's test signing keys, as the offline runtime settings tests use.
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    # Protocol 1 authority verifier, as the offline runtime settings tests use.
+    use_broker_authority_verifier()
     access_runtime._runtime_access.cache_clear()
     config_path = _write_config(tmp_path)
     overrides = _overrides_path(config_path)

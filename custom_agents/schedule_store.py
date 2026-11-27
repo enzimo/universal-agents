@@ -2252,7 +2252,7 @@ class ScheduleStore:
             if token is None:
                 return None
             if hasattr(token, "model_dump_json"):
-                return token.model_dump_json()
+                return str(token.model_dump_json())
             import json
 
             return json.dumps(token)

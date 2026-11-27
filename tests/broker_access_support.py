@@ -19,16 +19,6 @@ from access_catalog.catalog import CatalogSource
 from access_control.account_sharing import TeamAccountSharing
 from access_control.authority_verifier import AuthorityTokenVerifier, set_process_verifier
 from access_control.caller_tokens import CALLER_GATEWAY, CALLER_MANAGER, derive_caller_token
-from access_control.identity import (
-    ENV_GATEWAY_SIGNING_KEY,
-    ENV_SCHEDULER_SIGNING_KEY,
-    ENV_VERIFY_KEYS,
-    ISSUER_GATEWAY,
-    ISSUER_SCHEDULER,
-    ContextSigner,
-    generate_signing_key,
-    verify_keys_value,
-)
 from custom_messages.contracts.access_v2 import (
     AccountLinkV1,
     AccountSharing,
@@ -387,51 +377,25 @@ def signed_scheduler_task_context(
     )
 
 
-@lru_cache(maxsize=1)
-def _gateway_key() -> tuple[str, str]:
-    private, public = generate_signing_key(ISSUER_GATEWAY)
-    return private, verify_keys_value([public])
+def use_scheduler_key(_monkeypatch: Any = None) -> None:
+    """Install the protocol 1 test authority verifier (gateway + scheduler certs).
 
-
-def context_signer() -> ContextSigner:
-    return ContextSigner.from_value(ISSUER_GATEWAY, _gateway_key()[0])
-
-
-def context_verify_keys() -> str:
-    """The public key value for ``ACCESS_CONTEXT_VERIFY_KEYS``."""
-
-    return _gateway_key()[1]
-
-
-@lru_cache(maxsize=1)
-def _scheduler_key() -> tuple[str, dict[str, str]]:
-    return generate_signing_key(ISSUER_SCHEDULER)
-
-
-def use_scheduler_key(monkeypatch: Any) -> None:
-    """Let this process sign as the scheduler (as the manager does) and trust both test keys.
-
-    Call ``forget_task_context_keys`` after the test: the signer, the verifier
-    and the access services are cached per process.
+    Call ``forget_task_context_keys`` after the test: the verifier and access
+    services are cached per process.
     """
 
-    private, public = _scheduler_key()
-    monkeypatch.setenv(ENV_SCHEDULER_SIGNING_KEY, private)
-    monkeypatch.setenv(ENV_VERIFY_KEYS, verify_keys_value([*json.loads(context_verify_keys()), public]))
     forget_task_context_keys()
+    use_broker_authority_verifier()
 
 
-def use_gateway_key(monkeypatch: Any) -> None:
-    """Let this process sign as the gateway (``UserGateway`` reads its key at start) and trust it.
+def use_gateway_key(_monkeypatch: Any = None) -> None:
+    """Install the protocol 1 test authority verifier (gateway + scheduler certs).
 
-    For tests that run a real gateway against a manager over NATS: the manager
-    takes a command's person only from the gateway-signed context. Call
-    ``forget_task_context_keys`` after the test.
+    Call ``forget_task_context_keys`` after the test.
     """
 
-    monkeypatch.setenv(ENV_GATEWAY_SIGNING_KEY, _gateway_key()[0])
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
 
 
 def forget_task_context_keys() -> None:

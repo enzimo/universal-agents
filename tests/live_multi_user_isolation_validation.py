@@ -38,8 +38,8 @@ from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
 from storage.gateway_state_repository import SqliteGatewayStateRepository
 from tests.broker_access_support import (
-    context_signer,
     forget_task_context_keys,
+    signed_task_token,
     use_gateway_key,
 )
 
@@ -61,8 +61,8 @@ class _TaskManager:
             base_dir=str(PROJECT_ROOT),
         )
         self._canonical_user_id = canonical_user_id
-        self._task_context = context_signer().issue(
-            team_id=TEAM_ID, person_id=canonical_user_id, person_roles=roles,
+        self._task_context = signed_task_token(
+            canonical_user_id, team_id=TEAM_ID, roles=roles,
         )
         self.history_entries: list[tuple[str, str]] = []
 

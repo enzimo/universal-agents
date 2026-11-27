@@ -756,7 +756,7 @@ def _knowledge_blobs(runtime: object, *, team: str) -> Any:
     )
 
 
-def _gateway_service_tasks(gateway: "UserGateway") -> list[asyncio.Task]:
+def _gateway_service_tasks(gateway: "UserGateway") -> list[asyncio.Task[Any]]:
     """Start optional background loops owned by the gateway's application services."""
 
     stop_event = gateway._stop_event

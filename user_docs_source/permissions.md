@@ -838,14 +838,17 @@ checks the following, whether authorization is on or off:
    broker never accepts the secret itself. A gateway or agent started by hand
    with the `team.env` value makes its own token from it at start.
 2. **Who the task works for.** When the gateway accepts a request, it signs a
-   record of the person and their current team roles (a *signed task
-   context*). The manager's scheduler signs one for each scheduled run's
-   owner. Delegated tasks carry the record unchanged, so a later step cannot
-   change whom the work is for. The broker refuses a request whose record is
-   missing, forged, or names a different person. The signing keys
-   (`ACCESS_GATEWAY_SIGNING_KEY`, `ACCESS_SCHEDULER_SIGNING_KEY`,
-   `ACCESS_CONTEXT_VERIFY_KEYS`) are generated into `team.env` with the other
-   internal credentials; do not edit them.
+   protocol 1 *authority token* with its host certificate, naming the person by
+   their opaque reference (`person_ref`) and the root task. For scheduled runs,
+   the team services process (which holds the `scheduler` role) signs the run's
+   authority token or standing schedule permit; no agent or model-running
+   process holds a signing key. Delegated tasks carry the token unchanged, so a
+   later step cannot change whom the work is for. Every verifier resolves the
+   person's current standing and roles live from the team's people records and
+   checks the current revocations record, refusing requests whose token is
+   missing, forged, expired, from another team, or signed by a revoked
+   certificate. Host keys and certificates are managed automatically by the
+   installation authority rather than stored in `team.env`.
 3. **What the operation is and its level**, from the tool catalog.
 4. **For web requests, the web API tool that covers the host.** Requests to
    any other host are refused (`access_unlisted_host`). Public pages remain
@@ -1931,21 +1934,17 @@ Account links replace credential bindings, OpenShell bindings, and
 stored-credential consent for MCP connections. Stored credentials stay where
 they are; each needs to be linked to its tool once.
 
-1. Stop Universal Agents and add the task-context signing keys to `team.env`.
-    Rerunning onboarding adds them, or run the following. It adds only missing
-    values and keeps existing ones:
+1. Stop Universal Agents. If your instance is missing internal credentials such
+   as `SECURE_TOOL_BROKER_TOKEN`, rerun onboarding or run the following (it adds
+   only missing values and keeps existing ones):
 
     ```bash
     .venv/bin/python scripts/generate_internal_credentials.py \
       --instance-name <name> --env-file <instance_root>/team.env --write
     ```
 
-    To use Docker secrets instead, set `ACCESS_GATEWAY_SIGNING_KEY_FILE` and
-    `ACCESS_SCHEDULER_SIGNING_KEY_FILE` to files holding the values that the
-    same script prints with `--print` in place of `--env-file ... --write`
-    (see [Docker](docker.md#useful-environment-variables)). Startup refuses
-    while either key is missing (`task_context_keys_missing`) and prints this
-    command.
+    When upgrading from 0.9, see [Upgrading](upgrading.md) for the one-time
+    authority-token conversion and removal of obsolete signing-key variables.
 
 2. Start Universal Agents. If installed MCP connection records still carry
     credential binding data (every install from before this version that has

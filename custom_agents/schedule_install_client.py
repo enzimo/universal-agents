@@ -209,7 +209,8 @@ async def _instruction_content(
         raise RuntimeError(
             "Schedule instruction exceeds the 32,768-character inline limit and no blob store is available."
         )
-    from custom_transport.protocol1.knowledge_blobs import BlobOwner, encode_text_content
+    from custom_transport.protocol1.blobs import BlobOwner
+    from custom_transport.protocol1.knowledge_blobs import encode_text_content
 
     person_ref = str(authority_token.get("person") or "")
     owner = BlobOwner(request_id=request_id, person_ref=person_ref)

@@ -347,3 +347,18 @@ def test_google_application_credentials_is_no_longer_a_listed_secret(tmp_path: P
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in resolved
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in {name for name, _entry in SECRET_ENV_LIST.entries()}
+
+
+def test_environment_for_withholds_removed_signing_keys_from_every_process() -> None:
+    """C41: removed 0.9 signing-key variables and their _FILE forms reach no runtime process."""
+
+    from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
+
+    env = {"PATH": "/usr/bin"}
+    for name in REMOVED_SIGNING_KEY_ENV_VARS:
+        env[name] = f"secret-{name}"
+        env[f"{name}_FILE"] = f"/run/secrets/{name.lower()}"
+
+    for process in sorted(PROCESS_NAMES):
+        scoped = environment_for(process, env)
+        assert scoped == {"PATH": "/usr/bin"}, f"{process} unexpectedly received {set(scoped) - {'PATH'}}"

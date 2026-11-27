@@ -175,21 +175,15 @@ class _FixedGatewayClock:
 
 
 @pytest.fixture
-def gateway_signed_commands(monkeypatch: pytest.MonkeyPatch):
-    """The manager reads a command's person only from its gateway-signed context."""
+def gateway_signed_commands():
+    """The manager reads a command's person only from its verified protocol 1 authority token."""
 
-    from tests.broker_access_support import context_verify_keys, forget_task_context_keys
+    from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
-
-
-def _gateway_signer():
-    from tests.broker_access_support import context_signer
-
-    return context_signer()
 
 
 class _FakeGatewayManagerRuntime:

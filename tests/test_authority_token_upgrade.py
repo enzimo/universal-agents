@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sqlite3
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -794,6 +795,7 @@ def test_missing_legacy_keys_stops_conversion_without_writing_marker(tmp_path: P
     """When legacy 0.9 rows exist without old verify keys, conversion refuses without changing rows or writing the marker."""
 
     config = _make_config(tmp_path)
+    config.security_layer.sealbox.manage_service = False
     manager_db = Path(config.manager_storage_settings.sqlite_path or "")
     _init_09_sqlite(manager_db)
     gw_signer = _Legacy09Signer("gateway", "gateway-missing")
@@ -848,6 +850,7 @@ def test_crash_after_commit_or_notice_failure_preserves_pending_report_for_next_
     from instance_upgrades.authority_tokens import has_pending_authority_token_report
 
     config = _make_config(tmp_path)
+    config.security_layer.sealbox.manage_service = False
     manager_db = Path(config.manager_storage_settings.sqlite_path or "")
     gateway_db = Path(config.state_storage_settings.sqlite_path or "")
     _init_09_sqlite(manager_db)
@@ -955,6 +958,7 @@ def test_launcher_converter_hook_command_env_error_and_offline_allow_unverifiabl
     import subprocess
 
     config = _make_config(tmp_path)
+    config.security_layer.sealbox.manage_service = False
     manager_db = Path(config.manager_storage_settings.sqlite_path or "")
     _init_09_sqlite(manager_db)
     gw_signer = _Legacy09Signer("gateway", "gateway-hook")
@@ -1054,29 +1058,53 @@ def test_signing_keys_removed_from_templates_secrets_yaml_and_internal_credentia
         assert removed not in secrets_yaml
 
 
-def test_launcher_fresh_install_refuses_removed_keys_and_upgraded_install_converts_before_refusal(
-    tmp_path: Path,
+def test_launcher_first_start_accepts_removed_keys_once_and_refuses_after_marker(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A6: fresh install refuses removed keys immediately; upgraded install with legacy rows runs
-    conversion first (without passing old keys to runtime services), writes marker, and refuses
-    on the next start if any removed key is still set."""
+    """A6 + C42: one unified upgrade flow at the first start without a marker.
 
-    # 1. Fresh 0.10 install (no legacy rows): refuses removed signing keys immediately.
-    fresh_config = _make_config(tmp_path / "fresh")
-    fresh_cfg_path = fresh_config.config_path
+    - First start without the marker and no legacy rows: removed signing-key variables are
+      accepted once, stripped from ``inherited_env``, the marker is written, and a warning
+      names the variables to remove; from the next start on they are refused.
+    - Clean first start without the marker and no old keys: writes the marker silently.
+    - First start that already has the marker: refused immediately.
+    - Upgraded 0.9 install with legacy rows: strips keys from ``inherited_env`` and hands
+      them only to the converter hook.
+    """
+
+    # 1. First start without marker, no legacy rows, removed key still set (e.g. 0.9 instance
+    #    with nothing to convert): accepted once, stripped, marker written, warning logged.
+    empty_09_config = _make_config(tmp_path / "empty_09")
+    empty_env = {
+        "SECURE_TOOL_BROKER_TOKEN": "stb_1",
+        "ACCESS_GATEWAY_SIGNING_KEY": "old-key",
+    }
+    with caplog.at_level(logging.WARNING, logger="instance_upgrades.authority_tokens"):
+        hook = prepare_authority_tokens_for_launch(empty_09_config, empty_09_config.config_path, empty_env)
+    assert hook is None
+    assert "ACCESS_GATEWAY_SIGNING_KEY" not in empty_env
+    assert authority_tokens_upgrade_done(empty_09_config) is True
+    assert "ACCESS_GATEWAY_SIGNING_KEY" in caplog.text
+    assert "event=authority_token_conversion_remove_old_keys" in caplog.text
+
+    # From the next start on (marker present), removed keys are refused immediately.
     with pytest.raises(ValueError, match="ACCESS_GATEWAY_SIGNING_KEY"):
         prepare_authority_tokens_for_launch(
-            fresh_config,
-            fresh_cfg_path,
+            empty_09_config,
+            empty_09_config.config_path,
             {"ACCESS_GATEWAY_SIGNING_KEY": "old-key"},
         )
-    assert not fresh_config.layout.authority_tokens_upgrade_path.exists()
 
-    # Clean fresh install writes the marker without needing NATS.
+    # 2. Clean fresh 0.10 install (no marker, no legacy rows, no removed keys): writes marker silently.
+    fresh_config = _make_config(tmp_path / "fresh")
+    fresh_cfg_path = fresh_config.config_path
     clean_env: dict[str, str] = {"SECURE_TOOL_BROKER_TOKEN": "stb_1"}
-    hook = prepare_authority_tokens_for_launch(fresh_config, fresh_cfg_path, clean_env)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="instance_upgrades.authority_tokens"):
+        hook = prepare_authority_tokens_for_launch(fresh_config, fresh_cfg_path, clean_env)
     assert hook is None
     assert authority_tokens_upgrade_done(fresh_config) is True
+    assert caplog.text == ""
 
     # Subsequent start with marker present refuses any removed key or _FILE form via build_process_env.
     with pytest.raises(ValueError, match="ACCESS_SCHEDULER_SIGNING_KEY_FILE"):
@@ -1087,7 +1115,7 @@ def test_launcher_fresh_install_refuses_removed_keys_and_upgraded_install_conver
             allow_legacy_signing_keys=False,
         )
 
-    # 2. Upgraded 0.9 install (marker missing, legacy row present): old keys are stripped from
+    # 3. Upgraded 0.9 install (marker missing, legacy row present): old keys are stripped from
     #    inherited_env and isolated exclusively to the conversion hook.
     up_config = _make_config(tmp_path / "upgraded")
     manager_db = Path(up_config.manager_storage_settings.sqlite_path or "")
@@ -1118,6 +1146,135 @@ def test_launcher_fresh_install_refuses_removed_keys_and_upgraded_install_conver
     assert hook is not None
     assert "ACCESS_GATEWAY_SIGNING_KEY" not in inherited_env
     assert "ACCESS_CONTEXT_VERIFY_KEYS" not in inherited_env
+
+
+def test_launch_headless_main_wires_converter_hook_and_isolates_legacy_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C40: drives launch_headless.main() on a seeded 0.9 store with legacy keys in team.env
+    and verifies MessageServices receives after_authority_ready, runtime envs never receive
+    the legacy keys, and invoking the hook passes the legacy keys only to the converter."""
+
+    import subprocess
+    import sys as _sys
+
+    import docker.launch_headless as launch_headless_module
+
+    config = _make_config(tmp_path)
+    config.security_layer.sealbox.manage_service = False
+    manager_db = Path(config.manager_storage_settings.sqlite_path or "")
+    _init_09_sqlite(manager_db)
+
+    gw_signer = _Legacy09Signer("gateway", "gateway-main")
+    sched_signer = _Legacy09Signer("scheduler", "scheduler-main")
+    now = datetime.now(timezone.utc)
+    ctx = gw_signer.sign_context(
+        context_id="task_context_main",
+        team_id=TEAM,
+        person_id="ada",
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(days=2),
+    )
+    with sqlite3.connect(str(manager_db)) as conn:
+        conn.execute(
+            "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("sched_main", "{}", json.dumps(_schedule_dict(schedule_id="sched_main", name="Main", owner_id="ada", task_context=ctx)), "Main", now.isoformat(), now.isoformat(), 1, TEAM, "ada"),
+        )
+        conn.commit()
+
+    env_file = config.layout.team_env_path
+    env_file.write_text(
+        f"ACCESS_GATEWAY_SIGNING_KEY={gw_signer.env_private_value}\n"
+        f"ACCESS_SCHEDULER_SIGNING_KEY={sched_signer.env_private_value}\n"
+        f"ACCESS_CONTEXT_VERIFY_KEYS={json.dumps([gw_signer.verify_entry, sched_signer.verify_entry])}\n"
+        "SECURE_TOOL_BROKER_TOKEN=stb_main_test\n"
+        "WEB_CHAT_AUTH_TOKEN=wcat_main_test\n"
+        "TEAM_LOCAL_NATS_ENABLED=false\n",
+        encoding="utf-8",
+    )
+
+    captured_services: dict[str, Any] = {}
+    captured_supervised: dict[str, Any] = {}
+    captured_hook_run: dict[str, Any] = {}
+
+    class _FakeMessageServices:
+        def __init__(
+            self,
+            layout: Any,
+            expected_hosts: Any,
+            transport: Any,
+            authority_command: Any,
+            authority_env: Mapping[str, str],
+            team_services_command: Any,
+            team_services_env: Mapping[str, str],
+            *,
+            cwd: Path,
+            after_authority_ready: Any = None,
+        ) -> None:
+            captured_services["authority_env"] = dict(authority_env)
+            captured_services["team_services_env"] = dict(team_services_env)
+            captured_services["after_authority_ready"] = after_authority_ready
+
+        def start(self, *, stop_requested: Any = None) -> bool:
+            captured_services["started"] = True
+            return True
+
+        def stop(self, _terminate: Any) -> None:
+            pass
+
+    def _fake_run_supervised(**kwargs: Any) -> int:
+        captured_supervised.update(kwargs)
+        return 0
+
+    def _fake_subprocess_run(
+        command: list[str], *, cwd: Path, env: dict[str, str], check: bool
+    ) -> subprocess.CompletedProcess[bytes]:
+        captured_hook_run["command"] = list(command)
+        captured_hook_run["env"] = dict(env)
+        return subprocess.CompletedProcess(command, 0)
+
+    for removed in REMOVED_SIGNING_KEY_ENV_VARS:
+        monkeypatch.delenv(removed, raising=False)
+        monkeypatch.delenv(f"{removed}_FILE", raising=False)
+    monkeypatch.setattr(_sys, "argv", ["launch_headless.py", "--config", str(config.config_path), "--env", str(env_file)])
+    monkeypatch.setattr(launch_headless_module, "MessageServices", _FakeMessageServices)
+    monkeypatch.setattr(launch_headless_module, "run_nats_consumer_preflight", lambda **_: None)
+    monkeypatch.setattr(launch_headless_module, "prepare_message_streams_before_services", lambda *a, **kw: True)
+    monkeypatch.setattr(launch_headless_module, "validate_memory_graph_embedding_preflight", lambda *a, **kw: None)
+    monkeypatch.setattr(launch_headless_module, "ensure_managed_sealbox_service", lambda *a, **kw: None)
+    monkeypatch.setattr(launch_headless_module, "ensure_openshell_gateway", lambda *a, **kw: None)
+    monkeypatch.setattr(launch_headless_module, "ensure_openshell_sandbox", lambda *a, **kw: None)
+    monkeypatch.setattr(launch_headless_module, "run_supervised", _fake_run_supervised)
+
+    assert launch_headless_module.main() == 0
+    assert captured_services.get("started") is True
+    hook = captured_services.get("after_authority_ready")
+    assert callable(hook)
+
+    # Neither authority/team-services nor any supervised runtime service sees the removed keys.
+    service_envs: list[tuple[str, Mapping[str, str]]] = [
+        ("installation_authority", captured_services["authority_env"]),
+        ("team_services", captured_services["team_services_env"]),
+        ("manager", captured_supervised["manager_env"]),
+        ("gateway", captured_supervised["gateway_env"]),
+        ("secure_tool_broker", captured_supervised["secure_tool_broker_env"]),
+        ("activity_collector", captured_supervised["activity_collector_env"]),
+    ]
+    for label, agent_env in captured_supervised["startup_agent_envs"].items():
+        service_envs.append((f"agent:{label}", agent_env))
+    for svc_name, svc_env in service_envs:
+        for removed in REMOVED_SIGNING_KEY_ENV_VARS:
+            assert removed not in svc_env, f"{svc_name} received {removed}"
+            assert f"{removed}_FILE" not in svc_env, f"{svc_name} received {removed}_FILE"
+
+    # Invoking the hook passes all three legacy keys exclusively to the converter subprocess.
+    monkeypatch.setattr(launch_headless_module.subprocess, "run", _fake_subprocess_run)
+    hook()
+    assert captured_hook_run["command"][-4:] == ["upgrade", "authority-tokens", "--config", str(config.config_path)]
+    assert captured_hook_run["env"]["ACCESS_GATEWAY_SIGNING_KEY"] == gw_signer.env_private_value
+    assert captured_hook_run["env"]["ACCESS_SCHEDULER_SIGNING_KEY"] == sched_signer.env_private_value
+    assert "ACCESS_CONTEXT_VERIFY_KEYS" in captured_hook_run["env"]
 
 
 # ---------------------------------------------------------------------------
@@ -1366,31 +1523,34 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
 def test_live_bundle_first_start_converter_hook_and_real_host_certificates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """C36 + C39: drives the bundle entry point env path + launcher converter hook on a real
-    nats-server 2.15.1 against a real installation-authority and real team-services, proving:
-    1. An upgraded 0.9 bundle instance with legacy keys in team.env converts at its first start.
+    """C36 + C39 + C40: runs the real launch_headless.main() entry point on a seeded 0.9 store
+    with legacy keys in team.env against a real nats-server, real installation-authority, real
+    converter subprocess, and real team-services, proving:
+    1. launch_headless.main() strips legacy keys from runtime services and passes the converter
+       hook as after_authority_ready into MessageServices.
     2. The converter subprocess joins installation-authority as gateway and team-services and
        re-signs a waiting task and a schedule permit with real host certificates.
     3. Real team-services (started right after the hook) and a real gateway host reuse those
        certificates, and their AuthorityTokenVerifier resolves both converted tokens.
-    4. A second bundle start with the old keys still set refuses cleanly with exit code 2."""
+    4. A second bundle start (run_bundle.main) with the old keys still set refuses with exit 2."""
 
     import asyncio
+    import sys as _sys
 
+    import docker.launch_headless as launch_headless_module
     import docker.run_bundle as run_bundle_module
     from assistant_gateway.message_host import GATEWAY_RUNTIME, gateway_profile
     from custom_transport.nats_adapter import NatsTransportAdapter, NatsTransportConfig
     from custom_transport.protocol1.host_runtime import MessageHost
     from custom_transport.subjects import NatsSubjectMapper
-    from docker import message_hosts
     from docker.launch_headless import terminate_process
-    from env_secrets import PROCESS_INSTALLATION_AUTHORITY, PROCESS_TEAM_SERVICES, environment_for
     from team_services.process import TEAM_SERVICES_RUNTIME, team_services_profile
     from team_services.serving import serving_process
     from tests.own_nats_server import own_nats_server
     from tests.test_live_message_contract import nats_server
 
     config = _make_config(tmp_path)
+    config.security_layer.sealbox.manage_service = False
     manager_db = Path(config.manager_storage_settings.sqlite_path or "")
     _init_09_sqlite(manager_db)
 
@@ -1473,7 +1633,9 @@ def test_live_bundle_first_start_converter_hook_and_real_host_certificates(
     env_file.write_text(
         f"ACCESS_GATEWAY_SIGNING_KEY={gw_signer.env_private_value}\n"
         f"ACCESS_SCHEDULER_SIGNING_KEY={sched_signer.env_private_value}\n"
-        "SECURE_TOOL_BROKER_TOKEN=stb_live_upgrade\n",
+        "SECURE_TOOL_BROKER_TOKEN=stb_live_upgrade\n"
+        "WEB_CHAT_AUTH_TOKEN=wcat_live_upgrade\n"
+        "TEAM_LOCAL_NATS_ENABLED=false\n",
         encoding="utf-8",
     )
 
@@ -1482,144 +1644,112 @@ def test_live_bundle_first_start_converter_hook_and_real_host_certificates(
         config.transport.nats_servers = [broker_url]
         config.save(config.config_path)
 
-        base_ambient = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith("NATS_") and k not in REMOVED_SIGNING_KEY_ENV_VARS
-        }
-        base_ambient["NATS_URL"] = broker_url
-        base_ambient["NATS_SERVERS"] = broker_url
+        for key in list(os.environ):
+            if key.startswith("NATS_") or key in REMOVED_SIGNING_KEY_ENV_VARS or any(
+                key == f"{name}_FILE" for name in REMOVED_SIGNING_KEY_ENV_VARS
+            ):
+                monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("NATS_URL", broker_url)
+        monkeypatch.setenv("NATS_SERVERS", broker_url)
 
-        # Step 1 (C36): Bundle entry point prepares env without refusing pre-marker legacy keys.
-        bundle_effective = build_process_env(
-            config,
-            env_path=env_file,
-            base_env=base_ambient,
-            allow_legacy_signing_keys=not authority_tokens_upgrade_done(config),
-        )
-        bundle_runtime_env = run_bundle_module.build_bundle_runtime_env(
-            config,
-            base_env=bundle_effective,
-            ambient_env=base_ambient,
-            bundled_nats_enabled=False,
-        )
+        verified_certs: dict[str, str] = {}
 
-        # Step 2 (launch_headless): builds inherited_env, strips legacy keys into converter hook only.
-        inherited_env = build_process_env(
-            config,
-            env_path=env_file,
-            base_env=bundle_runtime_env,
-            allow_legacy_signing_keys=not authority_tokens_upgrade_done(config),
-        )
-        hook = prepare_authority_tokens_for_launch(config, config.config_path, inherited_env)
-        assert hook is not None
-        for removed in REMOVED_SIGNING_KEY_ENV_VARS:
-            assert removed not in inherited_env
+        def _verify_and_stop_in_supervised(**kwargs: Any) -> int:
+            services = kwargs["message_services"]
+            try:
+                assert authority_tokens_upgrade_done(config) is True
+                assert has_legacy_authority_records(config, env=kwargs["manager_env"]) is False
+                for svc_key in ("manager_env", "gateway_env", "secure_tool_broker_env", "activity_collector_env"):
+                    for removed in REMOVED_SIGNING_KEY_ENV_VARS:
+                        assert removed not in kwargs[svc_key]
+                assert services.team_services is not None
+                assert serving_process(config.layout) == services.team_services.pid
 
-        # Step 3 (C39): Real installation-authority -> REAL converter hook -> REAL team-services.
-        services = message_hosts.MessageServices(
-            config.layout,
-            lambda: {
-                TEAM_SERVICES_RUNTIME: message_hosts.expected_host(config.layout, team_services_profile(TEAM)),
-                GATEWAY_RUNTIME: message_hosts.expected_host(config.layout, gateway_profile(TEAM)),
-            },
-            lambda: GatewayInstanceConfig.load_for_process(config.config_path).transport,
-            message_hosts.build_installation_authority_command(config.config_path, repo_root=REPO_ROOT),
-            environment_for(PROCESS_INSTALLATION_AUTHORITY, inherited_env),
-            message_hosts.build_team_services_command(config.config_path, repo_root=REPO_ROOT),
-            environment_for(PROCESS_TEAM_SERVICES, inherited_env),
-            cwd=REPO_ROOT,
-            after_authority_ready=hook,
-        )
-        try:
-            assert services.start() is True
-            assert authority_tokens_upgrade_done(config) is True
-            assert has_legacy_authority_records(config, env=inherited_env) is False
-            assert services.team_services is not None
-            assert serving_process(config.layout) == services.team_services.pid
+                async def _verify_with_live_hosts() -> tuple[str, str]:
+                    async def _join(runtime_name: str, profile: Any):
+                        cfg = NatsTransportConfig(
+                            servers=[broker_url],
+                            name=f"live-check-{runtime_name}",
+                            subject_prefix=config.transport.subject_prefix,
+                            jetstream_enabled=False,
+                            reply_inbox_runtime=runtime_name,
+                        )
+                        adapter = NatsTransportAdapter(config=cfg, mapper=NatsSubjectMapper(team_id=TEAM))
+                        await adapter.connect()
+                        host = MessageHost(config.layout, profile, adapter.nats_connection)
+                        live = await host.start(report=False)
+                        return adapter, host, live
 
-            # Step 4: Join a real gateway host and a real team-services check to the same authority,
-            # confirming certificate reuse and live AuthorityTokenVerifier verification of both tokens.
-            async def _verify_with_live_hosts() -> tuple[str, str]:
-                async def _join(runtime_name: str, profile: Any):
-                    cfg = NatsTransportConfig(
-                        servers=[broker_url],
-                        name=f"live-check-{runtime_name}",
-                        subject_prefix=config.transport.subject_prefix,
-                        jetstream_enabled=False,
-                        reply_inbox_runtime=runtime_name,
-                    )
-                    adapter = NatsTransportAdapter(config=cfg, mapper=NatsSubjectMapper(team_id=TEAM))
-                    await adapter.connect()
-                    host = MessageHost(config.layout, profile, adapter.nats_connection)
-                    live = await host.start(report=False)
-                    return adapter, host, live
+                    gw_adapter, gw_host, gw_live = await _join(GATEWAY_RUNTIME, gateway_profile(TEAM))
+                    ts_adapter, ts_host, ts_live = await _join(TEAM_SERVICES_RUNTIME, team_services_profile(TEAM))
+                    try:
+                        access_repo = AccessRepository(config.manager_storage_settings)
+                        gw_verifier = AuthorityTokenVerifier(
+                            gw_host, people=access_repo, installation=gw_live.identity.installation
+                        )
+                        ts_verifier = AuthorityTokenVerifier(
+                            ts_host, people=access_repo, installation=ts_live.identity.installation
+                        )
 
-                gw_adapter, gw_host, gw_live = await _join(GATEWAY_RUNTIME, gateway_profile(TEAM))
-                ts_adapter, ts_host, ts_live = await _join(TEAM_SERVICES_RUNTIME, team_services_profile(TEAM))
-                try:
-                    access_repo = AccessRepository(config.manager_storage_settings)
-                    gw_verifier = AuthorityTokenVerifier(
-                        gw_host, people=access_repo, installation=gw_live.identity.installation
-                    )
-                    ts_verifier = AuthorityTokenVerifier(
-                        ts_host, people=access_repo, installation=ts_live.identity.installation
-                    )
+                        with sqlite3.connect(str(manager_db)) as conn:
+                            wait_raw = conn.execute(
+                                "SELECT payload_json FROM active_task_runtime_records WHERE owner_agent_id = 'lead_1' AND record_id = 'task_live_wait'"
+                            ).fetchone()[0]
+                            sched_row = conn.execute(
+                                "SELECT owner_vouched, run_permit_json FROM scheduled_messages WHERE schedule_id = 'sched_live_ada'"
+                            ).fetchone()
 
-                    # Verify converted waiting task token with team-services' live verifier
-                    # (fetching gateway's certificate from UA1_CERTS on demand, as in production).
-                    with sqlite3.connect(str(manager_db)) as conn:
-                        wait_raw = conn.execute(
-                            "SELECT payload_json FROM active_task_runtime_records WHERE owner_agent_id = 'lead_1' AND record_id = 'task_live_wait'"
-                        ).fetchone()[0]
-                        sched_row = conn.execute(
-                            "SELECT owner_vouched, run_permit_json FROM scheduled_messages WHERE schedule_id = 'sched_live_ada'"
-                        ).fetchone()
+                        rec = TaskSnapshotRecord.model_validate_json(wait_raw)
+                        assert rec.meta.gateway_context is not None
+                        wait_tok = rec.meta.gateway_context.task_context
+                        assert wait_tok is not None
+                        assert wait_tok.issuer.key_id == gw_live.identity.certificate.key_id
+                        assert wait_tok.issuer.membership_epoch == gw_live.identity.certificate.membership_epoch
+                        assert gw_live.identity.certificate.replaces is None
+                        check_now = datetime.now(timezone.utc)
+                        assert await ts_verifier.ensure_issuer_known(wait_tok, now=check_now) is True
+                        resolved_wait = resolve_task_identity(
+                            verifier=ts_verifier,
+                            team_id=TEAM,
+                            task_context=wait_tok,
+                            schedule_run=None,
+                            schedule_runs=None,
+                            now=check_now,
+                        )
+                        assert resolved_wait.person_id == "ada"
+                        assert resolved_wait.context_id == "task_context_live_wait"
 
-                    rec = TaskSnapshotRecord.model_validate_json(wait_raw)
-                    assert rec.meta.gateway_context is not None
-                    wait_tok = rec.meta.gateway_context.task_context
-                    assert wait_tok is not None
-                    assert wait_tok.issuer.key_id == gw_live.identity.certificate.key_id
-                    assert wait_tok.issuer.membership_epoch == gw_live.identity.certificate.membership_epoch
-                    assert gw_live.identity.certificate.replaces is None
-                    check_now = datetime.now(timezone.utc)
-                    assert await ts_verifier.ensure_issuer_known(wait_tok, now=check_now) is True
-                    resolved_wait = resolve_task_identity(
-                        verifier=ts_verifier,
-                        team_id=TEAM,
-                        task_context=wait_tok,
-                        schedule_run=None,
-                        schedule_runs=None,
-                        now=check_now,
-                    )
-                    assert resolved_wait.person_id == "ada"
-                    assert resolved_wait.context_id == "task_context_live_wait"
+                        assert sched_row[0] == 1 and sched_row[1] is not None
+                        permit_tok = AuthorityToken.model_validate_json(sched_row[1])
+                        assert permit_tok.issuer.key_id == ts_live.identity.certificate.key_id
+                        assert permit_tok.issuer.membership_epoch == ts_live.identity.certificate.membership_epoch
+                        assert ts_live.identity.certificate.replaces is None
+                        assert await gw_verifier.ensure_issuer_known(permit_tok, now=check_now) is True
+                        verified_permit = gw_verifier.verify_schedule_permit(permit_tok, team_id=TEAM, now=check_now)
+                        assert verified_permit.person_id == "ada"
+                        assert verified_permit.schedule_id == "sched_live_ada"
+                        assert "scheduler" in verified_permit.issuer_roles
+                        return gw_live.identity.certificate.certificate_id, ts_live.identity.certificate.certificate_id
+                    finally:
+                        await gw_adapter.close()
+                        await ts_adapter.close()
 
-                    # Verify converted schedule permit with gateway's live verifier.
-                    assert sched_row[0] == 1 and sched_row[1] is not None
-                    permit_tok = AuthorityToken.model_validate_json(sched_row[1])
-                    assert permit_tok.issuer.key_id == ts_live.identity.certificate.key_id
-                    assert permit_tok.issuer.membership_epoch == ts_live.identity.certificate.membership_epoch
-                    assert ts_live.identity.certificate.replaces is None
-                    assert await gw_verifier.ensure_issuer_known(permit_tok, now=check_now) is True
-                    verified_permit = gw_verifier.verify_schedule_permit(permit_tok, team_id=TEAM, now=check_now)
-                    assert verified_permit.person_id == "ada"
-                    assert verified_permit.schedule_id == "sched_live_ada"
-                    assert "scheduler" in verified_permit.issuer_roles
-                    return gw_live.identity.certificate.certificate_id, ts_live.identity.certificate.certificate_id
-                finally:
-                    await gw_adapter.close()
-                    await ts_adapter.close()
+                gw_cert_id, ts_cert_id = asyncio.run(_verify_with_live_hosts())
+                verified_certs["gateway"] = gw_cert_id
+                verified_certs["team_services"] = ts_cert_id
+            finally:
+                services.stop(terminate_process)
+            return 0
 
-            gw_cert_id, ts_cert_id = asyncio.run(_verify_with_live_hosts())
-            assert gw_cert_id and ts_cert_id
-        finally:
-            services.stop(terminate_process)
+        monkeypatch.setattr(_sys, "argv", ["launch_headless.py", "--config", str(config.config_path), "--env", str(env_file)])
+        monkeypatch.setattr(launch_headless_module, "run_supervised", _verify_and_stop_in_supervised)
 
-        # Step 5 (C36): Post-marker bundle start refuses the still-present old keys in team.env.
-        import sys as _sys
+        # Real launch_headless.main() runs: prepare_authority_tokens_for_launch -> prepare_message_streams ->
+        # MessageServices(after_authority_ready=hook).start() -> real authority -> real converter -> real team-services.
+        assert launch_headless_module.main() == 0
+        assert verified_certs.get("gateway") and verified_certs.get("team_services")
 
+        # Post-marker bundle start refuses the still-present old keys in team.env with exit code 2.
         monkeypatch.setattr(_sys, "argv", ["run_bundle.py", "--config", str(config.config_path)])
         monkeypatch.setenv("TEAM_BUNDLE_SERVICE_ROOT", str(tmp_path / "services"))
         assert run_bundle_module.main() == 2

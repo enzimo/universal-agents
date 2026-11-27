@@ -30,15 +30,15 @@ from custom_tools.comms_tools import TeamComms
 from test_live_nats_replacement_semantics import _adapter, _subscribe_queue, _team
 from test_turn_action_outbox import _make_agent
 from tests.pending_work_support import idle_runtime_coordinator
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import forget_task_context_keys, signed_task_token, use_broker_authority_verifier
 
 
 @pytest.fixture
-def gateway_signed_commands(monkeypatch):
-    """The manager takes a command's person only from its gateway-signed context."""
+def gateway_signed_commands():
+    """The manager takes a command's person only from its verified protocol 1 authority token."""
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -114,7 +114,7 @@ async def test_controls_remain_available_during_model_work_and_after_stop(
                 owner_agent_id=agent.id, owner_agent_name="Lead", task_request=task,
                 msg_header=header, msg_meta=MessageMeta(gateway_context=GatewayContext(
                     canonical_user_id="owner",
-                    task_context=context_signer().issue(team_id=team, person_id="owner", person_roles=("member",)),
+                    task_context=signed_task_token("owner", team_id=team, roles=("member",), root_task_id=task_id),
                 )),
                 owner_person_id="owner",
             )
@@ -169,7 +169,7 @@ async def test_controls_remain_available_during_model_work_and_after_stop(
                                              response_routing_key=reply),
                     msg_meta=MessageMeta(gateway_context=GatewayContext(
                         canonical_user_id="owner",
-                        task_context=context_signer().issue(team_id=team, person_id="owner", person_roles=("member",)),
+                        task_context=signed_task_token("owner", team_id=team, roles=("member",)),
                     )),
                 ), routing_key=agent.id,
             )
@@ -209,8 +209,8 @@ async def test_controls_remain_available_during_model_work_and_after_stop(
                     msg_meta=MessageMeta(msg_correlation_id="corr_rejected_chat",
                                          gateway_context=GatewayContext(
                                              canonical_user_id="owner",
-                                             task_context=context_signer().issue(
-                                                 team_id=team, person_id="owner", person_roles=("member",),
+                                             task_context=signed_task_token(
+                                                 "owner", team_id=team, roles=("member",), root_task_id="rejected_chat",
                                              ),
                                          )),
                 ), routing_key=agent.id,

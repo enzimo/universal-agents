@@ -122,7 +122,7 @@ async def ask_scheduler(agent: Any, kind: str, body: Mapping[str, Any], *,
     host = process_host()
     if host is None:
         raise AgentUnreachable(NO_HOST.reason, clears=False)
-    return await host.ask_scheduler(kind, body, sender_agent=str(agent.id), timeout=timeout)
+    return dict(await host.ask_scheduler(kind, body, sender_agent=str(agent.id), timeout=timeout))
 
 
 async def ask_team(
@@ -138,8 +138,10 @@ async def ask_team(
     host = process_host()
     if host is None:
         raise AgentUnreachable(NO_HOST.reason, clears=False)
-    return await host.ask_team(
-        kind, body, sender_agent=str(agent.id), authority=authority, timeout=timeout
+    return dict(
+        await host.ask_team(
+            kind, body, sender_agent=str(agent.id), authority=authority, timeout=timeout
+        )
     )
 
 

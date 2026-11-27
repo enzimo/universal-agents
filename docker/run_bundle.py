@@ -366,17 +366,10 @@ def _postgres_environment() -> dict[str, str]:
 
     This launcher's own environment holds every secret (it starts the
     headless supervisor with them); docker/secret_env_vars.yaml names no
-    secret for the ``postgres`` process. Also strip obsolete 0.9 signing-key
-    variables during a first-start upgrade so Postgres never sees them.
+    secret for the ``postgres`` process.
     """
 
-    from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
-
-    scoped = environment_for(PROCESS_POSTGRES, os.environ)
-    for name in REMOVED_SIGNING_KEY_ENV_VARS:
-        scoped.pop(name, None)
-        scoped.pop(f"{name}_FILE", None)
-    return scoped
+    return environment_for(PROCESS_POSTGRES, os.environ)
 
 
 def _run_as_user(

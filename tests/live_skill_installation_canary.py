@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
-import os
 import re
 import shutil
 import sys
@@ -55,7 +54,7 @@ from custom_messages.contracts.access_v2 import (
     TargetKind,
     TargetRefV1,
 )
-from tests.broker_access_support import context_verify_keys
+from tests.broker_access_support import use_broker_authority_verifier
 from tests.change_approval_support import ToolCall, change_agent, decide, owner, run_apply_change, stored_request
 
 DEFAULT_BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -245,8 +244,8 @@ def run_canary(
         "source_request": {"repository_url": repository_url, "skill_path": skill_path},
         "checks": checks,
     }
-    # The test gateway key signs the owner's task context; agents trust only it.
-    os.environ["ACCESS_CONTEXT_VERIFY_KEYS"] = context_verify_keys()
+    # Protocol 1 authority verifier for the owner's task token.
+    use_broker_authority_verifier()
     access_runtime._runtime_access.cache_clear()
     with TemporaryDirectory(prefix="ua-live-skill-installation-") as temp_dir:
         root = Path(temp_dir) / "instance"

@@ -737,14 +737,13 @@ ACTIVITY_COLLECTOR_ADMIN_TOKEN=
 `SECURE_TOOL_BROKER_TOKEN` is the secure tool broker's secret. The supervisor
 gives the broker that value and every other process its own token made from
 it, so the broker knows which process is calling; the broker never accepts the
-plain value. A gateway or agent started by hand makes its own token at start. The internal credentials step also writes the
-task-context signing keys (`ACCESS_GATEWAY_SIGNING_KEY`,
-`ACCESS_SCHEDULER_SIGNING_KEY`, `ACCESS_CONTEXT_VERIFY_KEYS`), which sign the
-record of whom each task works for. Do not edit them. The signing keys can also
-come from Docker secrets (`ACCESS_GATEWAY_SIGNING_KEY_FILE`,
-`ACCESS_SCHEDULER_SIGNING_KEY_FILE`); the supervisor derives the verification
-keys from them. See
-[Tool access and account links](permissions.md#tool-access-and-account-links).
+plain value. A gateway or agent started by hand makes its own token at start.
+Who a task works for is proven by protocol 1 authority tokens signed with the
+gateway's and team services' host certificates (managed automatically by the
+installation authority), so no signing keys belong in `team.env` or Docker
+secrets. See
+[Tool access and account links](permissions.md#tool-access-and-account-links)
+and [Upgrading](upgrading.md) if you are upgrading from 0.9.
 
 Every secret can also come from a Docker secret file: set `<NAME>_FILE` to the
 mounted file instead of setting `<NAME>`. A secret file beats a `team.env`

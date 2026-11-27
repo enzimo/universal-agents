@@ -10,10 +10,12 @@ variables leave ``team.env`` and are refused at startup.
 
 This module runs once at the first start of 0.10 (plan 13C.9, decision 90):
 
-- **Fresh 0.10 installs (no legacy rows in any store):** if any removed signing-key
-  variable (or ``*_FILE`` form) is set, startup refuses immediately. Otherwise the
-  marker (``InstanceLayout.authority_tokens_upgrade_path``) is written without touching
-  NATS.
+- **First start without the marker, no legacy rows in any store:** writes the marker
+  (``InstanceLayout.authority_tokens_upgrade_path``) without touching NATS. If any
+  removed 0.9 signing-key variable (or ``*_FILE`` form) is set, it is accepted once on
+  this first start (the launcher withholds it from every runtime service) and startup
+  logs a warning naming the variables to remove before the next restart. From the next
+  start on, once the marker exists, removed signing-key variables are refused immediately.
 - **Upgraded 0.9.x installs (marker missing, legacy rows present):** the headless
   launcher runs ``assistant_cli.py upgrade authority-tokens --config <path>`` after
   ``installation-authority`` is ready and before ``team-services``, ``secure_tool_broker``,
@@ -68,10 +70,7 @@ from custom_messages.wire.kinds import AUTHORITY_TOKEN_MAX_SECONDS
 from custom_transport.protocol1.authority_tokens import root_task_token, schedule_permit_token
 from custom_transport.protocol1.identity import HostIdentity
 from env_secrets import get_env_with_file_fallback
-from runtime_settings.security import (
-    present_removed_signing_key_env_vars,
-    reject_removed_signing_key_env_vars,
-)
+from runtime_settings.security import present_removed_signing_key_env_vars
 from storage.access_repository import AccessRepository
 from storage.config import StorageSettings
 from storage.runtime_snapshot_layout import canonical_json, payload_digest
@@ -1694,15 +1693,30 @@ def upgrade_authority_tokens(
                 notice_stored=notice_stored,
                 removed_keys_still_set=still_set,
             )
-        # Fresh 0.10 install (no legacy rows): refuse removed signing key env vars immediately.
-        reject_removed_signing_key_env_vars(source_env)
+        # First start without the marker and no legacy rows to convert: write the marker,
+        # warn if any obsolete 0.9 signing-key variable is still set (refused from the next
+        # start on), and leave NATS untouched.
         _write_marker(marker_path, team_id=team_id, counts=ConversionCounts(), now=moment)
+        still_set = tuple(present_removed_signing_key_env_vars(source_env))
+        if still_set:
+            LOGGER.warning(
+                "No legacy 0.9 contexts or permits needed conversion. Remove these obsolete "
+                "signing-key variables from team.env or Docker secrets before the next restart "
+                "(future starts will refuse them): %s. "
+                "event=authority_token_conversion_remove_old_keys variables=%s",
+                ", ".join(still_set),
+                ",".join(still_set),
+            )
         LOGGER.info(
             "No legacy 0.9 signed contexts or permits found; recorded authority-token upgrade complete. "
             "event=authority_tokens_upgraded team_id=%s had_legacy=false",
             team_id,
         )
-        return AuthorityTokenUpgradeResult(already_done=False, had_legacy_records=False)
+        return AuthorityTokenUpgradeResult(
+            already_done=False,
+            had_legacy_records=False,
+            removed_keys_still_set=still_set,
+        )
 
     keyring = _LegacyKeyring.from_env(source_env)
     if keyring.is_empty and not allow_unverifiable:

@@ -592,12 +592,7 @@ def start_local_nats(
     data_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
-
     server_env = environment_for(PROCESS_NATS, env)
-    for name in REMOVED_SIGNING_KEY_ENV_VARS:
-        server_env.pop(name, None)
-        server_env.pop(f"{name}_FILE", None)
     version_check = subprocess.run(
         ["nats-server", "--version"],
         check=False,

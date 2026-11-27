@@ -112,20 +112,27 @@ With authorization off every tool is available, so there is nothing to give.
 ## Who signs a scheduled run
 
 Every scheduled run must show whom it works for, or the access checks refuse
-every tool call ("Nobody verifiably asked for this task"). Only the TeamLead
-process holds the scheduler's signing key.
+every tool call ("Nobody verifiably asked for this task"). No process that runs
+a model (neither TeamLead nor any worker) holds a signing key. Instead, the
+team services process (`team-services`) holds the `scheduler` role in its host
+certificate and signs every scheduled run's authority token and schedule permit.
 
-TeamLead signs one permit per schedule. It says the schedule's runs work for
-its owner, and it lasts 30 days; TeamLead renews it a week before it runs out
-and checks it again whenever the schedule gets a new owner. A worker listed
-under `startup_agents` runs as its own process: when it takes a due schedule,
-it attaches that permit to the run and starts it without contacting TeamLead.
-Workers that TeamLead starts itself sign their runs directly.
+Team services signs one standing permit per active schedule. It says the
+schedule's runs work for its owner (or as system work for no person on built-in
+system-work schedules), and it lasts at most 7 days; team services renews it
+when fewer than 2 days remain and re-checks it whenever the schedule's owner
+changes. When a worker or TeamLead claims a due schedule, it attaches that
+standing permit to the run and starts without asking team services for a fresh
+signature. If a schedule has no usable permit yet (for example right after
+creation, or a heartbeat item), the claiming agent asks team services over NATS
+(`run_context.sign` on `svc.scheduler`), which checks the live claim against
+the asking agent's session and signs a per-run authority token.
 
-The permit does not record the owner's roles. Each time a run's tool call is
-checked, the owner's current roles and standing are read (at most 30 seconds
-old), so a role change, a disabled or removed owner, or a deleted or turned-off
-schedule takes effect on the run within 30 seconds.
+Neither the permit nor a run token records the owner's roles. Each time a run's
+tool call is checked, the owner's current roles and standing are read live from
+the team's people records (cached at most 30 seconds for permits), so a role
+change, a disabled or removed owner, or a deleted or turned-off schedule takes
+effect on the run within 30 seconds.
 
 A one-time reminder and the last run of a repeating job keep their schedule
 and job access until that run finishes, even when a new worker takes the run

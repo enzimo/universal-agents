@@ -1345,7 +1345,7 @@ def start_isolated_recovery(
     if recovery_task_info is None:
         return json.dumps({"error": "Failed to queue isolated recovery task"})
 
-    checkpoint_schedule = None
+    checkpoint_schedule: ScheduledMessage | dict[str, Any] | None = None
     checkpoint_link_fields: dict[str, str] = {}
     if _coerce_tool_bool(notify_user) and checkpoint_delay_seconds > 0:
         checkpoint_schedule_id = new_id("recov_ckpt")

@@ -784,38 +784,12 @@ class TaskContextV1(AccessContractModel):
     expires_at_utc: datetime
 
 
-class SignedTaskContextV1(AccessContractModel):
-    context: TaskContextV1
-    key_id: str = Field(min_length=1, max_length=120)
-    signature: str = Field(min_length=1, max_length=400)
-
-
 # The prefix of a schedule run's own context id, so it can never equal the id
-# of a signed task context (``task_context_...`` or ``message_context_...``).
+# of a root-task authority token (``task_context_...`` or ``message_context_...``).
 SCHEDULE_RUN_ID_PREFIX = "schedule_run"
-# The prefix of the id of a signed context bound to one message that brings a
+# The prefix of the id of a root-task token bound to one message that brings a
 # person's files (``access_control.ownership.request_context_id``).
 MESSAGE_CONTEXT_ID_PREFIX = "message_context"
-
-
-class SchedulePermitV1(AccessContractModel):
-    """Legacy schedule permit model; kept only until scheduler/upgrade/transfer cutover completes."""
-
-    schema_version: Literal[1] = 1
-    record_kind: Literal["schedule_permit"] = "schedule_permit"
-    permit_id: str = Field(min_length=1, max_length=120)
-    issuer: Literal["scheduler"]
-    team_id: str = Field(min_length=1, max_length=120)
-    schedule_id: str = Field(min_length=1, max_length=240)
-    person_id: str | None = Field(default=None, max_length=240)
-    issued_at_utc: datetime
-    expires_at_utc: datetime
-
-
-class SignedSchedulePermitV1(AccessContractModel):
-    permit: SchedulePermitV1
-    key_id: str = Field(min_length=1, max_length=120)
-    signature: str = Field(min_length=1, max_length=400)
 
 
 class ScheduleRunIdentityV1(AccessContractModel):
@@ -1883,11 +1857,8 @@ __all__ = [
     "LIFETIME_RANK",
     "MESSAGE_CONTEXT_ID_PREFIX",
     "SignInService",
-    "SignedTaskContextV1",
     "SCHEDULE_RUN_ID_PREFIX",
-    "SchedulePermitV1",
     "ScheduleRunIdentityV1",
-    "SignedSchedulePermitV1",
     "PERSON_REF_PATTERN",
     "PersonStanding",
     "SubjectKind",

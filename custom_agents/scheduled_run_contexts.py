@@ -37,7 +37,7 @@ from custom_agents.schedule_permits import attach_run_permit
 from custom_agents.task_context_runtime import context_verifier
 from custom_messages.contracts.routing_v1 import GatewayContext, PERSON_GATEWAY_FIELDS
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
-from custom_messages.wire.authority_bindings import AuthorityTokenRecord, SCHEDULER_ISSUER_ROLE
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
 from id_generation import new_id
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ def _verify_signed_reply(
         verified = context_verifier(agent).verify_root_task(
             token,
             team_id=str(agent.team_id),
-            require_issuer=SCHEDULER_ISSUER_ROLE,
+            require_issuer="scheduler",
             require_active_person=False,
         )
     except (IdentityRejected, ValueError):
