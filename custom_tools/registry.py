@@ -47,6 +47,7 @@ from custom_tools.providers.schedules import PROVIDER as SCHEDULES_PROVIDER
 from custom_tools.providers.schedules import SCHEDULE_RUNS_PROVIDER
 from custom_tools.providers.solution_variations import PROVIDER as SOLUTION_VARIATIONS_PROVIDER
 from custom_tools.providers.task_queue import PROVIDER as TASK_QUEUE_PROVIDER
+from custom_tools.providers.timed_waits import LONG_WAIT_PROVIDER, WAIT_PROVIDER
 from custom_tools.providers.tool_loading import PROVIDER as TOOL_LOADING_PROVIDER
 from custom_tools.providers.tool_setup import PROVIDER as TOOL_SETUP_PROVIDER
 from custom_tools.providers.worker_pools import PROVIDER as WORKER_POOLS_PROVIDER
@@ -123,6 +124,8 @@ TOOL_PROVIDERS = (
     WORKER_POOLS_PROVIDER,
     FILES_PROVIDER,
     CALCULATOR_PROVIDER,
+    WAIT_PROVIDER,
+    LONG_WAIT_PROVIDER,
     LOCAL_CONTEXT_PROVIDER,
     SHELL_EXECUTION_PROVIDER,
     PUBLISHING_PROVIDER,

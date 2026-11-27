@@ -38,6 +38,10 @@ Use this skill before calling the Universal Agents `shell` tool.
   child process tree on timeout or cancellation.
 - Do not start a persistent server directly. Use a bounded health probe,
   purpose-built harness, or separately supervised service.
+- Do not use `sleep` in shell to wait for an external process (such as a
+  redeploy, build, or cooldown); use the `wait` tool (or request
+  `fn:long_wait` for waits beyond the team's without-approval limit) so the
+  task pauses cleanly without holding a sandbox process or worker slot.
 
 ## RTK Behavior
 

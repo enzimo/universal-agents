@@ -610,6 +610,97 @@ Changes it already made are kept.
 The limit counts that task's own waits, including after access or setup
 approval. A child task's waits do not use its parent's allowance.
 
+## Timed waits during a run
+
+Any agent task — including a scheduled job run — can pause itself for a fixed
+number of whole minutes and continue in the same task when the timer ends,
+without running a shell `sleep` and without holding its worker's slot. Timed
+waits do not count toward the five-wait limit above (which counts only turns
+that send work out and wait for a reply):
+
+- **`wait(minutes, reason)`** is a standard tool available to every role with
+  no approval required. All timed waits in one task count toward
+  `agent.max_wait_minutes_without_approval` (default `20` minutes per task).
+- **`long_wait(minutes, reason)`** allows one task's total waited time (counting
+  both `wait` and `long_wait`) to reach `agent.max_wait_minutes_with_approval`
+  (default `1440` minutes / 24 hours per task). It is not in any standard tool set or
+  starter profile, so `fn:long_wait` at level `write` must be approved in the
+  Inbox — for one run, or with **Keep for later tasks** on a recurring
+  scheduled job (or by declaring `fn:long_wait` / `long_wait` in the job's
+  requirements). A person who already holds `fn:long_wait` (such as an
+  administrator) approves requests for their own work; for a member who does
+  not hold it, an administrator decides the request, and approving it gives the
+  member the access too.
+
+While a task is in a timed wait:
+
+- **Worker capacity is freed.** The worker can accept and run other tasks while
+  the timer ticks. When the timer ends, if the worker is busy with another task
+  it took during the wait, the finished wait is held until that work finishes or
+  pauses, so a long task on the same worker can delay continuation past the
+  scheduled resume time.
+- **Budgets are tracked per task.** Each delegated subtask starts with its own
+  task history and therefore its own wait budget; a child task's waits do not
+  count against its parent task's wait budget.
+- **Recurring schedules protect the next run.** In a recurring scheduled run, a
+  wait whose resume time would reach or pass the schedule's next fire time is
+  refused with the next run time named, so the next occurrence is not skipped.
+- **Long waits in interactive chat may show a reply timeout notice.** Because
+  timed waits pause locally without sending an intermediate message, a chat
+  request that pauses longer than the gateway's reply timeout (default 60
+  minutes) shows a timeout notice in chat; the task keeps waiting in the
+  background and delivers its final reply when the wait ends.
+- **Messages in the same chat become guidance.** If you send another message in
+  a chat thread whose task is waiting on a timer, it is saved as guidance for
+  that task and applied when the wait ends; it does not wake the timer early.
+  Start separate work with **New Chat** or `/new`.
+- **Stopping ends the wait early.** Stopping or cancelling a waiting task
+  (`/stop task <task_id>`, `/stop all`, or **Remove** / **Stop and remove** in
+  Settings → Tasks; bare `/stop` lists unfinished tasks with the command to
+  stop them) clears the wait record cleanly, and nothing resumes when the timer
+  would have expired.
+- **Worker wind-down stops waits that outlast the shutdown deadline.** When a
+  worker winds down (it lost its launch lease, or it is a pool worker that
+  stops taking work after an upgrade, see
+  [Operator controls and diagnosis](#operator-controls-and-diagnosis)), any waiting timed wait whose
+  scheduled resume time is already after the worker's shutdown deadline
+  (`agent.schedule_workers.lease_loss_wait_timeout_seconds`, default 30
+  minutes) and that does not already have an answer ready stops immediately
+  instead of holding the old worker alive until the deadline: its pending
+  subtasks are asked to stop, its wait record is cleared so nothing resumes
+  later, and the requester gets a message explaining that the worker shut down
+  before the wait could finish. Timed waits due before the deadline still
+  resume and finish on that worker, and waits for a person (access approvals or
+  tool setup) keep the normal wind-down timeout.
+- **Restarts and power loss keep the wait and budget.** A task's wait charge
+  and scheduled resume time are saved together before the task enters the
+  waiting state, and the wait and its resume are each saved in one step so a
+  crash cannot leave them half done. Once the pause is saved it is also
+  written through to disk, so a power cut right after a task starts waiting
+  does not undo the pause:
+  - If the system restarts before the scheduled resume time, the task stays
+    waiting and resumes once when the timer comes due (never early).
+  - If the system is down past the resume time (even for hours), the task
+    resumes promptly once on startup with a durable note naming the real waited
+    time and when it resumed, without double-charging the wait budget. In a
+    recurring schedule whose next run time also passed during the outage, the
+    overdue firing merges into the active resumed task (or runs once as a
+    single catch-up if the resumed task already finished) and the schedule
+    advances to its next future slot without replaying every missed run.
+  - If the worker that held the waiting task does not come back (including an
+    on-demand or pool worker), TeamLead's orphaned-work takeover starts a
+    replacement of the same type, which adopts the waiting task and resumes it
+    when due.
+  - **Outage during an already-resumed running turn:** once a wait has ended
+    and the resumed turn is actively running, the normal executing-task restart
+    grace applies. If power is lost while that resumed turn is running and the
+    system comes back after `agent.restart_executing_task_grace_seconds`
+    (900 seconds / 15 minutes by default), restart recovery marks the task
+    failed as stale and tells the requester rather than re-running it
+    automatically. Operators can raise or unset
+    `restart_executing_task_grace_seconds` if running turns should recover
+    after longer outages.
+
 ## Change the worker or launch rules
 
 ### Custom agent types
@@ -788,11 +879,22 @@ worker then winds down instead of continuing without custody:
 
 - It stops taking new work and returns tasks it has not started, and the task it
   was running, to the TeamLead.
-- Tasks that were waiting for an answer from a person or a delegated subtask may
-  still finish on that worker for up to `lease_loss_wait_timeout_seconds`
-  (30 minutes by default). After that, the requester receives a failed result
-  explaining that no reply arrived in time.
+- Tasks that were waiting for an answer from a person, a delegated subtask, or
+  a timed wait due before the deadline may still finish on that worker for up
+  to `lease_loss_wait_timeout_seconds` (30 minutes by default). After that, the
+  requester receives a failed result explaining that the reply or wait did not
+  finish in time. A timed wait that ends after the deadline fails immediately
+  with a message to the requester.
 - The worker exits once it holds no unfinished task.
+
+A pool worker winds down the same way, without any fault, when an upgrade
+leaves its process on a different message format (message contract) than the
+rest of the installation: it stops taking new work, finishes the turns it is
+running, and then winds down as above, with the deadline counted from then.
+Tasks it returns this way do not count as interruptions. The TeamLead and the
+agents started with the instance can't hand work back during such an upgrade:
+they finish what they already started, including a timed wait of up to 24
+hours, before their old process can be replaced.
 
 The TeamLead sends returned tasks to another worker of the same type, starting
 one when none is available, and the result still goes to whoever asked. A task
