@@ -447,6 +447,17 @@ class ScheduledMessage(BaseModel):
         return self.schedule_id
 
 
+def is_recurring_schedule(scheduled_message: ScheduledMessage) -> bool:
+    """Whether a schedule repeats beyond a single run (infinite, count > 1, interval, or cron)."""
+
+    return (
+        scheduled_message.repeat_count is None
+        or (scheduled_message.repeat_count or 0) > 1
+        or scheduled_message.interval_ms is not None
+        or scheduled_message.cron_expression is not None
+    )
+
+
 # What runs change by themselves: a repeating schedule's next run time and the
 # content of the run notes (state and ledger). A person's controls are bound to
 # the schedule they saw without these, so a schedule that runs often can still

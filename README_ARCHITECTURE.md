@@ -993,7 +993,9 @@ Five repairs keep work from getting stuck in the first place:
   a run another step is working on, or saved in the last 30 seconds, to the
   next pass, so its warnings (`event=tool_setup_run_recovered`) name only
   real lost wake-ups. An agent that drains for another message contract does
-  this too, as it resumes its decided access waits: these are tasks it
+  this too, as it resumes its decided access waits and due timed waits
+  (`timed_wait_runtime.resume_due_timed_waits`; once a pool worker winds down,
+  its wind-down loop resumes timed waits instead): these are tasks it
   already holds, the recovery takes over nothing and starts no agent, and a
   resumed task already ran, so even a draining pool worker starts it.
 - A task that ends with delegated work still running stops it
@@ -1039,12 +1041,22 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    manager escalation, an access workflow's unfinished steps) with its own
    status, `held_back`, so such a task is
    handed back, and the next worker is not told the held-back answer was sent.
-3. It keeps tasks that already started and now wait on a person or subtask,
-   because replies are addressed to this worker's id. They may finish until
-   `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)
-   after the lease was lost; then they fail with an explanation to the requester,
-   their pending subtasks are asked to stop, and an access request they were
-   waiting on is withdrawn so the reviewer is not left with an open item.
+3. It keeps tasks that already started and now wait on a person or a subtask,
+   because their replies live on this worker, and timed waits whose `resume_at`
+   falls before the deadline, because their paused turns live here and can
+   resume and finish. They may finish until
+   `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30
+   minutes) after the wind-down started. Only the wind-down loop resumes due
+   timed waits meanwhile: after a lost lease the scheduler loop has stopped, and
+   during a contract drain the scheduler pass skips them while the agent winds
+   down (`scheduled_runtime._resume_due_timed_waits_step`), so no resume lands
+   between a poll's snapshot and the step that fails what remains. Then they fail with an
+   explanation to the requester, their pending subtasks are asked to stop, and
+   an access request they were waiting on is withdrawn so the reviewer is not
+   left with an open item. A timed wait whose `resume_at` falls after that
+   deadline (and that does not already hold an answer) fails immediately with a
+   message to the requester, clears its wait record, and asks pending subtasks
+   to stop instead of holding the worker open until the timeout.
 4. It exits once it holds no unfinished task. Until then it keeps refreshing its own
    status row and its record says it takes no work, so a starting worker of the same
    type does not adopt its tasks (adoption is decided by launch records).
@@ -1157,7 +1169,10 @@ delivered (a crashed process loses nothing either way). So:
   noted files' write-ahead logs. One flush of a WAL file makes every commit in
   it durable, whichever connection wrote it, so a power loss leaves the state
   the agent had when it last sent something: what a crash at that moment
-  leaves, which recovery already handles. One flush runs at a time, on a
+  leaves, which recovery already handles. The one exception is a pause whose
+  every interrupt waits locally (an access request, a setup run or a timed
+  wait): it sends nothing, so the pause function flushes once after `WAITING`
+  is saved (see "Timed waits" below). One flush runs at a time, on a
   thread of its own (Strands runs synchronous tools on asyncio's shared pool),
   and a file stays noted until a flush that started after its last commit
   succeeds, so a sender arriving mid-flush waits. A failed flush stops all
@@ -1768,7 +1783,10 @@ or publish after it. The final status write still marks this agent exiting
 after delivery callbacks have settled. A turn in progress at shutdown is
 cancelled; restart recovery queues its task again if
 the agent restarts within `restart_executing_task_grace_seconds` (900 s by
-default) and otherwise fails the task and tells the requester.
+default) and otherwise fails the task and tells the requester. A running task
+that already saved a wait record (an access request, a setup run, or a timed
+wait) returns to `WAITING` instead of being re-queued or failed, because its
+pause was already durable and the pending decision or timer will resume it.
 
 A turn reads the note left for its task's next turn (an access decision, a
 delegation decision, a restart notice) and the requester's partial tool-call
@@ -1817,6 +1835,147 @@ so the worker finishes immediately and the report cannot close the original
 person's request ledger. Ordinary delegated work still answers its requester.
 The limit is fixed in code because a setting would change the team transfer's
 settings format.
+
+### Timed waits (`wait` and `long_wait`)
+
+Any agent task, including a scheduled job run, can pause itself for a fixed
+number of whole minutes and continue in the same task when the timer ends.
+The feature uses two catalog tools (`custom_tools/providers/timed_waits.py`,
+pure rules in `custom_agents/timed_waits.py`, runtime in
+`custom_agents/timed_wait_runtime.py`):
+
+- `wait(minutes, reason)` is catalog tool `fn:wait` in the standard
+  `agent_runtime` tool set at level `read`, so every role holds it without a
+  grant. Wait budgets are tracked **per task** (each delegated subtask has its
+  own budget, and child waits do not count against the parent task's budget):
+  all waits in one task share a cumulative budget bounded by
+  `agent.max_wait_minutes_without_approval` (default `20` minutes).
+- `long_wait(minutes, reason)` is its own catalog tool `fn:long_wait` outside
+  every standard tool set and starter profile at level `write`, bounded by
+  `agent.max_wait_minutes_with_approval` (default `1440` minutes / 24 hours per
+  task, hard ceiling `1440`). Agents reach it only through `find_tools` +
+  `request_access` (or lasting `SubjectKind.SCHEDULE` access on a recurring
+  job). Both limits are team-wide and `operator_only` so agents cannot raise
+  their own wait budget.
+
+Both tools pause the task with a local Strands interrupt (`timed_wait`, listed
+in `task_steering_runtime._LOCAL_WAIT_KINDS` so nothing is sent to a
+requester). Before `ProgressState.WAITING` is saved (the same order access
+requests and `tool_setup_run_runtime.stage_run` use), trusted code writes the
+budget charge (`timed_wait_started` in task history, keyed by
+`access_runtime.step_tool_call_id`) and the `timed_wait` blocker record in
+`TaskRuntimeState.human_interaction_blockers` together in **one atomic
+runtime-state write** (`task_state_transitions.record_blocker_with_history`,
+with full in-memory rollback on error), using `resume_at` UTC as the single
+source of truth. A crash around pausing can therefore neither leave a budget
+charge without its blocker nor leave a `WAITING` task without its wait record.
+Moving the task to `WAITING` releases the worker's main slot so other work can
+run while the timer ticks.
+
+Once the charge, the record and `WAITING` have committed, the pause is flushed
+to disk once. An agent process defers its SQLite flushes until it sends
+something (decision 82, `storage/sqlite_connection.py` "Flushing before
+sending"), and a pause whose every interrupt waits locally (an access request,
+a setup run or a timed wait) sends nothing to a requester, so
+`task_steering_runtime.send_interrupt_request_for_result` flushes once itself,
+through the send barrier (`custom_agents.commit_flushes.flush_local_pause_commits`),
+right after `WAITING` is saved and before the setup run's pages open or the
+scheduler is woken. A pause that also asks a requester needs no separate flush:
+the send barrier flushes before its requester message is published, so a power
+loss leaves the state the agent had at its last send, as for any other work.
+Without the flush, a power cut could roll back the pause and bring the task
+back as an interrupted running turn, re-run from the start or failed as stale
+after `restart_executing_task_grace_seconds`, although it was only waiting
+(a person may decide an access request hours later). The records of all three
+kinds live in deferred stores whose WAL files the one flush makes durable, or
+in stores that flush every commit. A failed flush is logged
+(`event=local_pause_commit_flush_failed` with agent, task and pause kinds), the
+pause stays, and the process sends nothing more, as after any failed flush.
+The resume side needs no flush: if a power cut rolls back a resume, the task is
+still `WAITING` with its overdue record and recovery resumes it again.
+
+Each `scheduled_runtime._scheduler_pass` runs `resume_due_timed_waits` (capping
+its idle sleep to the next resume time and backing off overdue unresumable
+records) through `custom_agents/paused_wait_resume.py` and
+`custom_agents/task_state_transitions.py`:
+
+- **Live paused turn**: when the paused turn is still in memory, the interrupt
+  is answered with the elapsed time and current UTC timestamp (marking the
+  record `answer_held` while it waits for a busy lane, without overwriting
+  another pending answer). When the resumed turn consumes the blocker
+  (`clear_answered_blocker_with_resume_note`), trusted code atomically removes
+  the blocker and records a past-fact `resume_note(record, now=...)` via
+  `TurnStartNotes.with_live_wait_directive` (replacing any earlier live-wait
+  note in the same turn so repeated waits keep at most one stored note, and
+  restoring the blocker unmarked if the save fails so the task stays
+  recoverable). `release_turn_start_notes` releases that note when the turn
+  records its decision; if the worker crashes after clearing the blocker or
+  before recording a decision, restart recovery delivers the note so the next
+  turn knows the wait already ended and never double-charges the budget.
+- **Restart, power loss, or takeover**: `runtime_recovery.recover_runtime_after_restart`
+  clears stale `answer_held` marks (for both same-id restarts and new-id
+  takeovers), keeps not-yet-due waits `WAITING` until `resume_at`, and resumes
+  overdue waits promptly via **one atomic write**
+  (`task_state_transitions.resume_wait_from_note`, committing the past-fact
+  resume note with real elapsed minutes and exact resume time, blocker removal,
+  `timed_wait_ended` + state-change history, `ProgressState.ACCEPTED`, and
+  front-of-queue enqueue together, with clean rollback on readiness or
+  persistence failure). If a worker holding a `WAITING` timed wait dies and no
+  worker of that type is running (such as a pool worker), TeamLead's
+  `orphaned_work_takeover.take_over_orphaned_work` starts a replacement, which
+  adopts the task transactionally via `agent_liveness` /
+  `commit_task_runtime_recovery`, stays alive via `worker_holds_work`, and
+  resumes it at `resume_at`. Once a wait has ended and the resumed turn is
+  actively executing, normal executing-task restart recovery applies: if power
+  is lost during that running turn and the worker comes back after
+  `agent.restart_executing_task_grace_seconds` (900 s by default), recovery
+  fails the task as stale and notifies the requester (operators can raise or
+  unset `restart_executing_task_grace_seconds`).
+- **Recurring schedules**: in a recurring scheduled run (verified
+  scheduler-issued task context), waits that would reach or pass the schedule's
+  next fire time are refused so the next occurrence is not skipped. After a
+  long outage past both `resume_at` and `next_fire_at`, recovery resumes the
+  waiting task first; when the scheduler claims the overdue schedule, an
+  overlapping fire coalesces into the active resumed task (or starts one
+  catch-up run if the resumed task already finished) and `next_fire_at`
+  advances past now without burst-replaying missed occurrences.
+- **Stuck-task checks & wind-down**: `custom_agents/task_wait_reasons.py`
+  treats an active timer as `WaitReason.TIMED_WAIT` (with a 5-minute grace
+  window past `resume_at`) and a held answer as `WaitReason.ANSWER_HELD`, while
+  overdue unheld waits are reported as stuck. During a wind-down (after a lost
+  launch lease, or a pool worker's contract drain; `custom_agents/lease_loss_wind_down.py`),
+  `_wait_for_resumable_tasks`
+  fails any `WAITING` timed wait whose `resume_at` falls after the deadline (or
+  within the final `WIND_DOWN_POLL_SECONDS` poll margin, since the next poll
+  would come too late to resume it, with no held answer and not yet resumed)
+  immediately on entry and on each poll
+  (`timed_wait_runtime.fail_timed_wait_outlasting_deadline`, logging
+  `event=worker_wind_down_timed_wait_outlasts_deadline`), stops pending
+  delegated subtasks, clears its blocker and paused turn, and tells the
+  requester with a dedicated early-shutdown message; it then resumes waits
+  already due. A poll that runs at or after the deadline resumes nothing and
+  fails the remaining waits with the deadline message, which names why the worker wound down. Waits due before the
+  deadline still resume and finish on the winding-down worker, held answers are
+  not failed early, and waits on people (`access_request`, `tool_setup_run`)
+  keep the full timeout. A draining team lead or startup agent does not wind
+  down: it keeps its timed waits, up to 24 hours, until they end. If failing the task raises, it counts as failed only
+  when the task is FAILED in memory or archived as FAILED; a task another agent
+  took over (`custody_loss.custody_moved`) is left to that agent with no
+  message and no subtask stop (`event=timed_wait_wind_down_custody_moved`).
+  Stopping or cancelling a waiting task removes the blocker record and drops
+  the paused turn so nothing resumes later.
+
+Rationale for a paused Strands interrupt plus a saved blocker record:
+
+- **Instead of `sleep` in shell or Python**: sleeping ties up the worker's
+  execution slot and a live sandbox process for the whole wait, requires code
+  execution access, disappears across a restart, and is invisible to status
+  summaries and stuck-task checks.
+- **Instead of creating a one-time schedule**: a one-time schedule starts a
+  separate task that loses the paused turn's conversation and tool context as
+  well as the original run's signed identity and access (including a scheduled
+  job's `SubjectKind.SCHEDULE` grants), and for a recurring job a second run
+  would collide with or be coalesced by the recurring schedule.
 
 ## Authorization and credentials
 
@@ -7221,13 +7380,16 @@ failed); pool workers run in the team lead's process, so the lead
 drains with them, and what they return waits in the lead's queue for a team lead on the
 installation's contract. The team lead and startup agents have no way to hand a task
 back yet (that comes with `task.handback` and the queued work of protocol 1), so they
-finish what they already admitted. The host's record says `draining` meanwhile; its
+finish what they already admitted, and they have no wind-down deadline: a timed wait they
+hold, a `long_wait` of up to 24 hours included, is kept until it ends and its task
+finishes, so the old process stays until then. The host's record says `draining` meanwhile; its
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
 Startup counts as held work until recovery finishes, so a drain cannot close controls
 before saved tasks become visible. A draining startup restores its own work and adopts
-no work from gone agents; it still resumes its own tasks whose setup run ended or whose
-access requests were decided meanwhile (`resume_ended_setup_runs`,
-`resume_decided_access_waits`). Pool-worker wind-down waits for recovery too, so it returns
+no work from gone agents; it still resumes its own tasks whose setup run ended,
+whose access requests were decided, or whose timed wait came due meanwhile
+(`resume_ended_setup_runs`, `resume_decided_access_waits`,
+`resume_due_timed_waits`). Pool-worker wind-down waits for recovery too, so it returns
 the complete set of saved tasks. Admission reads the leaf module `contract_drain_state`; drain
 execution can depend on turn and control handlers without creating an import cycle.
 Once no agent is starting or holds an unfinished task or a waiting request, the host closes their sessions

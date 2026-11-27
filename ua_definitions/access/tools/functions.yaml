@@ -124,6 +124,25 @@ tools:
     functions:
       calculator: read
 
+  # Timed pauses of an agent's own task (custom_tools.providers.timed_waits):
+  # short waits (up to 20 minutes total per task by default) are standard for
+  # every role; longer waits (up to 24 hours total) are their own tool outside
+  # every standard set so a person approves them through request_access.
+  - tool_id: fn:wait
+    provider: wait
+    display_name: Wait
+    description: Pause this task for a set number of minutes (within the team's without-approval total, default 20 minutes) and continue in the same task when the timer ends.
+    tool_sets: [agent_runtime]
+    functions:
+      wait: read
+
+  - tool_id: fn:long_wait
+    provider: long_wait
+    display_name: Long wait
+    description: Pause this task for a longer duration (up to 24 hours total per task) with a person's approval, and continue in the same task when the timer ends.
+    functions:
+      long_wait: write
+
   - tool_id: fn:web_research
     provider: web_research
     display_name: Web research

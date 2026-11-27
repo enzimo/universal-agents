@@ -130,7 +130,9 @@ class SettingsSection:
     #     max_delegation_ttl_seconds and allow_password_bootstrap joined it.
     # 15: transport.nats.credential_lifetime_seconds joined it; not carried (_INSTALLATION_SETTINGS).
     # 16: agent.blob_retention_days and transport.queues.max_bytes.blobs joined it.
-    schema_version: ClassVar[int] = 16
+    # 17: agent.max_wait_minutes_without_approval and agent.max_wait_minutes_with_approval joined it, and
+    # agent.schedule_workers.lease_loss_wait_timeout_seconds's description names timed waits and the contract drain.
+    schema_version: ClassVar[int] = 17
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -822,10 +824,15 @@ __all__ = [
 # an older export has none, so the new instance keeps its own default and the same step reads version 14.
 # V16 added agent.blob_retention_days and transport.queues.max_bytes.blobs; an older export has
 # neither, so the new instance takes their defaults and the same step reads version 15.
+# V17 added agent.max_wait_minutes_without_approval and agent.max_wait_minutes_with_approval; an
+# older export has neither, so the new instance takes their defaults and the same step reads
+# version 16. Because their ordering rule is a model validator on ``agent``, an invalid pair
+# (or a conflict with the destination's existing limit on an existing-instance import) blames
+# location ``("agent",)`` and refuses every carried ``agent.*`` setting together.
 
 
 def _upgraded_settings(records: SectionRecords) -> SectionRecords:
-    """An older export's records as version 16 reads them: retired settings dropped, a replica count as a whole number."""
+    """An older export's records as version 17 reads them: retired settings dropped, a replica count as a whole number."""
 
     retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
     upgraded: SectionRecords = []
@@ -839,6 +846,6 @@ def _upgraded_settings(records: SectionRecords) -> SectionRecords:
     return upgraded
 
 
-for _source in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15):
+for _source in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _upgraded_settings
 TEAM_ID_RENAMES[SettingsSection.name] = _renamed_team_settings

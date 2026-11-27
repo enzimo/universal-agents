@@ -1074,6 +1074,8 @@ def run_with_args(args: argparse.Namespace) -> None:
                 'same_role_runtime_takeover_enabled': agent_runtime_settings.get('same_role_runtime_takeover_enabled'),
                 'max_tool_calls_per_task': agent_runtime_settings['max_tool_calls_per_task'],
                 'max_tool_result_tokens_per_call': agent_runtime_settings['max_tool_result_tokens_per_call'],
+                'max_wait_minutes_without_approval': agent_runtime_settings['max_wait_minutes_without_approval'],
+                'max_wait_minutes_with_approval': agent_runtime_settings['max_wait_minutes_with_approval'],
                 'runtime_budget_policy': agent_runtime_settings.get('runtime_budget_policy'),
                 'turn_action_outbox': agent_runtime_settings.get('turn_action_outbox'),
                 'runtime_coordinator': agent_runtime_settings.get('runtime_coordinator'),

@@ -157,7 +157,7 @@ from access_control.ownership import (
 from custom_agents.task_context_runtime import context_verifier
 from custom_messages.contracts.access_v2 import TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
-from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery, TaskSteering
+from custom_messages.contracts.task_v1 import BUBBLED_ENTRY_ID_KEY, Task, TaskHistoryEntry, TaskQuery, TaskSteering
 from custom_messages.enums import MessageMetaType, TaskHistoryImportance, TaskHistoryType
 from runtime_settings.instance_layout import InstanceLayout
 from storage.turn_attachments import INVENTORY_LIMIT, TurnAttachment, attachment_summary
@@ -233,9 +233,6 @@ _REFUSAL_TEXT = {
     TASK_NOT_FOUND_REASON: "the task it was sent to is not held here",
 }
 _NOT_VOUCHED_TEXT = "the gateway does not vouch that it sent it for this task"
-# Set by ``TaskManager`` on the copies of a worker's entries in its lead's history.
-_BUBBLED_ENTRY_KEY = "bubbled_entry_id"
-
 # Why an upload cannot be read here (``locate_upload``).
 UPLOAD_NO_LOCAL_COPY = "no_local_copy"
 UPLOAD_NOT_ON_THIS_HOST = "not_on_this_host"
@@ -753,7 +750,7 @@ def _written_by_this_task(entry: Any, details: dict[str, Any], event: str = TASK
     return (
         details.get("event") == event
         and getattr(entry, "entry_type", None) != TaskHistoryType.SUBTASK_EVENT
-        and _BUBBLED_ENTRY_KEY not in details
+        and BUBBLED_ENTRY_ID_KEY not in details
     )
 
 

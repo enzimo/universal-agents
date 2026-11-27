@@ -33,6 +33,7 @@ from custom_agents.task_wait_reasons import (
     wait_reason,
 )
 from custom_agents.task_human_interaction_blockers import ANSWER_HELD_AT_KEY, ANSWER_HELD_BY_KEY
+from custom_agents.timed_waits import TIMED_WAIT_KIND, WAIT_TOOL_NAME, timed_wait_record
 from custom_agents.tool_setup_runs import RUN_FINISHED, RUN_STOPPED, RUN_WAITING, RunPieceV1, ToolSetupRunV1
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import (
@@ -81,8 +82,12 @@ def entry(minutes: float, **details: Any) -> TaskHistoryEntry:
 OWNER = "agent-lead"  # the agent process that saved the work
 
 
-def work(*records: TaskSnapshotRecord, **sections: Any) -> SavedWork:
-    return SavedWork.from_snapshot(RuntimeSnapshotV3(schema_version=3, tasks=list(records), **sections), owner_agent_id=OWNER)
+def work(*records: TaskSnapshotRecord, now: datetime | None = None, **sections: Any) -> SavedWork:
+    return SavedWork.from_snapshot(
+        RuntimeSnapshotV3(schema_version=3, tasks=list(records), **sections),
+        owner_agent_id=OWNER,
+        now=now or START,
+    )
 
 
 def setup_record(run_id: str = "run-1", *, held_by: str | None = None) -> dict[str, dict[str, Any]]:
@@ -91,6 +96,23 @@ def setup_record(run_id: str = "run-1", *, held_by: str | None = None) -> dict[s
     if held_by is not None:
         record |= {ANSWER_HELD_AT_KEY: at(3), ANSWER_HELD_BY_KEY: held_by}
     return {"t": record}
+
+
+def timed_record(resume_at_minutes: float, *, held_by: str | None = None) -> dict[str, dict[str, Any]]:
+    """The task's timed_wait record; ``resume_at_minutes`` is relative to START."""
+    rec = timed_wait_record(
+        interrupt_id="int-tw",
+        call_id="call-tw",
+        tool=WAIT_TOOL_NAME,
+        tool_use_id="tu-tw",
+        minutes=10,
+        reason="Portainer redeploy",
+        requested_at=at(resume_at_minutes - 10),
+        resume_at=at(resume_at_minutes),
+    )
+    if held_by is not None:
+        rec |= {ANSWER_HELD_AT_KEY: at(0), ANSWER_HELD_BY_KEY: held_by}
+    return {"t": rec}
 
 
 def interrupt(minutes: float, *, waits_on_requester: bool) -> TaskHistoryEntry:
@@ -152,10 +174,25 @@ WAITS: dict[str, tuple[WaitReason, Callable[[], SavedWork]]] = {
         WaitReason.PERSON_DECISION,
         lambda: work(record(), human_interaction_blockers={"t": {"kind": "access_request", "access_request_id": "req-1"}}),
     ),
-    # A setup-run record counts here only while this process holds its answer
-    # for the lane; otherwise the run store decides (SETUP_RUN, below).
+    # A setup-run or timed-wait record whose answer this process holds for the lane.
     "setup answer held for the lane": (
-        WaitReason.SETUP_ANSWER_HELD, lambda: work(record(), human_interaction_blockers=setup_record(held_by=OWNER))
+        WaitReason.ANSWER_HELD, lambda: work(record(), human_interaction_blockers=setup_record(held_by=OWNER))
+    ),
+    "timed wait answer held for the lane": (
+        WaitReason.ANSWER_HELD,
+        lambda: work(record(), human_interaction_blockers=timed_record(-30, held_by=OWNER)),
+    ),
+    "timed wait in the future": (
+        WaitReason.TIMED_WAIT,
+        lambda: work(record(), human_interaction_blockers=timed_record(10)),
+    ),
+    "timed wait overdue within grace": (
+        WaitReason.TIMED_WAIT,
+        lambda: work(record(), human_interaction_blockers=timed_record(-4)),
+    ),
+    "timed wait with stale mark while timer still running": (
+        WaitReason.TIMED_WAIT,
+        lambda: work(record(), human_interaction_blockers=timed_record(10, held_by="agent-before-restart")),
     ),
     "outside result": (
         WaitReason.OUTSIDE_RESULT,
@@ -225,6 +262,15 @@ ENDED: dict[str, Callable[[], SavedWork]] = {
     "a setup-run record with no held answer": lambda: work(record(), human_interaction_blockers=setup_record()),
     "a setup answer held by an earlier process": lambda: work(
         record(), human_interaction_blockers=setup_record(held_by="agent-before-restart")
+    ),
+    "an overdue timed wait past grace": lambda: work(
+        record(), human_interaction_blockers=timed_record(-6)
+    ),
+    "an overdue timed wait held by an earlier process": lambda: work(
+        record(), human_interaction_blockers=timed_record(-6, held_by="agent-before-restart")
+    ),
+    "a timed wait with no resume time": lambda: work(
+        record(), human_interaction_blockers={"t": {"kind": TIMED_WAIT_KIND, "interrupt_id": "int-tw"}}
     ),
     "a finished recovery task": lambda: work(record(), record("rec", ProgressState.COMPLETED), recovery_links=recovery()),
     "a queue pause marker from an earlier pause": lambda: work(queue_paused_at(at(0.5))),
