@@ -41,7 +41,11 @@ from custom_agents.context_engine.thread_renderer import BudgetedThreadContextRe
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents.person_departure_runtime import _clear_schedules, _move_team_schedule, _ScheduleMoves
-from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
+from custom_agents.schedule_management import (
+    ScheduleMutationAuthorityMode,
+    ScheduleMutationOperation,
+    build_schedule_mutation_permit,
+)
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.scheduled_runtime import _enqueue_owner_run, _prepared_heartbeat_run, _signed_heartbeat_runs
 from custom_agents.task_context_runtime import run_owner
@@ -435,7 +439,23 @@ def _refresh(agent: SimpleNamespace, owner: str, conversation_id: str | None) ->
     incoming = _team_schedule("sched_coremem", owner, conversation_id or "")
     incoming.payload_meta.conversation_id = conversation_id
     incoming.install_mode = "refresh"
-    assert refresh_schedule_gateway_context(agent, incoming)
+    agent._schedule_store.install(
+        incoming,
+        mode="refresh",
+        team_id=agent.team_id,
+        owner_id=owner,
+        owner_vouched=True,
+        allow_team_owner_change=True,
+        system_mutation_permit_fn=lambda current, candidate: build_schedule_mutation_permit(
+            schedule=current,
+            operation=ScheduleMutationOperation.UPDATE,
+            authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
+            actor_principal_id=owner,
+            owner_canonical_user_id=current.payload_meta.gateway_context.canonical_user_id or owner,
+            team_id=agent.team_id,
+            candidate=candidate,
+        ),
+    )
     return agent._schedule_store.get_scheduled_message("sched_coremem")
 
 

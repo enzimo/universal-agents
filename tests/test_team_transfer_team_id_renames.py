@@ -788,16 +788,18 @@ def _stored_naming(root: Path, needles: tuple[str, ...]) -> list[str]:
 def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_finds_them(
     tmp_path: Path,
 ) -> None:
-    from types import SimpleNamespace
-
     from assistant_gateway.config import GatewayInstanceConfig
     from custom_agents.internal_improvement_runtime import (
         internal_improvement_schedule_id,
         internal_improvement_schedule_name,
     )
     from custom_agents.local_schedule_policy import local_schedule_service_id
-    from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
     from custom_agents.schedule_execution_identity import execution_digest
+    from custom_agents.schedule_management import (
+        ScheduleMutationAuthorityMode,
+        ScheduleMutationOperation,
+        build_schedule_mutation_permit,
+    )
     from custom_agents.schedule_store import ScheduleStore
     from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
     from custom_messages.contracts.schedule_v1 import ScheduledMessage
@@ -886,7 +888,23 @@ def test_schedules_imported_under_a_new_id_are_the_new_teams_and_its_runtime_fin
         )),
         interval_ms=86_400_000, repeat_count=None,
     )
-    assert refresh_schedule_gateway_context(SimpleNamespace(_schedule_store=store, team_id=NEW, id="agent_lead"), incoming)
+    store.install(
+        incoming,
+        mode="refresh",
+        team_id=NEW,
+        owner_id="usr_ana",
+        owner_vouched=True,
+        allow_team_owner_change=True,
+        system_mutation_permit_fn=lambda current, candidate: build_schedule_mutation_permit(
+            schedule=current,
+            operation=ScheduleMutationOperation.UPDATE,
+            authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
+            actor_principal_id="usr_ana",
+            owner_canonical_user_id="usr_ana",
+            team_id=NEW,
+            candidate=candidate,
+        ),
+    )
     refreshed = store.get_scheduled_message(new_id)
     assert store.is_owner_vouched(new_id) is True
     assert refreshed.interval_ms == carried_interval * 1000, "the refresh keeps the carried cadence"

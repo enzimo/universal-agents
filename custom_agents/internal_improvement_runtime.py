@@ -311,8 +311,8 @@ def prepare_internal_improvement_schedule_for_manager(
     # worker launch names the person it was started for; its runs still work
     # for no person (sign_system_run_async in enqueue_internal_improvement_job).
     # This context is only for a new row: installs here are ensure-only, so a
-    # stored schedule, and the chat session the gateway refreshes on it
-    # (install mode refresh, custom_agents.schedule_context_refresh), is never
+    # stored schedule, and the delivery target the gateway refreshes on it
+    # (install mode refresh, team_services.schedules), is never
     # replaced. Escalations take the owner's current roles from the gateway's
     # copy of the team's people (access_control.people_directory), so a
     # schedule created here after the gateway's last refresh works at once.

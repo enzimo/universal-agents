@@ -742,9 +742,9 @@ async def _prepared_heartbeat_run(
         schedule_store = getattr(agent, "_schedule_store", None)
         vouched = bool(schedule_store is not None and schedule_store.is_owner_vouched(scheduled_message.schedule_id))
         roles = scheduled_owner_roles(
-            internal_meta.gateway_context, owner, schedule_id=item.heartbeat_item_id,
+            owner,
+            schedule_id=item.heartbeat_item_id,
             system_managed=is_system_managed_schedule(scheduled_message),
-            agent=agent,
             owner_vouched=vouched,
         ) if owner is not None else ()
         if not await _heartbeat_objective_allowed(

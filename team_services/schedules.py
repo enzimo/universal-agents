@@ -376,10 +376,13 @@ class ScheduleOperations:
                     "invalid_request", "An objective_work_session schedule requires objective_id."
                 )
             return False
-        if not actor.owner_vouched:
+        # System-schedule authority rule (EA-5): team and maintenance system schedules cannot be
+        # installed from a scheduled run; they require a direct gateway-signed person request or command.
+        if not actor.gateway_signed_token:
             raise ScheduleInstallRefused(
                 "not_allowed",
-                "Team and maintenance system schedules require a gateway-signed person request or command.",
+                "Team and maintenance system schedules cannot be installed from a scheduled run; "
+                "only an administrator's direct request or gateway command may install them.",
             )
         if not self._may_change_system(person):
             raise ScheduleInstallRefused("not_allowed", SYSTEM_NOT_ALLOWED_TEXT)

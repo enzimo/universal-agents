@@ -212,3 +212,153 @@ async def test_internal_review_backlog_uses_only_its_owners_configured_notificat
     assert notice.msg_meta.gateway_context.schedule_owner_agent_id is None
     assert notice.msg_meta.conversation_id is None
     assert notice.msg_content.source_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_decision_52_admission_accepts_token_valid_at_stored_at_even_when_expired_now(
+    tmp_path, monkeypatch
+):
+    """F10 (EA-2): real on_nats_delivery -> _handle_task_request admits a queued task whose
+    token was valid at JetStream stored_at even though it has already expired at arrival time."""
+    from datetime import timedelta
+
+    from custom_agents.pending_work_runtime import close_pending_work
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from tests.broker_access_support import broker_gateway_identity, broker_people_store
+    from tests.change_approval_support import use_signed_contexts
+
+    use_signed_contexts(monkeypatch)
+    agent = _make_agent(tmp_path)
+    agent.paused = True
+    monkeypatch.setattr(agent, "_refresh_self_agent_state", AsyncMock())
+
+    person = broker_people_store().register(agent.team_id, "alice", roles=("member",))
+    # Seed a conversation owned by alice so admission also exercises ownership verification.
+    agent._conversation_store.ensure_thread(
+        conversation_id="conv_d52_ok",
+        team_id=agent.team_id,
+        owner_agent_id=agent.id,
+        owner_agent_name=agent.name,
+        requester_name="alice",
+        requester_id="alice",
+        root_task_id="task_d52_seed_ok",
+        owner_canonical_user_id="alice",
+    )
+
+    now = datetime.now(timezone.utc)
+    # Valid from now-4m to now-3m -> EXPIRED now (past 30s clock skew), VALID at now-3m30s.
+    issued = now - timedelta(minutes=4)
+    stored_at = now - timedelta(minutes=3, seconds=30)
+
+    task, header, meta = _request("task_d52_valid_at_store")
+    meta.conversation_id = "conv_d52_ok"
+    token_dict = root_task_token(
+        broker_gateway_identity(agent.team_id),
+        team=agent.team_id,
+        root_task_id=task.task_id,
+        request_id="task_context_d52_ok",
+        person_ref=person.person_ref,
+        issued=issued,
+        lifetime_seconds=60,
+    )
+    meta.gateway_context.task_context = AuthorityTokenRecord.model_validate(token_dict)
+    header.to_routing_path = agent.id
+    delivery = SimpleNamespace(
+        envelope=MessageEnvelope(msg_content=task, msg_header=header, msg_meta=meta),
+        logical_route=agent.id,
+        source_queue_name=agent.id,
+        transport_subject="test.requests",
+        redelivery_count=0,
+        max_deliver=5,
+        stored_at=stored_at,
+        ack=AsyncMock(),
+        nak=AsyncMock(),
+    )
+    try:
+        async with agent._execution_lanes.hold():
+            await asyncio.wait_for(agent.on_nats_delivery(delivery), 5)
+            info = agent.task_manager.get_task_info(task.task_id)
+            assert info is not None, "task whose token was valid at stored_at must be admitted"
+            assert info.owner_person_id == "alice"
+            assert task.task_id in agent.task_manager.task_state.task_queue
+            delivery.ack.assert_awaited_once()
+            delivery.nak.assert_not_awaited()
+    finally:
+        await close_pending_work(agent)
+
+
+@pytest.mark.asyncio
+async def test_decision_52_admission_refuses_token_already_expired_at_stored_at(
+    tmp_path, monkeypatch
+):
+    """F10 (EA-2): real on_nats_delivery -> _handle_task_request refuses a queued task whose
+    token had already expired before JetStream stored_at."""
+    from datetime import timedelta
+
+    from custom_agents.pending_work_runtime import close_pending_work
+    from custom_messages.contracts.envelope_v1 import MessageEnvelope
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from tests.broker_access_support import broker_gateway_identity, broker_people_store
+    from tests.change_approval_support import use_signed_contexts
+
+    use_signed_contexts(monkeypatch)
+    agent = _make_agent(tmp_path)
+    agent.paused = True
+    monkeypatch.setattr(agent, "_refresh_self_agent_state", AsyncMock())
+
+    person = broker_people_store().register(agent.team_id, "alice", roles=("member",))
+    agent._conversation_store.ensure_thread(
+        conversation_id="conv_d52_expired",
+        team_id=agent.team_id,
+        owner_agent_id=agent.id,
+        owner_agent_name=agent.name,
+        requester_name="alice",
+        requester_id="alice",
+        root_task_id="task_d52_seed_expired",
+        owner_canonical_user_id="alice",
+    )
+
+    now = datetime.now(timezone.utc)
+    # Valid from now-4m to now-3m -> ALREADY EXPIRED at stored_at = now-1m (past 30s clock skew).
+    issued = now - timedelta(minutes=4)
+    stored_at = now - timedelta(minutes=1)
+
+    task, header, meta = _request("task_d52_expired_at_store")
+    meta.conversation_id = "conv_d52_expired"
+    token_dict = root_task_token(
+        broker_gateway_identity(agent.team_id),
+        team=agent.team_id,
+        root_task_id=task.task_id,
+        request_id="task_context_d52_expired",
+        person_ref=person.person_ref,
+        issued=issued,
+        lifetime_seconds=60,
+    )
+    meta.gateway_context.task_context = AuthorityTokenRecord.model_validate(token_dict)
+    header.to_routing_path = agent.id
+    delivery = SimpleNamespace(
+        envelope=MessageEnvelope(msg_content=task, msg_header=header, msg_meta=meta),
+        logical_route=agent.id,
+        source_queue_name=agent.id,
+        transport_subject="test.requests",
+        redelivery_count=0,
+        max_deliver=5,
+        stored_at=stored_at,
+        ack=AsyncMock(),
+        nak=AsyncMock(),
+    )
+    try:
+        async with agent._execution_lanes.hold():
+            await asyncio.wait_for(agent.on_nats_delivery(delivery), 5)
+            # Token was expired at stored_at -> owner_person_id resolved to None -> joining
+            # Alice's conversation is refused and the task is never queued.
+            assert agent.task_manager.get_task_info(task.task_id) is None
+            assert task.task_id not in agent.task_manager.task_state.task_queue
+            agent.team_comms.send_message.assert_awaited()
+            delivery.ack.assert_awaited_once()
+            delivery.nak.assert_not_awaited()
+    finally:
+        await close_pending_work(agent)

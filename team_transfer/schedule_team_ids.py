@@ -23,7 +23,7 @@ What follows the new id, and why:
   here (as export already does); vouching travels in ``owner_vouched``, and the chat route
   travels in ``scheduled_target`` and ``session``. The rest of the gateway context stays,
   because the gateway's refresh of a system schedule needs it
-  (``custom_agents.schedule_context_refresh``).
+  (``team_services.schedules``, refresh mode).
 - **Worker bindings and pool sizes.** ``team_id``; a binding's ``schedule_id`` follows its
   schedule. When the runtime set the binding up itself (the usual binding of a person's
   schedule nobody set up by hand), its ``actor_principal_id`` is ``local_schedule_runtime:<team>``

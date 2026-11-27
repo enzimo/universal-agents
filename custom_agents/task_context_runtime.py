@@ -8,7 +8,7 @@ certificate, maintains standing protocol 1 permits (``run_permit_json`` and
 
 This module holds:
 - ``context_verifier``: the process's live ``AuthorityTokenVerifier``;
-- ``people_directory``, ``run_owner``, ``inactive_owner``, and ``gateway_vouches``;
+- ``people_directory``, ``run_owner``, ``inactive_owner``, and ``scheduled_owner_roles``;
 - the three special lead-process paths (``sign_system_escalation``,
   ``sign_for_maintenance_owner``, ``sign_memory_review``), which wrap the schedule's
   scheduler-signed standing permit in ``ScheduleRunIdentityV1`` with a fresh
@@ -23,7 +23,6 @@ from typing import Any
 
 from access_control.authority_verifier import (
     AuthorityTokenVerifier,
-    IdentityRejected,
     get_process_verifier,
 )
 from access_control.people_directory import PeopleDirectory, PersonNow
@@ -72,42 +71,6 @@ def _run_person(meta: Any) -> str | None:
     return str(getattr(gateway_context, "canonical_user_id", "") or "").strip() or None
 
 
-def gateway_vouches(
-    gateway_context: Any,
-    person_id: str,
-    *,
-    team_id: str = "",
-    agent: Any = None,
-    verifier: AuthorityTokenVerifier | None = None,
-) -> bool:
-    """Whether the token saved with the schedule was signed by the gateway for this same person."""
-
-    signed = getattr(gateway_context, "task_context", None)
-    if signed is None:
-        return False
-    effective_team = team_id or str(getattr(agent, "team_id", "") or "")
-    if not effective_team:
-        audience = signed.get("audience") if isinstance(signed, dict) else getattr(signed, "audience", None)
-        effective_team = str(
-            (audience.get("team") if isinstance(audience, dict) else getattr(audience, "team", "")) or ""
-        )
-    if not effective_team:
-        return False
-    active_verifier = verifier if verifier is not None else context_verifier(agent)
-    try:
-        verified = active_verifier.verify_root_task(
-            signed,
-            team_id=effective_team,
-            require_issuer="gateway",
-            check_expiry=False,
-            require_active_person=False,
-        )
-    except (IdentityRejected, ValueError) as exc:
-        logger.warning("Ignoring an unverifiable embedded authority token. event=task_context_rejected reason=%s", exc)
-        return False
-    return verified.is_gateway_issued and verified.person_id == person_id
-
-
 def run_owner(agent: Any, meta: Any) -> PersonNow | None:
     """The run's person as the gateway last recorded them, or None when the run names no person.
 
@@ -142,12 +105,10 @@ def inactive_owner(owner: PersonNow | None, *, schedule_id: str) -> bool:
 
 
 def scheduled_owner_roles(
-    gateway_context: Any,
     owner: PersonNow,
     *,
     schedule_id: str,
     system_managed: bool,
-    agent: Any = None,
     owner_vouched: bool = False,
 ) -> tuple[str, ...]:
     """The owner's current roles when the owner is vouched for, else none (logged)."""
@@ -250,7 +211,7 @@ def sign_system_escalation(agent: Any, meta: Any, *, task_id: str) -> Any:
     stored_context = getattr(schedule.payload_meta, "gateway_context", None)
     signed = meta.model_copy(deep=True)
     # Where to reach the owner (their chat session) comes from the schedule the
-    # gateway keeps refreshed (custom_agents.schedule_context_refresh), never
+    # gateway keeps refreshed (team_services.schedules, refresh mode), never
     # from the escalation.
     for name in PERSON_GATEWAY_FIELDS:
         setattr(signed.gateway_context, name, getattr(stored_context, name, None))
@@ -407,7 +368,6 @@ def _find_conversation_review(store: Any, person_id: str) -> Any | None:
 
 __all__ = [
     "context_verifier",
-    "gateway_vouches",
     "inactive_owner",
     "people_directory",
     "run_owner",

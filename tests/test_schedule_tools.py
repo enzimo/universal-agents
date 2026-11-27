@@ -1608,15 +1608,41 @@ def test_permit_backed_scheduled_run_creates_unvouched_schedule(tmp_path: Path, 
     assert "not vouched" in child["notice"]
     child_id = child["schedule_id"]
     assert agent._schedule_store.is_owner_vouched(child_id) is False
-    assert agent._schedule_store.run_permit(child_id) is None
-    assert bound.scheduler.issue_permit_for_schedule(child_id) is False
-    assert agent._schedule_store.run_permit(child_id) is None
+    from access_control.authority_verifier import AuthorityTokenVerifier
+    from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
+    from custom_messages.wire.authority_bindings import SCHEDULE_UNVOUCHED_PERMIT_PREFIX
+    from tests.broker_access_support import broker_trust_store
+
+    child_permit = agent._schedule_store.run_permit(child_id)
+    assert child_permit is not None
+    assert child_permit.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}{child_id}"
+    resolved_child = resolve_task_identity(
+        verifier=AuthorityTokenVerifier(broker_trust_store(), people=AccessRepository(agent.task_manager.storage_settings)),
+        team_id="team_1",
+        task_context=None,
+        schedule_run=ScheduleRunIdentityV1(
+            permit=child_permit,
+            context_id="schedule_run_c49_child",
+            conversation_id="conversation_id_sched",
+            started_at_utc=now,
+        ),
+        schedule_runs=ScheduleRunLookup.from_storage(agent.task_manager.storage_settings),
+        now=now,
+    )
+    assert resolved_child.person_id == "usr_sched_a"
+    assert resolved_child.person_roles == ()
+    assert bound.scheduler.issue_permit_for_schedule(child_id) is True
+    assert agent._schedule_store.run_permit(child_id).bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}{child_id}"
 
 
 @pytest.mark.asyncio
 async def test_turn_action_install_refusal_logs_actual_outcome(tmp_path: Path, caplog: pytest.LogCaptureFixture):
-    """C30: non-id_in_use refusals log their outcome instead of 'belongs to someone else'."""
-    from custom_agents.schedule_installation import create_schedule_from_turn_action
+    """C30 + F5 (FA-3): non-id_in_use refusals raise a terminal TurnActionRefused and log their outcome."""
+    from custom_agents.schedule_installation import (
+        ScheduleActionInstallRefused,
+        create_schedule_from_turn_action,
+    )
+    from custom_agents.turn_action_refusal import TurnActionRefused
 
     db_path = str(tmp_path / "turn_action_refusal.db")
     agent = _FakeAgent(db_path)
@@ -1634,18 +1660,22 @@ async def test_turn_action_install_refusal_logs_actual_outcome(tmp_path: Path, c
         next_fire_at="2030-01-01T00:00:00+00:00",
     )
     with caplog.at_level(logging.WARNING, logger="test.turn_action_refusal"):
-        await create_schedule_from_turn_action(
-            agent,
-            bad_cron,
-            msg_header=source_header,
-            msg_meta=source_meta,
-        )
+        with pytest.raises(ScheduleActionInstallRefused) as exc_info:
+            await create_schedule_from_turn_action(
+                agent,
+                bad_cron,
+                msg_header=source_header,
+                msg_meta=source_meta,
+            )
+    assert isinstance(exc_info.value, TurnActionRefused)
+    assert exc_info.value.outcome == "invalid_request"
+    assert exc_info.value.schedule_id == "sched_bad_cron"
     assert agent._schedule_store.get_scheduled_message("sched_bad_cron") is None
     assert "event=schedule_action_install_refused" in caplog.text
     assert "outcome=invalid_request" in caplog.text
     assert "belongs to someone else" not in caplog.text
 
-    # Contrast: an id_in_use collision with another person's schedule still logs event=schedule_action_id_in_use.
+    # Contrast: an id_in_use collision with another person's schedule still returns cleanly and logs id_in_use.
     other_agent = _FakeAgent(db_path, canonical_user_id="usr_sched_b")
     set_agent_ref(other_agent)
     other_sched = ScheduledMessage(
@@ -1679,3 +1709,187 @@ async def test_turn_action_install_refusal_logs_actual_outcome(tmp_path: Path, c
         )
     assert "event=schedule_action_id_in_use" in caplog.text
     assert "belongs to someone else" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_turn_action_outbox_marks_schedule_install_refusal_failed_terminal_f5(tmp_path: Path):
+    """F5 (FA-3): ScheduleActionInstallRefused drives the outbox straight to failed_terminal and notifies the task."""
+    from types import SimpleNamespace
+    from typing import Any
+
+    from custom_agents.schedule_installation import ScheduleActionInstallRefused
+    from custom_agents.turn_action_outbox_runtime import _schedule_turn_action_recovery
+
+    marked_records: list[tuple[str, dict[str, Any]]] = []
+    marked_batches: list[tuple[str, str]] = []
+    history_entries: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _Ops:
+        async def run(self, fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+    record = SimpleNamespace(
+        action_id="act_sched_1",
+        batch_id="batch_sched_1",
+        source_task_id="task_sched_1",
+        action_index=0,
+        action_type="schedule_message",
+        phase="local_commit",
+        attempt_count=1,
+        recoverability="automatic_retry",
+        target_route=None,
+        message_id=None,
+        side_effects={},
+    )
+    task_manager = SimpleNamespace(
+        operations_runtime=_Ops(),
+        get_turn_action_record=lambda aid: record if aid == "act_sched_1" else None,
+        block_turn_actions_after=lambda batch_id, idx, reason="": None,
+        mark_turn_action_record=lambda aid, **kw: marked_records.append((aid, kw)),
+        mark_turn_action_batch_status=lambda bid, status, **kw: marked_batches.append((bid, status)),
+        append_history_entry=lambda tid, summary, **kw: history_entries.append((tid, summary, kw)),
+    )
+    fake_self = SimpleNamespace(
+        id="lead_1",
+        name="TeamLead",
+        task_manager=task_manager,
+        _logger=logging.getLogger("test.outbox_refusal"),
+        _turn_action_outbox_int=lambda _k, default: default,
+    )
+    refusal = ScheduleActionInstallRefused("invalid_request", "sched_bad", "Invalid cron expression.")
+    with pytest.raises(ScheduleActionInstallRefused):
+        await _schedule_turn_action_recovery(
+            fake_self,
+            batch_id="batch_sched_1",
+            action_id="act_sched_1",
+            exc=refusal,
+        )
+    assert any(kw.get("status") == "failed_terminal" and kw.get("recoverability") == "terminal" for _, kw in marked_records)
+    assert ("batch_sched_1", "failed") in marked_batches
+    assert any(tid == "task_sched_1" and "refused for good" in summary for tid, summary, _ in history_entries)
+
+
+@pytest.mark.asyncio
+async def test_schedule_install_client_resends_same_request_id_and_rereads_store_f5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """F5 (FA-4/CR-3): stable request_id, single resend on timeout/unavailable, store confirmation, and sync deadline."""
+    import asyncio
+    import threading
+    from datetime import timedelta
+
+    import custom_agents.schedule_install_client as install_client
+    from assistant_gateway.application.team_commands import TeamServicesUnavailable
+    from custom_agents.schedule_install_client import (
+        extract_task_authority_token,
+        install_schedule_via_team_services,
+        install_schedule_via_team_services_sync,
+        logical_install_request_id,
+    )
+    from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, ServiceUnavailable
+
+    db_path = str(tmp_path / "install_retry.db")
+    agent = _FakeAgent(db_path)
+    token = extract_task_authority_token(agent.task_manager._task_info.meta)
+    sched = ScheduledMessage(
+        schedule_id="sched_retry_1",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check status daily."),
+        payload_meta=agent.task_manager._task_info.meta.model_copy(deep=True),
+        interval_ms=3_600_000,
+        claim_team_id="team_1",
+    )
+    expected_req_id = logical_install_request_id("sched_retry_1", mode="create", authority_token=token)
+    assert expected_req_id == logical_install_request_id("sched_retry_1", mode="create", authority_token=token)
+
+    # 1. First attempt times out -> resends once with the exact same request_id and succeeds.
+    seen_request_ids: list[str] = []
+
+    async def _flaky_ask(_agent, kind, body, *, authority=None, timeout=None):
+        assert kind == "schedules.install"
+        seen_request_ids.append(body["request_id"])
+        if len(seen_request_ids) == 1:
+            raise ServiceUnavailable(kind, "svc.team", NO_ANSWER_IN_TIME)
+        return {
+            "outcome": "ok",
+            "state": "installed",
+            "schedule_id": body["schedule_id"],
+            "version": {"seen_version": "v1", "timing_revision": 0},
+        }
+
+    monkeypatch.setattr(install_client, "ask_team", _flaky_ask)
+    reply = await install_schedule_via_team_services(
+        agent, sched, mode="create", authority_token=token, timeout=2.0
+    )
+    assert reply["outcome"] == "ok"
+    assert seen_request_ids == [expected_req_id, expected_req_id]
+
+    # 2. Both attempts fail with TeamServicesUnavailable AFTER commit -> re-reads store and confirms.
+    committed_sched = sched.model_copy(deep=True)
+    committed_sched.schedule_id = "sched_committed_lost_reply"
+    committed_sched.next_fire_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    seen_lost: list[str] = []
+
+    async def _lost_reply_after_commit(_agent, kind, body, *, authority=None, timeout=None):
+        seen_lost.append(body["request_id"])
+        if len(seen_lost) == 1:
+            agent._schedule_store.add(committed_sched, claim_team_id="team_1", owner_vouched=True)
+        raise TeamServicesUnavailable("Reply lost after commit.")
+
+    monkeypatch.setattr(install_client, "ask_team", _lost_reply_after_commit)
+    confirmed = await install_schedule_via_team_services(
+        agent, committed_sched, mode="create", authority_token=token, timeout=2.0
+    )
+    assert confirmed["outcome"] == "ok"
+    assert confirmed["schedule_id"] == "sched_committed_lost_reply"
+    assert confirmed["owner_vouched"] is True
+    assert len(seen_lost) == 2 and seen_lost[0] == seen_lost[1]
+
+    # 3. Both attempts fail and nothing was committed -> raises the error.
+    absent_sched = sched.model_copy(deep=True)
+    absent_sched.schedule_id = "sched_never_saved"
+
+    async def _always_unavailable(_agent, kind, body, *, authority=None, timeout=None):
+        raise ServiceUnavailable(kind, "svc.team", NO_ANSWER_IN_TIME)
+
+    monkeypatch.setattr(install_client, "ask_team", _always_unavailable)
+    with pytest.raises(ServiceUnavailable):
+        await install_schedule_via_team_services(
+            agent, absent_sched, mode="create", authority_token=token, timeout=1.0
+        )
+
+    # 4. Sync wrapper enforces one overall deadline and cancels the submitted coroutine on timeout (CR-3).
+    cancelled_event = threading.Event()
+    bg_loop = asyncio.new_event_loop()
+    bg_thread = threading.Thread(target=bg_loop.run_forever, daemon=True)
+    bg_thread.start()
+    try:
+        async def _hang_forever(_agent, kind, body, *, authority=None, timeout=None):
+            try:
+                await asyncio.sleep(30.0)
+            except asyncio.CancelledError:
+                cancelled_event.set()
+                raise
+
+        monkeypatch.setattr(install_client, "ask_team", _hang_forever)
+        agent._runtime_loop = bg_loop
+        slow_sched = sched.model_copy(deep=True)
+        slow_sched.schedule_id = "sched_sync_timeout"
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError):
+            await asyncio.to_thread(
+                install_schedule_via_team_services_sync,
+                agent,
+                slow_sched,
+                mode="create",
+                authority_token=token,
+                timeout=0.25,
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed < 1.5, f"expected single overall deadline ~0.25s, took {elapsed:.2f}s"
+        assert cancelled_event.wait(timeout=1.0), "timed-out install coroutine must be cancelled"
+    finally:
+        agent._runtime_loop = None
+        bg_loop.call_soon_threadsafe(bg_loop.stop)
+        bg_thread.join(timeout=2.0)
+        bg_loop.close()

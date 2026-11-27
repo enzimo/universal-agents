@@ -3,8 +3,8 @@
 Real gateway application code, manager schedule handling, SQLite schedule store,
 Cedar and signed task contexts. At each gateway start (and when the manager
 becomes available again) the gateway sends ``refresh`` for the maintenance
-schedules; the manager replaces only the stored person and session
-(``custom_agents.schedule_context_refresh``). Roles do not come from the
+schedules; ``team_services.schedules`` (refresh mode) replaces only the stored
+person, delivery reference, and conversation. Roles do not come from the
 refresh: runs and escalations read the owner's current roles from the
 gateway's copy of the team's people (``access_control.people_directory``). So:
 

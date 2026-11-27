@@ -1584,11 +1584,13 @@ its own (coordination plan 7.10, accepted 2026-10-30).
 - **Memory reviews after a turn.** The review the team lead sends right after
   a person's turn used to carry the turn's signed context, which names the
   person's request; that request has usually ended, so its memory changes
-  would be refused as `request_closed`. The manager signs it instead as work
-  of the person's own stale-conversation review schedule, which reviews the
-  same queued jobs (`task_context_runtime.sign_memory_review`): it counts as
-  one of the person's scheduled jobs. Without that schedule, for a disabled
-  or removed person, or without the scheduler's key, nothing is sent
+  would be refused as `request_closed`. The manager instead attaches the
+  scheduler-signed standing run permit from the person's own stale-conversation
+  review schedule (`task_context_runtime.sign_memory_review`), wrapped in a
+  `ScheduleRunIdentityV1` with a fresh `schedule_run_<hex>` request id: it
+  counts as one of the person's scheduled jobs without holding any signing key
+  in the lead. Without that schedule, for a disabled or removed person, or
+  while the schedule has no usable permit yet, nothing is sent
   (`event=memory_review_not_signed`) and the job waits for the schedule's
   next run.
 - **Refusal names.** The names are shared, in
@@ -2091,28 +2093,32 @@ schedules are private and a change to a system schedule needs a person. So
 trusted manager code checks every schedule before each run
 (`custom_agents/stale_schedules.py`): it deletes the own schedules of people
 removed from the team and tells owners and administrators about unused ones
-through the Inbox, once per list; the run gets counts only. So that the run's
-findings reach a person, the manager signs TeamArchitect's task for its
-escalation for the owner stored on the maintenance schedule (the first user),
-with the scheduler key; a person named in the escalation itself is ignored
+through the Inbox, once per list; the run gets counts only. So that the run's findings reach a person, the lead attaches the
+scheduler-signed `owner_permit_json` from the maintenance schedule (the first
+user) to TeamArchitect's escalation task, wrapped in a `ScheduleRunIdentityV1`
+with a fresh `schedule_run_<hex>` request id; no signing key lives in the lead,
+and any person named in the escalation itself is ignored
 (`custom_agents/task_context_runtime.py`, `sign_system_escalation`).
 
 Every scheduled run takes its owner's standing and roles at the moment it runs
 from the gateway's copy of the team's people in the access store
 (`access_control/people_directory.py`, written by the gateway whenever a person
 is added, changes role, is disabled, enabled or removed, and in full at each
-start). Why a copy: the manager signs scheduled work but cannot read the
-gateway's records; before, runs used roles saved on the schedule, so a demoted
-administrator's schedules kept administrator roles and a disabled person's kept
-running. A disabled or removed owner's schedules do not run. Roles are given
-only when the owner is vouched for: a system-managed schedule, or a context the
-gateway signed for that same person saved with the schedule. The gateway still
-keeps where to reach each maintenance schedule's owner current: at each start,
-and whenever the manager becomes available again, it sends a `refresh`, and the
-manager replaces only the stored person, chat session and that session's
-conversation under the trusted-runtime permit, keeping pause, enabled state,
-cadence and next fire time (`custom_agents/schedule_context_refresh.py`). A refresh never creates a
-schedule. Memory-review schedules are installed the
+start). Why a copy: `team_services.scheduler` signs scheduled runs and standing
+permits, and verifiers resolve live roles from that copy without reading the
+gateway's private store; before, runs used roles saved on the schedule, so a
+demoted administrator's schedules kept administrator roles and a disabled
+person's kept running. A disabled or removed owner's schedules do not run.
+Roles are given only when the schedule's `owner_vouched` mark is set (or the
+schedule is system-managed); an unvouched person's schedule runs with a signed
+no-roles marker (`unvouched_run_<hex>` / `schedule_unvouched_permit:<id>`) and
+resolves with `person_roles=()`. The gateway keeps where to reach each
+maintenance schedule's owner current: at each start, and whenever the team
+services become available again, it sends `schedules.install` with
+`mode="refresh"` (`team_services/schedules.py`), replacing only the stored
+person, delivery reference, and conversation under the trusted-runtime permit
+while keeping pause, enabled state, cadence, and next fire time. A refresh
+never creates a schedule. Memory-review schedules are installed the
 same way: once (`ensure`), then refreshed, so a gateway restart no longer
 resets an operator's pause or cadence. The core-facts audit is one team
 schedule; the personal-facts audit and stale-conversation review are one pair

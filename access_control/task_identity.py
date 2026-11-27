@@ -393,6 +393,8 @@ def _fallback_current_permit(
         require_active_person=False,
         people=people_override,
     )
+    if not (frozen.issued_at - RUN_START_SKEW <= run.started_at_utc < frozen.expires_at):
+        raise frozen_exc
     if schedule_runs is None or frozen.schedule_id is None:
         raise frozen_exc
     facts = schedule_runs.schedule(frozen.schedule_id)

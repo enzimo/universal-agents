@@ -2158,14 +2158,32 @@ def test_08g_legacy_scan_finds_deeply_nested_dict_contexts_c47() -> None:
 @pytest.mark.live
 @pytest.mark.postgres
 def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
-    """A5 on PostgreSQL: converts legacy 0.9 task snapshot, schedule context/permit, handback,
-    gateway delivery, and backfills change_requests.token_digest; second start is a no-op."""
+    """A5 + F10 (EA-3) + C46 on PostgreSQL: converts legacy 0.9 waiting task, schedule run,
+    deferred message, handback, schedules (own-schedule vouched, another-schedule unvouched+issue),
+    scheduled_run_problems (preserving original start time), person_held_rows (nested JSON string),
+    gateway_deliveries (gateway context naming a schedule -> gateway-issued, schedule_id dropped),
+    and backfills change_requests.token_digest; a real second start changes nothing."""
 
     dsn = (os.environ.get("TEST_POSTGRES_DSN") or os.environ.get("LIVE_TEST_POSTGRES_DSN") or "").strip()
     if not dsn:
         pytest.skip("Set TEST_POSTGRES_DSN or LIVE_TEST_POSTGRES_DSN to run the live PostgreSQL upgrade test.")
 
+    import secrets
+    from urllib.parse import urlsplit, urlunsplit
+
+    import psycopg
+
+    from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
     from storage.postgres_connection import connect_postgres
+    from storage.scheduled_run_problems import ScheduledRunProblems, ScheduledRunRecordV1
+
+    # Isolate the 0.9 schema test in its own fresh database so it starts clean and never
+    # leaves 0.9-shaped tables in a shared test database used by other PostgreSQL tests.
+    parsed_dsn = urlsplit(dsn)
+    temp_db = f"ua_a5_upgrade_{secrets.token_hex(6)}"
+    isolated_dsn = urlunsplit(parsed_dsn._replace(path=f"/{temp_db}"))
+    with psycopg.connect(dsn, autocommit=True) as admin_conn:
+        admin_conn.execute(f'CREATE DATABASE "{temp_db}"')
 
     forget_task_context_keys()
     pg_team = "team_pg_upgrade"
@@ -2178,13 +2196,15 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
         gw_signer = _Legacy09Signer("gateway", "gateway-pg01")
         sched_signer = _Legacy09Signer("scheduler", "scheduler-pg01")
         old_env = {
-            "POSTGRES_DSN": dsn,
+            "POSTGRES_DSN": isolated_dsn,
             "ACCESS_CONTEXT_VERIFY_KEYS": json.dumps([gw_signer.verify_entry, sched_signer.verify_entry]),
         }
 
         now = datetime.now(timezone.utc).replace(microsecond=0)
         past = now - timedelta(hours=1)
         end_3d = now + timedelta(days=3)
+        failed_started = now - timedelta(days=5)
+        failed_ended = failed_started + timedelta(minutes=2)
 
         wait_ctx = gw_signer.sign_context(
             context_id="task_context_pg_wait",
@@ -2195,6 +2215,32 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
             issued_at=past,
             expires_at=end_3d,
         )
+        deferred_ctx = gw_signer.sign_context(
+            context_id="task_context_pg_deferred",
+            team_id=pg_team,
+            person_id="ada",
+            root_task_id="task_pg_deferred",
+            conversation_id="conv_pg_def",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        handback_ctx = gw_signer.sign_context(
+            context_id="task_context_pg_handback",
+            team_id=pg_team,
+            person_id="ada",
+            root_task_id="task_pg_hb",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        held_ctx = gw_signer.sign_context(
+            context_id="task_context_pg_held",
+            team_id=pg_team,
+            person_id="ada",
+            root_task_id="task_pg_held",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        # F1: own-schedule saved context as 0.9 gateway produced it.
         sched_ctx = gw_signer.sign_context(
             context_id="task_context_pg_sched",
             team_id=pg_team,
@@ -2211,9 +2257,64 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
             issued_at=past,
             expires_at=end_3d,
         )
+        # C46: saved context naming ANOTHER schedule -> must not vouch, must clear permit, must report issue.
+        other_sched_ctx = gw_signer.sign_context(
+            context_id="task_context_pg_other_sched",
+            team_id=pg_team,
+            person_id="ada",
+            schedule_id="sched_pg_unrelated",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        other_sched_permit = sched_signer.sign_permit(
+            permit_id="schedule_permit_pg_other",
+            team_id=pg_team,
+            schedule_id="sched_pg_wrong_ctx",
+            person_id="ada",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        # C46: gateway context naming a schedule inside a gateway delivery -> converted gateway-issued, schedule_id=None.
+        deliv_sched_ctx = gw_signer.sign_context(
+            context_id="task_context_pg_deliv_sched",
+            team_id=pg_team,
+            person_id="ada",
+            root_task_id="task_pg_wait",
+            schedule_id="sched_pg_1",
+            issued_at=past,
+            expires_at=end_3d,
+        )
+        # EA-3: legacy schedule_run inside an active task record.
+        legacy_sched_run = {
+            "permit": sched_permit,
+            "context_id": "schedule_run_pg_run1",
+            "conversation_id": "conv_pg_sched",
+            "started_at_utc": past.isoformat(),
+        }
+        # C46: legacy scheduled_run_problems failed_json with historical start time.
+        failed_run_ctx = sched_signer.sign_context(
+            context_id="task_context_pg_prob_fail",
+            team_id=pg_team,
+            person_id="ada",
+            root_task_id="task_pg_prob_1",
+            schedule_id="sched_pg_1",
+            issued_at=failed_started,
+            expires_at=failed_started + timedelta(hours=1),
+        )
+        prob_rec = ScheduledRunRecordV1(
+            task_id="task_pg_prob_1",
+            agent_id="lead_pg",
+            header=MessageHeader(message_id="m_pg_prob_1", timestamp=failed_ended.isoformat()),
+            meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="ada", scheduled_job_id="sched_pg_1")),
+            ended_at_utc=failed_ended,
+            schedule_name="PG Schedule",
+        )
+        prob_doc = json.loads(prob_rec.model_dump_json())
+        prob_doc["meta"]["gateway_context"]["task_context"] = failed_run_ctx
+
         forged_ctx = dict(wait_ctx, signature=_b64(b"f" * 64))
 
-        # Initialize minimal 0.9-shaped tables in Postgres.
+        # Initialize 0.9-shaped tables in Postgres.
         pg_settings = config.resolve_manager_storage_settings(env=old_env)
         access_repo = AccessRepository(pg_settings)
         access_repo.replace_people(
@@ -2230,7 +2331,7 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
             ],
             at=past,
         )
-        with connect_postgres(dsn) as conn:
+        with connect_postgres(isolated_dsn) as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS active_task_runtime (
@@ -2245,6 +2346,41 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
                     owner_agent_id TEXT NOT NULL, section TEXT NOT NULL, record_id TEXT NOT NULL,
                     payload_json TEXT NOT NULL, payload_digest TEXT NOT NULL,
                     PRIMARY KEY (owner_agent_id, section, record_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_deferred_messages (
+                    owner_agent_id TEXT PRIMARY KEY, owner_agent_name TEXT, team_id TEXT,
+                    owner_named_agent_type TEXT, messages_json TEXT NOT NULL, updated_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS worker_task_handbacks (
+                    handback_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, task_id TEXT NOT NULL,
+                    worker_agent_id TEXT NOT NULL, disposition TEXT NOT NULL, status TEXT NOT NULL,
+                    received_at TEXT NOT NULL, updated_at TEXT NOT NULL, payload_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS person_held_rows (
+                    held_row_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, person_id TEXT NOT NULL,
+                    position INTEGER NOT NULL, source_table TEXT NOT NULL, row_json TEXT NOT NULL,
+                    held_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scheduled_run_problems (
+                    team_id TEXT NOT NULL, schedule_id TEXT NOT NULL, failed_task_id TEXT NOT NULL,
+                    failed_json TEXT NOT NULL, recovered_json TEXT,
+                    PRIMARY KEY (team_id, schedule_id)
                 )
                 """
             )
@@ -2281,6 +2417,10 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
             # Clean any prior test rows for this team.
             conn.execute("DELETE FROM active_task_runtime_records WHERE owner_agent_id = 'lead_pg'")
             conn.execute("DELETE FROM active_task_runtime WHERE owner_agent_id = 'lead_pg'")
+            conn.execute("DELETE FROM agent_deferred_messages WHERE owner_agent_id = 'lead_pg'")
+            conn.execute("DELETE FROM worker_task_handbacks WHERE team_id = %s", (pg_team,))
+            conn.execute("DELETE FROM person_held_rows WHERE team_id = %s", (pg_team,))
+            conn.execute("DELETE FROM scheduled_run_problems WHERE team_id = %s", (pg_team,))
             conn.execute("DELETE FROM change_requests WHERE team_id = %s", (pg_team,))
             conn.execute("DELETE FROM scheduled_messages WHERE claim_team_id = %s", (pg_team,))
             conn.execute("DELETE FROM gateway_deliveries WHERE delivery_id = 'deliv_pg_1'")
@@ -2288,7 +2428,7 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
             header = canonical_json(
                 {
                     "layout_version": 1,
-                    "task_order": ["task_pg_wait", "task_pg_forged"],
+                    "task_order": ["task_pg_wait", "task_pg_sched_run", "task_pg_forged"],
                     "header": {"schema_version": 3, "task_queue": [], "waiting_top_level_task_ids": ["task_pg_wait"]},
                 }
             )
@@ -2299,6 +2439,7 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
             )
             for rid, rdoc in (
                 ("task_pg_wait", _task_record_dict(task_id="task_pg_wait", owner_person_id="ada", task_context=wait_ctx)),
+                ("task_pg_sched_run", _task_record_dict(task_id="task_pg_sched_run", owner_person_id="ada", schedule_run=legacy_sched_run, state="in_progress")),
                 ("task_pg_forged", _task_record_dict(task_id="task_pg_forged", owner_person_id="ada", task_context=forged_ctx)),
             ):
                 pjson = canonical_json(rdoc)
@@ -2306,30 +2447,100 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
                     "INSERT INTO active_task_runtime_records (owner_agent_id, section, record_id, payload_json, payload_digest) VALUES (%s, %s, %s, %s, %s)",
                     ("lead_pg", "tasks", rid, pjson, payload_digest(pjson)),
                 )
+            deferred_env = {
+                "msg_header": {"message_id": "msg_pg_def", "from_agent_id": "gateway", "agent_signature": ""},
+                "msg_meta": {"conversation_id": "conv_pg_def", "gateway_context": {"canonical_user_id": "ada", "task_context": deferred_ctx}},
+                "msg_content": {"message_class": "Task", "task_id": "task_pg_deferred", "task_type": "request", "problem_statement": "Deferred PG task"},
+            }
+            conn.execute(
+                "INSERT INTO agent_deferred_messages (owner_agent_id, owner_agent_name, team_id, owner_named_agent_type, messages_json, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                ("lead_pg", "LeadPG", pg_team, "TeamArchitect", json.dumps([deferred_env]), past.isoformat()),
+            )
+            handback_doc = {
+                "schema_version": 1,
+                "message_class": "WorkerTaskHandbackV1",
+                "handback_id": "hb_pg_1",
+                "team_id": pg_team,
+                "worker_agent_id": "worker_pg_1",
+                "worker_named_agent_type": "WebResearchAgent",
+                "evidence": {
+                    "lease_lost_at_utc": past.isoformat(),
+                    "reason": "lease lost",
+                },
+                "handed_back": {
+                    "task_id": "task_pg_hb",
+                    "disposition": "not_started",
+                    "prior_state": "ACCEPTED",
+                    "task": {"task_id": "task_pg_hb", "task_type": "request", "problem_statement": "PG handback"},
+                    "header": {"from_agent_id": "lead_pg", "agent_signature": ""},
+                    "meta": {"gateway_context": {"canonical_user_id": "ada", "task_context": handback_ctx}},
+                },
+            }
+            conn.execute(
+                "INSERT INTO worker_task_handbacks (handback_id, team_id, task_id, worker_agent_id, disposition, status, received_at, updated_at, payload_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                ("hb_pg_1", pg_team, "task_pg_hb", "worker_pg_1", "not_started", "received", past.isoformat(), past.isoformat(), json.dumps(handback_doc)),
+            )
+            held_row_payload = json.dumps(
+                {
+                    "conversation_id": "conv_pg_held",
+                    "task_id": "task_pg_held",
+                    "turn_index": 1,
+                    "owner_canonical_user_id": "ada",
+                    "gateway_context_json": json.dumps({"canonical_user_id": "ada", "task_context": held_ctx}),
+                    "created_at": past.isoformat(),
+                    "updated_at": past.isoformat(),
+                }
+            )
+            conn.execute(
+                "INSERT INTO person_held_rows (held_row_id, team_id, person_id, position, source_table, row_json, held_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                ("held_pg_1", pg_team, "ada", 1, "conversation_task_links", held_row_payload, past.isoformat()),
+            )
+            conn.execute(
+                "INSERT INTO scheduled_run_problems (team_id, schedule_id, failed_task_id, failed_json, recovered_json) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (pg_team, "sched_pg_1", "task_pg_prob_1", json.dumps(prob_doc), None),
+            )
             conn.execute(
                 "INSERT INTO change_requests (team_id, request_id, person_id, start_position, state, opened_at_utc, closed_at_utc) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s)",
                 (pg_team, "task_context_pg_wait", "ada", 1, RequestState.OPEN.value, past.isoformat(), ""),
             )
-            conn.execute(
-                "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id, run_permit_json) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            for sid, sname, sdoc, rpermit in (
                 (
                     "sched_pg_1",
-                    json.dumps({"task_type": "request", "problem_statement": "PG Schedule"}),
-                    json.dumps(_schedule_dict(schedule_id="sched_pg_1", name="PG Schedule", owner_id="ada", task_context=sched_ctx)),
                     "PG Schedule",
-                    end_3d.isoformat(),
-                    past.isoformat(),
-                    1,
-                    pg_team,
-                    "ada",
+                    _schedule_dict(schedule_id="sched_pg_1", name="PG Schedule", owner_id="ada", task_context=sched_ctx),
                     json.dumps(sched_permit),
                 ),
-            )
+                (
+                    "sched_pg_wrong_ctx",
+                    "PG Wrong Schedule Context",
+                    _schedule_dict(schedule_id="sched_pg_wrong_ctx", name="PG Wrong Schedule Context", owner_id="ada", task_context=other_sched_ctx),
+                    json.dumps(other_sched_permit),
+                ),
+            ):
+                conn.execute(
+                    "INSERT INTO scheduled_messages (schedule_id, payload_json, schedule_json, schedule_name, next_fire_at, created_at, enabled, claim_team_id, owner_canonical_user_id, run_permit_json) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        sid,
+                        json.dumps({"task_type": "request", "problem_statement": sname}),
+                        json.dumps(sdoc),
+                        sname,
+                        end_3d.isoformat(),
+                        past.isoformat(),
+                        1,
+                        pg_team,
+                        "ada",
+                        rpermit,
+                    ),
+                )
             deliv_env = {
                 "msg_header": {"message_id": "msg_pg_deliv", "from_agent_id": "lead_pg", "agent_signature": ""},
-                "msg_meta": {"gateway_context": {"canonical_user_id": "ada", "task_context": wait_ctx}},
+                "msg_meta": {"gateway_context": {"canonical_user_id": "ada", "task_context": deliv_sched_ctx}},
                 "msg_content": {"message_class": "Task", "task_id": "task_pg_wait", "task_type": "response", "problem_statement": "PG reply"},
             }
             conn.execute(
@@ -2344,28 +2555,83 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
         result = upgrade_authority_tokens(config, env=old_env, identities=identities, now=now)
         assert result.already_done is False
         assert result.had_legacy_records is True
-        assert result.counts.converted_contexts == 3
-        assert result.counts.converted_permits == 1
+        # Converted contexts: wait_ctx, deferred_ctx, handback_ctx, held_ctx, sched_ctx (sched_pg_1),
+        # deliv_sched_ctx, and failed_run_ctx (scheduled_run_problems.failed_json).
+        assert result.counts.converted_contexts == 7
+        assert result.counts.converted_schedule_runs == 1  # task_pg_sched_run
+        assert result.counts.converted_permits == 2  # both rows had valid legacy permits; wrong-ctx row is then cleared
         assert result.counts.vouched_schedules == 1
         assert result.counts.ledger_digests_backfilled == 1
-        assert result.counts.unverifiable == 1
+        assert result.counts.unverifiable == 2  # task_pg_forged + sched_pg_wrong_ctx
+        assert result.counts.schedule_names_dropped == 2  # sched_pg_1 saved context + deliv_pg_1 delivery context
+        assert any(
+            i.table == "scheduled_messages"
+            and i.record_id == "sched_pg_wrong_ctx"
+            and "names another schedule" in i.reason
+            for i in result.issues
+        )
         assert result.notice_stored is True
         assert has_legacy_authority_records(config, env=old_env) is False
 
         trust = broker_trust_store()
         verifier = AuthorityTokenVerifier(trust, people=access_repo, installation=identities.gateway.installation)
-        with connect_postgres(dsn) as conn:
-            wait_raw = conn.execute(
-                "SELECT payload_json FROM active_task_runtime_records WHERE owner_agent_id = 'lead_pg' AND section = 'tasks' AND record_id = 'task_pg_wait'"
-            ).fetchone()[0]
-            sched_row = conn.execute(
-                "SELECT owner_vouched, run_permit_json FROM scheduled_messages WHERE schedule_id = 'sched_pg_1'"
-            ).fetchone()
-            digest_val = conn.execute(
-                "SELECT token_digest FROM change_requests WHERE team_id = %s AND request_id = 'task_context_pg_wait'",
-                (pg_team,),
-            ).fetchone()[0]
-        rec = TaskSnapshotRecord.model_validate_json(wait_raw)
+
+        def _snapshot_pg_rows() -> dict[str, Any]:
+            def _one(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> Any:
+                row = conn.execute(sql, params).fetchone()
+                assert row is not None
+                return row
+
+            with connect_postgres(isolated_dsn) as conn:
+                return {
+                    "wait": _one(
+                        conn,
+                        "SELECT payload_json FROM active_task_runtime_records WHERE owner_agent_id = 'lead_pg' AND section = 'tasks' AND record_id = 'task_pg_wait'",
+                    )[0],
+                    "sched_run": _one(
+                        conn,
+                        "SELECT payload_json FROM active_task_runtime_records WHERE owner_agent_id = 'lead_pg' AND section = 'tasks' AND record_id = 'task_pg_sched_run'",
+                    )[0],
+                    "deferred": _one(
+                        conn,
+                        "SELECT messages_json FROM agent_deferred_messages WHERE owner_agent_id = 'lead_pg'",
+                    )[0],
+                    "handback": _one(
+                        conn,
+                        "SELECT payload_json FROM worker_task_handbacks WHERE handback_id = 'hb_pg_1'",
+                    )[0],
+                    "held": _one(
+                        conn,
+                        "SELECT row_json FROM person_held_rows WHERE held_row_id = 'held_pg_1'",
+                    )[0],
+                    "sched_1": _one(
+                        conn,
+                        "SELECT owner_vouched, run_permit_json, schedule_json FROM scheduled_messages WHERE schedule_id = 'sched_pg_1'",
+                    ),
+                    "sched_wrong": _one(
+                        conn,
+                        "SELECT owner_vouched, run_permit_json, schedule_json FROM scheduled_messages WHERE schedule_id = 'sched_pg_wrong_ctx'",
+                    ),
+                    "delivery": _one(
+                        conn,
+                        "SELECT payload_json FROM gateway_deliveries WHERE delivery_id = 'deliv_pg_1'",
+                    )[0],
+                    "problem": _one(
+                        conn,
+                        "SELECT failed_json FROM scheduled_run_problems WHERE team_id = %s AND schedule_id = 'sched_pg_1'",
+                        (pg_team,),
+                    )[0],
+                    "digest": _one(
+                        conn,
+                        "SELECT token_digest FROM change_requests WHERE team_id = %s AND request_id = 'task_context_pg_wait'",
+                        (pg_team,),
+                    )[0],
+                }
+
+        after_first = _snapshot_pg_rows()
+
+        # 1. Waiting task + backfilled change_requests digest.
+        rec = TaskSnapshotRecord.model_validate_json(after_first["wait"])
         assert rec.meta.gateway_context is not None
         ident = resolve_task_identity(
             verifier=verifier,
@@ -2376,14 +2642,109 @@ def test_09_postgres_first_start_conversion_end_to_end(tmp_path: Path) -> None:
             now=now + timedelta(seconds=5),
         )
         assert ident.person_id == "ada" and ident.context_id == "task_context_pg_wait"
-        assert sched_row[0] == 1 and sched_row[1] is not None
-        assert digest_val != ""
+        assert after_first["digest"] != ""
 
-        # Second start is a no-op.
-        second = upgrade_authority_tokens(config, env={"POSTGRES_DSN": dsn}, identities=identities, now=now + timedelta(minutes=1))
+        # 2. Schedule run in active task record.
+        sr_rec = TaskSnapshotRecord.model_validate_json(after_first["sched_run"])
+        assert sr_rec.meta.gateway_context is not None and sr_rec.meta.gateway_context.schedule_run is not None
+        assert sr_rec.meta.gateway_context.schedule_run.context_id == "schedule_run_pg_run1"
+        _verify_real_token(sr_rec.meta.gateway_context.schedule_run.permit, trust, now + timedelta(seconds=5))
+
+        # 3. Deferred message.
+        def_env = MessageEnvelope.model_validate(json.loads(after_first["deferred"])[0])
+        assert def_env.msg_meta is not None and def_env.msg_meta.gateway_context is not None
+        def_ident = resolve_task_identity(
+            verifier=verifier,
+            team_id=pg_team,
+            task_context=def_env.msg_meta.gateway_context.task_context,
+            schedule_run=None,
+            schedule_runs=None,
+            now=now + timedelta(seconds=5),
+        )
+        assert def_ident.person_id == "ada" and def_ident.context_id == "task_context_pg_deferred"
+
+        # 4. Handback.
+        hb_after = WorkerTaskHandbackV1.model_validate_json(after_first["handback"])
+        assert hb_after.handed_back.meta.gateway_context is not None
+        hb_ident = resolve_task_identity(
+            verifier=verifier,
+            team_id=pg_team,
+            task_context=hb_after.handed_back.meta.gateway_context.task_context,
+            schedule_run=None,
+            schedule_runs=None,
+            now=now + timedelta(seconds=5),
+        )
+        assert hb_ident.person_id == "ada" and hb_ident.context_id == "task_context_pg_handback"
+
+        # 5. Held row (nested JSON string inside person_held_rows.row_json).
+        held_after = json.loads(after_first["held"])
+        held_gw = json.loads(held_after["gateway_context_json"])
+        held_ident = resolve_task_identity(
+            verifier=verifier,
+            team_id=pg_team,
+            task_context=held_gw["task_context"],
+            schedule_run=None,
+            schedule_runs=None,
+            now=now + timedelta(seconds=5),
+        )
+        assert held_ident.person_id == "ada" and held_ident.context_id == "task_context_pg_held"
+
+        # 6. Schedules: F1 own-schedule stays vouched with permit; C46 wrong-schedule is unvouched with permit cleared.
+        assert after_first["sched_1"][0] == 1 and after_first["sched_1"][1] is not None
+        _verify_real_token(after_first["sched_1"][1], trust, now + timedelta(seconds=5))
+        assert after_first["sched_wrong"][0] == 0 and after_first["sched_wrong"][1] is None
+
+        # 7. Gateway delivery (EA-3 + C46): converted gateway-issued with schedule_id dropped.
+        deliv_after = MessageEnvelope.model_validate_json(after_first["delivery"])
+        assert deliv_after.msg_meta is not None and deliv_after.msg_meta.gateway_context is not None
+        deliv_ident = resolve_task_identity(
+            verifier=verifier,
+            team_id=pg_team,
+            task_context=deliv_after.msg_meta.gateway_context.task_context,
+            schedule_run=None,
+            schedule_runs=None,
+            now=now + timedelta(seconds=5),
+        )
+        assert deliv_ident.issuer == "gateway"
+        assert deliv_ident.person_id == "ada"
+        assert deliv_ident.context_id == "task_context_pg_deliv_sched"
+        assert deliv_ident.schedule_id is None
+
+        # 8. Scheduled run problem (C46): survives problems() and preserves original started_at_utc.
+        pg_problems = {p.schedule_id: p for p in ScheduledRunProblems(pg_settings).problems(pg_team)}
+        assert "sched_pg_1" in pg_problems
+        failed_gw = pg_problems["sched_pg_1"].failed.meta.gateway_context
+        assert failed_gw is not None
+        rep = reported_schedule_run(
+            verifier=verifier,
+            team_id=pg_team,
+            task_context=failed_gw.task_context,
+            schedule_run=failed_gw.schedule_run,
+        )
+        assert rep is not None
+        assert rep.schedule_id == "sched_pg_1"
+        assert rep.person_id == "ada"
+        assert rep.started_at_utc == failed_started
+
+        # 9. Second start is a true no-op: with marker (already_done) AND even if re-scanned without marker.
+        second = upgrade_authority_tokens(config, env={"POSTGRES_DSN": isolated_dsn}, identities=identities, now=now + timedelta(minutes=1))
         assert second.already_done is True
+        config.layout.authority_tokens_upgrade_path.unlink()
+        rescan = upgrade_authority_tokens(config, env={"POSTGRES_DSN": isolated_dsn}, identities=identities, now=now + timedelta(minutes=2))
+        assert rescan.already_done is False
+        assert rescan.had_legacy_records is False
+        assert rescan.counts.converted_contexts == 0
+        assert rescan.counts.converted_permits == 0
+        assert rescan.counts.converted_schedule_runs == 0
+        assert _snapshot_pg_rows() == after_first
     finally:
         forget_task_context_keys()
+        with psycopg.connect(dsn, autocommit=True) as admin_conn:
+            admin_conn.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid()",
+                (temp_db,),
+            )
+            admin_conn.execute(f'DROP DATABASE IF EXISTS "{temp_db}"')
 
 
 # ---------------------------------------------------------------------------

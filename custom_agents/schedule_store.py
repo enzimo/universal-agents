@@ -2166,21 +2166,6 @@ class ScheduleStore:
         row = self._row(schedule_id)
         return bool(row.get("owner_vouched")) if row else False
 
-    def mark_owner_vouched(
-        self,
-        schedule_id: str,
-        *,
-        checked_owner: str,
-        expected_vouched: Optional[bool] = None,
-    ) -> bool:
-        """Durably set ``owner_vouched = 1`` while the schedule's owner (and optional prior mark) matches."""
-
-        return self._repository.mark_owner_vouched(
-            schedule_id,
-            checked_owner=checked_owner,
-            expected_vouched=expected_vouched,
-        )
-
     def delivery_ref_of(self, schedule_id: str) -> Optional[str]:
         """The opaque ``delivery_ref`` saved on the schedule row by ``schedules.install``, or None."""
 

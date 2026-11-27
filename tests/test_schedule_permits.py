@@ -776,6 +776,57 @@ def test_permit_run_falls_back_to_renewed_current_permit_at_49h_and_stops_when_r
     assert kind_mismatch.value.code == "invalid_permit"
 
 
+def test_permit_run_fallback_refuses_permit_already_expired_before_run_start_c48(world) -> None:
+    """C48: an expired frozen permit cannot adopt a later renewed permit if the run started outside its signed window."""
+
+    record_ann(world, ACTIVE, ("admin", "member"))
+    save_schedule(world)
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+    # Issue a permit at t0 (expires t0 + 7d).
+    assert _issue(world, now=t0).issued == [SCHEDULE_ID]
+    old_permit = _stored(world)
+    assert old_permit is not None
+
+    # Issue a fresh renewed permit at t0 + 5d (valid through t0 + 12d, overlapping t0 + 7d..10d).
+    t_mid = t0 + timedelta(days=5)
+    assert _issue(world, now=t_mid).renewed == [SCHEDULE_ID]
+    new_permit = _stored(world)
+    assert new_permit is not None and new_permit.token_id != old_permit.token_id
+
+    # A host wraps the OLD permit with a start time after its expiry (t0 + 10d) and checks at t0 + 10d + 1h.
+    t_after = t0 + timedelta(days=10)
+    stale_run = _run(old_permit, started=t_after)
+    lookup = ScheduleRunLookup.from_storage(world.tasks.storage_settings)
+    with pytest.raises(IdentityRejected) as stale_exc:
+        resolve_task_identity(
+            verifier=world.verifier,
+            team_id=TEAM,
+            task_context=None,
+            schedule_run=stale_run,
+            schedule_runs=lookup,
+            now=t0,
+            valid_at=t_after + timedelta(hours=1),
+            reached_at=t_after + timedelta(hours=1),
+        )
+    assert stale_exc.value.code == "expired"
+
+    # A host wrapping the old permit with a start time well before its issued_at is also refused
+    # once the frozen permit has expired and fallback runs.
+    predated_run = _run(old_permit, started=t0 - timedelta(hours=1))
+    with pytest.raises(IdentityRejected) as predated_exc:
+        resolve_task_identity(
+            verifier=world.verifier,
+            team_id=TEAM,
+            task_context=None,
+            schedule_run=predated_run,
+            schedule_runs=lookup,
+            now=t0,
+            valid_at=t0 + timedelta(days=7, hours=1),
+            reached_at=t0 + timedelta(days=7, hours=1),
+        )
+    assert predated_exc.value.code == "expired"
+
+
 # -- F4: CR-1 permit race and saved-token fallback removal -----------------------------
 
 

@@ -5,9 +5,9 @@ context for the person they belong to
 (``GatewayRequestContextService.build_gateway_context``). That context also
 says where to reach the person (their chat session), so at each gateway start
 and whenever the manager becomes available again the gateway sends a
-``refresh`` for each schedule: the manager replaces only the stored person and
-session fields and keeps pause, enabled state, cadence and next fire time
-(``custom_agents.schedule_context_refresh``). Scheduled runs take the owner's
+``refresh`` for each schedule: ``team_services.schedules`` (refresh mode)
+replaces only the stored person, delivery reference, and conversation fields
+and keeps pause, enabled state, cadence and next fire time. Scheduled runs take the owner's
 roles from the gateway's copy of the team's people instead
 (``access_control.people_directory``), read at every run.
 

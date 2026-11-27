@@ -28,9 +28,21 @@ from custom_agents.schedule_store import (
     prepare_schedule_for_add,
     schedule_claim_scope_for_agent,
 )
+from custom_agents.turn_action_refusal import TurnActionRefused
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.enums import RequesterType
+
+
+class ScheduleActionInstallRefused(TurnActionRefused):
+    """The team services refused a model's ``schedule_message`` action for good (FA-3)."""
+
+    def __init__(self, outcome: str, schedule_id: str, message: str) -> None:
+        super().__init__(
+            f"The requested schedule ({schedule_id}) could not be created ({outcome}): {message}"
+        )
+        self.outcome = outcome
+        self.schedule_id = schedule_id
 
 
 async def _preserve_inbound_routing(
@@ -181,7 +193,7 @@ async def create_schedule_from_turn_action(
             exc.outcome,
             str(exc),
         )
-        return
+        raise ScheduleActionInstallRefused(exc.outcome, schedule_msg.schedule_id, str(exc)) from exc
     if reply.get("state") == SCHEDULE_KEPT:
         await _log_kept_schedule(agent, store, schedule_msg)
     if agent._scheduler_wake:

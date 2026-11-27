@@ -81,6 +81,7 @@ class InstallActorCheck:
     source_schedule_id: Optional[str] = None
     is_owner_permit: bool = False
     agent_id: Optional[str] = None
+    gateway_signed_token: bool = False
 
 
 def command_person(verified: VerifiedFrame, people: PeopleDirectory, logger: logging.Logger) -> PersonCheck:
@@ -147,6 +148,7 @@ def schedule_install_actor(
             from_gateway=True,
             from_agent=False,
             owner_vouched=check.person is not None,
+            gateway_signed_token=check.person is not None,
         )
     if bound.type != ROOT_TASK_BINDING:
         return InstallActorCheck(None, "Schedule installation requires a command or root-task authority token.", None)
@@ -234,6 +236,7 @@ def schedule_install_actor(
         source_schedule_id=source_schedule_id,
         is_owner_permit=is_owner_permit,
         agent_id=verified.frame.issuer.agent if isinstance(verified.frame.issuer.agent, str) else None,
+        gateway_signed_token=owner_vouched,
     )
 
 
