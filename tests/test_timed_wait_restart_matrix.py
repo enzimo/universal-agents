@@ -302,7 +302,6 @@ async def _run_scheduler_pass_with_claiming(
     monkeypatch.setattr(scheduled_runtime, "report_dead_letters", AsyncMock())
     monkeypatch.setattr(scheduled_runtime, "keep_storage_usage_measured", lambda _a: None)
     monkeypatch.setattr(scheduled_runtime, "release_orphaned_slot_when_idle", AsyncMock())
-    monkeypatch.setattr(scheduled_runtime, "maybe_renew_schedule_permits", AsyncMock())
     monkeypatch.setattr("custom_agents.delegation_wake.send_progress_notes", AsyncMock())
     monkeypatch.setattr(
         "custom_agents.agent_instantiation_service.renew_runtime_launch",
@@ -331,7 +330,7 @@ async def test_matrix_b_restart_hours_late_resumes_promptly_and_handles_recurrin
       half-hour slots are not burst-replayed."""
     from custom_messages.contracts.access_v2 import PersonStanding
     from tests import scheduled_run_support as srs
-    from tests.broker_access_support import context_signer, forget_task_context_keys
+    from tests.broker_access_support import forget_task_context_keys, signed_task_token
 
     # Anchor to real wall-clock UTC minus 3 hours so ScheduleStore (real UTC) and timed_waits.utc_now agree (C06).
     restart_now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -342,10 +341,12 @@ async def test_matrix_b_restart_hours_late_resumes_promptly_and_handles_recurrin
 
     world = srs.build_world(tmp_path, monkeypatch)
     try:
-        srs.record_ann(world, PersonStanding.ACTIVE)
+        srs.record_ann(world, PersonStanding.ACTIVE, roles=("admin",))
         schedule_id = "sched-recurring-b"
         original_next_fire = started_at + timedelta(minutes=30)
-        signed = context_signer().issue(team_id=srs.TEAM, person_id=srs.ANN, person_roles=("admin",))
+        signed = signed_task_token(
+            srs.ANN, team_id=srs.TEAM, roles=("admin",), root_task_id=f"task_{schedule_id}"
+        )
         world.store.add(
             ScheduledMessage(
                 schedule_id=schedule_id,
@@ -372,6 +373,7 @@ async def test_matrix_b_restart_hours_late_resumes_promptly_and_handles_recurrin
             ),
             claim_team_id=srs.TEAM,
             claim_named_agent_type=srs.WORKER_TYPE,
+            owner_vouched=True,
         )
 
         db_path = Path(world.db_path)
@@ -394,11 +396,11 @@ async def test_matrix_b_restart_hours_late_resumes_promptly_and_handles_recurrin
             owner_person_id=srs.ANN,
         )
 
-        # Restart 3 hours later: fresh TaskManager + worker wired on the real BusAdapter for signing.
+        # Restart 3 hours later: fresh TaskManager + worker wired on protocol 1 svc.scheduler for signing.
         restarted_mgr = _new_manager(
             db_path, agent_id=srs.WORKER_ID, team_id=srs.TEAM, agent_type=srs.WORKER_TYPE
         )
-        restarted_worker = srs.worker_agent(restarted_mgr, world.store, world.bus, srs.WORKER_ID)
+        restarted_worker = srs.worker_agent(restarted_mgr, world.store, srs.WORKER_ID)
         restarted_worker.is_executing = False
         restarted_worker.main_lane_busy = False
         restarted_worker.same_role_runtime_takeover_enabled = False
@@ -480,8 +482,6 @@ async def test_matrix_b_restart_hours_late_resumes_promptly_and_handles_recurrin
             assert catchup_response.answer == "single catch-up run done"
             assert list(restarted_mgr.task_state.task_queue) == []
     finally:
-        for delivery_task in world.bus.deliveries:
-            delivery_task.cancel()
         forget_task_context_keys()
 
 

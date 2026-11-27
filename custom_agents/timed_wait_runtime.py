@@ -209,7 +209,10 @@ def _verified_scheduler_schedule_id(
         return None, _UNVERIFIABLE_IDENTITY_REFUSAL
     if not context.schedule_id:
         return None, None
-    if context.issuer != ISSUER_SCHEDULER:
+    scheduler_signed = context.issuer == ISSUER_SCHEDULER and (
+        not context.issuer_roles or ISSUER_SCHEDULER in context.issuer_roles
+    )
+    if not scheduler_signed:
         logger.warning(
             "Ignoring schedule_id from a non-scheduler task context during timed wait check. "
             "event=schedule_id_from_non_scheduler_ignored issuer=%s schedule_id=%s task_id=%s",

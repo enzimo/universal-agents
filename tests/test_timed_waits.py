@@ -14,7 +14,7 @@ import pytest
 from strands.interrupt import Interrupt, InterruptException, _InterruptState
 from strands.types.tools import ToolContext
 
-from access_control.identity import ENV_SCHEDULER_SIGNING_KEY, ISSUER_GATEWAY, ISSUER_SCHEDULER, ContextSigner
+from access_control.identity import ISSUER_GATEWAY
 from custom_agents import timed_waits as timed_waits_rules
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.task_manager import TaskManager
@@ -53,8 +53,11 @@ from custom_tools.runtime_context import set_agent_ref, task_work
 from runtime_settings.timed_waits import TimedWaitLimits
 from tests.broker_access_support import (
     TEST_TEAM,
-    context_signer,
+    broker_gateway_identity,
+    broker_person_ref,
     forget_task_context_keys,
+    signed_scheduler_token,
+    signed_task_token,
     use_scheduler_key,
 )
 
@@ -618,39 +621,57 @@ async def test_wait_and_long_wait_share_persisted_budget_across_restart_and_auth
 
 
 def _scheduler_signed_meta(schedule_id: str) -> MessageMeta:
-    import os
-
-    now = datetime.now(timezone.utc)
-    signer = ContextSigner.from_value(ISSUER_SCHEDULER, os.environ[ENV_SCHEDULER_SIGNING_KEY])
-    signed = signer.sign(
-        TaskContextV1(
-            context_id=f"ctx-sched-{schedule_id}",
-            issuer=ISSUER_SCHEDULER,
-            team_id=TEST_TEAM,
-            person_id="alice",
-            person_roles=("member",),
-            schedule_id=schedule_id,
-            issued_at_utc=now,
-            expires_at_utc=now + timedelta(hours=1),
-        )
+    signed = signed_scheduler_token(
+        "alice",
+        team_id=TEST_TEAM,
+        roles=("member",),
+        root_task_id=f"task-{schedule_id}",
+        request_id=f"ctx-sched-{schedule_id}",
+        schedule_id=schedule_id,
     )
     return MessageMeta(gateway_context=GatewayContext(task_context=signed))
 
 
 def _gateway_signed_meta(schedule_id: str | None = None) -> MessageMeta:
-    now = datetime.now(timezone.utc)
-    signed = context_signer().sign(
-        TaskContextV1(
-            context_id=f"ctx-gw-{schedule_id or 'chat'}",
-            issuer=ISSUER_GATEWAY,
+    if schedule_id is None:
+        signed = signed_task_token(
+            "alice",
             team_id=TEST_TEAM,
-            person_id="alice",
-            person_roles=("member",),
-            schedule_id=schedule_id,
-            issued_at_utc=now,
-            expires_at_utc=now + timedelta(hours=1),
+            roles=("member",),
+            root_task_id="task-chat",
+            request_id="ctx-gw-chat",
         )
-    )
+        return MessageMeta(gateway_context=GatewayContext(task_context=signed))
+    # Build a gateway-signed authority token illegally carrying schedule_id (bypassing
+    # root_task_token's local issuer check) to exercise protocol 1 verifier rejection.
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord, ROOT_TASK_BINDING
+    from custom_messages.wire.encoding import format_timestamp
+    from custom_messages.wire.frame import sign_authority_token
+    from custom_transport.protocol1.ids import new_message_id
+
+    now = datetime.now(timezone.utc)
+    gw = broker_gateway_identity(TEST_TEAM)
+    cert = gw.certificate
+    unsigned = {
+        "token_id": new_message_id(int(now.timestamp() * 1000)),
+        "issuer": {
+            "installation": cert.installation,
+            "runtime": cert.runtime,
+            "membership_epoch": cert.membership_epoch,
+            "key_id": gw.keys.key_id,
+        },
+        "audience": {"installation": cert.installation, "team": TEST_TEAM},
+        "bound_to": {
+            "type": ROOT_TASK_BINDING,
+            "id": "task-forged-sched",
+            "request_id": f"ctx-gw-{schedule_id}",
+        },
+        "person": broker_person_ref("alice"),
+        "schedule_id": schedule_id,
+        "issued_at": format_timestamp(now),
+        "expires_at": format_timestamp(now + timedelta(hours=1)),
+    }
+    signed = AuthorityTokenRecord.model_validate(sign_authority_token(unsigned, gw.keys.application_key))
     return MessageMeta(gateway_context=GatewayContext(task_context=signed))
 
 
@@ -803,9 +824,34 @@ async def test_one_time_schedule_chat_and_missing_or_unreadable_schedule(
             with task_work("task-chat"), pytest.raises(InterruptException):
                 await wait(15, "chat wait", _make_tool_context("tu-chat"))
 
-            # Non-scheduler signed context naming a schedule_id is ignored.
-            with task_work("task-forged-sched"), caplog.at_level(logging.WARNING), pytest.raises(InterruptException):
-                await wait(15, "ignored schedule id", _make_tool_context("tu-forged"))
+            # Protocol 1 rejects a gateway-signed authority token that names a schedule_id,
+            # so wait refuses fail-safe as an unverifiable identity.
+            with task_work("task-forged-sched"), caplog.at_level(logging.WARNING):
+                refused_forged = json.loads(await wait(15, "forged schedule id", _make_tool_context("tu-forged")))
+            assert refused_forged["status"] == "refused"
+            assert "event=timed_wait_refused" in caplog.text
+            assert "reason=identity_unverifiable" in caplog.text
+
+            # Defense-in-depth: even if a non-scheduler TaskContextV1 carrying schedule_id reaches
+            # _verified_scheduler_schedule_id, the schedule_id is ignored and logged.
+            from custom_agents import access_runtime
+
+            non_sched_ctx = TaskContextV1(
+                context_id="ctx-gw-defense",
+                issuer=ISSUER_GATEWAY,
+                issuer_roles=(ISSUER_GATEWAY,),
+                team_id=TEST_TEAM,
+                person_id="alice",
+                person_roles=("member",),
+                schedule_id="sched-one-time",
+                issued_at_utc=now,
+                expires_at_utc=now + timedelta(hours=1),
+            )
+            caplog.clear()
+            with monkeypatch.context() as mp:
+                mp.setattr(access_runtime, "verified_task_context", lambda _a, _acc=None: non_sched_ctx)
+                with task_work("task-chat"), caplog.at_level(logging.WARNING), pytest.raises(InterruptException):
+                    await wait(15, "ignored schedule id", _make_tool_context("tu-forged-defense"))
             assert "event=schedule_id_from_non_scheduler_ignored" in caplog.text
 
             # Missing schedule row allows waiting and logs schedule_id at INFO (C06).
@@ -943,19 +989,36 @@ async def test_unverifiable_task_identity_refuses_wait(
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     monkeypatch.setattr(timed_waits_rules, "utc_now", lambda: now)
 
-    # 1. Context signed with a key unknown to the runtime verifier (chat task with unverifiable gateway context).
+    # 1. Authority token signed with a key unknown to the runtime verifier (unverifiable gateway token).
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    unknown_signer = ContextSigner(ISSUER_GATEWAY, "unknown-key", Ed25519PrivateKey.generate())
-    bad_signed = unknown_signer.sign(
-        TaskContextV1(
-            context_id="ctx-bad-sig",
-            issuer=ISSUER_GATEWAY,
-            team_id=TEST_TEAM,
-            person_id="alice",
-            person_roles=("member",),
-            issued_at_utc=now,
-            expires_at_utc=now + timedelta(hours=1),
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord, ROOT_TASK_BINDING
+    from custom_messages.wire.encoding import format_timestamp
+    from custom_messages.wire.frame import sign_authority_token
+    from custom_transport.protocol1.ids import new_message_id
+
+    gw_cert = broker_gateway_identity(TEST_TEAM).certificate
+    bad_signed = AuthorityTokenRecord.model_validate(
+        sign_authority_token(
+            {
+                "token_id": new_message_id(int(now.timestamp() * 1000)),
+                "issuer": {
+                    "installation": gw_cert.installation,
+                    "runtime": "unknown-gateway",
+                    "membership_epoch": 1,
+                    "key_id": "unknown-key",
+                },
+                "audience": {"installation": gw_cert.installation, "team": TEST_TEAM},
+                "bound_to": {
+                    "type": ROOT_TASK_BINDING,
+                    "id": "task-bad-id",
+                    "request_id": "ctx-bad-sig",
+                },
+                "person": broker_person_ref("alice"),
+                "issued_at": format_timestamp(now),
+                "expires_at": format_timestamp(now + timedelta(hours=1)),
+            },
+            Ed25519PrivateKey.generate(),
         )
     )
     bad_meta = MessageMeta(gateway_context=GatewayContext(task_context=bad_signed))
