@@ -31,7 +31,7 @@ from custom_tools.providers.context_memory import (
 )
 from custom_tools.runtime_context import _agent_ctx
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 from tests.task_work_support import set_agent_ref
 
@@ -90,7 +90,7 @@ def _conversation_with(layout: InstanceLayout, files: list[UserTaskAttachment]) 
     )
     task_manager = TaskManager(db_path=str(layout.root / "tasks.db"))
     task_manager.set_owner_identity("lead", "TeamLead", TEAM, "TeamArchitect")
-    signed = context_signer().issue(team_id=TEAM, person_id=PERSON, person_roles=("member",))
+    signed = signed_task_token(PERSON, team_id=TEAM, roles=("member",), root_task_id=TASK)
     task_manager.add_task(
         Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="Here is my receipt."),
         MessageHeader(from_agent_id="gateway", agent_signature=""),

@@ -1323,3 +1323,74 @@ def test_bundled_postgres_address_is_not_replaced_by_a_secret_file(tmp_path: Pat
 
     assert "POSTGRES_DSN_FILE" not in runtime_env
     assert f"{INTERNAL_POSTGRES_HOST}:{INTERNAL_POSTGRES_PORT}" in child_env["POSTGRES_DSN"]
+
+
+def test_run_bundle_main_allows_legacy_signing_keys_until_upgrade_marker_and_refuses_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C36 + C38: an upgraded 0.9 bundle instance with legacy signing keys reaches launch_headless
+    for conversion (and forwards --allow-unverifiable-authority-tokens); once the upgrade marker
+    is written, bundle start refuses removed signing keys cleanly with exit code 2."""
+
+    import json
+
+    config = _make_config(tmp_path)
+    config.layout.control_dir.mkdir(parents=True, exist_ok=True)
+    env_file = config.layout.team_env_path
+    config.launch.env_file_path = str(env_file)
+    config_path = config.save()
+    env_file.write_text(
+        "ACCESS_GATEWAY_SIGNING_KEY=gw-old:AAAA\n"
+        "ACCESS_SCHEDULER_SIGNING_KEY=sched-old:BBBB\n"
+        "SECURE_TOOL_BROKER_TOKEN=stb_test\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_run_supervised_bundle(**kwargs: object) -> int:
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(run_bundle_module, "run_supervised_bundle", fake_run_supervised_bundle)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_bundle.py", "--config", str(config_path), "--allow-unverifiable-authority-tokens"],
+    )
+    monkeypatch.setenv("TEAM_BUNDLE_SERVICE_ROOT", str(tmp_path / "services"))
+    monkeypatch.delenv("ACCESS_GATEWAY_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("ACCESS_SCHEDULER_SIGNING_KEY", raising=False)
+    monkeypatch.delenv("ACCESS_CONTEXT_VERIFY_KEYS", raising=False)
+
+    # 1. Pre-marker (upgraded 0.9 instance): reaches run_supervised_bundle / launch_headless.
+    assert run_bundle_module.main() == 0
+    assert captured["env_path"] == env_file.resolve()
+    assert captured["allow_unverifiable_authority_tokens"] is True
+
+    # build_launch_headless_command forwards the one-shot recovery flag to launch_headless.
+    cmd = build_launch_headless_command(
+        config_path,
+        [],
+        env_path=env_file,
+        allow_unverifiable_authority_tokens=True,
+    )
+    assert "--allow-unverifiable-authority-tokens" in cmd
+
+    # Bundled postgres env strips removed signing keys even if set in ambient environment.
+    monkeypatch.setenv("ACCESS_GATEWAY_SIGNING_KEY", "gw-ambient:CCCC")
+    pg_env = run_bundle_module._postgres_environment()
+    assert "ACCESS_GATEWAY_SIGNING_KEY" not in pg_env
+    monkeypatch.delenv("ACCESS_GATEWAY_SIGNING_KEY", raising=False)
+
+    # 2. Post-marker: bundle main refuses removed signing keys cleanly with exit code 2.
+    marker = config.layout.authority_tokens_upgrade_path
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"team_id": config.manager.team_id}), encoding="utf-8")
+    captured.clear()
+    with caplog.at_level(logging.ERROR, logger="docker.run_bundle"):
+        code = run_bundle_module.main()
+    assert code == 2
+    assert captured == {}
+    assert "Bundle launch refused." in caplog.text
+    assert "ACCESS_GATEWAY_SIGNING_KEY" in caplog.text

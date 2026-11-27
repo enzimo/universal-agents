@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,7 +35,11 @@ from live_storage_utils import (
 )
 from id_generation import new_id_suffix
 from storage.postgres_connection import redact_postgres_dsn
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 try:
     from dotenv import load_dotenv
@@ -74,17 +77,21 @@ def _reset_storage(settings: Any) -> None:
 def run_validation(*, config_path: str | None = None) -> dict[str, Any]:
     """Exercise person-owned tools with a gateway-signed fixture task.
 
-    Authorization-off mode still verifies who the task works for. Trust only
-    this canary's public key while it runs, then retire the cached verifier
-    before restoring the caller's environment.
+    Authorization-off mode still verifies who the task works for. Install the
+    canary's protocol 1 verifier while it runs, then restore the caller's
+    previous process verifier and clear caches afterward.
     """
-    with patch.dict(os.environ, {"ACCESS_CONTEXT_VERIFY_KEYS": context_verify_keys()}):
+    from access_control.authority_verifier import get_process_verifier, set_process_verifier
+
+    previous_verifier = get_process_verifier()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
+    try:
+        return _run_validation(config_path=config_path)
+    finally:
+        set_agent_ref(None)
         forget_task_context_keys()
-        try:
-            return _run_validation(config_path=config_path)
-        finally:
-            set_agent_ref(None)
-            forget_task_context_keys()
+        set_process_verifier(previous_verifier)
 
 
 def _run_validation(*, config_path: str | None = None) -> dict[str, Any]:
@@ -127,10 +134,11 @@ def _run_validation(*, config_path: str | None = None) -> dict[str, Any]:
                 canonical_user_id="live-objective-user",
                 session_key=f"session_live_objective_{run_id}",
                 heartbeat_source_id=f"hb_source_live_objective_{run_id}",
-                task_context=context_signer().issue(
+                task_context=signed_task_token(
+                    "live-objective-user",
                     team_id="team_live_objective",
-                    person_id="live-objective-user",
-                    person_roles=("owner",),
+                    roles=("owner",),
+                    root_task_id=task.task_id,
                 ),
             ),
         ),

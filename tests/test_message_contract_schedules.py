@@ -141,9 +141,19 @@ def test_exact_detail_preserves_instruction_ledger_and_owner_scope(agent: Any, t
     created = run_tool(agent, create_scheduled_job, {
         "instruction": instruction, "interval_seconds": 60, "schedule_memory_json": json.dumps(memory),
     })
+
+    def record_prior_runs(saved_memory: ScheduleTaskMemory) -> bool:
+        saved_memory.ledger.total_runs = 9
+        saved_memory.ledger.recent_runs = [{"task_id": "run_r2", "result": "Saved build R2. " * 1400}]
+        saved_memory.ledger.total_notifications = 1
+        saved_memory.ledger.recent_notifications = [{"result": "Build R2 is saved."}]
+        return True
+
+    agent._schedule_store.edit_schedule_memory(created["schedule_id"], record_prior_runs)
     raw = read_runtime_detail(created["schedule_id"])
     assert set(raw) == DETAIL_FIELDS | {"gateway_context"}, "Review new runtime fields before allowing them into detail."
-    assert raw["gateway_context"]["chat_id"], "The raw runtime context must exercise the privacy exclusion."
+    assert raw["gateway_context"]["canonical_user_id"], "The raw runtime context must exercise the privacy exclusion."
+    assert raw["gateway_context"]["chat_id"] is None, "schedules.install never stores raw chat_id in gateway_context."
     safe = {key: raw[key] for key in DETAIL_FIELDS}
     text = json.dumps(safe, ensure_ascii=False, sort_keys=True)
     assert len(text) > 16384
@@ -238,7 +248,7 @@ def test_saved_change_without_readable_version_is_successful(
     store = agent._schedule_store
     if operation == "install":
         inputs = {"instruction": "Saved despite read failure.", "interval_seconds": 60}
-        method = "add"
+        method = "install"
     else:
         created = run_tool(agent, create_scheduled_job, {"instruction": "Before the edit.", "interval_seconds": 60})
         inputs = {"schedule_id": created["schedule_id"], "expected_record_digest": created["record_digest"],

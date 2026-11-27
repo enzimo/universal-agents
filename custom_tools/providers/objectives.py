@@ -1345,11 +1345,11 @@ def start_isolated_recovery(
     if recovery_task_info is None:
         return json.dumps({"error": "Failed to queue isolated recovery task"})
 
-    checkpoint_schedule = None
+    checkpoint_schedule: ScheduledMessage | dict[str, Any] | None = None
     checkpoint_link_fields: dict[str, str] = {}
     if _coerce_tool_bool(notify_user) and checkpoint_delay_seconds > 0:
+        checkpoint_schedule_id = new_id("recov_ckpt")
         try:
-            checkpoint_schedule_id = new_id("recov_ckpt")
             checkpoint_schedule = ScheduledMessage(
                 schedule_id=checkpoint_schedule_id,
                 schedule_name=(
@@ -1392,9 +1392,22 @@ def start_isolated_recovery(
                 current_task_info.task.task_id
             )
             checkpoint_schedule.payload_meta.objective_id = objective_id
-            _schedule_store(agent).add(
+            claim_scope = schedule_claim_scope_for_agent(agent, task_local=True)
+            checkpoint_schedule.claim_team_id = claim_scope.get("claim_team_id")
+            checkpoint_schedule.claim_named_agent_type = claim_scope.get("claim_named_agent_type")
+            checkpoint_schedule.claim_agent_id = claim_scope.get("claim_agent_id")
+            from custom_agents.schedule_install_client import (
+                extract_task_authority_token,
+                extract_task_delivery_ref,
+                install_schedule_via_team_services_sync,
+            )
+
+            install_schedule_via_team_services_sync(
+                agent,
                 checkpoint_schedule,
-                **schedule_claim_scope_for_agent(agent, task_local=True),
+                mode="create",
+                authority_token=extract_task_authority_token(original_meta),
+                delivery_ref=extract_task_delivery_ref(original_meta),
             )
             checkpoint_link_fields = _link_to_objective(
                 agent,
@@ -1412,7 +1425,28 @@ def start_isolated_recovery(
             )
             wake_scheduler(agent)
         except Exception as exc:
-            checkpoint_schedule = {"error": str(exc)}
+            outcome = getattr(exc, "outcome", None)
+            getattr(agent, "_logger", logger).warning(
+                "Failed to install isolated-recovery checkpoint schedule; no checkpoint was set. "
+                "event=isolated_recovery_checkpoint_install_failed schedule_id=%s objective_id=%s "
+                "recovery_task_id=%s outcome=%s error_type=%s error=%s",
+                checkpoint_schedule_id,
+                objective_id,
+                recovery_task_id,
+                outcome,
+                type(exc).__name__,
+                exc,
+            )
+            checkpoint_schedule = {
+                "scheduled": False,
+                "error": str(exc),
+                "outcome": outcome,
+                "notice": (
+                    "No isolated-recovery checkpoint schedule was set, so the person will not be "
+                    "asked automatically whether to continue, stop, or abort. Inform the person "
+                    "directly or follow up on the recovery task."
+                ),
+            }
 
     return json.dumps(
         {

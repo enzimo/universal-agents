@@ -25,7 +25,7 @@ place: runs for no person start their own conversation
 (``start_new_conversation``), and a schedule or heartbeat item that changes
 hands continues in a conversation of its new person
 (``custom_agents.person_departure_runtime``,
-``custom_agents.schedule_context_refresh``,
+``team_services.schedules`` refresh mode,
 ``custom_agents.heartbeat_store.item_conversation_for_run``).
 
 Which files a turn keeps: the request's own files as admission kept them

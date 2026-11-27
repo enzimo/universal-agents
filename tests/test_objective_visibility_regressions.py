@@ -9,16 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
 from custom_agents.heartbeat_store import HeartbeatStore
+from custom_agents.schedule_store import ScheduleStore
 from custom_agents import scheduled_runtime
 from custom_agents.scheduled_runtime import enqueue_heartbeat_items
-from custom_agents.task_context_runtime import scheduler_signer
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ScheduleManagementClass, SystemScheduleKind
@@ -34,7 +34,8 @@ from custom_tools.providers.objectives import create_objective, objectives, upda
 from custom_tools.providers.schedules import create_scheduled_job
 from custom_tools.runtime_context import get_agent_ref
 from storage.access_repository import AccessRepository
-from tests.broker_access_support import context_signer, use_scheduler_key
+from tests.broker_access_support import broker_person_ref, signed_scheduler_token, signed_task_token
+from tests.scheduled_run_support import bind_test_scheduler
 from tests.test_objective_tools import (
     _act_as,
     _add_no_person_task,
@@ -88,8 +89,8 @@ def _team_timer(manager, tasks, team, *, roles: tuple[str, ...] = ("member",)) -
     assert "error" not in created
     schedule = get_agent_ref()._schedule_store.get_scheduled_message(created["schedule_id"])
     meta = schedule.payload_meta.model_copy(deep=True)
-    meta.gateway_context.task_context = context_signer().issue(
-        team_id="team_1", person_id="usr_admin", person_roles=roles,
+    meta.gateway_context.task_context = signed_task_token(
+        "usr_admin", team_id="team_1", roles=roles, root_task_id="demoted_timer_run",
     )
     run = Task(task_id="demoted_timer_run", task_type=MessageMetaType.REQUEST, problem_statement="Check team work.")
     assert manager.add_task(run, schedule.payload_header, meta, owner_person_id="usr_admin")
@@ -108,8 +109,8 @@ def test_creation_cannot_move_a_team_plan_into_personal_ownership(_people_and_ob
     assert "error" in result
     assert manager.get_plan(team.current_plan_id).model_dump(mode="json") == before
     # Future member work still cannot control the team's original Plan.
-    manager.get_task_info(run.task_id).meta.gateway_context.task_context = context_signer().issue(
-        team_id="team_1", person_id="usr_admin", person_roles=("member",),
+    manager.get_task_info(run.task_id).meta.gateway_context.task_context = signed_task_token(
+        "usr_admin", team_id="team_1", roles=("member",), root_task_id=run.task_id,
     )
     cancelled = tool_json(update_execution_plan_status("cancelled", "x", plan_id=team.current_plan_id))
     assert "error" in cancelled
@@ -186,11 +187,10 @@ def test_heartbeat_checks_its_objective_before_any_run_state_changes(
     _people_and_objectives, monkeypatch, caplog, objective_key, owner_key, allowed, signature,
 ) -> None:
     manager, tasks, made = _people_and_objectives
-    use_scheduler_key(monkeypatch)
     owner_id = "usr_admin" if owner_key == "admin" else f"usr_{owner_key}"
     roles = ("admin",) if owner_key == "admin" else ("member",)
     AccessRepository(manager.storage_settings).record_person(TeamPersonV1(
-        person_ref=new_person_ref(),
+        person_ref=broker_person_ref(owner_id),
         team_id="team_1", person_id=owner_id, standing=PersonStanding.ACTIVE,
         roles=roles, changed_at_utc=datetime.now(timezone.utc),
     ))
@@ -205,11 +205,24 @@ def test_heartbeat_checks_its_objective_before_any_run_state_changes(
     )
     launcher = ScheduledMessage(
         schedule_id="shared_launcher", schedule_name="heartbeat:shared", interval_ms=10_000,
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
         management_class=ScheduleManagementClass.SYSTEM, system_schedule_kind=SystemScheduleKind.HEARTBEAT_LAUNCHER,
         payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Tick"),
         payload_meta=manager.get_task_info(tasks[owner_key].task_id).meta.model_copy(deep=True),
     )
     agent = get_agent_ref()
+    agent._schedule_store = ScheduleStore(db_path=manager._db_path, storage_settings=manager.storage_settings)
+    agent._schedule_store.add(launcher, claim_team_id="team_1", claim_named_agent_type="TeamArchitect")
+    sched = bind_test_scheduler(
+        monkeypatch, store=agent._schedule_store, team_id="team_1", storage_settings=manager.storage_settings
+    )
+    sched.scheduler.renew_permits()
+    claimed = agent._schedule_store.claim_next_due(
+        claimer_agent_id=agent.id,
+        claimer_named_agent_type="TeamArchitect",
+        claimer_team_id="team_1",
+    )
+    assert claimed is not None and claimed["schedule_id"] == launcher.schedule_id
     agent._logger = logging.getLogger("test.objective.heartbeat")
     agent._conversation_store = None
     agent.paused = False
@@ -223,19 +236,23 @@ def test_heartbeat_checks_its_objective_before_any_run_state_changes(
     before_ids = set(manager.task_state.tasks)
     if signature != "current":
         async def sign_with_new_identity(_agent, meta, run):
-            # A manager reply may reflect newer roles than preparation saw.
-            # Produce a real, verifiable signature for those returned roles.
+            # Live people directory or scheduler reply may reflect newer roles than preparation saw.
             meta.gateway_context.schedule_run = None
-            meta.gateway_context.task_context = (
-                scheduler_signer().issue(
-                    team_id="team_1", person_id=owner_id, person_roles=("member",),
-                    schedule_id=run.scheduled_job_id, conversation_id=meta.conversation_id,
-                ) if signature == "member" else None
-            )
+            if signature == "member":
+                AccessRepository(manager.storage_settings).record_person(TeamPersonV1(
+                    person_ref=broker_person_ref(owner_id),
+                    team_id="team_1", person_id=owner_id, standing=PersonStanding.ACTIVE,
+                    roles=("member",), changed_at_utc=datetime.now(timezone.utc),
+                ))
+                meta.gateway_context.task_context = signed_scheduler_token(
+                    owner_id, team_id="team_1", roles=("member",), schedule_id=run.scheduled_job_id,
+                )
+            else:
+                meta.gateway_context.task_context = None
             return True
         monkeypatch.setattr(scheduled_runtime, "sign_scheduled_run", sign_with_new_identity)
     with caplog.at_level(logging.WARNING):
-        assert asyncio.run(enqueue_heartbeat_items(agent, launcher))
+        assert asyncio.run(enqueue_heartbeat_items(agent, launcher, claim_token=claimed["claim_token"]))
     runs = [info for key, info in manager.task_state.tasks.items() if key not in before_ids]
     assert {info.meta.gateway_context.scheduled_job_id for info in runs} == (
         {protected.heartbeat_item_id, sibling.heartbeat_item_id} if allowed else {sibling.heartbeat_item_id}

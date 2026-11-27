@@ -1280,20 +1280,20 @@ def test_run_supervised_cleans_sandbox_before_stopping_running_external_gateway(
     assert events[-2:] == ["cleanup:sandbox", "terminate:openshell"]
 
 
-def test_launch_refuses_without_task_context_keys_and_names_the_command(tmp_path: Path) -> None:
-    from docker.launch_headless import missing_task_context_keys, task_context_keys_message
+def test_launch_refuses_removed_task_context_signing_keys(tmp_path: Path) -> None:
+    from docker.launch_headless import build_process_env
 
     config = _make_config(tmp_path)
-    assert missing_task_context_keys({"ACCESS_GATEWAY_SIGNING_KEY": "k", "ACCESS_SCHEDULER_SIGNING_KEY": "k"}) == []
-    missing = missing_task_context_keys({"ACCESS_GATEWAY_SIGNING_KEY": "k"})
-    assert missing == ["ACCESS_SCHEDULER_SIGNING_KEY"]
-
-    message = task_context_keys_message(config, tmp_path / "team.env", missing)
-
-    assert "task_context_keys_missing" in message
-    assert f"--env-file {tmp_path / 'team.env'} --write" in message
-    assert "python3 -m scripts.generate_internal_credentials" in message
-    assert "ACCESS_GATEWAY_SIGNING_KEY_FILE" in message, "Docker secrets are offered too"
+    for key in (
+        "ACCESS_GATEWAY_SIGNING_KEY",
+        "ACCESS_GATEWAY_SIGNING_KEY_FILE",
+        "ACCESS_SCHEDULER_SIGNING_KEY",
+        "ACCESS_SCHEDULER_SIGNING_KEY_FILE",
+        "ACCESS_CONTEXT_VERIFY_KEYS",
+        "ACCESS_CONTEXT_VERIFY_KEYS_FILE",
+    ):
+        with pytest.raises(ValueError, match=key):
+            build_process_env(config, env_path=None, base_env={key: "obsolete-value"})
 
 
 def test_processes_started_by_hand_derive_their_own_broker_token(monkeypatch) -> None:
@@ -1311,46 +1311,35 @@ def test_processes_started_by_hand_derive_their_own_broker_token(monkeypatch) ->
     assert os.environ["SECURE_TOOL_BROKER_TOKEN"] == manager_token, "a supervisor-given token is kept"
 
 
-def test_signing_keys_from_docker_secret_files_reach_only_their_process(tmp_path: Path, caplog) -> None:
-    from access_control.identity import ContextVerifier, generate_signing_key
-    from docker.launch_headless import (
-        BROKER_TOKEN_ENV,
-        with_verify_keys,
-    )
+def test_removed_signing_keys_never_reach_any_scoped_process(tmp_path: Path) -> None:
+    from docker.launch_headless import BROKER_TOKEN_ENV
     from env_secrets import materialize_secret_file_envs
 
-    gateway_value, _ = generate_signing_key("gateway")
-    scheduler_value, _ = generate_signing_key("scheduler")
-    (tmp_path / "gateway_key").write_text(gateway_value + "\n", encoding="utf-8")
-    (tmp_path / "scheduler_key").write_text(scheduler_value, encoding="utf-8")
     (tmp_path / "broker_root").write_text("root-secret", encoding="utf-8")
     env = {
-        "ACCESS_GATEWAY_SIGNING_KEY_FILE": str(tmp_path / "gateway_key"),
-        "ACCESS_SCHEDULER_SIGNING_KEY_FILE": str(tmp_path / "scheduler_key"),
+        "ACCESS_GATEWAY_SIGNING_KEY": "obsolete-gateway-key",
+        "ACCESS_GATEWAY_SIGNING_KEY_FILE": "/run/secrets/gateway_key",
+        "ACCESS_SCHEDULER_SIGNING_KEY": "obsolete-scheduler-key",
+        "ACCESS_SCHEDULER_SIGNING_KEY_FILE": "/run/secrets/scheduler_key",
         "ACCESS_CONTEXT_VERIFY_KEYS": "[]",
         f"{BROKER_TOKEN_ENV}_FILE": str(tmp_path / "broker_root"),
     }
-    materialize_secret_file_envs(env)
-    assert env["ACCESS_GATEWAY_SIGNING_KEY"] == gateway_value
+    materialize_secret_file_envs({f"{BROKER_TOKEN_ENV}_FILE": str(tmp_path / "broker_root")})
 
-    with caplog.at_level("WARNING"):
-        env = with_verify_keys(env)
-    assert "task_context_verify_keys_mismatch" in caplog.text
-    assert set(ContextVerifier.from_value(env["ACCESS_CONTEXT_VERIFY_KEYS"]).keys) == {
-        gateway_value.split(":")[0],
-        scheduler_value.split(":")[0],
-    }
-
-    manager = scoped_environment("manager", env)
-    assert "ACCESS_GATEWAY_SIGNING_KEY" not in manager and "ACCESS_GATEWAY_SIGNING_KEY_FILE" not in manager
-    assert manager["ACCESS_SCHEDULER_SIGNING_KEY"] == scheduler_value
-    gateway = scoped_environment("gateway", env)
-    assert gateway["ACCESS_GATEWAY_SIGNING_KEY"] == gateway_value
-    assert "ACCESS_SCHEDULER_SIGNING_KEY_FILE" not in gateway
+    for process in ("manager", "gateway", "agent", "secure_broker", "team_services", "installation_authority"):
+        scoped = scoped_environment(
+            process,
+            env,
+            broker_root="root-secret" if process == "agent" else None,
+            caller_label="agent/Coder" if process == "agent" else None,
+        )
+        assert not {
+            key
+            for key in scoped
+            if key.startswith(("ACCESS_GATEWAY_SIGNING_KEY", "ACCESS_SCHEDULER_SIGNING_KEY", "ACCESS_CONTEXT_VERIFY_KEYS"))
+        }, process
     worker = scoped_environment("agent", env, broker_root="root-secret", caller_label="agent/Coder")
-    assert not {key for key in worker if key.startswith(("ACCESS_GATEWAY", "ACCESS_SCHEDULER"))}
     assert f"{BROKER_TOKEN_ENV}_FILE" not in worker and worker[BROKER_TOKEN_ENV] != "root-secret"
-    assert worker["ACCESS_CONTEXT_VERIFY_KEYS"] == env["ACCESS_CONTEXT_VERIFY_KEYS"]
 
 
 def _secret_env() -> dict[str, str]:
@@ -1371,9 +1360,6 @@ def _secret_env() -> dict[str, str]:
         "ACTIVITY_COLLECTOR_INGEST_TOKEN": "activity-ingest",
         "BW_SESSION_FILE": "/run/secrets/gh",
         "VAULT_TOKEN": "vault",
-        "ACCESS_GATEWAY_SIGNING_KEY": "gateway-key",
-        "ACCESS_SCHEDULER_SIGNING_KEY": "scheduler-key",
-        "ACCESS_SCHEDULER_SIGNING_KEY_FILE": "/run/secrets/scheduler",
         "OPENSHELL_SSH_HANDSHAKE_SECRET": "handshake",
         "SECURE_TOOL_BROKER_TOKEN": "root",
     }
@@ -1396,15 +1382,11 @@ def test_manager_and_agents_hold_no_gateway_channel_or_broker_tool_secret(tmp_pa
             "ACTIVITY_COLLECTOR_ADMIN_TOKEN",
             "BW_SESSION_FILE",
             "VAULT_TOKEN",
-            "ACCESS_GATEWAY_SIGNING_KEY",
             "OPENSHELL_SSH_HANDSHAKE_SECRET",
         } & set(process_env)
         assert process_env["OPENAI_API_KEY"] == "model"
         assert process_env["ACTIVITY_COLLECTOR_INGEST_TOKEN"] == "activity-ingest"
         assert process_env["SECURE_TOOL_BROKER_TOKEN"] != "root"
-    assert manager["ACCESS_SCHEDULER_SIGNING_KEY"] == "scheduler-key"
-    assert "ACCESS_SCHEDULER_SIGNING_KEY" not in agents["Coder"]
-    assert "ACCESS_SCHEDULER_SIGNING_KEY_FILE" not in agents["Coder"]
 
 
 def test_gateway_and_services_get_only_their_own_secrets(tmp_path: Path) -> None:
@@ -1419,14 +1401,14 @@ def test_gateway_and_services_get_only_their_own_secrets(tmp_path: Path) -> None
 
     gateway = environments.gateway
     assert gateway["WEB_CHAT_AUTH_TOKEN"] == "web-chat" and gateway["TELEGRAM_BOT_TOKEN"] == "telegram"
-    assert gateway["ACCESS_GATEWAY_SIGNING_KEY"] == "gateway-key" and gateway["XAI_API_KEY"] == "voice"
-    assert not {"BW_SESSION_FILE", "VAULT_TOKEN", "OPENAI_API_KEY", "EMBEDDING_API_KEY", "ACCESS_SCHEDULER_SIGNING_KEY"} & set(gateway)
+    assert gateway["XAI_API_KEY"] == "voice"
+    assert not {"BW_SESSION_FILE", "VAULT_TOKEN", "OPENAI_API_KEY", "EMBEDDING_API_KEY"} & set(gateway)
     adapter_host = environments.adapter_host
     assert adapter_host["TELEGRAM_BOT_TOKEN"] == "telegram" and adapter_host["ADAPTER_HOST_AUTH_TOKEN"] == "adapter"
-    assert not {"WEB_CHAT_AUTH_TOKEN", "ACCESS_GATEWAY_SIGNING_KEY", "OPENAI_API_KEY"} & set(adapter_host)
+    assert not {"WEB_CHAT_AUTH_TOKEN", "OPENAI_API_KEY"} & set(adapter_host)
     broker = environments.secure_broker
     assert broker["VAULT_TOKEN"] == "vault" and broker["SECURE_TOOL_BROKER_TOKEN"] == "root"
-    assert not {"WEB_CHAT_AUTH_TOKEN", "TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY", "ACCESS_GATEWAY_SIGNING_KEY"} & set(broker)
+    assert not {"WEB_CHAT_AUTH_TOKEN", "TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY"} & set(broker)
     assert set(environments.execution_controller) - {"UA_RUNTIME_MANIFEST"} == {"PATH", "NATS_PASSWORD"}
     collector = environments.activity_collector
     assert collector["ACTIVITY_COLLECTOR_ADMIN_TOKEN"] == "activity-admin"
@@ -2227,15 +2209,12 @@ def _prepare_launch(tmp_path: Path, monkeypatch, *, team_id: str, env: Mapping[s
     """Let the launcher's main run to its services; the steps that start other tools are left out."""
 
     import docker.launch_headless as lh
-    from access_control.identity import ISSUER_GATEWAY, ISSUER_SCHEDULER, generate_signing_key
 
     config = GatewayInstanceConfig.create(
         instance_name="streamtest", instance_root=str(tmp_path / "instance"), team_id=team_id, timezone="UTC"
     )
     config_path = config.save(tmp_path / "instance" / "instance_config.yaml")
     for name, value in {
-        "ACCESS_GATEWAY_SIGNING_KEY": generate_signing_key(ISSUER_GATEWAY)[0],
-        "ACCESS_SCHEDULER_SIGNING_KEY": generate_signing_key(ISSUER_SCHEDULER)[0],
         "SECURE_TOOL_BROKER_TOKEN": "root",
         **env,
     }.items():
@@ -2321,7 +2300,7 @@ def test_the_authority_and_the_team_services_start_after_the_streams_each_ready_
     assert "SECURE_TOOL_BROKER_TOKEN" not in env
     # The team services and the gateway are hosts the authority approves without asking anyone.
     expected = read_expected_hosts(layout.trust_expected_hosts_path)
-    assert expected["team-services"].roles == {"team_services"}
+    assert expected["team-services"].roles == {"team_services", "scheduler"}
     assert expected["gateway"].roles == {"gateway"} and expected["gateway"].teams == {"team_test"}
     # The agent processes: the team lead's may run any type in the catalog, a startup agent's its one type.
     assert expected["lead"].roles == {"lead_host", "worker_host"} and expected["lead"].agent_types_from_catalog

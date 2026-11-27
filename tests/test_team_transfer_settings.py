@@ -117,7 +117,7 @@ def test_import_builds_the_instance_like_onboarding_with_the_team_choices(tmp_pa
     # The same first steps as onboarding: folders, control files, fresh keys.
     assert (target / "control" / "SOUL.md").is_file()
     env = parse_env_file(target / "team.env")
-    assert env["ACCESS_GATEWAY_SIGNING_KEY"] and env["SECURE_TOOL_BROKER_TOKEN"].startswith("stb_")
+    assert "ACCESS_GATEWAY_SIGNING_KEY" not in env and env["SECURE_TOOL_BROKER_TOKEN"].startswith("stb_")
 
 
 def test_a_setting_this_version_does_not_accept_is_refused_and_the_rest_apply(tmp_path: Path) -> None:

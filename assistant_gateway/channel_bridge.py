@@ -6,6 +6,10 @@ import json
 import logging
 
 from assistant_gateway.application.gateway_application import GatewayApplication
+from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
+    SIGNER_UNAVAILABLE_USER_MESSAGE,
+)
 from assistant_gateway.inbound_attachments import attachment_debug_summary
 from assistant_gateway.translation import (
     ChannelInboundMessage,
@@ -205,18 +209,27 @@ class ChannelBridge:
             ]
 
         if action.action_type == "add_cron_job":
-            job_id = await self.application.add_cron_job(
-                session_key=action.session_key or resolved_session_key,
-                name=action.cron_name or "scheduled_job",
-                instruction=action.cron_instruction or "",
-                interval_seconds=action.interval_seconds,
-                cron_expression=action.cron_expression,
-                channel_name=inbound.channel_name,
-                user_id=inbound.user_id,
-                chat_id=inbound.chat_id,
-                thread_id=inbound.thread_id,
-                original_message_id=inbound.message_id,
-            )
+            try:
+                job_id = await self.application.add_cron_job(
+                    session_key=action.session_key or resolved_session_key,
+                    name=action.cron_name or "scheduled_job",
+                    instruction=action.cron_instruction or "",
+                    interval_seconds=action.interval_seconds,
+                    cron_expression=action.cron_expression,
+                    channel_name=inbound.channel_name,
+                    user_id=inbound.user_id,
+                    chat_id=inbound.chat_id,
+                    thread_id=inbound.thread_id,
+                    original_message_id=inbound.message_id,
+                )
+            except GatewayAuthorityTokenUnavailable:
+                return [
+                    self.translator.render_outbound(
+                        inbound=inbound,
+                        text=SIGNER_UNAVAILABLE_USER_MESSAGE,
+                        session_key=action.session_key or resolved_session_key,
+                    )
+                ]
             return [
                 self.translator.render_outbound(
                     inbound=inbound,

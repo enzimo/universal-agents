@@ -351,7 +351,7 @@ def lookup_handler(
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
             raise web.HTTPBadRequest(text=f"Invalid model key lookup: {exc}") from exc
         caller = request[caller_key]
-        person_id = _verified_person(gate, caller, lookup)
+        person_id = await _verified_person(gate, caller, lookup)
         try:
             entry, owner = await asyncio.to_thread(_entry_for, team_store, person_store, person_id, lookup.address)
             refused = owner == "team" and await asyncio.to_thread(_team_keys_refused, gate, person_id, lookup)
@@ -415,8 +415,8 @@ def _team_keys_refused(gate: Any, person_id: str | None, lookup: ModelKeyLookupV
         ) from exc
 
 
-def _verified_person(gate: Any, caller: BrokerCaller, lookup: ModelKeyLookupV1) -> str | None:
-    """Whose key the lookup may get: the person its verified task context names, or None for the team's.
+async def _verified_person(gate: Any, caller: BrokerCaller, lookup: ModelKeyLookupV1) -> str | None:
+    """Whose key the lookup may get: the person its verified authority token names, or None for the team's.
 
     The gateway (Grok voice) may ask only for ``GATEWAY_KEY_ADDRESSES``, without a task context.
     """
@@ -431,7 +431,11 @@ def _verified_person(gate: Any, caller: BrokerCaller, lookup: ModelKeyLookupV1) 
     if lookup.context is None:
         return None
     try:
-        person: str | None = gate.verified_person_id(caller, lookup.context)
+        async_verify = getattr(gate, "verified_person_id_async", None)
+        if callable(async_verify):
+            person: str | None = await async_verify(caller, lookup.context)
+        else:
+            person = gate.verified_person_id(caller, lookup.context)
         return person
     except (PermissionError, ValueError) as exc:
         LOGGER.warning(

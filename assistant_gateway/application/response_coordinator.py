@@ -29,6 +29,10 @@ from assistant_gateway.application.pending_questions import (
     QuestionDisplay,
 )
 from assistant_gateway.application.reply_leftovers import ArrivalRoute
+from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
+    SIGNER_UNAVAILABLE_USER_MESSAGE,
+)
 from assistant_gateway.application.request_service import GatewayRequestService
 from assistant_gateway.application.response_models import GatewayResponse
 from assistant_gateway.domain.message_types import TASK_STEERING_MESSAGE_TYPE
@@ -208,13 +212,29 @@ class GatewayResponseCoordinator:
                 response_text = query_handler(content)
                 if inspect.isawaitable(response_text):
                     response_text = await response_text
-                await self._reply_to_task_query(
-                    content,
-                    correlation_id=correlation_id,
-                    response_text=str(response_text),
-                    session_key=session_key,
-                    conversation_id=conversation_id,
-                )
+                try:
+                    await self._reply_to_task_query(
+                        content,
+                        correlation_id=correlation_id,
+                        response_text=str(response_text),
+                        session_key=session_key,
+                        conversation_id=conversation_id,
+                    )
+                except GatewayAuthorityTokenUnavailable:
+                    self._logger.warning(
+                        "Could not sign an interactive query answer yet; returning starting-up notice. "
+                        "event=gateway_query_handler_signer_unavailable correlation_id=%s task_query_id=%s",
+                        correlation_id,
+                        content.task_query_id,
+                    )
+                    return GatewayResponse(
+                        correlation_id=correlation_id,
+                        conversation_id=conversation_id,
+                        task_id=content.parent_task_id,
+                        message_type="system_status",
+                        text=SIGNER_UNAVAILABLE_USER_MESSAGE,
+                        raw_envelope=envelope,
+                    )
                 continue
 
             if isinstance(content, TaskSteering):
@@ -447,7 +467,9 @@ class GatewayResponseCoordinator:
             user_approved=content.user_approved,
         )
 
-    async def queue_manager_unavailable(self, correlation_id: str) -> None:
+    async def queue_manager_unavailable(
+        self, correlation_id: str, *, message: str | None = None
+    ) -> None:
         if not self._manager_client.has_pending_response(correlation_id):
             return
         request_record = self._request_service.mark_manager_unavailable(correlation_id)
@@ -455,7 +477,7 @@ class GatewayResponseCoordinator:
             correlation_id,
             MessageEnvelope(
                 msg_content=SystemStatusMessage(
-                    system_status=self._manager_unavailable_text()
+                    system_status=message or self._manager_unavailable_text()
                 ),
                 msg_meta=MessageMeta(
                     from_agent_name=(f"{self._settings.gateway_instance_name}_gateway"),

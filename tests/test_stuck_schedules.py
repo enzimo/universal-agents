@@ -322,3 +322,31 @@ def test_the_schedules_card_projection_matches_the_notice(tmp_path):
     add_schedule(lead, "fine", due=datetime.now(timezone.utc) + HOUR)
     healthy = _schedule_worker_assignment(store, store.get_scheduled_message("fine"), "jordan")
     assert healthy.not_running_since is None and healthy.not_running_explanation is None
+
+
+@pytest.mark.asyncio
+async def test_owner_not_vouched_refusal_notifies_owner_and_administrators_c25(tmp_path):
+    """When the scheduler refuses permits as owner_not_vouched, both owner and admins are told (C25)."""
+
+    lead = make_lead(tmp_path)
+    add_schedule(lead, "unvouched_sched", due=NOW - 2 * HOUR)
+    lead._schedule_store.set_run_permit(
+        "unvouched_sched",
+        permit=None,
+        owner_permit=None,
+        checked_owner="jordan",
+        recheck_at=NOW + HOUR,
+        refusal_reason="owner_not_vouched",
+    )
+
+    await report_stuck_schedules(lead, now=NOW + HOUR)
+
+    (owner_notice,) = notices(lead)
+    assert "owner" in owner_notice.summary.lower()
+    assert "vouched" in owner_notice.summary.lower()
+    (admin_notice,) = notices(lead, person_id="admin-1", roles=(PERSON_ROLE_ADMIN,))
+    assert admin_notice.title == owner_notice.title
+    assert admin_notice.summary == owner_notice.summary
+    (chat_envelope,) = chats(lead)
+    assert chat_envelope.msg_content.reason == "work_stuck"
+    assert "vouched" in chat_envelope.msg_content.text.lower()

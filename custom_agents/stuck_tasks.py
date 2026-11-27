@@ -87,7 +87,7 @@ from typing import Any, Iterable
 
 from pydantic import ValidationError
 
-from access_control.identity import IdentityRejected
+from access_control.authority_verifier import IdentityRejected, VerifiedTaskToken
 from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.agent_liveness import LivenessPurpose, owner_liveness, parse_utc, retain_decisions
 from custom_agents.conversation_attachments import TaskAttachments, UploadFolder, points_into_upload_folder
@@ -110,7 +110,7 @@ from custom_agents.task_wait_reasons import (
     UnreadableWaitRecord,
     wait_reason,
 )
-from custom_messages.contracts.access_v2 import AccessRequestStatus, SchedulePermitV1, TaskContextV1
+from custom_messages.contracts.access_v2 import AccessRequestStatus, TaskContextV1
 from custom_messages.contracts.attachments_v1 import UserTaskAttachment
 from custom_messages.contracts.runtime_snapshot_v3 import (
     RuntimeSnapshotV3,
@@ -325,19 +325,27 @@ class StuckTasks:
 
     # -- who and where ----------------------------------------------------------
 
-    def identity_of(self, meta: Any) -> TaskContextV1 | SchedulePermitV1 | None:
-        """Read signed identity facts for notices, never to authorize work."""
+    def identity_of(self, meta: Any) -> VerifiedTaskToken | None:
+        """Read verified authority-token facts for notices, never to authorize work."""
         context = getattr(meta, "gateway_context", None)
         if context is None:
             return None
-        verifier = context_verifier()
+        verifier = context_verifier(self.agent)
         try:
             if context.task_context is not None:
-                return verifier.verify(
-                    context.task_context, team_id=self.team_id, check_expiry=False
+                return verifier.verify_root_task(
+                    context.task_context,
+                    team_id=self.team_id,
+                    check_expiry=False,
+                    require_active_person=False,
                 )
             if context.schedule_run is not None:
-                return verifier.verify_permit(context.schedule_run.permit, team_id=self.team_id)
+                return verifier.verify_schedule_permit(
+                    context.schedule_run.permit,
+                    team_id=self.team_id,
+                    check_expiry=False,
+                    require_active_person=False,
+                )
         except (IdentityRejected, ValueError):
             return None
         return None
@@ -670,7 +678,7 @@ _TITLES = {
 }
 
 
-def _work_description(identity: TaskContextV1 | SchedulePermitV1 | None) -> tuple[str, str]:
+def _work_description(identity: VerifiedTaskToken | TaskContextV1 | None) -> tuple[str, str]:
     """Administrator labels follow verified identity, including work for no person."""
     if identity is None:
         return "A task", "a task"

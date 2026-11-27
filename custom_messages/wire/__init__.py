@@ -1,6 +1,8 @@
 """Protocol 1 of Universal Agents messages (contracts/messages/v1).
 
-Written by hand: ``canonical`` (strict parsing and RFC 8785), ``encoding``
+Written by hand: ``authority_bindings`` (shared authority-token issuer roles, lightweight
+token model, and application-local permit/schedule-run prefix conventions outside the
+protocol 1 contract), ``canonical`` (strict parsing and RFC 8785), ``encoding``
 (base64url, digests), ``refusals``, ``trust`` (the trust store and state records),
 ``frame`` (signing and verifying frames), ``permissions`` (filling a role's NATS
 grants for one host), ``buckets`` (the key-value buckets' streams), ``ids`` (whether a

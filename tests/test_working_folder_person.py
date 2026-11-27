@@ -28,7 +28,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from access_control.identity import ENV_VERIFY_KEYS
 from tests.task_work_support import bind_task
 from custom_agents.access_runtime import verified_meta_person_id
 from custom_agents.context_engine import ContextAssemblyRequest, ContextEngineAdapters
@@ -36,7 +35,11 @@ from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, 
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 TEAM = "team-1"
 ANN = "usr_ann"
@@ -47,8 +50,8 @@ TASK_ID = "task_context_1"  # the id the context engine test fixtures expect
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -106,7 +109,7 @@ def _meta(gateway_context: GatewayContext) -> MessageMeta:
 def test_a_turn_signed_for_ann_that_claims_bob_names_anns_folder(tmp_path, caplog) -> None:
     from custom_tools.workspace_scope import current_workspace_scope
 
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",), root_task_id=TASK_ID)
     meta = _meta(GatewayContext(canonical_user_id=BOB, task_context=signed))
     agent = _agent(tmp_path, meta)
     layout = InstanceLayout.at(tmp_path)
@@ -150,7 +153,7 @@ async def test_isolated_turns_name_the_tools_folder_without_exposing_gateway_con
     from tests.test_runtime_owner_boundaries import build_turn_owner
 
     context = (
-        context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+        signed_task_token(ANN, team_id=TEAM, roles=("member",), root_task_id=TASK_ID)
         if signed
         else None
     )
@@ -227,7 +230,7 @@ def test_the_agent_gives_its_context_engine_the_verified_person(tmp_path, monkey
     monkeypatch.chdir(tmp_path)
     agent = UniversalAgent(role="working folder check", tools=[], team_id=TEAM, workspace_dir=str(tmp_path))
     engine = agent._context_engine
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",), root_task_id=TASK_ID)
 
     assert engine.adapters.verified_person_of(_meta(GatewayContext(canonical_user_id=BOB, task_context=signed))) == ANN
     assert engine.adapters.verified_person_of(_meta(GatewayContext(canonical_user_id=BOB))) is None

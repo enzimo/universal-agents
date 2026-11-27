@@ -21,21 +21,17 @@ What travels, and why:
   these are listed as not imported. A team maintenance schedule (team memory
   review, internal improvement) whose person is not imported still travels:
   the gateway names a current person at its next start.
-- **Who a person's schedule works for.** The gateway signed the context saved
-  with a person's schedule, and every run checks that signature
-  (``task_context_runtime.gateway_vouches``) before giving the run its
-  owner's roles. The new instance has its own signing key, so the import signs
-  the context again for the owner, with their imported roles. Only a context
-  the old instance's gateway key vouched for is signed again (checked at
-  export with the old instance's key), so the move never vouches for something
-  nobody vouched for. Re-signing does not change the schedule's execution
-  digest (the signed context is not part of it). Contexts saved with
-  system-managed schedules are not used to vouch (trusted code set their
-  owner) and the gateway refreshes them at start, so they travel unchanged.
+- **Who a person's schedule works for.** Vouching is stored directly on each
+  schedule row (``scheduled_messages.owner_vouched``), set when a person
+  installs a schedule or an administrator vouches it. Export reads
+  ``owner_vouched`` directly without needing any signing key, strips runtime
+  credentials (``task_context``, ``schedule_run``, and source-keyed
+  ``delivery_ref``), and import writes ``owner_vouched`` directly without
+  signing anything; ``team_services`` issues fresh scheduler-signed protocol 1
+  run permits after start.
 - **Under a new team id** (owner's decision 103), the records follow it as they are read:
   ``team_transfer.schedule_team_ids`` says what changes, including the team's maintenance
-  schedule, whose ids are built from the team id, and the signed contexts, which are dropped
-  and signed again.
+  schedule, whose ids are built from the team id.
 - **Sessions** (routing records only). A person's schedule delivers through a
   chat session, which no other section carries. This section carries the
   sessions carried schedules and delivery targets use, and each imported
@@ -77,6 +73,7 @@ What travels, and why:
 
 from __future__ import annotations
 
+import hmac
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -93,7 +90,6 @@ from team_transfer.schedule_records import (
     ScheduleRecordKind,
     ScheduleTransferRecordV2,
     SessionRouteV1,
-    gateway_signing_key,
     is_one_time,
     record_key,
     run_time_passed,
@@ -113,7 +109,6 @@ from team_transfer.sections import (
 )
 
 if TYPE_CHECKING:
-    from access_control.identity import ContextVerifier
     from custom_messages.contracts.schedule_v1 import ScheduledMessage
 
 logger = logging.getLogger(__name__)
@@ -172,46 +167,6 @@ def _expired(schedule: "ScheduledMessage", now: datetime) -> bool:
     return (end if end.tzinfo else end.replace(tzinfo=timezone.utc)) <= now
 
 
-def _old_verifier(source: ExportSource) -> Optional["ContextVerifier"]:
-    from access_control.identity import (
-        ISSUER_GATEWAY,
-        ContextVerifier,
-        public_entry,
-        verify_keys_value,
-    )
-
-    value = gateway_signing_key(source.config, source.layout)
-    if value is None:
-        logger.warning(
-            "The exported instance has no gateway signing key, so no person's schedule counts as vouched for. "
-            "event=team_transfer_schedules_no_old_key"
-        )
-        return None
-    return ContextVerifier.from_value(
-        verify_keys_value([public_entry(ISSUER_GATEWAY, value)])
-    )
-
-
-def _vouched(
-    verifier: Optional["ContextVerifier"],
-    schedule: "ScheduledMessage",
-    owner: Optional[str],
-) -> bool:
-    """``gateway_vouches`` under the old instance's own key (the export runs where that key is)."""
-
-    from access_control.identity import ISSUER_GATEWAY, IdentityRejected
-
-    gateway_context = getattr(schedule.payload_meta, "gateway_context", None)
-    signed = getattr(gateway_context, "task_context", None)
-    if verifier is None or signed is None or not owner:
-        return False
-    try:
-        context = verifier.verify(signed, check_expiry=False)
-    except IdentityRejected:
-        return False
-    return context.issuer == ISSUER_GATEWAY and context.person_id == owner
-
-
 # -- export ---------------------------------------------------------------------------
 
 
@@ -231,7 +186,7 @@ def _gateway_repository(config: Any) -> Any:
 
 
 def _without_runtime_data(schedule: "ScheduledMessage") -> "ScheduledMessage":
-    """The schedule as configuration: no run identity, no run ledger or state (module docstring)."""
+    """The schedule as configuration: no run identity, tokens, source delivery_ref, or run ledger/state."""
 
     from custom_messages.contracts.schedule_v1 import (
         ScheduleMemoryLedger,
@@ -241,12 +196,36 @@ def _without_runtime_data(schedule: "ScheduledMessage") -> "ScheduledMessage":
     copy = schedule.model_copy(deep=True)
     gateway_context = getattr(copy.payload_meta, "gateway_context", None)
     if gateway_context is not None:
+        gateway_context.task_context = None
         gateway_context.schedule_run = None
+        gateway_context.delivery_ref = None
     if copy.schedule_memory is not None:
         copy.schedule_memory = copy.schedule_memory.model_copy(
             update={"ledger": ScheduleMemoryLedger(), "state": ScheduleMemoryState()}
         )
     return copy
+
+
+def _resolve_session_for_delivery_ref(
+    repository: Any,
+    delivery_refs: Any,
+    *,
+    owner: Optional[str],
+    delivery_ref: str,
+) -> Any:
+    """Find the source gateway session whose HMAC matches ``delivery_ref`` (C31)."""
+
+    candidates: list[Any] = []
+    if owner:
+        count = repository.count_sessions(owner_canonical_user_id=owner)
+        if count:
+            candidates = repository.list_sessions(limit=count, owner_canonical_user_id=owner)
+    else:
+        candidates = repository.list_unowned_sessions(limit=10_000)
+    for session in candidates:
+        if hmac.compare_digest(delivery_refs.ref(session.session_key), delivery_ref):
+            return session
+    return None
 
 
 @dataclass
@@ -256,13 +235,17 @@ class _Export:
     source: ExportSource
     records: list[dict[str, Any]] = field(default_factory=list)
     session_keys: set[str] = field(default_factory=set)
+    # Schedules with an opaque delivery_ref (agent-made schedules that may not yet have a
+    # gateway_scheduled_targets row): schedule_id -> (owner, delivery_ref, conversation_id).
+    schedule_delivery_refs: dict[str, tuple[Optional[str], str, Optional[str]]] = field(
+        default_factory=dict
+    )
 
     def schedules(self) -> list[str]:
         from custom_agents.schedule_store import owner_canonical_user_id_for_schedule
         from team_transfer.errors import TransferError
 
         store = _schedule_store(self.source.config)
-        verifier = _old_verifier(self.source)
         ids = []
         for row in store.all_rows():
             schedule_id = str(row["schedule_id"])
@@ -272,13 +255,25 @@ class _Export:
                     f"The schedule {schedule_id} cannot be read, so the export stops."
                 )
             owner = owner_canonical_user_id_for_schedule(schedule)
+            gateway_context = getattr(schedule.payload_meta, "gateway_context", None)
+            raw_delivery_ref = str(
+                row.get("delivery_ref")
+                or getattr(gateway_context, "delivery_ref", None)
+                or ""
+            ).strip()
+            if raw_delivery_ref:
+                self.schedule_delivery_refs[schedule_id] = (
+                    owner,
+                    raw_delivery_ref,
+                    getattr(schedule.payload_meta, "conversation_id", None),
+                )
             from team_transfer.schedule_markdown import render_schedule
 
             entry = CarriedScheduleV2(
                 # Zero is exhausted, even if its last run was still active.
                 # Work does not move; never restore an extra fire on import.
                 remaining_count=row.get("remaining_count"),
-                owner_vouched=_vouched(verifier, schedule, owner),
+                owner_vouched=bool(row.get("owner_vouched")),
                 markdown=render_schedule(
                     _without_runtime_data(schedule).model_dump(mode="json")
                 ),
@@ -286,34 +281,71 @@ class _Export:
             self.records.append(
                 _record(ScheduleRecordKind.SCHEDULE, schedule_id, schedule=entry)
             )
-            self._uses_session(
-                getattr(
-                    getattr(schedule.payload_meta, "gateway_context", None),
-                    "session_key",
-                    None,
-                )
-            )
+            self._uses_session(getattr(gateway_context, "session_key", None))
             ids.append(schedule_id)
         return ids
 
     def targets(self, schedule_ids: list[str]) -> None:
         repository = _gateway_repository(self.source.config)
+        delivery_refs: Any = None
+        delivery_refs_loaded = False
         for schedule_id in schedule_ids:
             target = repository.get_scheduled_target(schedule_id)
-            if target is None:
+            if target is not None:
+                carried = ScheduledTargetV1(
+                    schedule_id=schedule_id,
+                    session_key=target.session_key,
+                    conversation_id=target.conversation_id,
+                    owner_person_id=target.owner_canonical_user_id,
+                )
+                self.records.append(
+                    _record(
+                        ScheduleRecordKind.SCHEDULED_TARGET, schedule_id, target=carried
+                    )
+                )
+                self._uses_session(target.session_key)
+                continue
+            ref_info = self.schedule_delivery_refs.get(schedule_id)
+            if ref_info is None:
+                continue
+            owner, delivery_ref, conversation_id = ref_info
+            if not delivery_refs_loaded:
+                delivery_refs_loaded = True
+                try:
+                    from custom_transport.protocol1.delivery_refs import DeliveryRefs
+
+                    delivery_refs = DeliveryRefs.load(self.source.layout, self.source.team_id)
+                except (FileNotFoundError, OSError, ValueError) as exc:
+                    logger.warning(
+                        "Cannot resolve schedule delivery_ref during export because the source delivery-ref "
+                        "key is unavailable. event=team_transfer_delivery_ref_key_missing error=%s",
+                        exc,
+                    )
+            if delivery_refs is None:
+                continue
+            session = _resolve_session_for_delivery_ref(
+                repository, delivery_refs, owner=owner, delivery_ref=delivery_ref
+            )
+            if session is None:
+                logger.warning(
+                    "Schedule delivery_ref did not match any source session; no scheduled target carried. "
+                    "event=team_transfer_schedule_delivery_ref_unresolved schedule_id=%s owner=%s",
+                    schedule_id,
+                    owner or "-",
+                )
                 continue
             carried = ScheduledTargetV1(
                 schedule_id=schedule_id,
-                session_key=target.session_key,
-                conversation_id=target.conversation_id,
-                owner_person_id=target.owner_canonical_user_id,
+                session_key=session.session_key,
+                conversation_id=conversation_id,
+                owner_person_id=owner or session.owner_canonical_user_id,
             )
             self.records.append(
                 _record(
                     ScheduleRecordKind.SCHEDULED_TARGET, schedule_id, target=carried
                 )
             )
-            self._uses_session(target.session_key)
+            self._uses_session(session.session_key)
 
     def sessions(self) -> None:
         repository = _gateway_repository(self.source.config)
@@ -515,7 +547,6 @@ class _Known:
     objectives: set[str]
     agent_types: set[str]
     heartbeat_source_id: Optional[str]
-    signing_key: bool
     now: datetime
     default_cron_timezone: str
     accepted: set[str] = field(default_factory=set)
@@ -540,11 +571,6 @@ class _Known:
             objectives=objectives,
             agent_types=known_agent_types(context),
             heartbeat_source_id=config.heartbeat.source_id,
-            # An env-file instance gets its keys when the settings are imported.
-            signing_key=(
-                not config.launch.secrets_from_environment
-                or gateway_signing_key(config, context.layout) is not None
-            ),
             now=datetime.now(timezone.utc),
             default_cron_timezone=config.user.timezone,
         )
@@ -634,10 +660,6 @@ def _schedule_attention(
     elif not entry.owner_vouched:
         reasons.append(
             "nobody vouched for its owner in the old instance either, so it runs without the owner's roles"
-        )
-    elif not known.signing_key:
-        reasons.append(
-            "runs without its owner's roles until signed again: the new instance has no gateway signing key"
         )
     agent_type = schedule.claim_named_agent_type
     if agent_type and agent_type not in known.agent_types:
@@ -882,7 +904,11 @@ class SchedulesSection:
     #    (GatewayContext.parallel_thread). A schedule created in a parallel
     #    thread keeps the mark, so its runs get parallel lanes of their own
     #    (custom_agents.execution_lanes).
-    schema_version: ClassVar[int] = 6
+    # 7: protocol 1 authority tokens replace SignedTaskContextV1 / SignedSchedulePermitV1,
+    #    and GatewayContext gains opaque delivery_ref. Export strips runtime credentials and
+    #    source delivery_ref, resolves delivery_ref into scheduled_target + session, carries
+    #    owner_vouched directly without signing keys, and import stores owner_vouched directly.
+    schema_version: ClassVar[int] = 7
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = ScheduleTransferRecordV2
@@ -931,19 +957,63 @@ class SchedulesSection:
 __all__ = ["SchedulesSection"]
 
 
-# V4 added optional Task.replied_message and V5 added timing_revision, whose
-# initial value is zero. Already-supported V3 payloads carry neither field;
-# their records are otherwise unchanged and the current model fills both.
-SECTION_UPGRADES[(SchedulesSection.name, 3, SchedulesSection.schema_version)] = lambda records: records
+def _strip_legacy_schedule_credentials(record: dict[str, Any]) -> dict[str, Any]:
+    """Drop pre-v7 signed task contexts / schedule runs from a schedule's Markdown YAML.
 
-# V4 exports have no timing_revision. ScheduledMessage reads their timing as
-# revision zero; the first explicit timing edit increments it. Keep the V3
-# conversion above for the already-supported frozen transfer fixture too.
-SECTION_UPGRADES[(SchedulesSection.name, 4, SchedulesSection.schema_version)] = lambda records: records
+    Vouching is already carried in ``schedule.owner_vouched``; the old 0.9
+    ``SignedTaskContextV1`` shape does not validate against protocol 1 ``AuthorityToken``.
+    Records whose ``gateway_context`` already has no non-null credentials stay untouched.
+    """
 
-# V6 adds the optional GatewayContext.parallel_thread, false when missing.
-# V5 records are otherwise unchanged.
-SECTION_UPGRADES[(SchedulesSection.name, 5, SchedulesSection.schema_version)] = lambda records: records
+    import yaml
+    from team_transfer.schedule_markdown import _BLOCK
+
+    if record.get("kind") != ScheduleRecordKind.SCHEDULE.value:
+        return record
+    entry = record.get("schedule")
+    if not isinstance(entry, dict) or not isinstance(entry.get("markdown"), str):
+        return record
+    markdown = entry["markdown"]
+    matches = list(_BLOCK.finditer(markdown))
+    if len(matches) != 1:
+        return record
+    match = matches[0]
+    try:
+        doc = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return record
+    if not isinstance(doc, dict):
+        return record
+    meta = doc.get("payload_meta")
+    gw = meta.get("gateway_context") if isinstance(meta, dict) else None
+    if not isinstance(gw, dict):
+        return record
+    changed = False
+    for key in ("task_context", "schedule_run", "delivery_ref"):
+        if gw.get(key) is not None:
+            gw[key] = None
+            changed = True
+    if not changed:
+        return record
+    dumped = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+    updated_markdown = (
+        markdown[: match.start()] + "```yaml\n" + dumped + "```" + markdown[match.end() :]
+    )
+    return {**record, "schedule": {**entry, "markdown": updated_markdown}}
+
+
+def _upgrade_schedules_to_v7(records: SectionRecords) -> SectionRecords:
+    return [_strip_legacy_schedule_credentials(record) for record in records]
+
+
+# V4 added optional Task.replied_message, V5 added timing_revision (initial value 0),
+# V6 added optional GatewayContext.parallel_thread (false when missing), and V7 replaced
+# legacy SignedTaskContextV1/SignedSchedulePermitV1 with protocol 1 AuthorityToken while
+# carrying vouching in owner_vouched and stripping carried task_context/schedule_run/delivery_ref.
+for _previous_schedules_version in (3, 4, 5, 6):
+    SECTION_UPGRADES[
+        (SchedulesSection.name, _previous_schedules_version, SchedulesSection.schema_version)
+    ] = _upgrade_schedules_to_v7
 
 # Under a new team id (team_transfer.schedule_team_ids).
 TEAM_ID_RENAMES[SchedulesSection.name] = renamed_schedules

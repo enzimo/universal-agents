@@ -39,15 +39,13 @@ The person (None for work for nobody) is stored on the review and batch
 records, and batches are kept per person. The review schedule is a
 runtime-managed schedule owned by that person (``review_gateway_context``), so
 the scheduler's usual path signs each review run for them with their current
-roles (``task_context_runtime.sign_scheduled_context``, or the manager for a
-worker process without the key), a disabled or removed person's review does not
+roles (``scheduled_run_contexts.sign_scheduled_run`` via a standing schedule
+permit or ``svc.scheduler``), a disabled or removed person's review does not
 run (``task_context_runtime.inactive_owner``), and the schedule is deleted with
 their other personal schedules rather than moved to an administrator
 (``custom_messages.system_schedules``). A review of work
 for nobody has a schedule that names nobody, and the scheduler signs its run
-for no person through the same path; no permit for no person is needed
-(``system_schedules.is_system_work_kind`` stays as it is), because the
-reviewing team lead runs in the manager process, which holds the key.
+for no person through the same path.
 """
 
 from __future__ import annotations

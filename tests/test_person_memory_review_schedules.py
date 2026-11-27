@@ -31,7 +31,6 @@ from typing import Any
 
 import pytest
 
-from access_control.identity import ContextVerifier
 from assistant_gateway.application.delivery_service import GatewayDeliveryService
 from assistant_gateway.application.identity_service import (
     GatewayIdentityService,
@@ -57,6 +56,7 @@ from assistant_gateway.application.request_context import (
     GatewayRequestContextSettings,
 )
 from assistant_gateway.application.session_service import GatewaySessionService
+from assistant_gateway.application.team_commands import GatewayTeamCommandService
 from assistant_gateway.runtime_ports import (
     MembershipRoleIdentityAuthorizer,
     OwnershipPrivateResourceAuthorizer,
@@ -72,7 +72,6 @@ from custom_agents.schedule_management import (
     build_schedule_mutation_permit,
 )
 from custom_agents.scheduled_runtime import (
-    handle_scheduled_message,
     prepare_memory_review_schedule,
 )
 from custom_messages.contracts.routing_v1 import GatewayContext
@@ -89,6 +88,7 @@ from custom_messages.system_schedules import (
     is_person_system_schedule,
     person_system_schedule_id,
 )
+from custom_transport.protocol1.delivery_refs import DeliveryRefs
 from id_generation import (
     MEMORY_REVIEW_CORE_ID_PREFIX,
     MEMORY_REVIEW_STALE_ID_PREFIX,
@@ -96,10 +96,13 @@ from id_generation import (
 )
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import (
-    context_signer,
+    BrokerGatewayTokenSigner,
+    broker_authority_verifier,
+    broker_people_store,
+    broker_person_ref,
     forget_task_context_keys,
-    use_scheduler_key,
 )
+from tests.scheduled_run_support import bind_test_scheduler
 from tests.system_schedule_kind_support import (
     CURATOR_AGENT_TYPE,
     CURATOR_DELIVERY_MODE,
@@ -108,6 +111,7 @@ from tests.system_schedule_kind_support import (
     STAND_IN_KIND,
     use_kind,
 )
+from tests.team_services_support import checked_reply, stand_in_frame
 from tests.test_internal_improvement_runtime import _Manager
 
 INSTANCE = "test"
@@ -128,15 +132,25 @@ def _stale_id(person: str) -> str:
     return person_system_schedule_id(MEMORY_REVIEW_STALE_ID_PREFIX, INSTANCE, person)
 
 
+class _InProcessScheduleCommands:
+    """In-process gateway ``team_commands`` port routing ``schedules.install`` to ``ScheduleOperations``."""
+
+    def __init__(self, schedule_ops: Any) -> None:
+        self._ops = schedule_ops
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
+        self.calls.append((kind, dict(body)))
+        frame = stand_in_frame(TEAM, kind, body, person_ref=person_ref, request_id=request_id)
+        return checked_reply(kind, await self._ops.handle(frame))
+
+
 class _ManagerRoute:
-    """The gateway's manager client: what it publishes goes to the manager's inbox."""
+    """The gateway's manager presence check."""
 
     def __init__(self) -> None:
         self.manager_id: str | None = "manager_1"
         self.published: list[Any] = []
-
-    async def publish_durable(self, envelope: Any, *, routing_key: str) -> None:
-        self.published.append(envelope)
 
 
 def _seed_people(store: GatewayStateStore) -> None:
@@ -246,6 +260,13 @@ def _gateway(
             default_owner_canonical_user_id=OLIVE,
         )
     )
+    from uuid import uuid4
+
+    team_commands = GatewayTeamCommandService(
+        team_services=world.commands,
+        references=SimpleNamespace(person_ref=broker_person_ref),
+        request_ids=lambda: f"cmd-{uuid4().hex}",
+    )
     return GatewayMaintenanceScheduleApplication(
         settings=GatewayMaintenanceScheduleSettings(
             instance_name=INSTANCE,
@@ -278,20 +299,21 @@ def _gateway(
                 users_enabled=users_enabled,
             ),
             identity=_identity_service(store),
-            context_signer=context_signer(),
+            token_signer=BrokerGatewayTokenSigner(team_id=TEAM),
+            person_ref_resolver=broker_person_ref,
         ),
         delivery=GatewayDeliveryService(repository=store.delivery_repository, unit_of_work_factory=store),
         manager=world.route,  # type: ignore[arg-type]
         id_generator=UuidGatewayIdGenerator(),
+        team_commands=team_commands,
+        delivery_refs=world.delivery_refs,
     )
 
 
 def _deliver(world: SimpleNamespace) -> None:
-    """The manager handles what the gateway sent, in order."""
+    """No-op: maintenance schedules are now installed synchronously through ``schedules.install``."""
 
-    for envelope in world.route.published:
-        asyncio.run(handle_scheduled_message(world.manager, envelope.msg_content))
-    world.route.published.clear()
+    del world
 
 
 def _stored(world: SimpleNamespace) -> dict[str, ScheduledMessage]:
@@ -301,10 +323,24 @@ def _stored(world: SimpleNamespace) -> dict[str, ScheduledMessage]:
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    use_scheduler_key(monkeypatch)
     store = GatewayStateStore(str(tmp_path / "gateway_state.db"))
     _seed_people(store)
-    yield SimpleNamespace(tmp_path=tmp_path, store=store, route=_ManagerRoute(), manager=_Manager(tmp_path / "schedules.db"))
+    manager = _Manager(tmp_path / "schedules.db")
+    people_store = broker_people_store()
+    people_store.register(TEAM, OLIVE, roles=("owner",))
+    people_store.register(TEAM, MIA, roles=("member",))
+    people_store.register(TEAM, NOAH, roles=("member",))
+    bound = bind_test_scheduler(monkeypatch, store=manager._schedule_store, team_id=TEAM, people_store=people_store)
+    delivery_refs = DeliveryRefs(TEAM, b"p" * 32)
+    commands = _InProcessScheduleCommands(bound.schedule_ops)
+    yield SimpleNamespace(
+        tmp_path=tmp_path,
+        store=store,
+        route=_ManagerRoute(),
+        manager=manager,
+        commands=commands,
+        delivery_refs=delivery_refs,
+    )
     forget_task_context_keys()
 
 
@@ -315,13 +351,17 @@ def test_gateway_start_installs_a_pair_owned_by_each_active_person_only(world) -
 
     expected = {CORE_ID} | {_usermem_id(p) for p in ACTIVE} | {_stale_id(p) for p in ACTIVE}
     assert set(stored) == expected  # nothing for Dora (disabled) or Remy (removed)
-    verifier = ContextVerifier.from_env()
+    verifier = broker_authority_verifier()
+    schedule_store = world.manager._schedule_store
     for person in ACTIVE:
         for schedule_id in (_usermem_id(person), _stale_id(person)):
             schedule = stored[schedule_id]
             context = schedule.payload_meta.gateway_context
             assert context.canonical_user_id == person
-            assert verifier.verify(context.task_context, team_id=TEAM).person_id == person
+            assert schedule_store.is_owner_vouched(schedule_id) is True
+            permit_token = schedule_store.run_permit(schedule_id)
+            assert permit_token is not None
+            assert verifier.verify_schedule_permit(permit_token, team_id=TEAM).person_id == person
             assert schedule.management_class == ScheduleManagementClass.SYSTEM
             assert schedule.claim_named_agent_type == "MemReviewAgent"
             assert is_person_system_schedule(schedule)
@@ -336,11 +376,14 @@ def test_each_persons_pair_is_delivered_to_their_own_chat(world, caplog) -> None
     with caplog.at_level(logging.INFO):
         asyncio.run(_gateway(world).ensure_all())
     _deliver(world)
-    stored = _stored(world)
 
     def route(person: str) -> tuple[Any, ...]:
-        context = stored[_usermem_id(person)].payload_meta.gateway_context
-        return context.session_key, context.channel_name, context.chat_id, context.thread_id
+        session_key = person_maintenance_session_key(person)
+        delivery_ref = world.manager._schedule_store.delivery_ref_of(_usermem_id(person))
+        assert delivery_ref == world.delivery_refs.ref(session_key)
+        session = world.store.get_session(session_key)
+        assert session is not None
+        return session.session_key, session.channel_name, session.chat_id, session.thread_id
 
     # Olive: her default chat. Mia: her most recent chat (Web Chat). Noah: none.
     assert route(OLIVE) == (person_maintenance_session_key(OLIVE), "telegram", "chat_olive", "topic_1")
@@ -366,8 +409,11 @@ def test_a_person_without_a_chat_gets_one_at_the_next_install(world) -> None:
     asyncio.run(gateway.ensure_person_schedules(NOAH))
     _deliver(world)
 
-    context = _stored(world)[_usermem_id(NOAH)].payload_meta.gateway_context
-    assert (context.channel_name, context.chat_id) == ("signal", "chat_noah")
+    session_key = person_maintenance_session_key(NOAH)
+    assert world.manager._schedule_store.delivery_ref_of(_usermem_id(NOAH)) == world.delivery_refs.ref(session_key)
+    session = world.store.get_session(session_key)
+    assert session is not None
+    assert (session.channel_name, session.chat_id) == ("signal", "chat_noah")
 
 
 def _pause(world: SimpleNamespace, schedule_id: str, person: str) -> None:
@@ -417,7 +463,8 @@ def test_ensure_person_memory_review_does_nothing_when_it_cannot(world, caplog) 
         world.route.manager_id = None
         asyncio.run(_gateway(world).ensure_person_schedules(MIA))
 
-    assert world.route.published == []
+    assert world.commands.calls == []
+    assert _stored(world) == {}
     assert caplog.text.count("event=gateway_person_memory_review_not_active") == 2
     assert "event=gateway_memory_review_schedule_disabled" in caplog.text
     assert "event=gateway_person_memory_review_manager_unavailable" in caplog.text
@@ -429,7 +476,8 @@ def test_with_gateway_users_off_the_configured_user_gets_the_pair_on_the_proacti
     stored = _stored(world)
 
     assert set(stored) == {CORE_ID, _usermem_id(OLIVE), _stale_id(OLIVE)}
-    assert stored[_usermem_id(OLIVE)].payload_meta.gateway_context.session_key == PROACTIVE_SESSION
+    assert world.manager._schedule_store.delivery_ref_of(_usermem_id(OLIVE)) == world.delivery_refs.ref(PROACTIVE_SESSION)
+    assert world.store.get_scheduled_target(_usermem_id(OLIVE)).session_key == PROACTIVE_SESSION
 
 
 def _seed_stale_conversation(conversations: ConversationStore, person: str) -> None:
@@ -572,16 +620,23 @@ def test_a_new_per_person_kind_is_installed_for_each_active_person_like_memory_r
 
     curation = {person_system_schedule_id(CURATION_ID_PREFIX, INSTANCE, person) for person in ACTIVE}
     assert set(stored) == {CORE_ID} | {_usermem_id(p) for p in ACTIVE} | {_stale_id(p) for p in ACTIVE} | curation
-    verifier = ContextVerifier.from_env()
+    verifier = broker_authority_verifier()
+    schedule_store = world.manager._schedule_store
     for person in ACTIVE:
-        schedule = stored[person_system_schedule_id(CURATION_ID_PREFIX, INSTANCE, person)]
+        schedule_id = person_system_schedule_id(CURATION_ID_PREFIX, INSTANCE, person)
+        schedule = stored[schedule_id]
         context = schedule.payload_meta.gateway_context
         assert schedule.schedule_name == f"{PERSON_NAME_PREFIX}{INSTANCE}:{person}"
         assert (schedule.management_class, schedule.system_schedule_kind) == (ScheduleManagementClass.SYSTEM, STAND_IN_KIND)
         assert schedule.claim_named_agent_type == schedule.payload_meta.to_named_agent_type == CURATOR_AGENT_TYPE
         assert (context.canonical_user_id, context.delivery_mode) == (person, CURATOR_DELIVERY_MODE)
-        assert verifier.verify(context.task_context, team_id=TEAM).person_id == person
-        assert context.session_key == person_maintenance_session_key(person)
+        assert schedule_store.is_owner_vouched(schedule_id) is True
+        permit_token = schedule_store.run_permit(schedule_id)
+        assert permit_token is not None
+        assert verifier.verify_schedule_permit(permit_token, team_id=TEAM).person_id == person
+        assert schedule_store.delivery_ref_of(schedule_id) == world.delivery_refs.ref(
+            person_maintenance_session_key(person)
+        )
         assert is_person_system_schedule(schedule)
 
 

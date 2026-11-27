@@ -115,6 +115,58 @@ async def ask_agent(agent: Any, kind: str, body: Mapping[str, Any], target_agent
     return await host.ask(kind, body, target_agent, sender_agent=str(agent.id), timeout=timeout)
 
 
+async def ask_scheduler(agent: Any, kind: str, body: Mapping[str, Any], *,
+                        timeout: Optional[float] = None) -> dict[str, Any]:
+    """Ask the team services' scheduler (``svc.scheduler``), signed as ``agent``."""
+
+    host = process_host()
+    if host is None:
+        raise AgentUnreachable(NO_HOST.reason, clears=False)
+    return dict(await host.ask_scheduler(kind, body, sender_agent=str(agent.id), timeout=timeout))
+
+
+async def ask_team(
+    agent: Any,
+    kind: str,
+    body: Mapping[str, Any],
+    *,
+    authority: Optional[Mapping[str, Any]] = None,
+    timeout: Optional[float] = None,
+) -> dict[str, Any]:
+    """Ask the team services (``svc.team``), signed as ``agent``, optionally carrying ``authority``."""
+
+    host = process_host()
+    if host is None:
+        raise AgentUnreachable(NO_HOST.reason, clears=False)
+    return dict(
+        await host.ask_team(
+            kind, body, sender_agent=str(agent.id), authority=authority, timeout=timeout
+        )
+    )
+
+
+def agent_blob_store(agent: Any, *, timeout: float = 30.0) -> Optional[Any]:
+    """A ``ClientBlobStore`` over this process's host when available, else ``None``."""
+
+    host = process_host()
+    if host is None:
+        return None
+    if hasattr(host, "blob_store"):
+        return host.blob_store
+    if not (hasattr(host, "blob_store_handle") and hasattr(host, "register_blob")):
+        return None
+    from custom_transport.protocol1.ids import new_message_id
+    from custom_transport.protocol1.knowledge_blobs import ClientBlobStore
+
+    team = str(getattr(agent, "team_id", "") or getattr(host, "team", "") or "")
+    return ClientBlobStore(
+        get_js=host.blob_store_handle,
+        team=team,
+        register=lambda body: host.register_blob(body, timeout=timeout),
+        request_ids=new_message_id,
+    )
+
+
 async def ask_each(agent: Any, kind: str, body: Mapping[str, Any], targets: Iterable[str], *,
                    timeout: float) -> dict[str, Union[dict[str, Any], Exception]]:
     """Ask every target at once, all within ``timeout`` seconds; each target's reply body, or its error.

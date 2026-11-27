@@ -148,21 +148,6 @@ class NatsSubjectMapper:
     def lead_work_subject(self) -> str:
         return f"{self.prefix}.lead.work"
 
-    def run_context_request_subject(self) -> str:
-        """Core NATS subject where the team lead answers requests for scheduled run contexts.
-
-        Kept out of every JetStream stream: a request nobody answers now is
-        not worth keeping, because the asking worker releases its claim and
-        the schedule is retried (``custom_agents.scheduled_run_contexts``).
-        """
-
-        return f"{self.prefix}.lead.run_context"
-
-    def run_context_reply_subject(self, agent_id: str) -> str:
-        """Core NATS subject where one agent receives answers about its scheduled run contexts."""
-
-        return f"{self.prefix}.agent.{encode_subject_token(agent_id)}.run_context"
-
     def named_type_work_subject(self, named_agent_type: str) -> str:
         return f"{self.prefix}.type.{encode_subject_token(named_agent_type)}.work"
 

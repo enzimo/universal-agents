@@ -22,6 +22,7 @@ from runtime_settings.security import (
     reject_removed_credential_catalog_env_vars,
     reject_removed_sealbox_env_vars,
     reject_removed_secure_cli_env_var,
+    reject_removed_signing_key_env_vars,
     reject_removed_tool_credential_env_vars,
 )
 from runtime_settings.services import CRAWL4AI_BASE_URL_ENV, reject_removed_web_service_env_vars
@@ -68,6 +69,7 @@ def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
     reject_removed_sealbox_env_vars()
     reject_removed_credential_catalog_env_vars()
     reject_removed_tool_credential_env_vars()
+    reject_removed_signing_key_env_vars()
     reject_removed_secure_cli_env_var()
     reject_removed_web_service_env_vars()
     # Ensure nested dicts exist

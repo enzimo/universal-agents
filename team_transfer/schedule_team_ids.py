@@ -18,12 +18,12 @@ What follows the new id, and why:
   Every record naming that schedule follows: its delivery target, the ``scheduled_job_id`` in
   its gateway context, its worker binding, and grants to it (``team_transfer.access``). The new
   instance's manager then finds it as its own and installs no second one.
-- **Signed contexts.** A context saved with a schedule names the old team and carries the old
-  gateway's signature, so under a new id only that field (``gateway_context.task_context``) is
-  dropped; the rest of the gateway context stays, because the gateway's refresh of a system
-  schedule needs it (``custom_agents.schedule_context_refresh``). The writer signs a person's
-  schedule again for the new team when the old key vouched for it, as without a new id, and the
-  gateway signs system schedules again at its first start.
+- **Runtime credentials and delivery references.** A schedule's saved ``task_context`` and
+  instance-keyed ``delivery_ref`` belong to the old installation and team, so both are cleared
+  here (as export already does); vouching travels in ``owner_vouched``, and the chat route
+  travels in ``scheduled_target`` and ``session``. The rest of the gateway context stays,
+  because the gateway's refresh of a system schedule needs it
+  (``team_services.schedules``, refresh mode).
 - **Worker bindings and pool sizes.** ``team_id``; a binding's ``schedule_id`` follows its
   schedule. When the runtime set the binding up itself (the usual binding of a person's
   schedule nobody set up by hand), its ``actor_principal_id`` is ``local_schedule_runtime:<team>``
@@ -96,8 +96,9 @@ def _renamed_document(document: dict[str, Any], team_ids: TeamIds) -> dict[str, 
     gateway = meta.get("gateway_context") if isinstance(meta, dict) else None
     if isinstance(meta, dict) and isinstance(gateway, dict):
         gateway = _changed(gateway, "scheduled_job_id", renamed_schedule_id(team_ids, gateway.get("scheduled_job_id")))
-        # Signed by the old gateway for the old team; signed again later (module docstring).
+        # Credentials and instance-keyed delivery_ref belong to the old installation/team.
         gateway = _changed(gateway, "task_context", None)
+        gateway = _changed(gateway, "delivery_ref", None)
         changed["payload_meta"] = {**meta, "gateway_context": gateway}
     return changed
 

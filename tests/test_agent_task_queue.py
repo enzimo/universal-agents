@@ -13,7 +13,7 @@ from custom_messages.enums import ProgressState
 from custom_tools.providers.task_queue import control_task_queue, list_task_queue
 from tests.task_work_support import bind_task, set_agent_ref
 from test_runtime_task_controls import agent as runtime_agent_fixture, add, command
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 
 
@@ -26,7 +26,7 @@ def agent(request, tmp_path):
 def sign(agent, task_id: str, request=None):
     """Give a task the gateway-signed context of its owner's request (a new request by default)."""
 
-    signed = request or context_signer().issue(team_id=agent.team_id, person_id="owner", person_roles=("owner",))
+    signed = request or signed_task_token("owner", team_id=agent.team_id, roles=("owner",), root_task_id=task_id)
     agent.task_manager.get_task_info(task_id).meta.gateway_context.task_context = signed
     return signed
 

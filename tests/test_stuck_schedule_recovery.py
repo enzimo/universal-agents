@@ -178,13 +178,47 @@ def test_a_change_made_outside_an_authorized_path_still_waits_for_review(lead):
     assert binding(lead).blocked_reason == SCHEDULE_EXECUTION_CHANGED
 
 
-def _refresh_with(lead, **gateway_fields):
-    from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
+def _refresh_with(lead, *, owner_id: str | None = None, delivery_ref: str | None = None, **gateway_fields):
+    from custom_agents.schedule_execution_identity import follow_authorized_change
+    from custom_agents.schedule_management import (
+        ScheduleMutationAuthorityMode,
+        ScheduleMutationOperation,
+        build_schedule_mutation_permit,
+    )
+    from custom_agents.schedule_store import owner_canonical_user_id_for_schedule
 
-    incoming = lead._schedule_store.get_scheduled_message("job").model_copy(deep=True)
+    store = lead._schedule_store
+    incoming = store.get_scheduled_message("job").model_copy(deep=True)
     for name, value in gateway_fields.items():
         setattr(incoming.payload_meta.gateway_context, name, value)
-    return refresh_schedule_gateway_context(lead, incoming)
+    resolved_owner = owner_id or incoming.payload_meta.gateway_context.canonical_user_id or "owner"
+    result = store.install(
+        incoming,
+        mode="refresh",
+        team_id=lead.team_id,
+        owner_id=resolved_owner,
+        owner_vouched=True,
+        delivery_ref=delivery_ref,
+        allow_team_owner_change=True,
+        system_mutation_permit_fn=lambda current, candidate: build_schedule_mutation_permit(
+            schedule=current,
+            operation=ScheduleMutationOperation.UPDATE,
+            authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
+            actor_principal_id=resolved_owner,
+            owner_canonical_user_id=owner_canonical_user_id_for_schedule(current) or resolved_owner,
+            team_id=lead.team_id,
+            candidate=candidate,
+        ),
+    )
+    if result.previous is not None and result.saved is not None:
+        follow_authorized_change(
+            store.worker_records,
+            lead.team_id,
+            result.previous,
+            result.saved,
+            source="gateway_context_refresh",
+        )
+    return result.saved is not None
 
 
 def test_memory_review_schedule_moved_to_the_persons_current_chat_keeps_running(lead):
@@ -192,9 +226,9 @@ def test_memory_review_schedule_moved_to_the_persons_current_chat_keeps_running(
 
     memory_timer(lead)
     apply_local_schedule_upgrade(lead)
-    assert _refresh_with(lead, session_key="telegram:owner-new-chat", channel_name="telegram")
+    assert _refresh_with(lead, delivery_ref="dr_owner_new_chat")
     schedule = lead._schedule_store.get_scheduled_message("job")
-    assert schedule.payload_meta.gateway_context.session_key == "telegram:owner-new-chat"
+    assert schedule.payload_meta.gateway_context.delivery_ref == "dr_owner_new_chat"
     assert schedule_ready_for_admission(lead, schedule)
     assert binding(lead).blocked_reason is None
 
@@ -204,7 +238,7 @@ def test_memory_review_schedule_given_to_another_person_waits_for_review(lead):
 
     memory_timer(lead)
     apply_local_schedule_upgrade(lead)
-    assert _refresh_with(lead, canonical_user_id="someone-else")
+    assert _refresh_with(lead, owner_id="someone-else", canonical_user_id="someone-else")
     assert not schedule_ready_for_admission(lead, lead._schedule_store.get_scheduled_message("job"))
     assert binding(lead).blocked_reason == SCHEDULE_EXECUTION_CHANGED
 

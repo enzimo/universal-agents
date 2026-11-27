@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -93,6 +94,9 @@ class PersistentTrustStore:
     def __init__(self, store: TrustStore, path: Path) -> None:
         self.store = store
         self._path = path
+        # Serializes in-memory TrustStore mutations (add, forget) against cross-thread readers
+        # such as worker threads in AgentProcessHost and HTTP threads in secure_tool_broker.
+        self.lock = threading.RLock()
         # installation -> records this store verified, oldest first; the newest is the one it holds.
         self._kept: dict[str, list[Record]] = {}
         # Kept records this store has not verified yet; written back and tried again.
@@ -126,6 +130,11 @@ class PersistentTrustStore:
             persistent._save()
         return persistent
 
+    def trust_state(self) -> tuple[TrustStore, threading.RLock]:
+        """The underlying ``TrustStore`` paired with the lock that serializes its mutations."""
+
+        return self.store, self.lock
+
     # -- trust records ------------------------------------------------------------------------------
 
     def add(self, data: bytes, *, now: datetime) -> bool:
@@ -134,22 +143,29 @@ class PersistentTrustStore:
         Kept records still waiting to be checked are tried first, so they come before this one.
         """
 
-        changed = self._retry_pending(now) or self._unsaved
-        added = False
-        try:
-            added = self.store.add(data, now=now)
-            if added:
-                document = json.loads(bytes(data))
-                if document.get("record") == _REVOCATIONS:
-                    self._keep(document, now)
-                    changed = True
-                elif document.get("record") == _AGREEMENT:
-                    # Another installation's kept record may be checkable now.
-                    changed = self._retry_pending(now) or changed
-        finally:
-            if changed:
-                self._save()
-        return added
+        with self.lock:
+            changed = self._retry_pending(now) or self._unsaved
+            added = False
+            try:
+                added = self.store.add(data, now=now)
+                if added:
+                    document = json.loads(bytes(data))
+                    if document.get("record") == _REVOCATIONS:
+                        self._keep(document, now)
+                        changed = True
+                    elif document.get("record") == _AGREEMENT:
+                        # Another installation's kept record may be checkable now.
+                        changed = self._retry_pending(now) or changed
+            finally:
+                if changed:
+                    self._save()
+            return added
+
+    def forget(self, now: datetime) -> int:
+        """Forget expired trust records under the store lock (``TrustStore.forget``)."""
+
+        with self.lock:
+            return self.store.forget(now)
 
     def kept_revocations(self, installation: str) -> list[Record]:
         """The revocations records this store verified and keeps for ``installation``, oldest first.

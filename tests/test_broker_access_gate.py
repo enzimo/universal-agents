@@ -29,7 +29,6 @@ from access_control.caller_tokens import (
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService
 from access_control.entities import PersonPrincipal
-from access_control.identity import ISSUER_GATEWAY, ContextSigner, ContextVerifier, generate_signing_key
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     GrantV1,
@@ -52,8 +51,6 @@ from tests.broker_access_support import (
     TEST_TEAM,
     agent_context,
     caller_headers,
-    context_signer,
-    context_verify_keys,
     gateway_headers,
     open_gate,
 )
@@ -102,11 +99,11 @@ def test_open_gate_allows_a_verified_agent_request() -> None:
 @pytest.mark.parametrize(
     ("change", "fragment"),
     [
-        (lambda c: c.pop("task_context"), "no signed context"),
+        (lambda c: c.pop("task_context"), "no authority token"),
         (lambda c: c.update(canonical_user_id="user-9"), "different person"),
         (lambda c: c.update(team_id="team-other"), "another team"),
         (lambda c: c.pop("agent_id"), "does not name the agent"),
-        (lambda c: c["task_context"]["context"].update(person_id="user-9"), "changed or forged"),
+        (lambda c: c["task_context"].update(person="p-9999999999999999999999"), "signature"),
     ],
 )
 def test_gate_refuses_unverified_identity(change, fragment) -> None:
@@ -120,14 +117,40 @@ def test_gate_refuses_unverified_identity(change, fragment) -> None:
 
 
 def test_gate_refuses_expired_and_foreign_key_contexts() -> None:
-    expired = context_signer().issue(
-        team_id=TEST_TEAM, person_id="user-1", now=datetime.now(timezone.utc) - timedelta(days=30)
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from custom_transport.protocol1.host_keys import HostKeys
+    from custom_transport.protocol1.identity import HostIdentity
+    from tests.broker_access_support import broker_gateway_identity, broker_person_ref
+
+    gw = broker_gateway_identity()
+    now = datetime.now(timezone.utc)
+    # Token issued inside cert validity window, but already expired 10 minutes ago.
+    expired = root_task_token(
+        gw,
+        team=TEST_TEAM,
+        root_task_id="task-exp",
+        request_id="task_context_exp",
+        person_ref=broker_person_ref("user-1"),
+        issued=now - timedelta(minutes=30),
+        expires_at=now - timedelta(minutes=10),
     )
-    foreign = ContextSigner.from_value(ISSUER_GATEWAY, generate_signing_key(ISSUER_GATEWAY)[0]).issue(
-        team_id=TEST_TEAM, person_id="user-1"
+    # Token signed by a foreign key not matching the gateway certificate.
+    foreign_identity = HostIdentity(
+        HostKeys(gw.runtime, gw.keys.key_id, Ed25519PrivateKey.generate(), b"0" * 32),
+        gw.certificate,
     )
-    for signed, fragment in ((expired, "expired"), (foreign, "unknown key")):
-        context = {**agent_context(), "task_context": signed.model_dump(mode="json")}
+    foreign = root_task_token(
+        foreign_identity,
+        team=TEST_TEAM,
+        root_task_id="task-for",
+        request_id="task_context_for",
+        person_ref=broker_person_ref("user-1"),
+        issued=now,
+    )
+    for signed, fragment in ((expired, "not valid"), (foreign, "signature")):
+        context = {**agent_context(), "task_context": signed}
         result = gmail_search(open_gate(), context)
         assert not result.allowed and fragment in result.message
 
@@ -156,6 +179,8 @@ def test_unlisted_hosts_are_refused_in_both_modes() -> None:
 
 @pytest.fixture
 def enabled_gate(tmp_path):
+    from tests.broker_access_support import broker_authority_verifier
+
     store = AccessRepository(
         resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
     )
@@ -164,7 +189,7 @@ def enabled_gate(tmp_path):
     service = AccessService(store=store, catalog=catalogs.current(), cedar=cedar, team_id=TEST_TEAM)
     gate = BrokerAccessGate(
         catalogs=catalogs,
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=service,
     )
@@ -357,12 +382,16 @@ def test_agents_in_a_scheduled_run_inherit_the_access_of_whom_they_work_for(tmp_
     hands on; the team lead keeps its own access for the person in every run."""
 
     from access_control.entities import schedule_subject
-    from access_control.identity import ISSUER_SCHEDULER, verify_keys_value
     from access_control.task_identity import ScheduleFacts, ScheduleRunLookup
     from custom_messages.contracts.access_v2 import DelegationMode
-    from tests.broker_access_support import _scheduler_key
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from tests.broker_access_support import (
+        broker_authority_verifier,
+        broker_gateway_identity,
+        broker_people_store,
+        broker_scheduler_identity,
+    )
 
-    scheduler_private, scheduler_public = _scheduler_key()
     store = AccessRepository(resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}}))
     catalogs = CatalogSource(None)
     cedar = CedarAccessClient(binary=str(BINARY))
@@ -373,18 +402,28 @@ def test_agents_in_a_scheduled_run_inherit_the_access_of_whom_they_work_for(tmp_
         _user_schedule("morning", "TeamArchitect"),
         ScheduleFacts("heartbeat-launcher", True, "user-1", True, "heartbeat_launcher"),
     )
+    people = broker_people_store()
+    owner_rec = people.register(TEST_TEAM, "user-1", roles=("owner",))
     gate = BrokerAccessGate(
         catalogs=catalogs,
-        verifier=ContextVerifier.from_value(verify_keys_value([*json.loads(context_verify_keys()), scheduler_public])),
+        verifier=broker_authority_verifier(people=people),
         team_id=TEST_TEAM,
         access=service,
-        schedule_runs=ScheduleRunLookup(schedules, object()),
+        schedule_runs=ScheduleRunLookup(schedules, people),
     )
-    scheduler = ContextSigner.from_value(ISSUER_SCHEDULER, scheduler_private)
+    scheduler = broker_scheduler_identity()
 
-    def run_of(schedule_id: str, signer: ContextSigner = scheduler, agent_type: str = "GeneralAssistant") -> dict:
-        signed = signer.issue(team_id=TEST_TEAM, person_id="user-1", person_roles=("owner",), schedule_id=schedule_id)
-        return {**agent_context(roles=("owner",), named_agent_type=agent_type), "task_context": signed}
+    def run_of(schedule_id: str, issuer=scheduler, agent_type: str = "GeneralAssistant") -> dict:
+        token = root_task_token(
+            issuer,
+            team=TEST_TEAM,
+            root_task_id=f"task-{schedule_id}",
+            request_id=f"task_context_{schedule_id}",
+            person_ref=owner_rec.person_ref,
+            schedule_id=schedule_id if issuer is scheduler else None,
+            issued=datetime.now(timezone.utc),
+        )
+        return {**agent_context(roles=("owner",), named_agent_type=agent_type), "task_context": token}
 
     try:
         # The digest job's access: every agent in its runs uses it, and only there.
@@ -396,8 +435,8 @@ def test_agents_in_a_scheduled_run_inherit_the_access_of_whom_they_work_for(tmp_
         )
         assert gmail_search(gate, run_of("digest")).allowed
         assert not gmail_search(gate, run_of("triage")).allowed
-        # Only the scheduler says a task is a schedule's run; the gateway's word is ignored.
-        assert not gmail_search(gate, run_of("digest", context_signer())).allowed
+        # Only the scheduler says a task is a schedule's run; a gateway token cannot carry a schedule_id.
+        assert not gmail_search(gate, run_of("digest", broker_gateway_identity())).allowed
         assert not gmail_search(gate, agent_context(roles=("owner",))).allowed
 
         # The team lead's lasting access for the person, which it may hand on.
@@ -443,6 +482,7 @@ def test_a_process_that_cannot_read_schedules_reads_a_run_as_a_job_run(caplog) -
 def test_the_broker_treats_built_in_maintenance_agents_as_system_agents(tmp_path) -> None:
     from access_control.entities import AGENT_ROLE_SYSTEM, AGENT_ROLE_WORKER
     from secure_tool_broker.access_gate import build_broker_access_gate
+    from tests.broker_access_support import broker_trust_store
 
     gate = build_broker_access_gate(
         instance_root=None,
@@ -450,7 +490,7 @@ def test_the_broker_treats_built_in_maintenance_agents_as_system_agents(tmp_path
         authorization_enabled=True,
         storage_settings=resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}}),
         cedar_binary=str(BINARY),
-        verify_keys=context_verify_keys(),
+        trust=broker_trust_store(),
     )
     try:
         assert gate.access is not None
@@ -487,6 +527,8 @@ tools:
 
 @pytest.fixture
 def gated_world(tmp_path: Path):
+    from tests.broker_access_support import broker_authority_verifier
+
     tools = tmp_path / "instance" / "control" / "access" / "tools"
     tools.mkdir(parents=True)
     (tools / "gated.yaml").write_text(GATED_TOOLS_YAML, encoding="utf-8")
@@ -495,7 +537,7 @@ def gated_world(tmp_path: Path):
     )
     gate = BrokerAccessGate(
         catalogs=CatalogSource(tmp_path / "instance"),
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=None,
         links=store,
@@ -682,9 +724,9 @@ def test_sign_in_tool_skips_outdated_team_fallback_link_instead_of_blocking_sign
     import logging
     from access_catalog.catalog import CatalogSource, ToolCatalog
     from access_control.account_sharing import TeamAccountSharing
-    from access_control.identity import ContextVerifier
     from custom_messages.contracts.access_v2 import AccountSharing, CredentialInjectionV1, InjectionPlacement
     from secure_tool_broker.access_gate import BrokerAccessGate
+    from tests.broker_access_support import broker_authority_verifier
 
     store = AccessRepository(
         resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
@@ -711,7 +753,7 @@ def test_sign_in_tool_skips_outdated_team_fallback_link_instead_of_blocking_sign
 
     gate = BrokerAccessGate(
         catalogs=_StaticCatalogs(),  # type: ignore[arg-type]
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=None,
         links=store,

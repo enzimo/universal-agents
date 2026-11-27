@@ -69,15 +69,19 @@ from team_services.knowledge import KnowledgeOperations
 from team_services.memory import MemoryOperations
 from team_services.partitions import PartitionService
 from team_services.relays import Relays
-from team_services.schedules import ScheduleOperations, SystemScheduleCheck
+from team_services.scheduler import SCHEDULER_ADDRESS, SchedulerOperations
+from team_services.schedules import ScheduleInstallDefaults, ScheduleOperations, SystemScheduleCheck
 from team_services.topics import TopicOperations
 from custom_agents.conversation_store import ConversationStore
+from custom_agents.heartbeat_store import HeartbeatStore
+from id_generation import HEARTBEAT_SOURCE_ID_PREFIX, operational_id
+from access_control.authority_verifier import AuthorityTokenVerifier
 from assistant_gateway.runtime_config import lead_memory_config
 from team_services.service import OperationFamily, TeamServices, Upkeep
 from team_services.serving import mark_serving
 from team_services.sessions import SessionService
 
-TEAM_SERVICES_ROLES = ("team_services",)
+TEAM_SERVICES_ROLES = ("team_services", "scheduler")
 # How often the team services look after their own records (SessionService.maintain) and each family's.
 MAINTENANCE_INTERVAL = TRUST_REFRESH_INTERVAL
 # How long stopping waits for the requests being handled: the longest a team operation's request lasts
@@ -211,9 +215,17 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
             await keeper
             return
         await family_prepare
-    subscription = await live.serve("svc.team", Receiver(live.identity.installation, team, "team_services", team,
-                                                         TEAM_SERVICES_RUNTIME), services.handle,
+    receiver = Receiver(live.identity.installation, team, "team_services", team, TEAM_SERVICES_RUNTIME)
+    subscription = await live.serve("svc.team", receiver, services.handle,
                                     side_by_side_kinds=services.side_by_side)
+    scheduler_subscription = None
+    if services.served_at(SCHEDULER_ADDRESS):
+        scheduler_subscription = await live.serve(
+            SCHEDULER_ADDRESS,
+            receiver,
+            lambda verified: services.handle_address(SCHEDULER_ADDRESS, verified),
+            side_by_side_kinds=services.side_by_side_at(SCHEDULER_ADDRESS),
+        )
     await host.nc.flush()
     lost = False
     upkeep: Optional[asyncio.Task[None]] = None
@@ -245,6 +257,8 @@ async def _serve_holding_lock(host: MessageHost, live: LiveHost, lock: SingleIns
     finally:
         try:
             await subscription.unsubscribe()
+            if scheduler_subscription is not None:
+                await scheduler_subscription.unsubscribe()
             # Requests already being handled finish and are answered before the lock is released: a change the
             # store commits after that could otherwise race the next instance, and its requester would see no answer.
             await _drain(live, host.logger)
@@ -350,13 +364,54 @@ def team_operations(
     conversations = ConversationStore(db_path=storage.sqlite_path or "", storage_settings=storage, logger=_LOGGER,
                                       artifacts_dir=config.layout.conversation_artifacts_dir)
     topics = TopicOperations(conversations, people, clock, _LOGGER)
-    schedules = ScheduleOperations(ScheduleStore(storage_settings=storage, default_cron_timezone=config.user.timezone),
-                                   people, _delivery_refs(config),
-                                   SystemScheduleCheck(config, people), clock, _LOGGER)
+    schedule_store = ScheduleStore(storage_settings=storage, default_cron_timezone=config.user.timezone)
+    scheduler: Optional[SchedulerOperations] = None
+    if host is not None:
+        scheduler = SchedulerOperations(
+            schedule_store,
+            people,
+            config.manager.team_id,
+            identity_fn=lambda: host.live.identity if host.live is not None else None,
+            verifier_fn=lambda: (
+                AuthorityTokenVerifier(host, people=access_repo, clock=clock)
+                if host.live is not None
+                else None
+            ),
+            heartbeat_store_fn=lambda: HeartbeatStore(
+                db_path=storage.sqlite_path or "",
+                logger_=_LOGGER,
+                storage_settings=storage,
+            ),
+            clock=clock,
+            logger=_LOGGER,
+        )
+    heartbeat_source_id = config.heartbeat.source_id or operational_id(
+        HEARTBEAT_SOURCE_ID_PREFIX, config.instance_name
+    )
+    schedules = ScheduleOperations(
+        schedule_store,
+        people,
+        _delivery_refs(config),
+        SystemScheduleCheck(config, people),
+        clock,
+        _LOGGER,
+        blobs=blob_service,
+        on_schedule_installed=scheduler.issue_permit_for_schedule if scheduler is not None else None,
+        conversations=conversations,
+        install_defaults=ScheduleInstallDefaults(
+            lead_agent_type=config.manager.named_agent_type,
+            response_route=config.manager.response_queue_name,
+            instance_name=config.instance_name,
+            heartbeat_source_id=heartbeat_source_id,
+            default_timezone=config.user.timezone,
+        ),
+    )
     families: list[OperationFamily] = [memory.family(), knowledge.family(), topics.family(), schedules.family()]
     if blob_service is not None:
         families.append(BlobOperations(blob_service, people, _LOGGER).family())
     if host is not None:
+        assert scheduler is not None
+        families.append(scheduler.family())
         mapper = NatsSubjectMapper(
             team_id=config.manager.team_id,
             subject_prefix=config.transport.subject_prefix,

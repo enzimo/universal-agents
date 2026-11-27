@@ -5,10 +5,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from access_control.identity import ContextVerifier, IdentityRejected
+from access_control.authority_verifier import IdentityRejected
 from access_control.task_identity import ScheduleRunLookup, job_schedule_id, resolve_task_identity
 from custom_agents import access_runtime
-from custom_agents.schedule_permits import renew_schedule_permits
 from custom_agents.schedule_store import ScheduleStore
 from custom_messages.contracts.access_v2 import (
     AccessLevel, GrantStatus, GrantV1, PersonStanding, SubjectKind, SubjectRefV1, TargetKind, TargetRefV1,
@@ -21,7 +20,7 @@ from custom_messages.system_schedules import MEMORY_REVIEW_PREPARER, USERMEM_AUD
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import forget_task_context_keys
 from tests.scheduled_run_support import (
-    ANN, SCHEDULE_ID, TEAM, access_agent, build_world, claim, fire, needs_cedar,
+    ANN, SCHEDULE_ID, TEAM, access_agent, build_world, claim, fire, issue_permits, needs_cedar,
     queued_run, record_ann, save_schedule, subscribe,
 )
 
@@ -63,7 +62,7 @@ def start_final_run(world, *, interval=None, count=1, expires=None, followup=Non
         )
     else:
         world.store.update(changed, base=base)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    issue_permits(world)
 
     async def scenario():
         await subscribe(world)
@@ -79,7 +78,7 @@ def start_final_run(world, *, interval=None, count=1, expires=None, followup=Non
 
 def resolve(world, run):
     return resolve_task_identity(
-        verifier=ContextVerifier.from_env(), team_id=TEAM,
+        verifier=world.verifier, team_id=TEAM,
         task_context=run.meta.gateway_context.task_context,
         schedule_run=run.meta.gateway_context.schedule_run,
         schedule_runs=ScheduleRunLookup.from_storage(world.tasks.storage_settings),
@@ -97,7 +96,7 @@ def test_exact_agent_final_run_keeps_authority_until_completion(world, with_type
         "claim_named_agent_type": world.worker.named_agent_type if with_type else None,
     })
     world.store.add(schedule, claim_team_id=TEAM, claim_agent_id=world.worker.id)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    issue_permits(world)
 
     async def scenario():
         await subscribe(world)
@@ -126,7 +125,7 @@ def test_superseding_a_run_closes_its_same_worker_coalesced_fire(world):
     current = world.store.get_scheduled_message(SCHEDULE_ID)
     due = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     world.store.update(current.model_copy(update={"next_fire_at": due}), base=current)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    issue_permits(world)
     asyncio.run(fire(world, claim(world)))
     records = world.store.worker_records
     before = records.occurrences_for_schedule(SCHEDULE_ID, TEAM)
@@ -134,7 +133,7 @@ def test_superseding_a_run_closes_its_same_worker_coalesced_fire(world):
     assert {r.state for r in before} == {"admitted", "coalesced"}
     assert next(r for r in before if r.state == "coalesced").coalesced_into_task_id == primary.task.task_id
     save_schedule(world, schedule_id="sched_other")
-    renew_schedule_permits(world.manager, signer=world.signer)
+    issue_permits(world)
     asyncio.run(fire(world, claim(world, schedule_id="sched_other")))
     unrelated = records.occurrences_for_schedule("sched_other", TEAM)
     assert len(unrelated) == 1 and unrelated[0].finished_at_utc is None
@@ -193,6 +192,7 @@ def test_final_run_passes_the_access_hook_and_broker(world):
     gate = build_broker_access_gate(
         instance_root=None, team_id=TEAM, authorization_enabled=True,
         storage_settings=world.tasks.storage_settings, cedar_binary=str(CEDAR),
+        verifier=world.verifier,
     )
     try:
         assert gate.check(
@@ -309,7 +309,7 @@ def test_an_objective_work_run_whose_session_cannot_open_stays_due(world, monkey
         "system_schedule_kind": SystemScheduleKind.OBJECTIVE_WORK_SESSION,
         "repeat_count": 1,
     }))
-    renew_schedule_permits(world.manager, signer=world.signer)
+    issue_permits(world)
     due = world.store.get_row(SCHEDULE_ID)["next_fire_at"]
 
     async def scenario():

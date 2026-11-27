@@ -12,8 +12,10 @@ from assistant_gateway.application.local_responses import (
 )
 from assistant_gateway.application.ports import GatewayIdGenerator
 from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
     GatewayRequestContextService,
     GatewayRequestRoute,
+    SIGNER_UNAVAILABLE_USER_MESSAGE,
 )
 from assistant_gateway.application.response_models import GatewayResponse
 from assistant_gateway.domain.message_types import TASK_PROGRESS_STATUS_MESSAGE_TYPE
@@ -149,6 +151,22 @@ class GatewayTaskProgressService:
             session_key=session.session_key,
             conversation_id=resolved_conversation_id,
         )
+        await self._request_context.ensure_signer_ready()
+        try:
+            gateway_context = self._request_context.build_gateway_context(
+                session_key=session.session_key,
+                delivery_mode="task_progress_status",
+                route=resolved_route,
+                manager_agent_id=manager_id,
+                root_task_id=progress_request.progress_status_id,
+            )
+        except GatewayAuthorityTokenUnavailable:
+            return self._local_responses.create(
+                text=SIGNER_UNAVAILABLE_USER_MESSAGE,
+                message_type=TASK_PROGRESS_STATUS_MESSAGE_TYPE,
+                correlation_id=correlation_id,
+                conversation_id=resolved_conversation_id,
+            )
         envelope = MessageEnvelope(
             msg_content=progress_request,
             msg_header=MessageHeader(
@@ -165,12 +183,7 @@ class GatewayTaskProgressService:
                 request_timezone=self._settings.request_timezone,
                 requester_type=RequesterType.USER_REQUESTER,
                 is_response_requested=True,
-                gateway_context=self._request_context.build_gateway_context(
-                    session_key=session.session_key,
-                    delivery_mode="task_progress_status",
-                    route=resolved_route,
-                    manager_agent_id=manager_id,
-                ),
+                gateway_context=gateway_context,
             ),
         )
         async with self._manager.control_channel(correlation_id) as queue:

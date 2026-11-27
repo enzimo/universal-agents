@@ -37,7 +37,7 @@ from assistant_gateway.onboarding_web.settings_import import (
     OnboardingImportError,
     read_onboarding_import,
 )
-from docker.launch_headless import resolve_env_file_path, task_context_keys_message
+from docker.launch_headless import resolve_env_file_path
 from internal_credentials import (
     InternalCredentialRequest,
     generate_internal_credentials,
@@ -128,15 +128,18 @@ def test_environment_mode_writes_no_team_env_and_generates_nothing(
     assert seeded_envs and seeded_envs[0]["ACTIVITY_COLLECTOR_USER_TOKEN"] == PRESENT_VALUE
     missing = {item.name for item in result.missing_secrets}
     assert {
-        "ACCESS_GATEWAY_SIGNING_KEY",
-        "ACCESS_SCHEDULER_SIGNING_KEY",
+        "SECURE_TOOL_BROKER_TOKEN",
         "ACTIVITY_COLLECTOR_ADMIN_TOKEN",
         "WEB_CHAT_AUTH_TOKEN",
     } <= missing
+    assert not {
+        "ACCESS_GATEWAY_SIGNING_KEY",
+        "ACCESS_SCHEDULER_SIGNING_KEY",
+        "ACCESS_CONTEXT_VERIFY_KEYS",
+    } & missing, "signing keys left team.env in 0.10"
     # Model keys are not environment secrets: they are saved with /auth model.
     assert "OPENAI_API_KEY" not in missing
     assert "ACTIVITY_COLLECTOR_USER_TOKEN" not in missing, "present in the environment"
-    assert "ACCESS_CONTEXT_VERIFY_KEYS" not in missing, "derived from the signing keys"
     # The typed Exa key is not an environment secret: it waits for the gateway,
     # which links it for the team in the credential store at its first start.
     assert "EXA_API_KEY" not in missing
@@ -151,9 +154,9 @@ def test_missing_secrets_are_named_with_a_fix_and_never_show_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _clear_secret_env(monkeypatch)
-    secret_file = tmp_path / "gateway_key"
+    secret_file = tmp_path / "broker_token"
     secret_file.write_text(PRESENT_VALUE + "\n", encoding="utf-8")
-    monkeypatch.setenv("ACCESS_GATEWAY_SIGNING_KEY_FILE", str(secret_file))
+    monkeypatch.setenv("SECURE_TOOL_BROKER_TOKEN_FILE", str(secret_file))
     caplog.set_level(logging.INFO)
 
     result = write_onboarded_instance(
@@ -163,11 +166,10 @@ def test_missing_secrets_are_named_with_a_fix_and_never_show_values(
     )
 
     by_name = {item.name: item for item in result.missing_secrets}
-    assert "ACCESS_GATEWAY_SIGNING_KEY" not in by_name, "a Docker secret file counts as present"
-    scheduler = by_name["ACCESS_SCHEDULER_SIGNING_KEY"]
-    assert "-m scripts.generate_internal_credentials --instance-name swarm" in scheduler.how_to_create
-    assert "--print" in scheduler.how_to_create
-    assert "one-line command" in scheduler.how_to_create
+    assert "SECURE_TOOL_BROKER_TOKEN" not in by_name, "a Docker secret file counts as present"
+    web_chat = by_name["WEB_CHAT_AUTH_TOKEN"]
+    assert "-m scripts.generate_internal_credentials --instance-name swarm" in web_chat.how_to_create
+    assert "--print" in web_chat.how_to_create
     rendered = repr(result.missing_secrets) + caplog.text
     assert PRESENT_VALUE not in rendered
     assert "event=onboarding_secrets_from_environment" in caplog.text
@@ -224,7 +226,10 @@ def test_env_file_mode_still_writes_team_env_with_generated_credentials(
     env_path = tmp_path / "instance" / "team.env"
     assert result.env_path == env_path.resolve()
     env_text = env_path.read_text(encoding="utf-8")
-    assert "ACCESS_GATEWAY_SIGNING_KEY=" in env_text
+    assert "SECURE_TOOL_BROKER_TOKEN=stb_" in env_text
+    assert "ACCESS_GATEWAY_SIGNING_KEY=" not in env_text
+    assert "ACCESS_SCHEDULER_SIGNING_KEY=" not in env_text
+    assert "ACCESS_CONTEXT_VERIFY_KEYS=" not in env_text
     assert "WEB_CHAT_AUTH_TOKEN=uaweb_" in env_text
     assert result.missing_secrets == ()
     config = GatewayInstanceConfig.load(tmp_path / "instance" / "instance_config.yaml")
@@ -278,16 +283,6 @@ def test_launcher_without_team_env_in_environment_mode_stays_quiet(
 def test_launcher_refuses_an_explicit_env_file_in_environment_mode(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="launch.secrets_source is environment"):
         resolve_env_file_path(_environment_config(tmp_path), str(tmp_path / "other.env"))
-
-
-def test_missing_signing_keys_refusal_points_to_docker_secrets_in_environment_mode(tmp_path: Path) -> None:
-    message = task_context_keys_message(_environment_config(tmp_path), None, ["ACCESS_SCHEDULER_SIGNING_KEY"])
-
-    assert "task_context_keys_missing" in message
-    assert "ACCESS_SCHEDULER_SIGNING_KEY_FILE" in message
-    assert "Docker secret" in message
-    assert "--print" in message
-    assert "team.env" not in message
 
 
 OLD_INSTANCE_CONFIG = """
@@ -444,7 +439,8 @@ async def test_web_onboarding_in_environment_mode_saves_no_uploaded_env_and_bloc
     assert complete.status == 200
     assert payload["env_path"] is None
     assert payload["source_env_ignored"] is True
-    assert "ACCESS_GATEWAY_SIGNING_KEY" in {item["name"] for item in payload["missing_secrets"]}
+    assert "SECURE_TOOL_BROKER_TOKEN" in {item["name"] for item in payload["missing_secrets"]}
+    assert "ACCESS_GATEWAY_SIGNING_KEY" not in {item["name"] for item in payload["missing_secrets"]}
     assert "from-upload" not in str(payload)
     assert not (instance_root / "team.env").exists()
     assert (instance_root / "instance_config.yaml").exists(), "the page's remembered folder never moves the instance"
@@ -475,7 +471,8 @@ def test_cli_onboard_from_environment_writes_no_team_env(
     config = GatewayInstanceConfig.load(tmp_path / "instance" / "instance_config.yaml")
     assert config.launch.secrets_source == SECRETS_SOURCE_ENVIRONMENT
     assert "no team.env was written" in output
-    assert "ACCESS_GATEWAY_SIGNING_KEY" in output
+    assert "SECURE_TOOL_BROKER_TOKEN" in output
+    assert "ACCESS_GATEWAY_SIGNING_KEY" not in output
 
     # A rerun without the flag keeps the stored choice.
     _onboard(_cli_args(tmp_path))

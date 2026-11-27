@@ -178,21 +178,28 @@ def test_every_process_gets_the_instance_zone_unless_the_environment_sets_tz(tmp
 async def test_a_schedule_made_in_chat_carries_the_persons_own_zone() -> None:
     from types import SimpleNamespace
 
+    from assistant_gateway.application.request_context import GatewayCommandPerson
     from assistant_gateway.application.schedule_management import (
         GatewayScheduleApplication,
         GatewayScheduleCreateRequest,
         GatewayScheduleSettings,
     )
-    from custom_messages.contracts.routing_v1 import GatewayContext
 
     session = SimpleNamespace(
         session_key="session_ann", conversation_id="conv_ann", channel_name="web", user_id="ann",
         chat_id=None, thread_id=None, owner_canonical_user_id="usr_ann",
     )
-    published = []
+    installed_bodies = []
 
-    async def publish_durable(envelope, *, routing_key):
-        published.append(envelope)
+    async def request_team(kind, body, *, person_id):
+        installed_bodies.append((kind, body, person_id))
+        return {
+            "outcome": "ok",
+            "state": "installed",
+            "schedule_id": body["schedule_id"],
+            "timing_revision": 0,
+            "version": {"state": "available", "seen_version": "a" * 64},
+        }
 
     ids = iter(["sched_1", "corr_1", "conv_sched_1"])
     application = GatewayScheduleApplication(
@@ -204,13 +211,15 @@ async def test_a_schedule_made_in_chat_carries_the_persons_own_zone() -> None:
         sessions=SimpleNamespace(resolve_session=lambda **_kwargs: session),
         request_context=SimpleNamespace(
             canonical_user_id=lambda route: "usr_ann",
+            manager_principal=lambda route: GatewayCommandPerson(
+                canonical_user_id="usr_ann", team_id="team_tz", roles=("member",)
+            ),
             users_enabled=True,
             requester_presentation_for_session=lambda session, route: SimpleNamespace(timezone=BERLIN),
-            build_gateway_context=lambda **_kwargs: GatewayContext(canonical_user_id="usr_ann"),
         ),
         delivery=SimpleNamespace(register_scheduled_request=lambda **_kwargs: None),
-        manager=SimpleNamespace(manager_id="manager", publish_durable=publish_durable),
-        team_commands=None,
+        manager=SimpleNamespace(manager_id="manager"),
+        team_commands=SimpleNamespace(request=request_team),
         delivery_refs=None,
         id_generator=SimpleNamespace(
             new_scheduled_job_id=lambda: next(ids),
@@ -221,7 +230,7 @@ async def test_a_schedule_made_in_chat_carries_the_persons_own_zone() -> None:
 
     await application.add(GatewayScheduleCreateRequest(name="standup", instruction="Standup notes", cron_expression="0 9 * * 1-5"))
 
-    [envelope] = published
-    schedule = envelope.msg_content
-    assert schedule.payload_meta.request_timezone == BERLIN
-    assert fill_cron_timezone(schedule, CHICAGO) == BERLIN
+    [(kind, body, person_id)] = installed_bodies
+    assert kind == "schedules.install"
+    assert person_id == "usr_ann"
+    assert body["timing"] == {"kind": "cron", "expression": "0 9 * * 1-5", "time_zone": BERLIN}

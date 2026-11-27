@@ -908,6 +908,7 @@ async def test_run_secure_tool_broker_service_uses_config_bind_settings(
             "execution_ssh_config",
             "mcp_config",
             "tool_setup_recheck_days",
+            "trust_reader",
             "web_chat_origin",
         ),
     }

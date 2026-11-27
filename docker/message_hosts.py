@@ -346,6 +346,7 @@ class MessageServices:
     team_services_command: list[str]
     team_services_env: Mapping[str, str]
     cwd: Path
+    after_authority_ready: Optional[Callable[[], None]] = None
     authority: Optional[subprocess.Popen[bytes]] = None
     team_services: Optional[subprocess.Popen[bytes]] = None
 
@@ -365,6 +366,10 @@ class MessageServices:
                                                       stop_requested=stop_requested)
         if stop_requested():
             return False
+        if self.after_authority_ready is not None:
+            self.after_authority_ready()
+            if stop_requested():
+                return False
         self.team_services = start_team_services(self.layout, self.team_services_command,
                                                  environment(self.team_services_env, TEAM_SERVICES_NAME),
                                                  cwd=self.cwd,

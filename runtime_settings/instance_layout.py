@@ -117,6 +117,7 @@ TASK_DATABASE_FILENAME = "task_history.db"
 TRUST_DIRNAME = "trust"
 TRUST_AUTHORITY_DIRNAME = "authority"
 TRUST_HOSTS_DIRNAME = "hosts"
+TRUST_READERS_DIRNAME = "readers"
 TRUST_BOOTSTRAP_FILENAME = "bootstrap.json"
 TRUST_EXPECTED_HOSTS_FILENAME = "expected-hosts.json"
 TRUST_DELIVERY_REF_KEY_FILENAME = "delivery-ref.key.json"
@@ -155,6 +156,8 @@ ADAPTER_HOST_FILES_UPGRADE_PROGRESS_FILENAME = "adapter-host-files.started"
 ADAPTER_HOST_FILES_UPGRADE_LOCK_FILENAME = "adapter-host-files.lock"
 ADAPTER_HOST_FILES_WITHOUT_RECORDS_FILENAME = "adapter-host-files.without-records.txt"
 PROTOCOL1_IDS_CHECK_FILENAME = "protocol1-ids.json"
+AUTHORITY_TOKENS_UPGRADE_FILENAME = "authority-tokens.json"
+AUTHORITY_TOKENS_PENDING_REPORT_FILENAME = "authority-tokens-pending-report.json"
 # /upgrade: team exports the supervisor wrote, and the requests it reads
 # (team_transfer.export_requests).
 EXPORTS_DIRNAME = "exports"
@@ -502,6 +505,13 @@ class InstanceLayout:
             raise ValueError(f"Not a host runtime id: {runtime!r}")
         return self.trust_dir / TRUST_HOSTS_DIRNAME / runtime
 
+    def reader_trust_dir(self, reader: str) -> Path:
+        """One read-only trust reader's persisted revocations state (no private key)."""
+
+        if not _RUNTIME_ID.fullmatch(reader) or reader.startswith(("x-", "_")):
+            raise ValueError(f"Not a trust reader id: {reader!r}")
+        return self.trust_dir / TRUST_READERS_DIRNAME / reader
+
     @property
     def environment_overrides_path(self) -> Path:
         """Names of the environment variables that override saved settings, written by the launcher.
@@ -789,6 +799,28 @@ class InstanceLayout:
         no agent tool or sandboxed code can reach it."""
 
         return self.state_dir / UPGRADES_DIRNAME / PROTOCOL1_IDS_CHECK_FILENAME
+
+    @property
+    def authority_tokens_upgrade_path(self) -> Path:
+        """The record that the one-time conversion of stored signed task contexts and
+        schedule permits to protocol 1 authority tokens finished at the first start of 0.10.
+
+        Written by ``instance_upgrades.authority_tokens`` once every store has been
+        scanned and converted (or immediately on a fresh 0.10 install with no legacy rows).
+        While this file exists, startup refuses the removed task-context signing-key
+        environment variables (``runtime_settings.security.REMOVED_SIGNING_KEY_ENV_VARS``).
+        Under ``state/``, so no agent tool or sandboxed code can reach it."""
+
+        return self.state_dir / UPGRADES_DIRNAME / AUTHORITY_TOKENS_UPGRADE_FILENAME
+
+    @property
+    def authority_tokens_pending_report_path(self) -> Path:
+        """Durable list of unverifiable or expired 0.9 records cleared during conversion,
+        written atomically before committing any database transaction so a crash or notice
+        store failure cannot lose the administrator report (removed once the Access Inbox
+        notice is stored)."""
+
+        return self.state_dir / UPGRADES_DIRNAME / AUTHORITY_TOKENS_PENDING_REPORT_FILENAME
 
     @property
     def storage_levels_path(self) -> Path:

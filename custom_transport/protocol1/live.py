@@ -41,6 +41,7 @@ from typing import Any, Awaitable, Callable, Iterable, Mapping, Optional
 
 from nats.errors import NoRespondersError, TimeoutError as NatsTimeoutError
 
+from custom_messages.wire.authority_bindings import token_issuer_lookup_bytes
 from custom_messages.wire.encoding import format_timestamp
 from custom_messages.wire.frame import (
     HEADER_ID,
@@ -256,6 +257,21 @@ class LiveHost:
         self.replay = LiveReplayRecord()
         self._handling: set[asyncio.Task[None]] = set()
         self._inbox_checked = False
+
+    def trust_state(self) -> tuple[Any, Any]:
+        """The host's ``TrustStore`` paired with the lock that serializes its mutations."""
+
+        return self.trust.trust_state()
+
+    async def fetch_token_issuer(self, token: Any) -> bool:
+        """Fetch an authority token's issuer certificate (and stale revocations) via ``fetch_trust``."""
+
+        if self.fetch_trust is None:
+            return False
+        payload = token_issuer_lookup_bytes(token, self.trust.store.installation)
+        if payload is None:
+            return False
+        return await self.fetch_trust(payload)
 
     async def verify(self, data: bytes, **checks: Any) -> VerifiedFrame:
         """``verify_frame``, reading once from the buckets a certificate or session this host does not hold yet."""

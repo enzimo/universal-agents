@@ -26,7 +26,7 @@ from strands.interrupt import Interrupt, InterruptException
 
 from access_control.changes import ChangeApproval
 from access_control.entities import PersonPrincipal
-from custom_agents import access_runtime, change_approvals
+from custom_agents import change_approvals
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.access_v2 import ChangeProposalV1, contract_digest
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -34,7 +34,11 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType
 from tests.task_work_support import bind_task, set_agent_ref
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -51,12 +55,12 @@ def storage_settings(tmp_path: Path) -> Any:
 
 
 def use_signed_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
 
 
 def signed_context(person: PersonPrincipal = OWNER) -> Any:
-    return context_signer().issue(team_id=TEAM, person_id=person.person_id, person_roles=person.roles)
+    return signed_task_token(person.person_id, team_id=TEAM, roles=person.roles)
 
 
 def make_agent(

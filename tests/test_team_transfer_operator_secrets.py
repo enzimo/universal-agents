@@ -97,7 +97,8 @@ def test_operator_secrets_travel_encrypted_and_generated_keys_are_made_fresh(tmp
     env = parse_env_file(target / "team.env")
     assert env["TELEGRAM_BOT_TOKEN"] == BOT_TOKEN
     assert env["OPENAI_API_KEY"] == "new-instance-own-key"
-    assert env["ACCESS_GATEWAY_SIGNING_KEY"] and env["ACCESS_GATEWAY_SIGNING_KEY"] != OLD_SIGNING_KEY
+    assert "ACCESS_GATEWAY_SIGNING_KEY" not in env
+    assert env["SECURE_TOOL_BROKER_TOKEN"].startswith("stb_")
     codex = target / "auth" / "openai_codex_auth.json"
     assert codex.read_text() == CODEX_AUTH and stat.S_IMODE(codex.stat().st_mode) == 0o600
     report = next((target / "runtime" / "team-import").glob("report-*.json")).read_text()

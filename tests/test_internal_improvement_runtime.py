@@ -26,13 +26,14 @@ from custom_agents.schedule_management import (
 )
 from custom_agents.scheduled_runtime import handle_scheduled_message
 from custom_messages.enums import RequesterType
-from access_control.identity import ISSUER_SCHEDULER, ContextVerifier
-from tests.broker_access_support import forget_task_context_keys, use_scheduler_key
+from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
+from custom_messages.wire.authority_bindings import SCHEDULER_ISSUER_ROLE
+from tests.broker_access_support import forget_task_context_keys
+from tests.scheduled_run_support import bind_test_scheduler
 
 
 @pytest.fixture
 def scheduler_key(monkeypatch):
-    use_scheduler_key(monkeypatch)
     yield
     forget_task_context_keys()
 
@@ -210,13 +211,16 @@ def test_manager_rejects_non_singleton_internal_schedule() -> None:
 
 
 @pytest.mark.asyncio
-async def test_due_schedule_ensures_worker_and_dispatches_stable_occurrence() -> None:
-    manager = _Manager()
+async def test_due_schedule_ensures_worker_and_dispatches_stable_occurrence(tmp_path, monkeypatch) -> None:
+    manager = _Manager(tmp_path / "schedules.db")
     schedule = build_internal_improvement_schedule(_Worker("worker_dispatch"))
     assert schedule is not None
     schedule = prepare_internal_improvement_schedule_for_manager(manager, schedule)
     assert schedule is not None
     schedule.next_fire_at = "2026-07-15T12:00:00+00:00"
+    manager._schedule_store.add(schedule)
+    sched = bind_test_scheduler(monkeypatch, store=manager._schedule_store, team_id=manager.team_id)
+    sched.scheduler.renew_permits()
 
     assert (
         await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule)
@@ -288,7 +292,7 @@ async def test_due_schedule_remains_pending_when_worker_cannot_be_started(monkey
 
 
 @pytest.mark.asyncio
-async def test_trusted_cleanups_run_once_per_occurrence_even_when_the_worker_cannot_start(monkeypatch) -> None:
+async def test_trusted_cleanups_run_once_per_occurrence_even_when_the_worker_cannot_start(tmp_path, monkeypatch) -> None:
     """The scheduler retries an occurrence whose worker did not start every 30 seconds; clean up once."""
 
     from custom_agents import internal_improvement_runtime as runtime
@@ -309,12 +313,15 @@ async def test_trusted_cleanups_run_once_per_occurrence_even_when_the_worker_can
 
     monkeypatch.setattr(runtime, "prune_scratch_for_maintenance", scratch)
     monkeypatch.setattr(runtime, "remove_old_outputs_for_maintenance", outputs)
-    manager = _Manager()
+    manager = _Manager(tmp_path / "schedules.db")
     manager.availability_result = False
     schedule = prepare_internal_improvement_schedule_for_manager(
         manager, build_internal_improvement_schedule(_Worker("worker_missing"))
     )
     schedule.next_fire_at = "2026-10-28T06:00:00+00:00"
+    manager._schedule_store.add(schedule)
+    sched = bind_test_scheduler(monkeypatch, store=manager._schedule_store, team_id=manager.team_id)
+    sched.scheduler.renew_permits()
 
     assert await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule) is False
     assert await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule) is False
@@ -340,15 +347,29 @@ def _due_maintenance_schedule(manager):
 
 
 @pytest.mark.asyncio
-async def test_a_maintenance_run_is_signed_by_the_scheduler_as_work_for_no_person(scheduler_key) -> None:
-    manager = _Manager()
+async def test_a_maintenance_run_is_signed_by_the_scheduler_as_work_for_no_person(tmp_path, monkeypatch, scheduler_key) -> None:
+    manager = _Manager(tmp_path / "schedules.db")
     schedule = _due_maintenance_schedule(manager)
+    manager._schedule_store.add(schedule)
+    sched = bind_test_scheduler(monkeypatch, store=manager._schedule_store, team_id=manager.team_id)
+    sched.scheduler.renew_permits()
 
     assert await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule) is True
 
+    from storage.config import resolve_storage_settings
+
     gateway_context = manager.team_comms.sent[0][0].msg_meta.gateway_context
-    context = ContextVerifier.from_env().verify(gateway_context.task_context, team_id=manager.team_id)
-    assert context.issuer == ISSUER_SCHEDULER
+    lookup = ScheduleRunLookup.from_storage(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "schedules.db")}})
+    )
+    context = resolve_task_identity(
+        verifier=sched.verifier,
+        team_id=manager.team_id,
+        task_context=gateway_context.task_context,
+        schedule_run=gateway_context.schedule_run,
+        schedule_runs=lookup,
+    )
+    assert context.issuer == SCHEDULER_ISSUER_ROLE
     assert context.person_id is None and context.person_roles == ()
     # The context names the schedule, so the run may record that schedule's run.
     assert context.schedule_id == schedule.schedule_id
@@ -357,16 +378,16 @@ async def test_a_maintenance_run_is_signed_by_the_scheduler_as_work_for_no_perso
 
 
 @pytest.mark.asyncio
-async def test_without_a_scheduler_key_the_run_is_unsigned_and_the_log_says_why(monkeypatch, caplog) -> None:
-    monkeypatch.delenv("ACCESS_SCHEDULER_SIGNING_KEY", raising=False)
+async def test_without_a_scheduler_key_the_run_is_unsigned_and_the_log_says_why(tmp_path, monkeypatch, caplog) -> None:
     forget_task_context_keys()
-    manager = _Manager()
+    manager = _Manager(tmp_path / "schedules.db")
     schedule = _due_maintenance_schedule(manager)
+    manager._schedule_store.add(schedule)
 
     with caplog.at_level(logging.WARNING):
-        assert await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule) is True
+        assert await enqueue_internal_improvement_job(manager, schedule.schedule_id, schedule) is False
 
-    assert manager.team_comms.sent[0][0].msg_meta.gateway_context.task_context is None
-    assert "event=task_context_signer_missing" in caplog.text
+    assert manager.team_comms.sent == []
+    assert "event=system_work_run_unsigned" in caplog.text
     assert schedule.schedule_id in caplog.text
     forget_task_context_keys()

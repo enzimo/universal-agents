@@ -28,6 +28,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from custom_messages.contracts.cli_tool_v1 import CLI_NAME_PATTERN, InstalledCliV1
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
 from model_providers.endpoints import EndpointKind, endpoint_address
 from custom_messages.contracts.tool_setup_spec_v1 import ToolSetupSpecV1
 
@@ -761,16 +762,18 @@ class AccessDecisionV1(AccessContractModel):
 
 
 class TaskContextV1(AccessContractModel):
-    """Who an agent task works for, signed by a trusted issuer.
+    """Verified facts of whom an agent task works for (returned by ``resolve_task_identity``).
 
-    The gateway signs a context when it admits a person's task; the scheduler
-    signs one for a schedule's owner; delegated child tasks carry their root
-    context unchanged, so later hops cannot widen it.
+    Populated from a verified protocol 1 authority token (or a verified schedule permit
+    inside ``ScheduleRunIdentityV1``). ``issuer_roles`` records the signing host
+    certificate's verified roles so gateway-only and scheduler-only checks enforce the
+    certificate role directly.
     """
 
     schema_version: Literal[1] = 1
-    context_id: str = Field(min_length=1, max_length=120)
+    context_id: str = Field(min_length=1, max_length=128)
     issuer: Literal["gateway", "scheduler"]
+    issuer_roles: tuple[str, ...] = ()
     team_id: str = Field(min_length=1, max_length=120)
     person_id: str | None = Field(default=None, max_length=240)
     person_roles: tuple[str, ...] = ()
@@ -781,61 +784,27 @@ class TaskContextV1(AccessContractModel):
     expires_at_utc: datetime
 
 
-class SignedTaskContextV1(AccessContractModel):
-    context: TaskContextV1
-    key_id: str = Field(min_length=1, max_length=120)
-    signature: str = Field(min_length=1, max_length=400)
-
-
 # The prefix of a schedule run's own context id, so it can never equal the id
-# of a signed task context (``task_context_...`` or ``message_context_...``).
+# of a root-task authority token (``task_context_...`` or ``message_context_...``).
 SCHEDULE_RUN_ID_PREFIX = "schedule_run"
-# The prefix of the id of a signed context bound to one message that brings a
+# The prefix of the id of a root-task token bound to one message that brings a
 # person's files (``access_control.ownership.request_context_id``).
 MESSAGE_CONTEXT_ID_PREFIX = "message_context"
 
 
-class SchedulePermitV1(AccessContractModel):
-    """The manager's signed statement that one schedule's runs work for one person.
-
-    The scheduler signs it once per schedule and renews it before it expires
-    (``custom_agents.schedule_permits``), so a worker that holds no key can
-    start the schedule's runs without asking the manager each time. It names
-    no roles: whoever checks a run reads the person's current roles and
-    standing, and the schedule row's current owner (``access_control.task_identity``).
-    ``person_id`` None is system work for no person, only for the runtime's
-    maintenance schedule of a built-in system agent. ``record_kind`` and the
-    signature's own domain keep a permit from ever passing as a task context.
-    """
-
-    schema_version: Literal[1] = 1
-    record_kind: Literal["schedule_permit"] = "schedule_permit"
-    permit_id: str = Field(min_length=1, max_length=120)
-    issuer: Literal["scheduler"]
-    team_id: str = Field(min_length=1, max_length=120)
-    schedule_id: str = Field(min_length=1, max_length=240)
-    person_id: str | None = Field(default=None, max_length=240)
-    issued_at_utc: datetime
-    expires_at_utc: datetime
-
-
-class SignedSchedulePermitV1(AccessContractModel):
-    permit: SchedulePermitV1
-    key_id: str = Field(min_length=1, max_length=120)
-    signature: str = Field(min_length=1, max_length=400)
-
-
 class ScheduleRunIdentityV1(AccessContractModel):
-    """Who one scheduled run works for: its schedule's signed permit and this run's own fields.
+    """Who one scheduled run works for: its schedule's protocol 1 permit token and this run's own fields.
 
-    Travels in ``GatewayContext.schedule_run`` instead of a signed task
-    context when the agent that started the run holds no scheduler key.
-    ``context_id``, ``conversation_id`` and ``started_at_utc`` are not signed:
-    they tie the run's tasks together and date the run, and grant nothing.
+    Travels in ``GatewayContext.schedule_run`` on the old wrapper (Step 5) when a scheduled
+    run uses its schedule's standing scheduler-signed permit token. ``context_id``,
+    ``conversation_id`` and ``started_at_utc`` are not signed: they tie the run's tasks
+    together and date the run, and grant nothing. Steps 6–7 will replace this wrapper once
+    queued work moves onto protocol 1 ``task.request`` frames whose ``verify_frame`` binds
+    ``/body/work/root_task_id`` directly to ``token.bound_to.id``.
     """
 
-    permit: SignedSchedulePermitV1
-    context_id: str = Field(min_length=1, max_length=120, pattern=rf"^{SCHEDULE_RUN_ID_PREFIX}_")
+    permit: AuthorityTokenRecord
+    context_id: str = Field(min_length=1, max_length=128, pattern=rf"^{SCHEDULE_RUN_ID_PREFIX}_")
     conversation_id: str | None = Field(default=None, max_length=240)
     started_at_utc: datetime
 
@@ -1506,6 +1475,7 @@ class AccessNoticeKind(StrEnum):
     HISTORY_CLEANED_UP = "history_cleaned_up"  # TeamLead deleted some of your chat history or finished tasks (assistant_gateway.history_cleanup)
     SAVED_OUTPUT_RETENTION = "saved_output_retention"  # saved tool outputs will start being deleted after the grace period (custom_agents.output_retention)
     STORAGE_USAGE = "storage_usage"  # the data the team stores for you passed another step (assistant_gateway.storage_usage)
+    AUTHORITY_TOKEN_UPGRADE = "authority_token_upgrade"  # stored contexts or permits that could not be converted at the 0.10 first start (instance_upgrades.authority_tokens)
 
 
 class AccessNoticeV1(AccessContractModel):
@@ -1887,11 +1857,8 @@ __all__ = [
     "LIFETIME_RANK",
     "MESSAGE_CONTEXT_ID_PREFIX",
     "SignInService",
-    "SignedTaskContextV1",
     "SCHEDULE_RUN_ID_PREFIX",
-    "SchedulePermitV1",
     "ScheduleRunIdentityV1",
-    "SignedSchedulePermitV1",
     "PERSON_REF_PATTERN",
     "PersonStanding",
     "SubjectKind",

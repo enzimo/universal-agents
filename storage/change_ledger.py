@@ -92,7 +92,17 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any
 
-from access_control.identity import ContextVerifier, ISSUER_GATEWAY, IdentityRejected
+from pydantic import MISSING
+
+from access_control.authority_verifier import (
+    AuthorityTokenVerifier,
+    IdentityRejected,
+    get_process_verifier,
+)
+from custom_messages.wire.authority_bindings import (
+    AuthorityTokenBoundToRootTaskRecord,
+    is_schedule_permit_binding,
+)
 from custom_messages.contracts.runtime_snapshot_v3 import TaskSnapshotRecord
 from custom_messages.enums import ChangeRecordKind, ChangeRefusal, ProgressState
 from knowledge_base.sensitive_content import SensitiveContentRules
@@ -127,6 +137,7 @@ ALL_FIELDS = "*"
 # entries count as having set every field (``_add_changed_fields``).
 CHANGED_FIELDS_COLUMN = "changed_fields"
 OLDER_ENTRY_FIELDS = json.dumps([ALL_FIELDS])
+TOKEN_DIGEST_COLUMN = "token_digest"
 # Escalation: this many conflicts on one record within the window make every
 # request's change to it wait for the person until the window has passed.
 ESCALATION_CASES = 3
@@ -318,6 +329,7 @@ def ledger_table_statements(dialect: SqlDialect) -> list[str]:
             state TEXT NOT NULL,
             opened_at_utc TEXT NOT NULL,
             closed_at_utc TEXT NOT NULL DEFAULT '',
+            token_digest TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (team_id, request_id)
         )
         """,
@@ -367,6 +379,7 @@ def ensure_ledger_tables(conn: Any, dialect: SqlDialect) -> None:
     for statement in ledger_table_statements(dialect):
         conn.execute(statement)
     _add_changed_fields(conn)
+    ensure_column(conn, CHANGE_REQUESTS_TABLE, TOKEN_DIGEST_COLUMN, "TEXT NOT NULL DEFAULT ''", logger=logger)
 
 
 def _add_changed_fields(conn: Any) -> None:
@@ -391,17 +404,37 @@ def current_position(conn: Any, dialect: SqlDialect, team_id: str) -> int:
     return int(row[0]) if row is not None else 0
 
 
-def open_request(conn: Any, dialect: SqlDialect, *, team_id: str, request_id: str, person_id: str, now: datetime) -> int:
+def open_request(
+    conn: Any,
+    dialect: SqlDialect,
+    *,
+    team_id: str,
+    request_id: str,
+    person_id: str,
+    now: datetime,
+    token_digest: str = "",
+) -> int:
     """Record that a person's request started now; returns its start position (kept if already open)."""
 
     p = dialect.bind
     conn.execute(
         f"""
-        INSERT INTO change_requests (team_id, request_id, person_id, start_position, state, opened_at_utc)
-        VALUES ({p}, {p}, {p}, {p}, {p}, {p})
-        ON CONFLICT (team_id, request_id) DO NOTHING
+        INSERT INTO change_requests (team_id, request_id, person_id, start_position, state, opened_at_utc, token_digest)
+        VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})
+        ON CONFLICT (team_id, request_id) DO UPDATE SET
+            token_digest = CASE
+                WHEN change_requests.token_digest = '' AND excluded.token_digest <> ''
+                THEN excluded.token_digest ELSE change_requests.token_digest END
         """,
-        (team_id, request_id, person_id, current_position(conn, dialect, team_id), RequestState.OPEN.value, now.isoformat()),
+        (
+            team_id,
+            request_id,
+            person_id,
+            current_position(conn, dialect, team_id),
+            RequestState.OPEN.value,
+            now.isoformat(),
+            token_digest,
+        ),
     )
     row = conn.execute(
         f"SELECT start_position FROM change_requests WHERE team_id={p} AND request_id={p}", (team_id, request_id)
@@ -410,7 +443,15 @@ def open_request(conn: Any, dialect: SqlDialect, *, team_id: str, request_id: st
 
 
 def close_request(
-    conn: Any, dialect: SqlDialect, *, team_id: str, request_id: str, person_id: str, state: RequestState, now: datetime
+    conn: Any,
+    dialect: SqlDialect,
+    *,
+    team_id: str,
+    request_id: str,
+    person_id: str,
+    state: RequestState,
+    now: datetime,
+    token_digest: str = "",
 ) -> None:
     """Mark a request stopped or ended; later writes for it are refused (a missing row is added closed)."""
 
@@ -421,9 +462,14 @@ def close_request(
     conn.execute(
         f"""
         INSERT INTO change_requests (
-            team_id, request_id, person_id, start_position, state, opened_at_utc, closed_at_utc
-        ) VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p})
-        ON CONFLICT (team_id, request_id) DO UPDATE SET state=excluded.state, closed_at_utc=excluded.closed_at_utc
+            team_id, request_id, person_id, start_position, state, opened_at_utc, closed_at_utc, token_digest
+        ) VALUES ({p}, {p}, {p}, {p}, {p}, {p}, {p}, {p})
+        ON CONFLICT (team_id, request_id) DO UPDATE SET
+            state=excluded.state,
+            closed_at_utc=excluded.closed_at_utc,
+            token_digest = CASE
+                WHEN change_requests.token_digest = '' AND excluded.token_digest <> ''
+                THEN excluded.token_digest ELSE change_requests.token_digest END
         WHERE change_requests.state={p}
         """,
         (
@@ -434,6 +480,7 @@ def close_request(
             state.value,
             now.isoformat(),
             now.isoformat(),
+            token_digest,
             RequestState.OPEN.value,
         ),
     )
@@ -446,14 +493,18 @@ def record_task_request_state(
     team_id: str | None,
     task: TaskSnapshotRecord,
     now: datetime,
+    verifier: AuthorityTokenVerifier | None = None,
 ) -> None:
     """Save a root request's lifecycle with its task, never in a later callback.
 
-    The stored owner was verified at admission. Recheck the original signature
-    and team before attributing the request id, including when the context has
-    since expired. This reads historical identity only and grants no authority.
-    A failed lifecycle write aborts the task save, so recovery cannot expose a
-    queued or terminal task whose request state was lost.
+    On a request's first save, recheck the original gateway-issued authority
+    token's signature, issuer certificate validity at issue time, team, and
+    installation before attributing the request id (even if the token later
+    expired or revocations are stale). Once ``change_requests`` already holds a
+    row for ``(team_id, bound_to.request_id)`` belonging to ``task.owner_person_id``,
+    subsequent saves, restores after restart, and same-role takeovers reuse
+    that durable proof without needing the trust store or issuer certificate to
+    be loaded yet (C17/C20). Scheduled runs never open a person-request row.
     """
 
     if not team_id or task.task.parent_task_id or not task.owner_person_id:
@@ -461,54 +512,108 @@ def record_task_request_state(
     gateway = task.meta.gateway_context
     signed = gateway.task_context if gateway is not None else None
     if gateway is not None and signed is not None and gateway.schedule_run is not None:
-        raise IdentityRejected("A task cannot carry both a signed context and a scheduled run identity.")
+        raise IdentityRejected("A task cannot carry both an authority token and a scheduled run identity.")
     if signed is None:
         return
+    if isinstance(signed.bound_to, AuthorityTokenBoundToRootTaskRecord) and (
+        signed.schedule_id is not MISSING
+        or signed.person is MISSING
+        or is_schedule_permit_binding(signed.bound_to.id)
+    ):
+        return
+    terminal = task.state in {
+        ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED,
+    }
+    token_digest = sha256(signed.model_dump_json().encode("utf-8")).hexdigest()
+    if isinstance(signed.bound_to, AuthorityTokenBoundToRootTaskRecord):
+        request_id = signed.bound_to.request_id
+        existing = conn.execute(
+            f"SELECT person_id, token_digest FROM change_requests WHERE team_id={dialect.bind} AND request_id={dialect.bind}",
+            (team_id, request_id),
+        ).fetchone()
+        if (
+            existing is not None
+            and str(existing[0]) == task.owner_person_id
+            and str(existing[1] or "") == token_digest
+        ):
+            logger.debug(
+                "Reusing admitted root request identity from change_requests for snapshot update. "
+                "event=change_ledger_admitted_token_reused task_id=%s team_id=%s request_id=%s terminal=%s",
+                task.task_id,
+                team_id,
+                request_id,
+                terminal,
+            )
+            if terminal:
+                state = RequestState.STOPPED if task.state is ProgressState.CANCELLED else RequestState.ENDED
+                close_request(
+                    conn, dialect, team_id=team_id, request_id=request_id,
+                    person_id=task.owner_person_id, now=now, state=state, token_digest=token_digest,
+                )
+                prune(conn, dialect, team_id=team_id, before=now - LEDGER_RETENTION)
+            return
+    active_verifier = verifier or get_process_verifier() or AuthorityTokenVerifier(None)
     try:
-        context = ContextVerifier.from_env().verify(signed, team_id=team_id, check_expiry=False)
-    except (IdentityRejected, ValueError):
+        verified = active_verifier.verify_historical_root_task(
+            signed,
+            team_id=team_id,
+            now=now,
+        )
+    except IdentityRejected as exc:
+        logger.warning(
+            "Ignored unverified request identity while saving a task. "
+            "event=change_ledger_task_identity_rejected task_id=%s team_id=%s code=%s",
+            task.task_id, team_id, exc.code,
+        )
+        raise
+    except ValueError:
         logger.warning(
             "Ignored unverified request identity while saving a task. "
             "event=change_ledger_task_identity_rejected task_id=%s team_id=%s",
             task.task_id, team_id,
         )
         raise
-    if context.issuer != ISSUER_GATEWAY:
+    if not verified.is_gateway_issued:
         return
-    if context.person_id != task.owner_person_id:
+    if verified.person_id != task.owner_person_id:
         logger.warning(
             "Ignored request identity that does not match the admitted task owner. "
             "event=change_ledger_task_owner_mismatch task_id=%s team_id=%s",
             task.task_id, team_id,
         )
         raise IdentityRejected("The request identity does not match the task's admitted owner.")
-    terminal = task.state in {
-        ProgressState.COMPLETED, ProgressState.FAILED, ProgressState.CANCELLED, ProgressState.ABANDONED,
-    }
     if terminal:
         state = RequestState.STOPPED if task.state is ProgressState.CANCELLED else RequestState.ENDED
         close_request(
-            conn, dialect, team_id=team_id, request_id=context.context_id,
-            person_id=task.owner_person_id, now=now, state=state,
+            conn, dialect, team_id=team_id, request_id=verified.request_id,
+            person_id=task.owner_person_id, now=now, state=state, token_digest=token_digest,
         )
         prune(conn, dialect, team_id=team_id, before=now - LEDGER_RETENTION)
     else:
-        open_request(conn, dialect, team_id=team_id, request_id=context.context_id, person_id=task.owner_person_id, now=now)
+        open_request(
+            conn, dialect, team_id=team_id, request_id=verified.request_id,
+            person_id=task.owner_person_id, now=now, token_digest=token_digest,
+        )
 
 
 def require_same_request_identity(previous: TaskSnapshotRecord, current: TaskSnapshotRecord) -> None:
     """An admitted root cannot lose or replace the identity its ledger records.
 
-    The previous snapshot is the trusted admission record. Removing its signed
-    context, changing its owner or turning it into a child must abort the save,
-    rather than persisting a terminal task without closing its real request.
+    The previous snapshot is the trusted admission record. Removing its
+    authority token, changing its owner or turning it into a child must abort
+    the save, rather than persisting a terminal task without closing its real
+    request.
     """
 
     gateway = previous.meta.gateway_context
     original = gateway.task_context if gateway is not None else None
     if previous.task.parent_task_id or not previous.owner_person_id or original is None:
         return
-    if original.context.issuer != ISSUER_GATEWAY:
+    # Scheduled run tokens name a schedule_id (or permit binding); only person requests open a ledger request.
+    if original.schedule_id is not MISSING or original.person is MISSING:
+        return
+    bound_id = getattr(original.bound_to, "id", "")
+    if isinstance(bound_id, str) and is_schedule_permit_binding(bound_id):
         return
     current_gateway = current.meta.gateway_context
     if (

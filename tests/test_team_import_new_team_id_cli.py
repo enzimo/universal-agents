@@ -146,7 +146,6 @@ def _old_team(tmp_path: Path, registry: Any, monkeypatch: pytest.MonkeyPatch) ->
 
     import tests.test_team_transfer_schedules as schedule_tests
     from access_control.entities import agent_type_id
-    from access_control.identity import ISSUER_GATEWAY, ContextSigner
     from assistant_gateway.bootstrap import bootstrap_instance
     from assistant_gateway.config import GatewayInstanceConfig
     from custom_agents.internal_improvement_runtime import (
@@ -170,7 +169,6 @@ def _old_team(tmp_path: Path, registry: Any, monkeypatch: pytest.MonkeyPatch) ->
         TargetKind,
         TargetRefV1,
     )
-    from internal_credentials import parse_env_file
     from knowledge_base.service import DraftInput, KnowledgeService, KnowledgeSettings
     from mcp_control.hosting import MCPHostedServerStore, resolve_mcp_hosting_paths
     from mcp_control.registry import reconcile_instance_mcp_connections
@@ -193,7 +191,6 @@ def _old_team(tmp_path: Path, registry: Any, monkeypatch: pytest.MonkeyPatch) ->
         patched.setattr(schedule_tests, "TEAM", OLD)
         path, store = schedule_tests._old_instance(tmp_path / "old")
     config = GatewayInstanceConfig.load(path)
-    old_key = parse_env_file(config.layout.team_env_path)["ACCESS_GATEWAY_SIGNING_KEY"]
 
     # Settings built from the team id, and the configured and hosted MCP servers.
     config.transport.subject_prefix = OLD
@@ -212,22 +209,18 @@ def _old_team(tmp_path: Path, registry: Any, monkeypatch: pytest.MonkeyPatch) ->
     bootstrap_instance(config)
     _specialist(config.layout.control_dir, "Approved", team_id=OLD)
 
-    # The team's maintenance schedule, as its manager stored it and its gateway signed it.
+    # The team's maintenance schedule, as its manager stored it and vouched.
     maintenance = _maintenance_schedule(OLD, interval_seconds=7 * 3600)
     maintenance.payload_meta.gateway_context.session_key = "sess_ana"
-    maintenance.payload_meta.gateway_context.task_context = ContextSigner.from_value(ISSUER_GATEWAY, old_key).issue(
-        team_id=OLD, person_id="usr_ana", person_roles=("owner",), schedule_id=maintenance.schedule_id)
-    store.add(maintenance)
+    store.add(maintenance, owner_vouched=True)
     create_gateway_state_repository(config.state_storage_settings).upsert_scheduled_target(
         scheduled_job_id=maintenance.schedule_id, session_key="sess_ana", conversation_id="conv_maintenance",
         owner_canonical_user_id="usr_ana")
-    # A person's schedule that replies through the old gateway's route, as a 0.9 person's schedule does.
+    # A person's schedule that replies through the old gateway's route, as a person's schedule does.
     route = f"{OLD}_alpha_user_gateway"
     replying = schedule_tests._schedule("sched_reply", "usr_ana", claim_team_id=OLD, payload_header=MessageHeader(
         from_agent_id=route, to_routing_path=f"{OLD}_TeamArchitect", response_routing_key=route))
-    replying.payload_meta.gateway_context.task_context = ContextSigner.from_value(ISSUER_GATEWAY, old_key).issue(
-        team_id=OLD, person_id="usr_ana", person_roles=("owner",), schedule_id=replying.schedule_id)
-    store.add(replying)
+    store.add(replying, owner_vouched=True)
 
     # Access: grants to a person, the lead's type, the team and a role; a data folder; the team's account link
     # and its choice for model keys.

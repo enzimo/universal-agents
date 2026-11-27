@@ -12,7 +12,6 @@ from uuid import uuid4
 
 import pytest
 
-from access_control.identity import ENV_SCHEDULER_SIGNING_KEY, ISSUER_SCHEDULER, ContextSigner
 from custom_agents.schedule_store import AdvanceOutcome, ScheduleStore
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.runtime_snapshot_v3 import RuntimeSnapshotV3, TaskSnapshotRecord
@@ -23,7 +22,11 @@ from custom_messages.enums import MessageMetaType, ProgressState, RequesterType,
 from storage.config import resolve_storage_settings
 from storage.runtime_state_repository import create_runtime_state_repository
 from storage.scheduled_run_problems import ScheduledRunProblems
-from tests.broker_access_support import forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_scheduler_token,
+    use_broker_authority_verifier,
+)
 from tests.runtime_snapshot_fixtures import canonical_json
 
 TEAM = "team"
@@ -32,7 +35,7 @@ OWNER = dict(owner_agent_id="worker", owner_agent_name="worker", team_id=TEAM, o
 
 @pytest.fixture(params=["sqlite", pytest.param("postgres", marks=[pytest.mark.live, pytest.mark.postgres])])
 def settings(tmp_path, request, monkeypatch):
-    use_scheduler_key(monkeypatch)
+    use_broker_authority_verifier()
     dsn = os.environ.get("LIVE_TEST_POSTGRES_DSN")
     if request.param == "sqlite":
         yield resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "rt.db")}})
@@ -60,12 +63,11 @@ def settings(tmp_path, request, monkeypatch):
 
 
 def _meta(schedule_id: str) -> MessageMeta:
-    signer = ContextSigner.from_value(ISSUER_SCHEDULER, os.environ[ENV_SCHEDULER_SIGNING_KEY])
     return MessageMeta(
         requester_type=RequesterType.TIMER_REQUESTER,
         gateway_context=GatewayContext(
             canonical_user_id="owner",
-            task_context=signer.issue(team_id=TEAM, person_id="owner", schedule_id=schedule_id),
+            task_context=signed_scheduler_token("owner", team_id=TEAM, schedule_id=schedule_id),
         ),
     )
 

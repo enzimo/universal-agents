@@ -31,7 +31,6 @@ from types import SimpleNamespace
 import pytest
 
 from tests.task_work_support import bind_task
-from access_control.identity import ENV_VERIFY_KEYS, ISSUER_SCHEDULER, ContextSigner
 from custom_agents import access_runtime
 from custom_agents.access_runtime import verified_meta_person_id, verified_person_id
 from custom_agents.context_engine import ContextAssemblyRequest, TurnFinalizationRequest
@@ -49,10 +48,10 @@ from custom_messages.enums import MessageMetaType, RequesterType
 from storage.conversation_repository import TURN_MEMORY_REVIEW_QUEUED, TURN_MEMORY_REVIEW_UNREVIEWED
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
 from tests.broker_access_support import (
-    context_signer,
-    context_verify_keys,
     forget_task_context_keys,
-    use_scheduler_key,
+    signed_scheduler_token,
+    signed_task_token,
+    use_broker_authority_verifier,
 )
 
 # The review seeds (tests.test_memory_review_runtime) use this team and person.
@@ -66,8 +65,8 @@ UNVERIFIED = "event=unverified_person_ignored"
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -165,14 +164,14 @@ def _assert_no_personal_memory(text: str) -> None:
 @pytest.mark.parametrize("authorization", [True, False], ids=["authorization_on", "authorization_off"])
 def test_a_task_signed_for_ann_that_claims_bob_loads_only_anns_memories(tmp_path, caplog, authorization) -> None:
     manager = _hydration_manager(_agent(tmp_path, authorization=authorization), tmp_path)
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
 
     with caplog.at_level(logging.WARNING, logger=ACCESS_LOGGER):
         text = _hydrated(manager, _meta(GatewayContext(canonical_user_id=BOB, task_context=signed)))
 
     _assert_only_anns(text)
     assert MISMATCH in caplog.text
-    assert f"claimed_person_id={BOB} verified_person_id={ANN} context_id={signed.context.context_id}" in caplog.text
+    assert f"claimed_person_id={BOB} verified_person_id={ANN} context_id={signed.bound_to.request_id}" in caplog.text
 
 
 def test_a_claim_without_a_signed_context_loads_no_personal_memory(tmp_path, caplog) -> None:
@@ -186,10 +185,7 @@ def test_a_claim_without_a_signed_context_loads_no_personal_memory(tmp_path, cap
 
 
 def test_system_work_loads_no_personal_memory(tmp_path, monkeypatch, caplog) -> None:
-    use_scheduler_key(monkeypatch)
-    scheduler = ContextSigner.from_env(ISSUER_SCHEDULER)
-    assert scheduler is not None
-    signed = scheduler.issue(team_id=TEAM, person_id=None, schedule_id="sched_internal_improvement")
+    signed = signed_scheduler_token(None, team_id=TEAM, schedule_id="sched_internal_improvement")
     manager = _hydration_manager(_agent(tmp_path), tmp_path)
 
     with caplog.at_level(logging.WARNING, logger=ACCESS_LOGGER):
@@ -201,10 +197,7 @@ def test_system_work_loads_no_personal_memory(tmp_path, monkeypatch, caplog) -> 
 
 
 def test_a_scheduler_signed_run_loads_its_owners_memories(tmp_path, monkeypatch, caplog) -> None:
-    use_scheduler_key(monkeypatch)
-    scheduler = ContextSigner.from_env(ISSUER_SCHEDULER)
-    assert scheduler is not None
-    signed = scheduler.issue(team_id=TEAM, person_id=ANN, person_roles=("member",), schedule_id="sched_ann_daily")
+    signed = signed_scheduler_token(ANN, team_id=TEAM, roles=("member",), schedule_id="sched_ann_daily")
     manager = _hydration_manager(_agent(tmp_path), tmp_path)
 
     _assert_only_anns(_hydrated(manager, _meta(GatewayContext(canonical_user_id=ANN, task_context=signed))))
@@ -218,13 +211,12 @@ def test_a_scheduler_signed_run_loads_its_owners_memories(tmp_path, monkeypatch,
 def test_a_permit_backed_scheduled_run_loads_its_owners_memories(tmp_path, monkeypatch, caplog) -> None:
     """A worker without the scheduler key starts the run with its schedule's permit (``schedule_permits``)."""
 
-    from custom_agents.schedule_permits import renew_schedule_permits
     from tests import scheduled_run_support as runs
 
     world = runs.build_world(tmp_path, monkeypatch)
     runs.record_people(world, (runs.ANN, PersonStanding.ACTIVE, ("member",)))
     runs.save_schedule(world)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    runs.issue_permits(world)
 
     async def start_run() -> dict:
         await runs.subscribe(world)
@@ -281,7 +273,7 @@ def _finish_turn(manager: MemoryPluginManager, gateway_context: GatewayContext) 
 
 def test_the_conversation_review_job_is_made_for_the_verified_person(tmp_path) -> None:
     manager, _conversations, reviews = _review_setup(tmp_path)
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
 
     jobs = _finish_turn(manager, GatewayContext(canonical_user_id=BOB, task_context=signed))
 
@@ -307,9 +299,7 @@ def test_review_jobs_refuse_a_conversation_the_verified_person_does_not_own(
         tmp_path, authorization=authorization, owner_canonical_user_id=source_owner
     )
     person = BOB if source_owner == ANN else ANN
-    signed = context_signer().issue(
-        team_id=TEAM, person_id=person, person_roles=("member",), conversation_id=f"conversation_{person}"
-    )
+    signed = signed_task_token(person, team_id=TEAM, roles=("member",))
 
     # The unsigned message points to Ann's conversation; its signed task works
     # for Bob. A person claim cannot assign a conversation with no stored owner.
@@ -327,7 +317,7 @@ def test_review_jobs_refuse_a_conversation_the_verified_person_does_not_own(
     if source_owner == ANN:
         # Refusal must leave the window available for its actual owner, even
         # when that owner's unsigned message claims a different person.
-        owner_signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+        owner_signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
         owner_jobs = _finish_turn(manager, GatewayContext(canonical_user_id=BOB, task_context=owner_signed))
         assert [job.payload["canonical_user_id"] for job in owner_jobs] == [ANN]
         assert len(owner_jobs[0].payload["turns"]) == 15
@@ -342,14 +332,14 @@ def test_the_agent_gives_its_memory_manager_the_verified_person(tmp_path, monkey
     monkeypatch.chdir(tmp_path)
     agent = UniversalAgent(role="memory identity check", tools=[], team_id=TEAM, workspace_dir=str(tmp_path))
     manager = agent._context_engine.memory_plugin_manager
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
 
     assert manager.verified_person_of(_meta(GatewayContext(canonical_user_id=BOB, task_context=signed))) == ANN
     assert manager.verified_person_of(_meta(GatewayContext(canonical_user_id=BOB))) is None
 
 
 def test_the_tools_verified_person_logs_the_same_mismatch(tmp_path, caplog) -> None:
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
     meta = _meta(GatewayContext(canonical_user_id=BOB, task_context=signed))
     agent = _agent(tmp_path)
     bind_task("task_now")

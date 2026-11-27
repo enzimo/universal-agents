@@ -16,7 +16,7 @@
     {
       "filename": "MCPInvocationRequestV1.schema.json",
       "model": "MCPInvocationRequestV1",
-      "sha256": "702c62b1c5604cd2497efd707866dacdd231feee11bcb36e5a92f6527d4a5d01"
+      "sha256": "2add3e483bb6a1f2a73d7656aa071e8f2b78ab3826ef3de043a9f1d901cb2a7f"
     },
     {
       "filename": "MCPInvocationResponseV1.schema.json",

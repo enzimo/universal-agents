@@ -18,10 +18,10 @@ The clean-ups run only with this schedule. With
 at 0 or less it is never installed, so they never run; the manager says so
 in its log when it starts (``note_trusted_cleanups_at_start``).
 
-A maintenance run is system work (access plan 7c): the scheduler signs it for
-no person (``custom_agents.task_context_runtime.sign_system_context``; without
-the key, the run carries the schedule's permit for no person,
-``custom_agents.schedule_permits.sign_system_run``), and
+A maintenance run is system work (access plan 7c): ``team_services.scheduler``
+issues a standing permit for no person (``custom_agents.schedule_permits.sign_system_run``)
+or signs the claimed run via ``svc.scheduler``
+(``custom_agents.scheduled_run_contexts.sign_system_run_async``), and
 InternalImprovementAgent is a built-in system agent (``access_role: system``),
 so the run may use its role's standard tools on the shared ``team/`` and
 ``agents/`` folders and record its own schedule's run, and reaches nothing of
@@ -54,7 +54,7 @@ from custom_agents.output_retention import (
 )
 from custom_agents.scratch_retention import prune_scratch_folders
 from python_env_lifecycle import prune_request_environments
-from custom_agents.schedule_permits import sign_system_run
+from custom_agents.scheduled_run_contexts import sign_system_run_async
 from default_values import AGENT_DEFAULTS, TOOL_POLICY_DEFAULTS
 from custom_messages.contracts.runtime_v1 import (
     INTERNAL_IMPROVEMENT_AGENT_TYPE,
@@ -309,10 +309,10 @@ def prepare_internal_improvement_schedule_for_manager(
     canonical_user_id = str(bootstrap.get("canonical_user_id") or "").strip() or None
     # The schedule records the person who set up the instance only because a
     # worker launch names the person it was started for; its runs still work
-    # for no person (sign_system_context in enqueue_internal_improvement_job).
+    # for no person (sign_system_run_async in enqueue_internal_improvement_job).
     # This context is only for a new row: installs here are ensure-only, so a
-    # stored schedule, and the chat session the gateway refreshes on it
-    # (install mode refresh, custom_agents.schedule_context_refresh), is never
+    # stored schedule, and the delivery target the gateway refreshes on it
+    # (install mode refresh, team_services.schedules), is never
     # replaced. Escalations take the owner's current roles from the gateway's
     # copy of the team's people (access_control.people_directory), so a
     # schedule created here after the gateway's last refresh works at once.
@@ -358,6 +358,8 @@ async def enqueue_internal_improvement_job(
     agent: Any,
     schedule_id: str,
     scheduled_message: ScheduledMessage,
+    *,
+    claim_token: Optional[str] = None,
 ) -> bool:
     """Ensure one worker is live and dispatch one idempotent maintenance occurrence."""
 
@@ -428,9 +430,10 @@ async def enqueue_internal_improvement_job(
     meta.gateway_context.delivery_mode = INTERNAL_IMPROVEMENT_DELIVERY_MODE
     meta.gateway_context.scheduled_job_id = schedule_id
     meta.gateway_context.schedule_owner_agent_id = getattr(agent, "id", None)
-    # System work for no person, naming this schedule: signed by the scheduler
-    # here, or else carrying the schedule's permit for no person.
-    await asyncio.to_thread(sign_system_run, agent, meta, schedule_id=schedule_id)
+    # System work for no person, naming this schedule: standing permit first,
+    # else run_context.sign on svc.scheduler. Never dispatch unsigned.
+    if not await sign_system_run_async(agent, meta, schedule_id=schedule_id, claim_token=claim_token):
+        return False
 
     envelope = MessageEnvelope(
         msg_content=task,

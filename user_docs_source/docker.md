@@ -730,12 +730,12 @@ configuration (for example a custom `web_chat_token_env_var`, or a
 `${NAME}` reference in an MCP server's settings) also accept `<NAME>_FILE`,
 but for those names a direct value wins when both are set, so set only one.
 
-For the task-context keys, only the two signing keys are needed: the supervisor
-derives the verification keys (`ACCESS_CONTEXT_VERIFY_KEYS`) from them and gives
-each signing key only to the process that signs with it. Get the values for the
-secret files from `python -m scripts.generate_internal_credentials --instance-name
-<name> --print`, and do not also keep the keys in `team.env`; a secret file
-takes precedence over a `team.env` value.
+Authority tokens are signed by the gateway and team services host certificates
+that the installation authority manages automatically, so `team.env` and Docker
+secrets no longer carry `ACCESS_GATEWAY_SIGNING_KEY`,
+`ACCESS_SCHEDULER_SIGNING_KEY`, or `ACCESS_CONTEXT_VERIFY_KEYS` (or their
+`_FILE` variants). After a 0.9 instance's first 0.10 start converts stored
+records, startup refuses those variables; see [Upgrading](upgrading.md).
 
 ### Which process receives each secret
 
@@ -823,9 +823,6 @@ ending in `*` covers every variable that starts with the text before it.
 | Variable | Processes that receive it | Secret file | What it is |
 | --- | --- | --- | --- |
 | `SECURE_TOOL_BROKER_TOKEN` | `secure_broker` | contents | The broker's root token; every other process that calls the broker gets its own token derived from it. |
-| `ACCESS_GATEWAY_SIGNING_KEY` | `gateway` | contents | Private key the gateway uses to sign the task context of each person's request. |
-| `ACCESS_SCHEDULER_SIGNING_KEY` | `manager` | contents | Private key the team lead's scheduler uses to sign scheduled runs. |
-| `ACCESS_CONTEXT_VERIFY_KEYS` | `gateway`, `manager`, `agent`, `secure_broker`, `activity_collector`, `execution_controller`, `adapter_host` | contents | Public keys every Universal Agents process uses to check signed task contexts. |
 | `OPENSHELL_SSH_HANDSHAKE_SECRET` | `openshell_gateway` | contents | Secret the managed openshell-gateway uses for its SSH connections to sandboxes. |
 
 #### Credentials of the tools the secure tool broker runs
@@ -972,14 +969,14 @@ With `environment`:
   folder, it logs one warning naming the file and ignores it. An explicit
   `--env` (or `TEAM_ASSISTANT_ENV_FILE`) is refused.
 
-The secrets a configuration needs are the two task-context signing keys, the
-activity collector tokens, `WEB_CHAT_AUTH_TOKEN`, the broker token
-(`SECURE_TOOL_BROKER_TOKEN`; the secure tool broker always runs, and without
-the token the launcher refuses to start and names it), `POSTGRES_DSN`
-for PostgreSQL storage, the chosen model provider's API key (OpenAI,
-Anthropic or Google AI; OAuth providers keep their own token store), and the
-tokens of enabled chat channels. The local message broker makes and stores
-its own user and password when `NATS_USER` and `NATS_PASSWORD` are not set.
+The secrets a configuration needs are the activity collector tokens,
+`WEB_CHAT_AUTH_TOKEN`, the broker token (`SECURE_TOOL_BROKER_TOKEN`; the secure
+tool broker always runs, and without the token the launcher refuses to start
+and names it), `POSTGRES_DSN` for PostgreSQL storage, the chosen model
+provider's API key (OpenAI, Anthropic or Google AI; OAuth providers keep their
+own token store), and the tokens of enabled chat channels. The local message
+broker makes and stores its own user and password when `NATS_USER` and
+`NATS_PASSWORD` are not set.
 
 Print new internal values without writing any file. The broker token and the
 Google keyring password are always included; add `--storage-backend postgres`
@@ -991,21 +988,9 @@ docker run --rm --entrypoint python team-assistant \
   -m scripts.generate_internal_credentials --instance-name <name> --print
 ```
 
-Each signing key can also be created straight into a Docker secret with one
-command:
-
-```bash
-docker run --rm --entrypoint python team-assistant -c \
-  'from access_control.identity import ISSUER_GATEWAY, generate_signing_key; print(generate_signing_key(ISSUER_GATEWAY)[0], end="")' \
-  | docker secret create ua_access_gateway_signing_key -
-docker run --rm --entrypoint python team-assistant -c \
-  'from access_control.identity import ISSUER_SCHEDULER, generate_signing_key; print(generate_signing_key(ISSUER_SCHEDULER)[0], end="")' \
-  | docker secret create ua_access_scheduler_signing_key -
-```
-
-Then give the service each secret and point `<NAME>_FILE` at it, for example
-`--secret ua_access_gateway_signing_key` with
-`ACCESS_GATEWAY_SIGNING_KEY_FILE=/run/secrets/ua_access_gateway_signing_key`.
+Give the service each secret and point `<NAME>_FILE` at it, for example
+`--secret ua_secure_tool_broker_token` with
+`SECURE_TOOL_BROKER_TOKEN_FILE=/run/secrets/ua_secure_tool_broker_token`.
 
 ## Runtime Checks
 

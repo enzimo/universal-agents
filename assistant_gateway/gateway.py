@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 if TYPE_CHECKING:
     from assistant_gateway.team_view import GatewayTeamView, TeamLeadFollower
 
-from access_control.identity import ISSUER_GATEWAY, ContextSigner
 from assistant_gateway.access_commands import GatewayAccessCommands
 from assistant_gateway.account_sharing import GatewayAccountSharing
 from assistant_gateway.status_page import StatusPage
@@ -295,23 +294,6 @@ ACTIVITY_NOTICE_POLL_SECONDS = 2.0
 OutputSink = Callable[[str], Optional[Awaitable[None]] | None]
 QueryHandler = Callable[[TaskQuery], Awaitable[str] | str]
 EventSink = Callable[[GatewayDeliveryEvent], Optional[Awaitable[None]] | None]
-
-
-def _gateway_context_signer() -> ContextSigner | None:
-    """The gateway's task-context signing key from team.env, if configured.
-
-    Without it, tasks carry no signed context and every enforcement point that
-    needs one refuses (access_control.identity).
-    """
-
-    signer = ContextSigner.from_env(ISSUER_GATEWAY)
-    if signer is None:
-        logger.warning(
-            "No gateway task-context signing key is configured; access checks that need a "
-            "verified person will refuse. Regenerate internal credentials. "
-            "event=task_context_signer_missing"
-        )
-    return signer
 
 
 # The stored task text of memory-review schedules; the manager replaces it with
@@ -774,6 +756,55 @@ def _knowledge_blobs(runtime: object, *, team: str) -> Any:
     )
 
 
+def _gateway_service_tasks(gateway: "UserGateway") -> list[asyncio.Task[Any]]:
+    """Start optional background loops owned by the gateway's application services."""
+
+    stop_event = gateway._stop_event
+    tasks = [
+        asyncio.create_task(
+            gateway._maintenance_schedules.run(stop_event),
+            name="gateway_maintenance_schedule_retry_loop",
+        ),
+        asyncio.create_task(
+            gateway._deferred_delivery_application.run(stop_event),
+            name="gateway_delivery_loop",
+        ),
+        asyncio.create_task(
+            gateway.stored_data.uploads.run(stop_event),
+            name="gateway_upload_retention_loop",
+        ),
+        asyncio.create_task(
+            _history_cleanup(gateway.config, gateway.state_store, gateway.access_inbox).run(stop_event),
+            name="gateway_history_cleanup_loop",
+        ),
+        asyncio.create_task(
+            gateway.stored_data.usage.run(stop_event),
+            name="gateway_storage_usage_loop",
+        ),
+    ]
+    tasks.extend(
+        _access_maintenance_tasks(
+            gateway.config,
+            access_inbox=gateway.access_inbox,
+            broker=gateway._secure_broker,
+            tool_setups=gateway._credential_workflow.tool_setups,
+            credential_workflow=gateway._credential_workflow,
+            status_page=gateway.application.status,
+            stop_event=stop_event,
+            # With a team view the lead follower sends them once the records name the lead.
+            resend_kept_results_at_start=gateway._team_lead is None,
+        )
+    )
+    if gateway._activity_notices.enabled:
+        tasks.append(
+            asyncio.create_task(
+                gateway._activity_notices.run(stop_event),
+                name="gateway_activity_plan_notice_loop",
+            )
+        )
+    return tasks
+
+
 class UserGateway:
     """User-facing NATS gateway with delivery and autonomy services."""
 
@@ -794,6 +825,7 @@ class UserGateway:
         secure_broker: GatewaySecureBroker | None = None,
         activity_source: GatewayActivitySource | None = None,
         team_services: GatewayTeamServices | None = None,
+        token_signer: Any = None,
     ):
         self.config = config
         self._logger = logger
@@ -898,6 +930,7 @@ class UserGateway:
             HEARTBEAT_SCHEDULE_ID_PREFIX,
             config.instance_name,
         )
+        schedule_delivery_refs = gateway_delivery_refs(config)
         self._request_context_service = GatewayRequestContextService(
             settings=GatewayRequestContextSettings(
                 instance_name=config.instance_name,
@@ -909,7 +942,13 @@ class UserGateway:
                 users_enabled=identity_users.enabled,
             ),
             identity=self._identity_service,
-            context_signer=_gateway_context_signer(),
+            token_signer=(
+                token_signer
+                if token_signer is not None
+                else getattr(resolved_manager_runtime, "message_host", None)
+            ),
+            person_ref_resolver=ownership_bootstrap.people_directory.person_ref,
+            delivery_refs=schedule_delivery_refs,
         )
         self._request_service = GatewayRequestService(
             repository=self.request_repository,
@@ -989,6 +1028,7 @@ class UserGateway:
             delivery=self._delivery_service,
             presentation=self._delivery_presentation,
             attachments=self._delivery_attachments,
+            delivery_refs=schedule_delivery_refs,
             logger=logger,
         )
         self._manager_client = GatewayManagerClient(
@@ -1076,6 +1116,12 @@ class UserGateway:
             delivery=self._delivery_service,
             manager=self._manager_client,
             id_generator=self._id_generator,
+            team_commands=(
+                schedule_team_commands := _team_commands(
+                    resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
+                )
+            ),
+            delivery_refs=schedule_delivery_refs,
             logger=logger,
         )
         self._manager_commands = GatewayManagerCommandService(
@@ -1105,10 +1151,8 @@ class UserGateway:
             request_context=self._request_context_service,
             delivery=self._delivery_service,
             manager=self._manager_client,
-            team_commands=_team_commands(
-                resolved_manager_runtime, team_services, references=ownership_bootstrap.people_directory
-            ),
-            delivery_refs=gateway_delivery_refs(config),
+            team_commands=schedule_team_commands,
+            delivery_refs=schedule_delivery_refs,
             id_generator=self._id_generator,
             # The schedule, MCP and procedure controls share one check of who
             # may make platform changes directly (PersonChangeCheck).
@@ -1630,44 +1674,7 @@ class UserGateway:
 
         if start_services:
             await self._maintenance_schedules.ensure_all()
-            self._background_tasks += [
-                asyncio.create_task(
-                    self._deferred_delivery_application.run(self._stop_event),
-                    name="gateway_delivery_loop",
-                ),
-                asyncio.create_task(
-                    self.stored_data.uploads.run(self._stop_event),
-                    name="gateway_upload_retention_loop",
-                ),
-                asyncio.create_task(
-                    _history_cleanup(self.config, self.state_store, self.access_inbox).run(self._stop_event),
-                    name="gateway_history_cleanup_loop",
-                ),
-                asyncio.create_task(
-                    self.stored_data.usage.run(self._stop_event),
-                    name="gateway_storage_usage_loop",
-                ),
-            ]
-            self._background_tasks.extend(
-                _access_maintenance_tasks(
-                    self.config,
-                    access_inbox=self.access_inbox,
-                    broker=self._secure_broker,
-                    tool_setups=self._credential_workflow.tool_setups,
-                    credential_workflow=self._credential_workflow,
-                    status_page=self.application.status,
-                    stop_event=self._stop_event,
-                    # With a team view the lead follower sends them once the records name the lead.
-                    resend_kept_results_at_start=self._team_lead is None,
-                )
-            )
-            if self._activity_notices.enabled:
-                self._background_tasks.append(
-                    asyncio.create_task(
-                        self._activity_notices.run(self._stop_event),
-                        name="gateway_activity_plan_notice_loop",
-                    )
-                )
+            self._background_tasks.extend(_gateway_service_tasks(self))
 
     async def close(self) -> None:
         self._stop_event.set()

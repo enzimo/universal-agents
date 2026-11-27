@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any, Optional
 
-from access_control.identity import ISSUER_GATEWAY, IdentityRejected
+from access_control.authority_verifier import IdentityRejected, REFUSAL_WRONG_ISSUER
 from custom_agents.task_context_runtime import context_verifier
 from custom_agents.control_runtime import stop_task_execution
 from custom_agents.execution_lanes import runs_in_parallel_lane
@@ -103,23 +103,31 @@ class CommandPerson:
 def verified_command_person(
     agent: Any, msg_meta: MessageMeta
 ) -> tuple[Optional[CommandPerson], Optional[str]]:
-    """The command's person from its gateway-signed context, or why it is refused."""
+    """The command's person from its gateway-signed authority token, or why it is refused."""
 
     gateway_context = getattr(msg_meta, "gateway_context", None)
     signed = getattr(gateway_context, "task_context", None)
     refusal: Optional[str] = None
+    verified = None
     try:
-        context = context_verifier().verify(signed, team_id=str(getattr(agent, "team_id", "") or ""))
+        verified = context_verifier(agent).verify_root_task(
+            signed,
+            team_id=str(getattr(agent, "team_id", "") or ""),
+            require_issuer="gateway",
+        )
     except IdentityRejected as exc:
-        refusal = f"unsigned_sender: {exc}"
-    else:
-        if context.issuer != ISSUER_GATEWAY:
+        if exc.code == REFUSAL_WRONG_ISSUER:
             refusal = "sender_not_gateway"
-        elif not context.person_id:
+        else:
+            refusal = f"unsigned_sender: {exc}"
+    else:
+        if not verified.is_gateway_issued:
+            refusal = "sender_not_gateway"
+        elif not verified.person_id:
             refusal = "person_required"
-        elif not context.person_roles:
+        elif not verified.person_roles:
             refusal = "active_team_membership_required"
-    if refusal is not None:
+    if refusal is not None or verified is None:
         agent._logger.warning(
             "[%s] Refused a gateway command without a valid gateway-signed person. "
             "event=manager_command_sender_refused reason=%s claimed_person_id=%s",
@@ -129,19 +137,19 @@ def verified_command_person(
         )
         return None, refusal
     claimed = str(getattr(gateway_context, "canonical_user_id", "") or "").strip()
-    if claimed and claimed != context.person_id:
+    if claimed and claimed != verified.person_id:
         agent._logger.warning(
-            "[%s] A gateway command names a person its signed context does not; using the signed one. "
+            "[%s] A gateway command names a person its authority token does not; using the verified one. "
             "event=manager_command_person_mismatch claimed_person_id=%s person_id=%s",
             getattr(agent, "id", None),
             claimed,
-            context.person_id,
+            verified.person_id,
         )
     return (
         CommandPerson(
-            canonical_user_id=str(context.person_id),
-            team_id=context.team_id,
-            roles=tuple(context.person_roles),
+            canonical_user_id=str(verified.person_id),
+            team_id=verified.team_id,
+            roles=tuple(verified.person_roles),
         ),
         None,
     )

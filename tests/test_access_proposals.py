@@ -24,7 +24,6 @@ from access_control.caller_tokens import CALLER_MANAGER, BrokerCaller
 from access_control.data_folders import DataFolderRegistry
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import agent_role_resolver
-from access_control.identity import ContextVerifier
 from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalApplier
 from access_control.requests import AccessRequests
 from custom_agents import access_request_runtime, access_runtime
@@ -48,7 +47,12 @@ from tests.task_work_support import set_agent_ref
 from secure_tool_broker.access_gate import REASON_ACCOUNT_LINK_MISSING, REASON_UNLISTED_HOST, BrokerAccessGate
 from storage.access_repository import AccessRepository
 from tests.access_decision_support import uncertain_store
-from tests.broker_access_support import agent_context, context_verify_keys
+from tests.broker_access_support import (
+    agent_context,
+    broker_authority_verifier,
+    forget_task_context_keys,
+    use_broker_authority_verifier,
+)
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, Context, make_agent
 
 pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
@@ -66,8 +70,8 @@ RESTART = "https://portainer.example.test/api/stacks/1/restart"
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     instance = tmp_path / "instance"
     (instance / "control").mkdir(parents=True)
     lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)
@@ -105,7 +109,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     gate = BrokerAccessGate(
         catalogs=catalogs,
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEAM,
         access=service,
         links=service.store,
@@ -562,8 +566,8 @@ def test_tool_change_with_authorization_off_applies_with_confirmed_and_rolls_bac
 ) -> None:
     """A7: with authorization.enabled false, tool_changes shows diffs before confirmation, applies on confirmed=true, and rolls back on failure."""
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     instance = tmp_path / "instance"
     (instance / "control").mkdir(parents=True)
     lead = make_agent(None, tmp_path, agent_type="TeamArchitect", lead=True)

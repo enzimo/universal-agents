@@ -112,20 +112,41 @@ With authorization off every tool is available, so there is nothing to give.
 ## Who signs a scheduled run
 
 Every scheduled run must show whom it works for, or the access checks refuse
-every tool call ("Nobody verifiably asked for this task"). Only the TeamLead
-process holds the scheduler's signing key.
+every tool call ("Nobody verifiably asked for this task"). No process that runs
+a model (neither TeamLead nor any worker) holds a signing key. Instead, the
+team services process (`team-services`) holds the `scheduler` role in its host
+certificate and signs every scheduled run's authority token and schedule permit.
 
-TeamLead signs one permit per schedule. It says the schedule's runs work for
-its owner, and it lasts 30 days; TeamLead renews it a week before it runs out
-and checks it again whenever the schedule gets a new owner. A worker listed
-under `startup_agents` runs as its own process: when it takes a due schedule,
-it attaches that permit to the run and starts it without contacting TeamLead.
-Workers that TeamLead starts itself sign their runs directly.
+Team services signs one standing permit per active schedule. It says the
+schedule's runs work for its owner (or as system work for no person on built-in
+system-work schedules), and it lasts at most 7 days; team services renews it
+when fewer than 2 days remain and re-checks it whenever the schedule's owner
+changes. When a worker or TeamLead claims a due schedule, it attaches that
+standing permit to the run and starts without asking team services for a fresh
+signature. A permit-backed run lasts up to 7 days from when it started: if the
+standing permit captured at run start expires while the run is waiting (for
+example on an access approval), the verifier checks the schedule's current
+renewed permit for the same schedule, owner, and vouching state, and stops the
+run if renewal was refused or the schedule changed. If a schedule has no usable
+permit yet (for example right after creation, or a heartbeat item), the claiming
+agent asks team services over NATS (`run_context.sign` on `svc.scheduler`),
+which checks the live claim against the asking agent's session and signs a
+per-run authority token.
 
-The permit does not record the owner's roles. Each time a run's tool call is
-checked, the owner's current roles and standing are read (at most 30 seconds
-old), so a role change, a disabled or removed owner, or a deleted or turned-off
-schedule takes effect on the run within 30 seconds.
+Neither the permit nor a run token records the owner's roles. Each time a run's
+tool call is checked, the owner's current roles and standing are read live from
+the team's people records (cached at most 30 seconds for permits), so a role
+change, a disabled or removed owner, or a deleted or turned-off schedule takes
+effect on the run within 30 seconds.
+
+A person's schedule gets full owner roles only when the owner vouched for it
+(created or replaced directly from that person's own request, imported as
+vouched, converted from a vouched 0.9 schedule, or managed by Universal Agents
+itself). A schedule created from inside another scheduled run is stored
+unvouched (`owner_vouched = 0`): it still runs, using a signed unvouched marker
+that gives the run no owner roles (`person_roles = ()`), so reminders can still
+reach the owner while most tool calls are refused until the owner replaces or
+recreates the schedule directly.
 
 A one-time reminder and the last run of a repeating job keep their schedule
 and job access until that run finishes, even when a new worker takes the run
@@ -136,24 +157,19 @@ move a job's end date later while its last run is still working, the job
 continues; if you make a running one-time reminder repeat, it keeps its new
 runs.
 
-TeamLead gives a person's schedule a permit only when the person is active and
-the schedule was saved from that person's own request (or is managed by
-Universal Agents itself). A schedule without a permit still runs: the worker
-then asks TeamLead to sign that one run, as for a schedule TeamLead has not
-looked at yet (it looks at new schedules within about a minute). TeamLead
-signs only a run the worker has actually taken, for the schedule's owner. If
-TeamLead is stopped, refuses, or does not answer within 20 seconds, the worker
-does not start the run. The schedule stays due and is tried again after the
-retry wait (`agent.schedule_workers.defaults.retry_backoff_seconds`, 30 seconds
-by default), so a run can start late while TeamLead restarts, but it never runs
-without its signature.
+If team services is stopped, refuses, or does not answer within 20 seconds when
+a claiming agent needs a per-run signature, the worker does not start the run.
+The schedule stays due and is tried again after the retry wait
+(`agent.schedule_workers.defaults.retry_backoff_seconds`, 30 seconds by
+default), so a run can start late while team services restarts, but it never
+runs without a verified signature.
 
 To follow this in the logs, look for `schedule_permit_issued`,
-`schedule_permit_renewed` and `schedule_permit_refused` (TeamLead, with the
+`schedule_permit_renewed` and `schedule_permit_refused` (team services, with the
 reason), `scheduled_run_permit_attached` (the worker used the permit),
-`scheduled_run_context_signed` and `scheduled_run_context_refused` (TeamLead
-signed or refused one run), and `scheduled_run_not_started_unsigned` (the
-worker, with the reason).
+`scheduler_run_context_signed`, `scheduler_run_context_signed_unvouched` and
+`scheduler_run_context_refused` (team services signed or refused one run), and
+`scheduled_run_not_started_unsigned` (the worker, with the reason).
 
 ## Upgrade and existing work
 

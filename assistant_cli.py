@@ -7,6 +7,7 @@ from assistant_gateway.runtime_config import build_collector_runtime_settings
 
 import argparse
 import asyncio
+import contextlib
 import copy
 import json
 import logging
@@ -1599,6 +1600,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="The adapter host's transfer folder is gone for good: handle every file not found as one to send again",
     )
+    authority_tokens = upgrade_commands.add_parser(
+        "authority-tokens",
+        help="Convert stored 0.9 signed task contexts and schedule permits to protocol 1 authority tokens (one-time)",
+    )
+    authority_tokens.add_argument("--config", required=True, help="Path to instance_config.yaml")
+    authority_tokens.add_argument(
+        "--allow-unverifiable",
+        action="store_true",
+        help="Proceed even if the 0.9 signing/verify keys are missing (clears unverifiable contexts and reports them to administrators)",
+    )
 
     migrate_config = subparsers.add_parser(
         "migrate-config",
@@ -2626,6 +2637,51 @@ def _resolve_instance_config_path(config_path: str | None) -> str:
         "Path to instance_config.yaml is required. Pass --config <path>, set TEAM_INSTANCE_CONFIG, "
         "or set TEAM_INSTANCE_ROOT to an onboarded instance directory."
     )
+
+
+def _upgrade_authority_tokens(args: argparse.Namespace) -> None:
+    """``upgrade authority-tokens`` (``instance_upgrades.authority_tokens``).
+
+    Converts stored 0.9 signed task contexts and schedule permits into protocol 1
+    authority tokens signed by the active ``gateway`` and ``team-services`` host
+    certificates. On a first start without the upgrade marker, removed signing-key
+    variables are accepted once (and warned about) so any stored 0.9 records can be
+    converted; once the marker exists, startup refuses them. Exits non-zero if
+    legacy records exist without 0.9 verification keys (unless
+    ``--allow-unverifiable`` is passed), or on any storage/authority error.
+    """
+
+    from instance_upgrades.authority_tokens import (
+        MissingLegacyVerifyKeysError,
+        upgrade_authority_tokens,
+    )
+
+    config = GatewayInstanceConfig.load_for_process(args.config)
+    try:
+        result = upgrade_authority_tokens(
+            config,
+            allow_unverifiable=bool(getattr(args, "allow_unverifiable", False)),
+        )
+    except (MissingLegacyVerifyKeysError, ValueError, RuntimeError) as exc:
+        raise SystemExit(str(exc)) from exc
+    if result.already_done:
+        print("Stored 0.9 contexts and permits were already converted to protocol 1 authority tokens.")
+        return
+    if not result.had_legacy_records:
+        print("No legacy 0.9 signed contexts or permits found; marked authority-token upgrade complete.")
+        return
+    counts = result.counts
+    print(
+        f"Converted {counts.converted_contexts} context(s), {counts.converted_schedule_runs} schedule run(s), "
+        f"and {counts.converted_permits} permit(s) ({counts.vouched_schedules} vouched schedule(s), "
+        f"{counts.fresh_permits_issued} fresh permit(s), {counts.ledger_digests_backfilled} ledger digest(s)); "
+        f"{counts.expired} expired and {counts.unverifiable} unverifiable record(s) cleared and reported."
+    )
+    if result.removed_keys_still_set:
+        print(
+            "Remove these obsolete signing-key variables from team.env or Docker secrets before the next restart: "
+            + ", ".join(result.removed_keys_still_set)
+        )
 
 
 def _upgrade_adapter_host_files(args: argparse.Namespace) -> None:
@@ -4296,6 +4352,12 @@ async def _run_secure_tool_broker_service(
             mcp_profiles=config.mcp_profiles,
             mcp=config.mcp,
         )
+        from custom_transport.nats_adapter import NatsTransportAdapter
+        from custom_transport.protocol1.trust_reader import (
+            TrustReader,
+            trust_reader_transport_config,
+        )
+        from custom_transport.subjects import NatsSubjectMapper
         from runtime_settings.services import web_service_urls
         from secure_tool_broker.access_gate import build_broker_access_gate
         from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
@@ -4311,33 +4373,67 @@ async def _run_secure_tool_broker_service(
             config_path=str(config.config_path),
             config_source_revision=config.source_revision,
         )
-        access_gate = build_broker_access_gate(
-            instance_root=config.instance_root_path,
-            team_id=config.manager.team_id,
-            authorization_enabled=config.authorization.enabled,
-            storage_settings=config.manager_storage_settings,
-            cedar_binary=config.authorization.cedar_binary_path,
-            lead_agent_type=config.manager.named_agent_type,
-            # The Crawl4AI web tool (http:crawl4ai) matches this exact address.
-            service_urls=web_service_urls(config.web_services),
-        )
-        await run_secure_tool_broker(
-            host=resolved_host,
-            port=resolved_port,
-            token=token,
-            access_gate=access_gate,
-            mcp_config=mcp_config,
-            execution_ssh_config=execution_ssh_config,
-            tool_setup_recheck_days=config.security_layer.tool_setup_recheck_days,
-            api_request_user_agent=config.security_layer.api_request_user_agent,
-            # Web Chat may show the broker's pages as cards only from its own address.
-            web_chat_origin=(
-                web_chat_origin(config.internal_website_base_url)
-                if config.interactive_apps.internal_website.enabled
-                and config.interactive_apps.internal_website.web_chat_enabled
-                else None
-            ),
-        )
+        trust_adapter: NatsTransportAdapter | None = None
+        trust_reader: TrustReader | None = None
+        if config.layout.trust_bootstrap_path.exists():
+            trust_logger = logging.getLogger("secure_tool_broker.trust_reader")
+            trust_adapter = NatsTransportAdapter(
+                config=trust_reader_transport_config(config, reader_id="secure-tool-broker"),
+                mapper=NatsSubjectMapper(team_id=config.manager.team_id),
+                logger=trust_logger,
+            )
+
+            async def _connect_trust_nats() -> Any:
+                assert trust_adapter is not None
+                if trust_adapter.connected:
+                    await trust_adapter.close()
+                await trust_adapter.connect(reconcile_topology=False)
+                return trust_adapter.nats_connection
+
+            # Open offline so broker HTTP serving starts immediately even if NATS is down;
+            # run_secure_tool_broker starts TrustReader.watch_and_refresh to connect and sync
+            # UA1_CERTS in the background while trust checks fail closed until synced (C18).
+            trust_reader = TrustReader.open(
+                config.layout,
+                "secure-tool-broker",
+                None,
+                connect=_connect_trust_nats,
+                logger=trust_logger,
+            )
+        try:
+            access_gate = build_broker_access_gate(
+                instance_root=config.instance_root_path,
+                team_id=config.manager.team_id,
+                authorization_enabled=config.authorization.enabled,
+                storage_settings=config.manager_storage_settings,
+                cedar_binary=config.authorization.cedar_binary_path,
+                trust=trust_reader,
+                lead_agent_type=config.manager.named_agent_type,
+                # The Crawl4AI web tool (http:crawl4ai) matches this exact address.
+                service_urls=web_service_urls(config.web_services),
+            )
+            await run_secure_tool_broker(
+                host=resolved_host,
+                port=resolved_port,
+                token=token,
+                access_gate=access_gate,
+                mcp_config=mcp_config,
+                execution_ssh_config=execution_ssh_config,
+                tool_setup_recheck_days=config.security_layer.tool_setup_recheck_days,
+                api_request_user_agent=config.security_layer.api_request_user_agent,
+                trust_reader=trust_reader,
+                # Web Chat may show the broker's pages as cards only from its own address.
+                web_chat_origin=(
+                    web_chat_origin(config.internal_website_base_url)
+                    if config.interactive_apps.internal_website.enabled
+                    and config.interactive_apps.internal_website.web_chat_enabled
+                    else None
+                ),
+            )
+        finally:
+            if trust_adapter is not None:
+                with contextlib.suppress(Exception):
+                    await trust_adapter.close()
     finally:
         for key, original_value in original_broker_state_env.items():
             if original_value is None:
@@ -5570,7 +5666,10 @@ def main() -> None:
         run_team_command(args)
         return
     if args.command == "upgrade":
-        _upgrade_adapter_host_files(args)
+        if args.upgrade_command == "authority-tokens":
+            _upgrade_authority_tokens(args)
+        else:
+            _upgrade_adapter_host_files(args)
         return
     if args.command == "mcp-operation-levels":
         _mcp_operation_levels(args)

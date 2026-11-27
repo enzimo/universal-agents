@@ -102,12 +102,13 @@ def _generated_names(
     config: Any = None, environment: Mapping[str, str] | None = None
 ) -> frozenset[str]:
     from internal_credentials import INTERNAL_ENV_KEYS
+    from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
     from assistant_gateway.instance_secrets import (
         NATS_CREDENTIAL_ENV_NAMES,
         should_generate_internal_nats_credentials,
     )
 
-    names = set(INTERNAL_ENV_KEYS)
+    names = set(INTERNAL_ENV_KEYS) | set(REMOVED_SIGNING_KEY_ENV_VARS)
     if config is not None and not should_generate_internal_nats_credentials(
         config, environment or {}
     ):

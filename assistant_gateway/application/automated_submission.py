@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 
 from assistant_gateway.application.manager_client import GatewayManagerClient
 from assistant_gateway.application.ports import GatewayClock, GatewayIdGenerator
 from assistant_gateway.application.request_context import (
+    GatewayAuthorityTokenUnavailable,
     GatewayRequestContextService,
     GatewayRequestRoute,
 )
@@ -92,6 +94,7 @@ class GatewayAutomatedSubmissionApplication:
         self._clock = clock
         self._id_generator = id_generator
         self._refresh_delivery_preferences = refresh_delivery_preferences
+        self._logger = logging.getLogger(__name__)
 
     async def submit_autonomous_task(
         self,
@@ -107,20 +110,33 @@ class GatewayAutomatedSubmissionApplication:
         delivery_mode = (
             request.origin_kind if request.deliver_quiet_hours else "interactive"
         )
-        self._requests.record(
-            correlation_id=correlation_id,
-            session_key=session.session_key,
-            request_kind=request_kind,
-            request_text=request.instruction,
-            conversation_id=session.conversation_id,
-            followup_to_task_id=None,
-        )
         route = self._resolved_route(request.route, session)
+        await self._request_context.ensure_signer_ready()
+        task = Task(
+            task_type=MessageMetaType.REQUEST,
+            problem_statement=request.instruction.strip(),
+        )
+        try:
+            gateway_context = self._request_context.build_gateway_context(
+                session_key=session.session_key,
+                delivery_mode=delivery_mode,
+                route=route,
+                manager_agent_id=manager_id,
+                root_task_id=task.task_id,
+            )
+        except GatewayAuthorityTokenUnavailable:
+            self._logger.warning(
+                "Autonomous task could not be signed yet; nothing was recorded or published. "
+                "event=gateway_autonomous_task_signer_unavailable correlation_id=%s "
+                "session_key=%s request_kind=%s task_id=%s",
+                correlation_id,
+                session.session_key,
+                request_kind,
+                task.task_id,
+            )
+            raise
         envelope = MessageEnvelope(
-            msg_content=Task(
-                task_type=MessageMetaType.REQUEST,
-                problem_statement=request.instruction.strip(),
-            ),
+            msg_content=task,
             msg_meta=MessageMeta(
                 from_agent_name=f"{self._settings.instance_name}_gateway",
                 msg_correlation_id=correlation_id,
@@ -128,12 +144,7 @@ class GatewayAutomatedSubmissionApplication:
                 request_timezone=self._settings.default_timezone,
                 requester_type=RequesterType.TIMER_REQUESTER,
                 is_response_requested=True,
-                gateway_context=self._request_context.build_gateway_context(
-                    session_key=session.session_key,
-                    delivery_mode=delivery_mode,
-                    route=route,
-                    manager_agent_id=manager_id,
-                ),
+                gateway_context=gateway_context,
             ),
             msg_header=MessageHeader(
                 from_agent_id=self._settings.response_route,
@@ -141,6 +152,14 @@ class GatewayAutomatedSubmissionApplication:
                 response_routing_key=self._settings.response_route,
                 agent_signature="",
             ),
+        )
+        self._requests.record(
+            correlation_id=correlation_id,
+            session_key=session.session_key,
+            request_kind=request_kind,
+            request_text=request.instruction,
+            conversation_id=session.conversation_id,
+            followup_to_task_id=None,
         )
         await self._manager.publish_durable(envelope, routing_key=manager_id)
         return correlation_id
@@ -172,6 +191,24 @@ class GatewayAutomatedSubmissionApplication:
             snapshot_context.session_key if snapshot_context else None
         )
         session = self._resolve_session(session_key, route)
+        await self._request_context.ensure_signer_ready()
+        try:
+            gateway_context = self._request_context.build_gateway_context(
+                session_key=session.session_key,
+                delivery_mode="automation",
+                route=self._resolved_route(route, session),
+                manager_agent_id=manager_id,
+                root_task_id=request.automation_id,
+            )
+        except GatewayAuthorityTokenUnavailable:
+            self._logger.warning(
+                "Automation submission could not be signed yet; nothing was recorded or published. "
+                "event=gateway_automation_signer_unavailable session_key=%s automation_id=%s hook_name=%s",
+                session.session_key,
+                request.automation_id,
+                request.hook_name,
+            )
+            raise
         submission = build_automation_submission(
             instance_name=self._settings.instance_name,
             response_queue_name=self._settings.response_route,
@@ -184,12 +221,7 @@ class GatewayAutomatedSubmissionApplication:
                 session_key=session.session_key,
                 conversation_id=session.conversation_id,
             ),
-            gateway_context=self._request_context.build_gateway_context(
-                session_key=session.session_key,
-                delivery_mode="automation",
-                route=self._resolved_route(route, session),
-                manager_agent_id=manager_id,
-            ),
+            gateway_context=gateway_context,
             automation_id=request.automation_id,
             hook_name=request.hook_name,
             original_envelope=request.original_envelope,

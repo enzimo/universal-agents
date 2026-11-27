@@ -541,7 +541,7 @@ class BrokerMCPRuntime:
         principal = payload.principal
         if principal.principal_type != PrincipalType.AGENT:
             raise PermissionError("Brokered MCP invocation requires an agent principal.")
-        gate = self._access_gate.check_mcp(
+        gate = await self._access_gate.check_mcp_async(
             caller,
             record.descriptor.connection_name,
             operation_name,

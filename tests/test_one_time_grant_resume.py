@@ -52,7 +52,11 @@ from custom_messages.contracts.access_v2 import (
 )
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "ua-cedar-authorizer"
@@ -125,16 +129,16 @@ class ScriptedModel(Model):
 
 @pytest.fixture
 def storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
 
 
 def worker(storage: Any) -> SimpleNamespace:
     """A worker running one task for OWNER, with the task's signed context (as in production)."""
 
-    signed = context_signer().issue(team_id=TEAM, person_id=OWNER.person_id, person_roles=OWNER.roles)
+    signed = signed_task_token(OWNER.person_id, team_id=TEAM, roles=OWNER.roles, root_task_id="task-1")
     meta = SimpleNamespace(gateway_context=SimpleNamespace(task_context=signed), conversation_id="conv-1")
     task_manager = SimpleNamespace(
         storage_settings=storage,
@@ -154,7 +158,7 @@ def worker(storage: Any) -> SimpleNamespace:
         authorization_config={"enabled": True, "cedar_binary_path": str(BINARY)},
         task_manager=task_manager,
         instance_root=None,
-        work_id=signed.context.context_id,
+        work_id=signed.bound_to.request_id,
     )
 
 

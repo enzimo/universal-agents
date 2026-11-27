@@ -746,6 +746,19 @@ class AgentProcessHost:
             return await coroutine
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, self.loop))  # type: ignore[arg-type]
 
+    def trust_state(self) -> Optional[tuple[Any, Any]]:
+        """This process host's ``TrustStore`` and lock once started, or ``None``."""
+
+        return self.host.trust_state() if self.host is not None else None
+
+    async def fetch_token_issuer(self, token: Any) -> bool:
+        """Fetch an authority token's issuer certificate on this process's host loop (safe from any worker thread)."""
+
+        if self.host is None or self.loop is None or self.loop.is_closed():
+            return False
+        result = await self._on_host_loop(self.host.fetch_token_issuer(token))
+        return bool(result)
+
     def cannot_ask(self, sender_agent: str) -> Optional[AskBlocked]:
         """Why this process cannot sign a request for ``sender_agent`` now, or None (``agent_requests.cannot_ask``).
 
@@ -801,6 +814,65 @@ class AgentProcessHost:
         assert self.host is not None and self.host.live is not None
         reply = await self._on_host_loop(self.host.live.request(kind, body, self._agent_audience(target_agent),
                                                                 team=self.team, agent=sender_agent, timeout=timeout))
+        return dict(reply.raw["body"])
+
+    async def ask_scheduler(self, kind: str, body: Mapping[str, Any], *, sender_agent: str,
+                            timeout: Optional[float] = None) -> dict[str, Any]:
+        """A request to the team services' scheduler (``svc.scheduler``), signed as ``sender_agent``.
+
+        Raises ``AgentUnreachable`` when this process cannot send yet, and the live host's
+        ``ServiceUnavailable`` or ``RequestRefused``.
+        """
+
+        self._sender_session(sender_agent)
+        assert self.host is not None and self.host.live is not None
+        reply = await self._on_host_loop(self.host.live.request(kind, body, self._audience(),
+                                                                team=self.team, agent=sender_agent, timeout=timeout))
+        return dict(reply.raw["body"])
+
+    async def ask_team(
+        self,
+        kind: str,
+        body: Mapping[str, Any],
+        *,
+        sender_agent: str,
+        authority: Optional[Mapping[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """A request to the team services (``svc.team``), signed as ``sender_agent``, with optional ``authority``."""
+
+        self._sender_session(sender_agent)
+        assert self.host is not None and self.host.live is not None
+        reply = await self._on_host_loop(
+            self.host.live.request(
+                kind,
+                body,
+                self._audience(),
+                team=self.team,
+                agent=sender_agent,
+                authority=authority,
+                timeout=timeout,
+            )
+        )
+        return dict(reply.raw["body"])
+
+    async def blob_store_handle(self) -> Any:
+        """Return the ``OBJ_UA1_BLOBS`` handle once this process host has joined."""
+
+        from custom_transport.protocol1.blobs import blob_store_handle
+
+        if self.host is None or self.host.nc is None:
+            raise AgentUnreachable("this process's message host has no NATS connection yet", clears=True)
+        return blob_store_handle(self.host.nc)
+
+    async def register_blob(self, body: Mapping[str, Any], *, timeout: Optional[float] = None) -> dict[str, Any]:
+        """Send a host-authenticated ``blobs.register`` request to ``svc.team``."""
+
+        if self.host is None or self.host.live is None or self._joined is None or not self._joined.is_set():
+            raise AgentUnreachable("this process has not joined the team's messaging yet", clears=True)
+        reply = await self._on_host_loop(
+            self.host.live.request("blobs.register", body, self._audience(), team=self.team, timeout=timeout)
+        )
         return dict(reply.raw["body"])
 
     async def announce(self, kind: str, body: Mapping[str, Any], *, sender_agent: str) -> None:

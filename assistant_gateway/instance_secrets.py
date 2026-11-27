@@ -21,7 +21,6 @@ import shlex
 from typing import Iterable, Mapping
 from urllib.parse import urlparse
 
-from access_control.identity import ENV_GATEWAY_SIGNING_KEY, ENV_SCHEDULER_SIGNING_KEY, ENV_VERIFY_KEYS
 from assistant_gateway.config import GatewayInstanceConfig
 from env_secrets import get_env_with_file_fallback, materialize_secret_file_envs
 from internal_credentials import (
@@ -32,10 +31,10 @@ from internal_credentials import (
     merge_env_file,
     parse_env_file,
 )
+from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
 
 GENERATE_CREDENTIALS_MODULE = "scripts.generate_internal_credentials"
-# Where the docs explain supplying secrets from the environment, including
-# one-line commands for the two signing keys.
+# Where the docs explain supplying secrets from the environment.
 ENVIRONMENT_SECRETS_DOCS = "/docs/docker/#secrets-from-the-environment"
 
 # Model keys are not environment secrets: they are saved per endpoint with
@@ -56,22 +55,19 @@ NATS_DECISION_ENV_NAMES = (ENV_NATS_CREDENTIALS_FILE, ENV_NATS_SERVERS, ENV_NATS
 # an external one.
 NATS_CREDENTIAL_ENV_NAMES = ("NATS_USER", "NATS_PASSWORD")
 
-# Generated names the environment does not have to hold: the supervisor derives
-# the verification keys from the signing keys; the local message broker makes
-# and stores its own user and password on first start when none are set
-# (docker.nats_service.ensure_local_nats_credentials); and only Google
+# Generated names the environment does not have to hold: the local message
+# broker makes and stores its own user and password on first start when none
+# are set (docker.nats_service.ensure_local_nats_credentials); and only Google
 # Workspace sign-in needs the keyring password (the broker says so when it is
 # missing).
 _NOT_REQUIRED_INTERNAL_NAMES = frozenset(
-    {ENV_VERIFY_KEYS, *NATS_CREDENTIAL_ENV_NAMES, "GOG_KEYRING_PASSWORD"}
+    {*NATS_CREDENTIAL_ENV_NAMES, "GOG_KEYRING_PASSWORD"}
 )
 # Secrets a channel names but does not need to start: the Photon sidecar token
 # is made fresh at each start when unset.
 _OPTIONAL_CHANNEL_SECRETS = frozenset({"PHOTON_SIDECAR_TOKEN"})
 
 _INTERNAL_PURPOSES: dict[str, str] = {
-    ENV_GATEWAY_SIGNING_KEY: "The gateway signs whom each task works for with it.",
-    ENV_SCHEDULER_SIGNING_KEY: "The scheduler signs whom each scheduled task works for with it.",
     "ACTIVITY_COLLECTOR_USER_TOKEN": "Opens the activity collector's user pages.",
     "ACTIVITY_COLLECTOR_ADMIN_TOKEN": "Opens the activity collector's admin pages.",
     "ACTIVITY_COLLECTOR_INGEST_TOKEN": "Lets agents send activity events to the collector.",
@@ -236,13 +232,11 @@ def _internal_requirements(config: GatewayInstanceConfig, env: Mapping[str, str]
     request = internal_credential_request(config, env=env)
     command = generate_credentials_command(request)
     how = f"Create it with `{command}` and store the printed value as a Docker secret."
-    signing_how = f"{how} The docs ({ENVIRONMENT_SECRETS_DOCS}) also show a one-line command for each signing key."
-    signing_keys = {ENV_GATEWAY_SIGNING_KEY, ENV_SCHEDULER_SIGNING_KEY}
     return [
         SecretRequirement(
             name=name,
             purpose=_INTERNAL_PURPOSES.get(name, "An internal service credential."),
-            how_to_create=signing_how if name in signing_keys else how,
+            how_to_create=how,
         )
         for name in internal_credential_names(request)
         if name not in _NOT_REQUIRED_INTERNAL_NAMES
@@ -306,7 +300,9 @@ def ensure_internal_credential_env_file(
         rotate=rotate,
     )
     generated = generate_internal_credentials(request, existing=existing)
-    remove_keys = set(INTERNAL_ENV_KEYS - set(NATS_CREDENTIAL_ENV_NAMES)) - set(generated)
+    remove_keys = (
+        set(INTERNAL_ENV_KEYS - set(NATS_CREDENTIAL_ENV_NAMES)) | set(REMOVED_SIGNING_KEY_ENV_VARS)
+    ) - set(generated)
     for key in NATS_CREDENTIAL_ENV_NAMES:
         if existing.get(f"{key}_FILE") or existing.get(ENV_NATS_CREDENTIALS_FILE):
             remove_keys.add(key)

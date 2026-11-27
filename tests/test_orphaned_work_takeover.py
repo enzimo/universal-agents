@@ -42,7 +42,7 @@ from storage.agent_launch_repository import LaunchCapacity
 from tests.test_schedule_worker_service import lead  # noqa: F401
 from tests.test_schedule_worker_transactions import make_launch
 from tests.test_stuck_tasks import seen
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token, use_broker_authority_verifier
 from tests.change_approval_support import use_signed_contexts
 
 DEAD = "agent_dead_worker"
@@ -113,6 +113,8 @@ def held_work(
     lead, owner: str = DEAD, state: ProgressState = ProgressState.WAITING, *, signed=False, task_id: str = "work-1"
 ):
     # One agent holds a task at a time (runtime_task_custody), so two holders need two task ids.
+    if signed:
+        use_broker_authority_verifier()
     task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="Fetch candles")
     snapshot = RuntimeSnapshotV3(
         schema_version=3,
@@ -122,7 +124,7 @@ def held_work(
                 header=MessageHeader(response_routing_key="gateway"),
                 meta=MessageMeta(gateway_context=GatewayContext(
                     canonical_user_id="owner",
-                    task_context=context_signer().issue(team_id="team", person_id="owner") if signed else None,
+                    task_context=signed_task_token("owner", team_id="team", root_task_id=task_id) if signed else None,
                 )),
                 owner_person_id="owner" if signed else None,
             )

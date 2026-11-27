@@ -24,7 +24,6 @@ from access_catalog.catalog import CatalogSource
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService
 from access_control.entities import agent_role_resolver
-from access_control.identity import ContextVerifier
 from custom_messages.contracts.access_v2 import AccountLinkV1, LinkOwnerKind, SubjectKind, SubjectRefV1
 from secure_tool_broker import credential_catalog
 from secure_tool_broker.access_gate import BrokerAccessGate
@@ -41,10 +40,10 @@ from tests.broker_access_support import (
     BROKER_ROOT,
     TEST_TEAM,
     agent_context,
+    broker_authority_verifier,
     caller_token,
-    context_verify_keys,
     access_store,
-    signed_task_context,
+    signed_scheduler_task_context,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -182,7 +181,7 @@ def build_gate(
         )
     return BrokerAccessGate(
         catalogs=catalogs,
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=access,
         links=links,
@@ -246,7 +245,7 @@ def work_for(monkeypatch: Any, person_id: str | None = "user-1", *, roles: tuple
             "agent_id": "agent-1",
             "named_agent_type": "GeneralAssistant",
             "task_id": "task-system",
-            "task_context": signed_task_context(None),
+            "task_context": signed_scheduler_task_context(None),
         }
     else:
         context = agent_context(person_id, roles=roles, task_id="task-1")

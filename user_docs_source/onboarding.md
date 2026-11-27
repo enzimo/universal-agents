@@ -234,10 +234,9 @@ broker's secret. The broker always runs, because every credentialed tool call
 it, so onboarding has no switch that turns it off. The supervisor gives each
 other process its own token made from it. If no token is set, the launcher
 stops before starting anything and prints the command that adds the token to
-`team.env`. Onboarding also writes the task-context signing keys
-(`ACCESS_GATEWAY_SIGNING_KEY`, `ACCESS_SCHEDULER_SIGNING_KEY`,
-`ACCESS_CONTEXT_VERIFY_KEYS`) that sign the record of whom each task works for.
-Do not edit or copy them. See
+`team.env`. Who each task works for is signed automatically by host
+certificates managed by the installation authority, so onboarding writes no
+signing keys to `team.env`. See
 [Tool access and account links](permissions.md#tool-access-and-account-links).
 
 xAI Grok OAuth and OpenAI Codex OAuth use their own instance-owned auth stores
@@ -272,7 +271,6 @@ specific flag. Each run writes a value-free report under
 `<instance_root>/onboarding_reports/`.
 
 Use `--rotate-internal-credentials` only when you intentionally want new
-generated broker, activity collector, or secure-tool tokens. It also replaces
-the task-context signing keys, so rotate while the instance is stopped. A rerun
-without that option adds missing internal credentials, such as the signing keys
-of an instance created by an earlier version, and keeps existing values.
+generated broker, activity collector, or secure-tool tokens, and run it while
+the instance is stopped. A rerun without that option adds any missing internal
+credentials and keeps existing values.

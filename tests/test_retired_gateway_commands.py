@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, get_args
 
 import pytest
 
-from access_control.identity import ContextSigner
 from assistant_gateway.gateway import UserGateway
 from assistant_gateway.store import GatewayStateStore
 from custom_agents.deferred_message_runtime import requires_execution_slot
@@ -41,10 +41,10 @@ from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_tools.providers.communication import send_message
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.broker_access_support import (
-    context_signer,
-    context_verify_keys,
     forget_task_context_keys,
-    use_scheduler_key,
+    signed_scheduler_token,
+    signed_task_token,
+    use_broker_authority_verifier,
 )
 from tests.task_work_support import set_agent_ref
 from tests.test_gateway_phase1 import _build_test_config, _CaptureGatewayManagerTransport
@@ -64,10 +64,10 @@ REFUSAL = "Your memory command was sent before the team was upgraded, so nothing
 
 @pytest.fixture(autouse=True)
 def _gateway_key(monkeypatch: pytest.MonkeyPatch):
-    """The lead takes the command's person only from a gateway-signed context."""
+    """The lead takes the command's person only from a gateway-signed authority token."""
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -117,8 +117,12 @@ def _queued_0_9_command(
     context = document["msg_meta"]["gateway_context"]
     context["canonical_user_id"] = claimed_person
     if signed == "gateway":
-        signed = context_signer().issue(team_id=world.lead.team_id, person_id=PERSON, person_roles=("owner",))
-    context["task_context"] = None if signed is None else signed.model_dump(mode="json")
+        signed = signed_task_token(PERSON, team_id=world.lead.team_id, roles=("owner",))
+    context["task_context"] = (
+        None
+        if signed is None
+        else (signed if isinstance(signed, dict) else signed.model_dump(mode="json"))
+    )
     return json.dumps(document).encode()
 
 
@@ -277,10 +281,9 @@ async def test_a_retired_command_that_cannot_be_answered_tells_nobody(
     elif case == "unsigned":
         payload_fields["signed"] = None
     elif case == "scheduler_signed":
-        use_scheduler_key(monkeypatch)
-        scheduler = ContextSigner.from_env("scheduler")
-        assert scheduler is not None
-        payload_fields["signed"] = scheduler.issue(team_id=world.lead.team_id, person_id=PERSON, person_roles=("owner",))
+        payload_fields["signed"] = signed_scheduler_token(
+            PERSON, team_id=world.lead.team_id, roles=("owner",), schedule_id="sched_retired"
+        )
     elif case == "names_another_person":
         payload_fields["claimed_person"] = "Someone_else"
     elif case == "not_team_lead":
@@ -337,6 +340,42 @@ async def test_agents_cannot_send_a_retired_gateway_command() -> None:
         set_agent_ref(None)
 
     assert "reserved for the authenticated gateway" in result
+
+
+@pytest.mark.asyncio
+async def test_a_0_9_command_carrying_a_legacy_signed_context_is_set_aside_once_per_c07(world) -> None:
+    """C07: an old 0.9 message carrying a legacy SignedTaskContextV1 fails decode and is set aside once."""
+
+    now = datetime.now(timezone.utc)
+    legacy = {
+        "context": {
+            "schema_version": 1,
+            "context_id": "task_context_legacy_c07",
+            "issuer": "gateway",
+            "team_id": world.lead.team_id,
+            "person_id": PERSON,
+            "person_roles": ["owner"],
+            "issued_at_utc": now.isoformat(),
+            "expires_at_utc": (now + timedelta(days=7)).isoformat(),
+        },
+        "key_id": "gateway-legacy-c07",
+        "signature": "A" * 86,
+    }
+    payload = _queued_0_9_command(world, signed=legacy)
+    message = _JsMessage("legacy_0_9_cmd", data=payload, delivered=1, subject="team_test.agent.manager_1234.control")
+    adapter = _adapter()
+    set_aside: list[Any] = []
+
+    async def _capture_set_aside(msg: Any, *args: Any, **kwargs: Any) -> bool:
+        set_aside.append((msg, args, kwargs))
+        return True
+
+    adapter._set_aside = _capture_set_aside  # type: ignore[method-assign]
+    delivery = await _decode(adapter, message, max_deliver=5)
+    assert delivery is None
+    assert message.terminated is True
+    assert message.nak_delays == []
+    assert len(set_aside) == 1
 
 
 def test_every_retired_command_has_a_name_people_know() -> None:

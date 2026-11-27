@@ -15,7 +15,7 @@ from datetime import timedelta
 
 import pytest
 
-from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
+from custom_messages.contracts.routing_v1 import MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.schedule_worker_v1 import utc_now
 from custom_messages.contracts.task_v1 import Task
@@ -29,7 +29,7 @@ from custom_tools.providers.schedule_workers import (
 )
 from tests.task_work_support import set_agent_ref
 from custom_tools.secure_cli_tool import secure_cli
-from tests.test_schedule_worker_service import lead  # noqa: F401  (fixture)
+from tests.test_schedule_worker_service import lead, owner_context  # noqa: F401  (fixture)
 from tests.tool_result_support import tool_json
 
 WORKER = "Worker"
@@ -62,7 +62,7 @@ def _create_job(agent, *, worker_policy_json: str) -> dict:
         schedule_name="Gmail check",
         management_class=ScheduleManagementClass.USER,
         payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check email."),
-        payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="owner")),
+        payload_meta=MessageMeta(gateway_context=owner_context()),
         claim_team_id="team",
         interval_ms=3 * 3600 * 1000,
         next_fire_at=(utc_now() + timedelta(hours=3)).isoformat(),
@@ -74,6 +74,7 @@ def _create_job(agent, *, worker_policy_json: str) -> dict:
         target_agent_type=WORKER,
         worker_policy_json=worker_policy_json,
         requirements_json=json.dumps(BY_FUNCTION_NAME),
+        source_meta=schedule.payload_meta,
     )
 
 

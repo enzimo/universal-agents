@@ -1599,11 +1599,13 @@ its own (coordination plan 7.10, accepted 2026-10-30).
 - **Memory reviews after a turn.** The review the team lead sends right after
   a person's turn used to carry the turn's signed context, which names the
   person's request; that request has usually ended, so its memory changes
-  would be refused as `request_closed`. The manager signs it instead as work
-  of the person's own stale-conversation review schedule, which reviews the
-  same queued jobs (`task_context_runtime.sign_memory_review`): it counts as
-  one of the person's scheduled jobs. Without that schedule, for a disabled
-  or removed person, or without the scheduler's key, nothing is sent
+  would be refused as `request_closed`. The manager instead attaches the
+  scheduler-signed standing run permit from the person's own stale-conversation
+  review schedule (`task_context_runtime.sign_memory_review`), wrapped in a
+  `ScheduleRunIdentityV1` with a fresh `schedule_run_<hex>` request id: it
+  counts as one of the person's scheduled jobs without holding any signing key
+  in the lead. Without that schedule, for a disabled or removed person, or
+  while the schedule has no usable permit yet, nothing is sent
   (`event=memory_review_not_signed`) and the job waits for the schedule's
   next run.
 - **Refusal names.** The names are shared, in
@@ -2250,28 +2252,32 @@ schedules are private and a change to a system schedule needs a person. So
 trusted manager code checks every schedule before each run
 (`custom_agents/stale_schedules.py`): it deletes the own schedules of people
 removed from the team and tells owners and administrators about unused ones
-through the Inbox, once per list; the run gets counts only. So that the run's
-findings reach a person, the manager signs TeamArchitect's task for its
-escalation for the owner stored on the maintenance schedule (the first user),
-with the scheduler key; a person named in the escalation itself is ignored
+through the Inbox, once per list; the run gets counts only. So that the run's findings reach a person, the lead attaches the
+scheduler-signed `owner_permit_json` from the maintenance schedule (the first
+user) to TeamArchitect's escalation task, wrapped in a `ScheduleRunIdentityV1`
+with a fresh `schedule_run_<hex>` request id; no signing key lives in the lead,
+and any person named in the escalation itself is ignored
 (`custom_agents/task_context_runtime.py`, `sign_system_escalation`).
 
 Every scheduled run takes its owner's standing and roles at the moment it runs
 from the gateway's copy of the team's people in the access store
 (`access_control/people_directory.py`, written by the gateway whenever a person
 is added, changes role, is disabled, enabled or removed, and in full at each
-start). Why a copy: the manager signs scheduled work but cannot read the
-gateway's records; before, runs used roles saved on the schedule, so a demoted
-administrator's schedules kept administrator roles and a disabled person's kept
-running. A disabled or removed owner's schedules do not run. Roles are given
-only when the owner is vouched for: a system-managed schedule, or a context the
-gateway signed for that same person saved with the schedule. The gateway still
-keeps where to reach each maintenance schedule's owner current: at each start,
-and whenever the manager becomes available again, it sends a `refresh`, and the
-manager replaces only the stored person, chat session and that session's
-conversation under the trusted-runtime permit, keeping pause, enabled state,
-cadence and next fire time (`custom_agents/schedule_context_refresh.py`). A refresh never creates a
-schedule. Memory-review schedules are installed the
+start). Why a copy: `team_services.scheduler` signs scheduled runs and standing
+permits, and verifiers resolve live roles from that copy without reading the
+gateway's private store; before, runs used roles saved on the schedule, so a
+demoted administrator's schedules kept administrator roles and a disabled
+person's kept running. A disabled or removed owner's schedules do not run.
+Roles are given only when the schedule's `owner_vouched` mark is set (or the
+schedule is system-managed); an unvouched person's schedule runs with a signed
+no-roles marker (`unvouched_run_<hex>` / `schedule_unvouched_permit:<id>`) and
+resolves with `person_roles=()`. The gateway keeps where to reach each
+maintenance schedule's owner current: at each start, and whenever the team
+services become available again, it sends `schedules.install` with
+`mode="refresh"` (`team_services/schedules.py`), replacing only the stored
+person, delivery reference, and conversation under the trusted-runtime permit
+while keeping pause, enabled state, cadence, and next fire time. A refresh
+never creates a schedule. Memory-review schedules are installed the
 same way: once (`ensure`), then refreshed, so a gateway restart no longer
 resets an operator's pause or cadence. The core-facts audit is one team
 schedule; the personal-facts audit and stale-conversation review are one pair
@@ -2461,62 +2467,72 @@ seen at all. In OpenShell mode the supervisor ends the local
 `openshell sandbox exec` client; whether that ends the command inside the
 sandbox has not yet been verified.
 
-Who a task works for is signed, not claimed. The gateway signs a task context
-(Ed25519) naming the person and their current team roles when it admits a
-request; the manager's scheduler signs one for each scheduled run's owner
-(`access_control/identity.py`), except runs of the runtime's own maintenance
-schedule for InternalImprovementAgent, which it signs as system work for no
-person (`custom_agents/task_context_runtime.py`). The context travels unchanged on every
-delegated task, so a later hop cannot widen it. Private keys live only in the
-gateway and manager processes; every checker holds the public keys.
+Who a task works for is proven only by a protocol 1 authority token
+(`custom_transport/protocol1/authority_tokens.py`), never claimed in message
+fields. The gateway signs a root-task token with its `gateway` host certificate
+key when it admits a person's request, guidance, or answer, naming the person
+only by their opaque `person_ref` and binding the token to the root task and
+request id (`bound_to.request_id`, lifetime capped at
+`AUTHORITY_TOKEN_MAX_SECONDS`). The token travels unchanged in
+`GatewayContext.task_context` down every delegation and reply, so a later hop
+cannot widen it. No model-running process (neither the team lead nor any
+worker) holds a signing key (decision 58).
 
-Scheduled workers claim their own due schedules from the shared database, so
-the claiming agent is not always in the manager process. An agent inside it
-(the team lead, or a worker the manager started on demand) signs the run
-itself. A worker started from team composition runs as its own process
-without the scheduler key. Why not give every worker the key: a key in every
-agent process would let any one of them sign for anyone.
+The `scheduler` role and schedule signing live in the `team-services` process
+(`team_services/scheduler.py`, holding both `team_services` and `scheduler`
+roles in its host certificate; decisions 58 and 66). `team-services` maintains
+one standing scheduler-signed protocol 1 schedule permit per active vouched
+schedule (`run_permit_json`, bound as `schedule_permit:<schedule_id>`, plus
+`owner_permit_json` as `schedule_owner_permit:<schedule_id>` for system-work
+schedules that also name a vouched administrator owner), renewed within 2 days
+of its 7-day cap and re-checked whenever the schedule's owner changes. System
+work schedules (such as `internal_improvement`) get a scheduler-signed permit
+naming `schedule_id` and no person. When a worker or the team lead claims a due
+schedule, it attaches that standing permit with a fresh `schedule_run_<hex>`
+context id in `GatewayContext.schedule_run` (`custom_agents/schedule_permits.py`)
+and starts without asking `team-services`.
 
-Instead the manager signs one permit per schedule (`SchedulePermitV1`,
-`custom_agents/schedule_permits.py`; owner's decision 2026-09-27). The team
-lead's scheduler pass, in the process that holds the key, issues a permit for
-each turned-on schedule whose owner is vouched for by the same rule as a
-locally signed run (the schedule is runtime-managed, or the context saved
-with it was signed by the gateway for that person) and is active, and a
-permit for no person for the maintenance schedule of InternalImprovementAgent.
-A permit lasts 30 days and is renewed in its last 7, and re-checked when the
-schedule's owner changes; the pass is one query, at most every 30 seconds.
-The permit is kept on the schedule row (`run_permit_json`), not in the
-schedule, and needs no schedule permit to set, like the next run time. A
-worker that claims the schedule puts the permit, with a fresh context id, the
-conversation and the start time, in the run's `GatewayContext.schedule_run`
-and starts the run without contacting the manager. Why one signature per
-schedule: asking the manager for every run of every worker puts the manager
-on the path of all scheduled work and does not scale.
+Neither a root-task token nor a permit carries roles. Every enforcement point
+— the agent access hook (`custom_agents/access_runtime.py`), the secure tool
+broker gate (`secure_tool_broker/access_gate.py`), the change ledger, the
+gateway, working requests, person model runtime, runtime context, and team
+transfer — routes through the single verifier and resolver
+(`access_control/authority_verifier.py` and `access_control/task_identity.py`,
+`resolve_task_identity`). The verifier checks the Ed25519 signature against the
+issuer's host certificate, team and installation membership, current
+revocations record, validity window (at stream storage time for queued work
+per decision 52, else arrival time), and resolves `person_ref` live through the
+team's people copy (`access_control/people_directory.py`, cached 30 seconds for
+permits), so role changes, disabled or removed owners, revoked host
+certificates, and deleted or turned-off schedules take effect promptly. Bare
+schedule permits are refused anywhere a root-task token is expected.
 
-A permit names no roles, so it cannot carry stale ones. Every check of a run
-identity (`access_control/task_identity.py`, `resolve_task_identity`: the
-access hook, the broker's gate and the schedule tools all use it) verifies
-the permit, then checks live that the schedule still exists, is turned on and
-still belongs to the permit's person, and reads that person's current
-standing and roles from the gateway's copy of the team's people. These live
-facts are cached for 30 seconds per schedule and permit (bounded), so a role
-change, a disable or removal, or a deleted or turned-off schedule applies to
-the run's next check within 30 seconds. A permit and a task context are
-signed under different domains and name different record kinds, so neither
-can pass as the other.
+Only when a schedule has no usable standing permit yet (a newly installed
+schedule before permit upkeep, an expired or mismatched permit, or a heartbeat
+item) does the claiming agent ask `team-services` with `run_context.sign` on
+`svc.scheduler` (`custom_agents/scheduled_run_contexts.py`,
+`team_services/scheduler.py`). The scheduler verifies the live claim against
+the asking agent's session (`verified.frame.issuer.agent`, refusing others as
+`claim_not_held`), verifies the schedule is active and vouched (or system
+work), and returns a fresh scheduler-signed protocol 1 root-task token. If
+`svc.scheduler` refuses or does not answer, the agent does not start the run
+and releases the claim so the schedule is retried later. Schedule creation from
+both the gateway (with a command token) and agents (with a root-task token)
+runs through `schedules.install` on `svc.team` (`team_services/schedules.py`),
+recording `owner_vouched` and storing the idempotent reply in the schedule
+write transaction.
 
-Only when a schedule has no usable permit yet (the manager has not looked at
-a new schedule, or issued none for an unvouched owner) does the worker ask
-the manager over NATS (`ScheduledRunContextRequestV1` on the Core NATS subject
-`<prefix>.lead.run_context`, answered on `<prefix>.agent.<id>.run_context`),
-showing its claim. The manager signs only when the schedule row's claim holder
-and claim token match the request and the sender, takes the owner from the
-row with the same rules as above, and answers with the signed context or a
-refusal reason (`custom_agents/scheduled_run_contexts.py`). If the manager
-refuses or does not answer within 20 seconds, the worker does not start the
-run and releases the claim, so the schedule is retried later; a run without a
-signed context or permit would have every tool call refused.
+At a 0.9 instance's first 0.10 start, `instance_upgrades/authority_tokens.py`
+(invoked by the launcher after `installation-authority` is ready and before
+`team-services` or any agent starts) verifies stored 0.9 signed contexts and
+permits once with the old public keys, re-signs them with the active `gateway`
+and `team-services` host certificates, converts vouched schedule contexts into
+`owner_vouched = 1` plus fresh permits, backfills `change_requests.token_digest`,
+reports any expired or unverifiable records to administrators without silently
+dropping rows, and writes `state/upgrades/authority-tokens.json`. From the next
+start on, the three removed 0.9 signing-key variables
+(`ACCESS_GATEWAY_SIGNING_KEY`, `ACCESS_SCHEDULER_SIGNING_KEY`,
+`ACCESS_CONTEXT_VERIFY_KEYS`, and their `_FILE` forms) are refused at startup.
 
 The secure tool broker checks every agent request before it runs anything
 (`secure_tool_broker/access_gate.py`), in both authorization modes: the calling
@@ -6347,8 +6363,9 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   instructions, `SOUL.md`, grant reasons) stays as written; a carried setting
   that names the old id, other than `transport.subject_prefix` and
   `gateway.response_queue_name`, is imported and listed for attention;
-  schedules' signed task contexts name the old id under the old key, so they
-  are dropped and signed again as for any import; plan digests of approved
+  schedules carry their `owner_vouched` flag without old signing keys (version 7
+  of the schedules section drops legacy task contexts on import), and team
+  services on the new instance issues fresh scheduler-signed permits; plan digests of approved
   specialists and skills, MCP approval records and notice ids stay as
   history. MCP record digests and a binding digest that matched are computed
   again. Credentials take the receipt's id (`import_credential_bundle`), and
@@ -6448,28 +6465,30 @@ The message contract (`contracts/messages/v1`, protocol 1) has every process tha
 its messages sign them as a host, with a key of its own, and every receiver check who
 signed against records that chain to the installation's authority keys.
 
-**Where each kind of traffic runs (end of message contract phase 2).** Phase 2 moved to
+**Where each kind of traffic runs (through message contract phase 3, step 5).** Phase 2 moved to
 protocol 1 what the team services answer from shared stores, what an agent answers about
-itself, and who is live. Everything else, the work itself included, stays until phase 3 in
-the 0.9 message format: `MessageEnvelope` messages on the team's work stream
-(`<PREFIX>_WORK`) and on plain NATS subjects under the team's prefix. They name their
-sender without proving it (`agent_signature` is empty), so any process with the team's
-NATS login can send one in another's name. A person's request, a scheduled run and the
-gateway's durable commands to the lead (decision 67) still carry a signed task context,
-which proves whom the work is for (`access_control.task_identity`). The lead acts on those
-commands only with a context the gateway signed
-(`manager_control_runtime.verified_command_person`). A signed context is not tied to one
-message, so a process that holds one, such as an agent working for that person, could
-reuse it until it expires.
+itself, and who is live; phase 3 steps 1–5 added partitions, blobs, dead letters, and
+protocol 1 authority tokens, moved the scheduler role (`run_context.sign` on `svc.scheduler`
+and standing schedule permits) and `schedules.install` (`svc.team`) into `team-services`,
+and removed the old `team.env` signing keys. Remaining work traffic stays until steps 6–10
+in the 0.9 message format (`MessageEnvelope` on `<PREFIX>_WORK` and plain NATS subjects),
+carrying the protocol 1 authority token unchanged in `GatewayContext.task_context` (or
+`GatewayContext.schedule_run.permit`). Who a task or command works for is verified only from
+those protocol 1 authority tokens (`access_control.authority_verifier`,
+`access_control.task_identity`). The lead acts on gateway durable commands only with a
+gateway-signed authority token (`manager_control_runtime.verified_command_person`); custody
+holder checks move to team services in step 7a.
 
-| On protocol 1 (signed messages and records) | In the 0.9 message format until phase 3 |
+| On protocol 1 (signed messages and records) | In the 0.9 message format until phase 3 steps 6–10 |
 | --- | --- |
-| Joining, certificates, revocations (the installation authority) | Work on the work stream: people's requests, delegated tasks and what is sent about them (claims, handbacks, questions, stops, results), and notices to people and agents |
-| Agent sessions and placement (`sessions.*`) | Creating schedules, and scheduled runs and their signing (decision 66) |
-| People's memory, knowledge, topics and schedule lists and controls (`svc.team`) | The gateway's task cancel and inventory, Objectives and a person's standing, as durable commands to the lead's control mailbox (decision 67) |
-| The Tasks page's lists and removals and the context dump setting, relayed to the agent | The other three commands of decision 67, the gateway's task progress, parent-task probe and thread guidance, on `.operational` (decision 68) |
-| Asking an agent (`agent.status`, `.pause`, `.resume`, `.exit`, `task.probe`): other agents, and the gateway for `agent.status` | A lead's guidance for delegated work, through the holder's control mailbox (decision 59) |
-| The `skills.changed` team event | Queued 0.9 dead letters (`<PREFIX>_DEAD_LETTER` and `custom_agents/dead_letter_watch.py`, kept until step 10 retires 0.9 queues) |
+| Joining, certificates, revocations (the installation authority) | Work on the work stream: people's requests, delegated tasks and what is sent about them (claims, handbacks, questions, stops, results), and notices to people and agents (carrying protocol 1 authority tokens) |
+| Agent sessions and placement (`sessions.*`) | The gateway's task cancel and inventory, Objectives and a person's standing, as durable commands to the lead's control mailbox (decision 67) |
+| People's memory, knowledge, topics and schedule lists, creation (`schedules.install`) and controls (`svc.team`) | The other three commands of decision 67, the gateway's task progress, parent-task probe and thread guidance, on `.operational` (decision 68) |
+| Scheduler role (`run_context.sign` on `svc.scheduler` and scheduler-signed standing schedule permits, decision 66) | A lead's guidance for delegated work, through the holder's control mailbox (decision 59) |
+| Authority tokens for root tasks, commands, and scheduled runs (signed by `gateway` and `team-services` host certificates; no signing keys in `team.env`, decision 58) | Queued 0.9 dead letters (`<PREFIX>_DEAD_LETTER` and `custom_agents/dead_letter_watch.py`, kept until step 10 retires 0.9 queues) |
+| The Tasks page's lists and removals and the context dump setting, relayed to the agent | |
+| Asking an agent (`agent.status`, `.pause`, `.resume`, `.exit`, `task.probe`): other agents, and the gateway for `agent.status` | |
+| The `skills.changed` team event | |
 | Protocol 1 dead letters (`UA1_DLQ_<team>`, `dlq.notice`, `team.delete_person_data`, CRIT-1 sweep) | |
 | Agent and host records: who is live, who leads, busy or idle | |
 
@@ -7314,9 +7333,9 @@ so the record is where the gateway can learn it live; `AgentStatus.request_task_
 private attribute the gateway's team view sets from the record (`team_view.record_status`),
 never a field a message can set or a dump can carry. Each turn decides once, when it starts
 (`custom_agents.working_requests.turn_request_id`, kept on `TaskWork.request_task_id`):
-only a task whose signed context the gateway issued for a person, with no schedule, counts,
+only a task whose authority token the gateway issued for a person, with no schedule, counts,
 and its `root_task_id` is the gateway's own request task, which delegated tasks carry
-unchanged. A schedule-run identity or a task without a signed context is answered without
+unchanged. A schedule-run identity or a task without an authority token is answered without
 reading the store, and scheduled runs and system work report nothing. The signed
 `context_id` was not used because for a new request it is a digest of the request's task
 and files (`access_control.ownership.request_context_id`), which the gateway does not keep.
@@ -7853,7 +7872,7 @@ link from each access or change request to its step. The link is made when the
 request is stored, through the `RequestWatcher` port of
 `access_control.requests`, so the access model never imports workflow code; a
 delegated worker's request reaches its parent's step only through the shared,
-verified signed task context. `storage.access_workflow_repository` persists
+verified authority token. `storage.access_workflow_repository` persists
 plans with versions and events. The gateway's workflow page
 (`assistant_gateway.access_workflows_page`) reads each request's current status
 from the access store and decides through the access Inbox. A denied request

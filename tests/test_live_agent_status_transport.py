@@ -53,7 +53,7 @@ from id_generation import new_id
 from runtime_settings.projection import _project_transport
 from runtime_settings.transport import TransportSettings
 from storage.pinned_memory_repository import create_pinned_memory_repository
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 
 pytestmark = [
     pytest.mark.integration,
@@ -238,8 +238,8 @@ async def _gateway_manager_controls_over_nats(tmp_path, live_transport, team_id:
             gateway_context=GatewayContext(
                 canonical_user_id=config.user.canonical_user_id,
                 session_key=session.session_key,
-                task_context=context_signer().issue(
-                    team_id=team_id, person_id=config.user.canonical_user_id, person_roles=("admin",),
+                task_context=signed_task_token(
+                    config.user.canonical_user_id, team_id=team_id, roles=("admin",),
                 ),
             ),
         ),
@@ -377,8 +377,8 @@ async def _gateway_manager_controls_over_nats(tmp_path, live_transport, team_id:
                     gateway_context=GatewayContext(
                         canonical_user_id=config.user.canonical_user_id,
                         session_key=session.session_key,
-                        task_context=context_signer().issue(
-                            team_id=team_id, person_id=config.user.canonical_user_id, person_roles=("admin",),
+                        task_context=signed_task_token(
+                            config.user.canonical_user_id, team_id=team_id, roles=("admin",),
                         ),
                     ),
                 ),

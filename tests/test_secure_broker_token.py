@@ -38,14 +38,19 @@ from secure_tool_broker.defaults import DEFAULT_INTERNAL_BASE_URL
 
 BROKER_TOKEN = "SECURE_TOOL_BROKER_TOKEN"
 KEYRING_PASSWORD = "GOG_KEYRING_PASSWORD"
-SIGNING_KEYS = {"ACCESS_GATEWAY_SIGNING_KEY": "gateway-key", "ACCESS_SCHEDULER_SIGNING_KEY": "scheduler-key"}
 MODES = ("broker", "openshell")
 
 
 @pytest.fixture(autouse=True)
 def _no_host_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     # The host running the tests must not supply the names under test.
-    for name in (BROKER_TOKEN, KEYRING_PASSWORD, *SIGNING_KEYS):
+    for name in (
+        BROKER_TOKEN,
+        KEYRING_PASSWORD,
+        "ACCESS_GATEWAY_SIGNING_KEY",
+        "ACCESS_SCHEDULER_SIGNING_KEY",
+        "ACCESS_CONTEXT_VERIFY_KEYS",
+    ):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(f"{name}_FILE", raising=False)
     for name in ("SECURE_CLI_ENABLED", "SECURITY_LAYER_MODE"):
@@ -111,7 +116,7 @@ def test_onboarding_team_env_always_has_the_broker_token(tmp_path: Path, mode: s
 
     assert values[BROKER_TOKEN].startswith("stb_")
     assert values[KEYRING_PASSWORD].startswith("gog_")
-    assert missing_secret_refusal(config, None, {**SIGNING_KEYS, **values}) is None
+    assert missing_secret_refusal(config, None, values) is None
 
 
 def test_environment_mode_always_lists_the_broker_token(tmp_path: Path) -> None:
@@ -129,7 +134,7 @@ def test_launcher_refuses_to_start_without_the_broker_token_and_names_the_fix(tm
     config = _config(tmp_path)
     env_path = tmp_path / "instance" / "team.env"
 
-    message = missing_secret_refusal(config, env_path, dict(SIGNING_KEYS))
+    message = missing_secret_refusal(config, env_path, {})
 
     assert message is not None
     assert "No SECURE_TOOL_BROKER_TOKEN is set (reason_code=broker_token_missing)" in message
@@ -137,24 +142,18 @@ def test_launcher_refuses_to_start_without_the_broker_token_and_names_the_fix(tm
     assert (
         f"python3 -m scripts.generate_internal_credentials --instance-name tokens --env-file {env_path} --write"
     ) in message
-    assert missing_secret_refusal(config, env_path, {**SIGNING_KEYS, BROKER_TOKEN: "stb_x"}) is None
+    assert missing_secret_refusal(config, env_path, {BROKER_TOKEN: "stb_x"}) is None
 
 
 def test_launcher_refusal_points_to_a_docker_secret_in_environment_mode(tmp_path: Path) -> None:
     config = _environment_mode(_config(tmp_path))
 
-    message = missing_secret_refusal(config, None, dict(SIGNING_KEYS))
+    message = missing_secret_refusal(config, None, {})
 
     assert message is not None
     assert "SECURE_TOOL_BROKER_TOKEN_FILE" in message
     assert "--instance-name tokens --print" in message
     assert "team.env" not in message
-
-
-def test_missing_signing_keys_are_reported_before_the_broker_token(tmp_path: Path) -> None:
-    message = missing_secret_refusal(_config(tmp_path), None, {})
-
-    assert message is not None and "task_context_keys_missing" in message
 
 
 def test_every_process_gets_the_broker_address_and_no_secure_cli_switch(tmp_path: Path) -> None:

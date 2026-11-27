@@ -38,6 +38,7 @@ from custom_agents.instance_delivery_context import configured_owner_route
 from custom_agents.schedule_management import is_system_managed_schedule
 from custom_agents.schedule_repair_guidance import (
     SCHEDULE_OVERDUE_UNCLAIMED,
+    SCHEDULE_OWNER_NOT_VOUCHED,
     administrators_act,
     person_explanation,
 )
@@ -85,8 +86,15 @@ def overdue_unclaimed(row: dict[str, Any], *, team_id: str, now: datetime) -> bo
     return not (row.get("claimed_by_agent_id") and lease and lease > now)
 
 
-def schedule_block_reason(store: Any, schedule: Any) -> str:
-    """The recorded worker block, or ``schedule_overdue_unclaimed`` when none is recorded."""
+def schedule_block_reason(store: Any, schedule: Any, *, row: dict[str, Any] | None = None) -> str:
+    """The recorded permit/worker block, or ``schedule_overdue_unclaimed`` when none is recorded."""
+    stored = row if row is not None else store.get_row(schedule.schedule_id)
+    if (
+        stored is not None
+        and stored.get("run_permit_refusal") == "owner_not_vouched"
+        and not stored.get("owner_vouched")
+    ):
+        return SCHEDULE_OWNER_NOT_VOUCHED
     team_id = schedule.claim_team_id
     binding = (
         store.worker_records.get_binding(schedule.schedule_id, team_id=team_id, active=True)
@@ -117,7 +125,7 @@ def not_running(store: Any, schedule: Any, *, now: datetime) -> tuple[str, str] 
         return None
     if not overdue:
         return None
-    return str(row["next_fire_at"]), schedule_block_reason(store, schedule)
+    return str(row["next_fire_at"]), schedule_block_reason(store, schedule, row=row)
 
 
 def _label(schedule: Any) -> str:
@@ -172,7 +180,7 @@ class StuckSchedules:
             schedule = self.store.get_scheduled_message(row["schedule_id"])
             if schedule is None:
                 continue
-            reason = schedule_block_reason(self.store, schedule)
+            reason = schedule_block_reason(self.store, schedule, row=row)
             system = is_system_managed_schedule(schedule)
             found.append(
                 StuckFinding(
@@ -253,7 +261,7 @@ class StuckSchedules:
             ):
                 continue
             due_text = str(row["next_fire_at"])
-            reason = schedule_block_reason(self.store, schedule)
+            reason = schedule_block_reason(self.store, schedule, row=row)
             missed.append(
                 MissedRun(
                     schedule_id=schedule.schedule_id,

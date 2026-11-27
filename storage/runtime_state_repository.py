@@ -177,8 +177,14 @@ class _RelationalRuntimeStateRepository:
 
     _dialect: SqlDialect
     _logger: logging.Logger
+    _authority_verifier: Any = None
 
     _recovery_lock_clause = ""
+
+    def set_authority_verifier(self, verifier: Any) -> None:
+        """Bind an explicit ``AuthorityTokenVerifier`` for change-ledger task attribution."""
+
+        self._authority_verifier = verifier
 
     def _begin_recovery(self, conn: Any) -> None:
         """Start the locking transaction (each backend overrides this)."""
@@ -609,7 +615,13 @@ class _RelationalRuntimeStateRepository:
                     payload_json = excluded.payload_json, payload_digest = excluded.payload_digest""",
                 (owner_agent_id, section, record_id, payload, digest))
             if task is not None:
-                self._record_task_outcome(conn, owner_agent_id, team_id, task, previous_state=previous_state)
+                self._record_task_outcome(
+                    conn,
+                    owner_agent_id,
+                    team_id,
+                    task,
+                    previous_state=previous_state,
+                )
 
     def _checked_task_snapshot(
         self, conn: Any, owner_agent_id: str, task_id: str, payload: str, *, saved: bool,
@@ -640,7 +652,14 @@ class _RelationalRuntimeStateRepository:
 
         from custom_messages.enums import ProgressState
 
-        record_task_request_state(conn, self._dialect, team_id=team_id, task=task, now=datetime.now(timezone.utc))
+        record_task_request_state(
+            conn,
+            self._dialect,
+            team_id=team_id,
+            task=task,
+            now=datetime.now(timezone.utc),
+            verifier=self._authority_verifier,
+        )
         if task.state != previous_state:
             # Only on entering a state: a later save of an old failure must
             # not reopen a problem a newer run resolved.
@@ -946,6 +965,7 @@ class _RelationalRuntimeStateRepository:
                 conn, self._dialect, team_id=team_id,
                 task=task.model_copy(update={"state": ProgressState.CANCELLED}),
                 now=datetime.now(timezone.utc),
+                verifier=self._authority_verifier,
             )
 
     def get_task_cancellation(
@@ -1089,9 +1109,16 @@ class SqliteRuntimeStateRepository(_RelationalRuntimeStateRepository):
 
     _dialect = SQLITE
 
-    def __init__(self, db_path: str, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        db_path: str,
+        logger: Optional[logging.Logger] = None,
+        *,
+        authority_verifier: Any = None,
+    ):
         self._db_path = db_path
         self._logger = logger or logging.getLogger(__name__)
+        self._authority_verifier = authority_verifier
         self._init_schema()
 
 
@@ -1119,10 +1146,17 @@ class PostgresRuntimeStateRepository(_RelationalRuntimeStateRepository):
         # serialize overlapping source sets without relying on SQLite syntax.
         pass
 
-    def __init__(self, dsn: str, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        dsn: str,
+        logger: Optional[logging.Logger] = None,
+        *,
+        authority_verifier: Any = None,
+    ):
         self._dsn = dsn
         self._db_path = ""
         self._logger = logger or logging.getLogger(__name__)
+        self._authority_verifier = authority_verifier
         validate_postgres_connection(self._dsn)
         self._init_schema()
 
@@ -1134,6 +1168,7 @@ def create_runtime_state_repository(
     storage_settings: StorageSettings,
     *,
     logger: Optional[logging.Logger] = None,
+    authority_verifier: Any = None,
 ) -> RuntimeStateRepository:
     capabilities = describe_storage_capabilities(storage_settings)
     require_repository_backend(
@@ -1142,9 +1177,17 @@ def create_runtime_state_repository(
         capability_supported=capabilities.supports_runtime_repositories,
     )
     if storage_settings.backend == STORAGE_BACKEND_SQLITE and storage_settings.sqlite_path:
-        return SqliteRuntimeStateRepository(storage_settings.sqlite_path, logger=logger)
+        return SqliteRuntimeStateRepository(
+            storage_settings.sqlite_path,
+            logger=logger,
+            authority_verifier=authority_verifier,
+        )
     if storage_settings.backend == STORAGE_BACKEND_POSTGRES and storage_settings.postgres_dsn:
-        return PostgresRuntimeStateRepository(storage_settings.postgres_dsn, logger=logger)
+        return PostgresRuntimeStateRepository(
+            storage_settings.postgres_dsn,
+            logger=logger,
+            authority_verifier=authority_verifier,
+        )
     raise NotImplementedError(
         f"RuntimeStateRepository has no implementation for backend {storage_settings.backend!r}."
     )

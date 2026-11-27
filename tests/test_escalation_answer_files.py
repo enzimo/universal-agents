@@ -74,7 +74,7 @@ from custom_agents.structured_llm_messages import (
     TaskQueryAction,
     TaskResponseAction,
 )
-from custom_agents.task_context_runtime import context_verifier, sign_system_context
+from custom_agents.task_context_runtime import context_verifier
 from custom_agents.task_manager import TaskManager
 from custom_messages.contracts.delegated_work_v1 import DelegatedTaskClaimedV1
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
@@ -84,7 +84,7 @@ from custom_messages.enums import MessageMetaType, ProgressState, RequesterType,
 from custom_messages.transport_codec import decode_envelope, encode_envelope
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import forget_task_context_keys, use_gateway_key, use_scheduler_key
+from tests.broker_access_support import forget_task_context_keys
 from tests.task_work_support import use_agent
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, TEAM, _admit, _answer, _lead
 from tests.test_gateway_parallel_threads import _send, _web_chat_thread
@@ -113,8 +113,11 @@ MAINTENANCE_CONVERSATION = "conv_maintenance"
 
 @pytest.fixture(autouse=True)
 def _keys(monkeypatch: pytest.MonkeyPatch):
-    # The gateway signs with the test gateway key; agents trust it.
-    use_gateway_key(monkeypatch)
+    # The gateway signs with the test protocol 1 gateway certificate; agents trust it.
+    from tests.broker_access_support import use_broker_authority_verifier
+
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -411,8 +414,10 @@ async def test_an_answer_to_a_workers_escalation_keeps_its_file_on_the_request_a
             work_id = team.work_id
             # The person answered the lead's question in the escalation, under a context bound to it and the file.
             assert answer.parent_task_id == escalation_id
-            signed = context_verifier().verify(team.answer.msg_meta.gateway_context.task_context)
-            assert (signed.root_task_id, signed.context_id) == (escalation_id, answer_context_id(answer))
+            signed = context_verifier().verify_root_task(
+                team.answer.msg_meta.gateway_context.task_context, team_id=TEAM, require_issuer="gateway"
+            )
+            assert (signed.root_task_id, signed.request_id) == (escalation_id, answer_context_id(answer))
 
             # The lead keeps the file on the request: its turn and its own files (the
             # escalation keeps it too; it has ended, and its result below carries it).
@@ -836,13 +841,18 @@ async def test_a_worker_keeps_files_only_from_its_escalations_results_and_only_f
 async def _admit_maintenance_run(worker: Any, task_id: str) -> None:
     """Admit a maintenance run as the scheduler signs one: system work for no person, in its own conversation."""
 
+    from tests.broker_access_support import signed_scheduler_token
+
     meta = MessageMeta(
         conversation_id=MAINTENANCE_CONVERSATION,
         msg_correlation_id=f"corr_{task_id}",
         requester_type=RequesterType.AGENT_REQUESTER,
-        gateway_context=GatewayContext(),
+        gateway_context=GatewayContext(
+            task_context=signed_scheduler_token(
+                None, team_id=TEAM, root_task_id=task_id, schedule_id="sched_maintenance"
+            )
+        ),
     )
-    sign_system_context(meta, team_id=TEAM, schedule_id="sched_maintenance")
     task = Task(task_id=task_id, task_type=MessageMetaType.REQUEST, problem_statement="Weekly maintenance check.")
     await task_message_runtime._handle_task_request(
         worker, task, MessageHeader(from_agent_id="scheduler", response_routing_key="scheduler_response"), meta
@@ -866,7 +876,6 @@ async def test_a_maintenance_run_keeps_none_of_the_files_its_escalations_answer_
     test above).
     """
 
-    use_scheduler_key(monkeypatch)
     worker = _worker(tmp_path, layout)
     object.__setattr__(worker, "access_role", "system")  # a built-in system agent runs maintenance
     await _admit_maintenance_run(worker, "task_maintenance_1")

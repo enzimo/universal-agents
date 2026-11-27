@@ -42,7 +42,7 @@ from custom_messages.enums import (
     ProgressState,
     ScheduleManagementClass,
 )
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import CEDAR_BINARY, needs_cedar, use_signed_contexts
 
 
@@ -51,7 +51,7 @@ def owner_context(person_id: str = "owner", team_id: str = "team") -> GatewayCon
 
     return GatewayContext(
         canonical_user_id=person_id,
-        task_context=context_signer().issue(team_id=team_id, person_id=person_id, person_roles=("owner",)),
+        task_context=signed_task_token(person_id, team_id=team_id, roles=("owner",)),
     )
 
 
@@ -262,14 +262,14 @@ async def test_inspection_repairs_custom_eligibility_through_real_settings_and_b
     from access_control.changes import ChangeApproval
     from custom_agents import access_runtime
     from custom_messages.contracts.access_v2 import ChangeApprovalMode
-    from tests.broker_access_support import context_signer, context_verify_keys
+    from tests.broker_access_support import signed_task_token, use_broker_authority_verifier
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+    use_broker_authority_verifier()
     access_runtime._runtime_access.cache_clear()
     lead.authorization_config = {"enabled": False}
     info = lead.task_manager.get_task_info("request")
-    info.meta.gateway_context.task_context = context_signer().issue(
-        team_id=lead.team_id, person_id="owner", person_roles=("owner",)
+    info.meta.gateway_context.task_context = signed_task_token(
+        "owner", team_id=lead.team_id, roles=("owner",), root_task_id="request"
     )
     bind_task("request")
     settings = RuntimeSettingsService(lead)

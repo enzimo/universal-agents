@@ -121,6 +121,8 @@ class OperatorContext:
     named_agent_type: Optional[str]
     is_team_lead: bool
     owner_agent_name: Optional[str]
+    instance_root: Optional[Path] = None
+    instance_config: Any = None
 
 
 def _collect_descendant_task_ids(task_manager, task_id: str) -> list[str]:
@@ -266,6 +268,8 @@ def _resolve_operator_storage_context(args: argparse.Namespace) -> OperatorConte
                 named_agent_type=instance_config.manager.named_agent_type,
                 is_team_lead=(instance_config.manager.named_agent_type == AGENT_DEFAULTS.named_agent_type.value),
                 owner_agent_name=instance_config.manager.named_agent_type,
+                instance_root=instance_config.instance_root_path,
+                instance_config=instance_config,
             )
 
     config_path = _ensure_config_ready(args.config)
@@ -312,29 +316,93 @@ def _resolve_operator_storage_context(args: argparse.Namespace) -> OperatorConte
         named_agent_type=args.agent_type,
         is_team_lead=bool(args.is_lead),
         owner_agent_name=args.agent_type,
+        instance_root=Path(instance_root).expanduser().resolve() if instance_root else None,
     )
 
 
-def _verified_deferred_task_owner(context: OperatorContext, task_id: str, msg_meta: Any) -> Optional[str]:
+def _operator_authority_verifier(context: OperatorContext) -> Any:
+    """One-shot ``AuthorityTokenVerifier`` backed by ``TrustReader.snapshot`` (or process override in tests)."""
+
+    from access_control.authority_verifier import AuthorityTokenVerifier, get_process_verifier
+    from storage.access_repository import AccessRepository
+
+    existing = get_process_verifier()
+    if existing is not None:
+        return existing
+    if context.instance_root is None:
+        return AuthorityTokenVerifier(None, people=AccessRepository(context.storage_settings))
+    from runtime_settings.instance_layout import InstanceLayout
+
+    layout = InstanceLayout.at(context.instance_root)
+    if not layout.trust_bootstrap_path.exists():
+        logger.warning(
+            "Protocol 1 trust bootstrap bundle is unavailable for operator verification; failing closed. "
+            "event=operator_trust_bootstrap_missing path=%s",
+            layout.trust_bootstrap_path,
+        )
+        return AuthorityTokenVerifier(None, people=AccessRepository(context.storage_settings))
+
+    async def _snapshot() -> Any:
+        from custom_transport.nats_adapter import NatsTransportAdapter
+        from custom_transport.protocol1.trust_reader import (
+            TrustReader,
+            trust_reader_transport_config,
+        )
+        from custom_transport.subjects import NatsSubjectMapper
+
+        if context.instance_config is None:
+            return None
+        adapter = NatsTransportAdapter(
+            config=trust_reader_transport_config(context.instance_config, reader_id="strands-operator"),
+            mapper=NatsSubjectMapper(team_id=str(context.team_id or "")),
+            logger=logger,
+        )
+        await adapter.connect(reconcile_topology=False)
+        try:
+            return await TrustReader.snapshot(layout, "strands-operator", adapter.nats_connection)
+        finally:
+            await adapter.close()
+
+    try:
+        reader = asyncio.run(_snapshot())
+    except Exception as exc:  # noqa: BLE001 - fail closed when NATS or trust records are unavailable
+        logger.warning(
+            "Could not snapshot protocol 1 trust records for operator verification; failing closed. "
+            "event=operator_trust_snapshot_failed error=%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        reader = None
+    return AuthorityTokenVerifier(reader, people=AccessRepository(context.storage_settings))
+
+
+def _verified_deferred_task_owner(
+    context: OperatorContext,
+    task_id: str,
+    msg_meta: Any,
+    *,
+    verifier: Any = None,
+) -> Optional[str]:
     """The person a deferred task verifiably works for, or None (logged).
 
     No agent admitted this task, so nothing recorded its owner. The operator
-    decides it here like admission does: only from the task's signed context
+    decides it here like admission does: only from the task's authority token
     or schedule run identity, checked by the one resolver
-    (``access_control.task_identity.resolve_task_identity``) with the
-    verifying keys in this process's environment. The person the message
-    names is never used; an expired or unverifiable identity archives the
-    task for nobody.
+    (``access_control.task_identity.resolve_task_identity``) against a one-shot
+    ``TrustReader.snapshot`` of ``UA1_CERTS``. The person the message names is
+    never used; an expired, unverifiable, or offline identity archives the task
+    for nobody.
     """
 
-    from access_control.identity import ContextVerifier, IdentityRejected
+    from access_control.authority_verifier import IdentityRejected
     from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
 
     gateway_context = getattr(msg_meta, "gateway_context", None)
+    active_verifier = verifier if verifier is not None else _operator_authority_verifier(context)
     try:
         return resolve_task_identity(
-            verifier=ContextVerifier.from_env(),
-            # An empty team id refuses every context instead of skipping the team check.
+            verifier=active_verifier,
+            # An empty team id refuses every token instead of skipping the team check.
             team_id=str(context.team_id or ""),
             task_context=getattr(gateway_context, "task_context", None),
             schedule_run=getattr(gateway_context, "schedule_run", None),
@@ -363,10 +431,12 @@ def _archive_failed_envelope_task(
 ) -> str:
     from custom_agents.task_manager import TaskManager
 
+    verifier = _operator_authority_verifier(context)
     task_manager = TaskManager(
         db_path=context.db_path,
         logger=logging.getLogger("TaskRuntimeOperator"),
         storage_settings=context.storage_settings,
+        authority_verifier=verifier,
     )
     task_manager.set_owner_identity(
         owner_agent_id,
@@ -378,7 +448,12 @@ def _archive_failed_envelope_task(
         task_request,
         msg_header,
         msg_meta,
-        owner_person_id=_verified_deferred_task_owner(context, task_request.task_id, msg_meta),
+        owner_person_id=_verified_deferred_task_owner(
+            context,
+            task_request.task_id,
+            msg_meta,
+            verifier=verifier,
+        ),
     )
     if not added:
         raise RuntimeError(f"Failed to admit operator-selected task {task_request.task_id} into the archive path.")

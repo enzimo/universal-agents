@@ -17,7 +17,11 @@ from custom_messages.enums import (
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_tools.providers.objective_work import _build_objective_work_schedule
-from tests.broker_access_support import forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    use_broker_authority_verifier,
+    use_scheduler_key,
+)
 from test_objective_work_sessions import _manager, _objective
 from test_turn_action_outbox import _make_agent
 
@@ -25,6 +29,7 @@ from test_turn_action_outbox import _make_agent
 @pytest.fixture(autouse=True)
 def _signed_task_contexts(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     use_scheduler_key(monkeypatch)
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 

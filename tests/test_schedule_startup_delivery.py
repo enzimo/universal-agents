@@ -31,6 +31,8 @@ class SubscriptionProbeComplete(Exception):
 
 def startup_probe(tmp_path):
     agent = lead_delivery_probe()
+    agent.is_team_lead = True
+    agent.named_agent_type = "TeamArchitect"
     agent.task_manager = SimpleNamespace(
         _db_path=str(tmp_path / "runtime.db"),
         storage_settings=resolve_storage_settings(
@@ -47,6 +49,7 @@ def startup_probe(tmp_path):
     agent.authorization_config = {"enabled": False}
     agent.on_nats_operational_delivery = AsyncMock()
     agent._cleanup_nats_runtime_on_exit = AsyncMock()
+    agent._bind_task_manager_authority_verifier = lambda: None
     agent._nats_mapper = lambda: NatsSubjectMapper(team_id=agent.team_id)
     for method in (
         "_ensure_schedule_store",
@@ -57,19 +60,32 @@ def startup_probe(tmp_path):
     return agent
 
 
-def schedule_envelope(route):
+def schedule_envelope(route, team_id: str):
+    from custom_agents.internal_improvement_runtime import (
+        INTERNAL_IMPROVEMENT_AGENT_TYPE,
+        INTERNAL_IMPROVEMENT_SCHEDULE_KIND,
+        internal_improvement_schedule_id,
+        internal_improvement_schedule_name,
+    )
+    from custom_messages.contracts.schedule_v1 import ScheduleTaskMemory
+    from custom_messages.enums import ScheduleManagementClass, SystemScheduleKind
+
     return MessageEnvelope(
         msg_content=ScheduledMessage(
-            schedule_id="startup_ensure",
-            schedule_name="Startup recurring work",
+            schedule_id=internal_improvement_schedule_id(team_id),
+            schedule_name=internal_improvement_schedule_name(team_id),
+            management_class=ScheduleManagementClass.SYSTEM,
+            system_schedule_kind=SystemScheduleKind.INTERNAL_IMPROVEMENT,
             install_mode="ensure",
             interval_ms=60_000,
+            repeat_count=None,
             payload=Task(
                 task_type=MessageMetaType.REQUEST,
                 problem_statement="Run scheduled work later.",
             ),
             payload_header=MessageHeader(from_agent_id="scheduler"),
-            payload_meta=MessageMeta(),
+            payload_meta=MessageMeta(to_named_agent_type=INTERNAL_IMPROVEMENT_AGENT_TYPE),
+            schedule_memory=ScheduleTaskMemory(schedule_kind=INTERNAL_IMPROVEMENT_SCHEDULE_KIND),
         ),
         msg_header=MessageHeader(from_agent_id="scheduler", to_routing_path=route),
     )
@@ -81,6 +97,8 @@ def schedule_envelope(route):
 async def test_startup_persists_schedule_before_subscription_returns(
     tmp_path, route_kind, preopened_store, caplog
 ):
+    from custom_agents.internal_improvement_runtime import internal_improvement_schedule_id
+
     agent = startup_probe(tmp_path)
     original_store = agent._ensure_schedule_store() if preopened_store else None
     route = agent.id if route_kind == "direct" else agent.team_id
@@ -93,7 +111,7 @@ async def test_startup_persists_schedule_before_subscription_returns(
         # NATS may run this callback before subscribe_route returns to startup.
         await kwargs["handler"](
             InboundDelivery(
-                envelope=schedule_envelope(route),
+                envelope=schedule_envelope(route, agent.team_id),
                 logical_route=route,
                 transport_subject=agent._nats_mapper().route_subject(route),
                 _ack=ack,
@@ -120,7 +138,7 @@ async def test_startup_persists_schedule_before_subscription_returns(
     if original_store is not None:
         assert agent._schedule_store is original_store
     reopened = ScheduleStore(db_path=agent.task_manager._db_path)
-    stored = reopened.get_scheduled_message("startup_ensure")
+    stored = reopened.get_scheduled_message(internal_improvement_schedule_id(agent.team_id))
     assert stored is not None
     assert stored.install_mode == "ensure"
 
@@ -286,9 +304,11 @@ async def test_live_backlogged_schedule_is_persisted_during_startup(
     agent._ensure_nats_transport_adapter = lambda: receiver
     agent._nats_mapper = lambda: mapper
     try:
+        from custom_agents.internal_improvement_runtime import internal_improvement_schedule_id
+
         await publisher.connect(reconcile_topology=True)
         await publisher.publish(
-            envelope=schedule_envelope(route),
+            envelope=schedule_envelope(route, agent.team_id),
             routing_key=route,
             options=TransportPublishOptions(),
         )
@@ -296,7 +316,7 @@ async def test_live_backlogged_schedule_is_persisted_during_startup(
             await agent._connect_nats()
         assert "Exception processing NATS delivery" not in caplog.text
         reopened = ScheduleStore(db_path=agent.task_manager._db_path)
-        assert reopened.get_scheduled_message("startup_ensure") is not None
+        assert reopened.get_scheduled_message(internal_improvement_schedule_id(agent.team_id)) is not None
         assert agent._scheduler_wake.is_set()
     finally:
         await receiver.close()

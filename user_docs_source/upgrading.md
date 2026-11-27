@@ -297,6 +297,45 @@ supported, because it may not read what a newer one saved.
   start the instance once with the launcher first (the Docker image, or
   `docker/launch_headless.py`), which checks the ids and then upgrades the
   file.
+- **From 0.9: authority tokens replace signed task contexts (two-start upgrade).**
+  In 0.10, who a task or scheduled run works for is proven only by protocol 1
+  authority tokens signed with the `gateway` and `team-services` host
+  certificates that the installation authority manages. The old 0.9 signing-key
+  variables (`ACCESS_GATEWAY_SIGNING_KEY`, `ACCESS_SCHEDULER_SIGNING_KEY`,
+  `ACCESS_CONTEXT_VERIFY_KEYS`, and their `_FILE` Docker secret forms) are
+  removed from `team.env` and container secrets. Upgrade in two steps:
+  1. **First 0.10 start — keep your 0.9 keys in place.** Leave the old variables
+     in `team.env` or Docker secrets for this first start. After the
+     installation authority starts and before `team-services`, the gateway, and
+     agents start, the launcher runs a one-time conversion
+     (`assistant_cli.py upgrade authority-tokens`) that checks every stored 0.9
+     signed task context and schedule permit (waiting tasks, deferred messages,
+     handbacks, schedules, permits, and gateway deliveries) with the old public
+     keys and re-signs them as protocol 1 authority tokens with the same person,
+     request id, and remaining lifetime (0.9 scheduled runs that were signed
+     with no owner roles receive the signed unvouched marker so they stay
+     roleless after the upgrade). No runtime service or model-running
+     process ever receives the old keys. If your 0.9 instance has no stored
+     records that need conversion, this first start still succeeds without
+     touching NATS. Once done, 0.10 writes
+     `state/upgrades/authority-tokens.json` and logs a warning naming the old
+     variables to remove (`event=authority_token_conversion_remove_old_keys`).
+     Any stored record that was already expired or could not be verified is
+     never silently dropped: its unparseable context is cleared and every
+     affected record is logged at startup and reported to administrators in one
+     Access Inbox notice.
+  2. **Before the next restart — remove the old variables.** Delete
+     `ACCESS_GATEWAY_SIGNING_KEY`, `ACCESS_SCHEDULER_SIGNING_KEY`, and
+     `ACCESS_CONTEXT_VERIFY_KEYS` (and any `_FILE` variants) from `team.env`
+     and your Docker secrets or container environment. From the second start on
+     (once `state/upgrades/authority-tokens.json` exists), startup refuses any
+     of those variables with exit code 2 and names them.
+  - **If the old 0.9 keys were lost before the first start:** startup refuses
+    when stored legacy records exist rather than silently clearing them. Start
+    once with `--allow-unverifiable-authority-tokens`, or run
+    `assistant_cli.py upgrade authority-tokens --config <instance_config.yaml> --allow-unverifiable`
+    while the instance is stopped, to clear unverifiable contexts and report
+    them to administrators in the Access Inbox.
 - **From 0.9: room for the message streams.** At its first start 0.10 creates
   each team's new message streams, and the NATS server sets each stream's
   whole size limit aside on its storage at once: about 2.1 GiB per team at the

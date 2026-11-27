@@ -58,12 +58,13 @@ from custom_agents.schedule_management import (
     ScheduleMutationOperation,
     ScheduleMutationPermit,
     SystemScheduleMutationDenied,
+    effective_system_schedule_kind,
     is_system_managed_schedule,
     require_schedule_mutation_permit,
     schedule_control_state_digest,
     schedule_reviewed_state_digest,
 )
-from custom_messages.enums import ChangeRefusal, ScheduleManagementClass
+from custom_messages.enums import ChangeRefusal, ScheduleManagementClass, SystemScheduleKind
 from custom_messages.contracts.routing_v1 import PERSON_GATEWAY_FIELDS
 from default_values import STORAGE_DEFAULTS
 from id_generation import new_id
@@ -72,7 +73,6 @@ from storage.operation_outcomes import CommandOutcome, OutcomeAlreadyStored
 from storage.schedule_repository import UNFINISHED_RUNS, RowWrite, create_schedule_repository
 
 if TYPE_CHECKING:
-    from custom_messages.contracts.access_v2 import SignedSchedulePermitV1
     from custom_messages.contracts.schedule_v1 import ScheduledMessage, ScheduleTaskMemory
 
 logger = logging.getLogger(__name__)
@@ -550,6 +550,28 @@ def _edited_memory(
     return memory
 
 
+def _merge_replace_memory(
+    current: Optional["ScheduleTaskMemory"],
+    incoming: Optional["ScheduleTaskMemory"],
+) -> Optional["ScheduleTaskMemory"]:
+    """Keep scheduler-owned ledger (and unchanged notes verbatim) across ``schedules.install(mode='replace')``."""
+
+    if incoming is None:
+        return current
+    if current is None:
+        return incoming
+    if (
+        incoming.schedule_kind == current.schedule_kind
+        and incoming.policy == current.policy
+        and incoming.state == current.state
+        and incoming.domain_schema_hint == current.domain_schema_hint
+    ):
+        return current
+    merged = incoming.model_copy(deep=True)
+    merged.ledger = current.ledger.model_copy(deep=True)
+    return merged
+
+
 # Why a claimed schedule must not start its run (``schedule_stopped_reason``).
 SCHEDULE_TURNED_OFF = "turned_off"
 SCHEDULE_PAUSED = "paused"
@@ -665,6 +687,29 @@ def _require_record_digest(current: "ScheduledMessage", expected: Optional[str])
 SCHEDULE_INSTALLED = "installed"
 SCHEDULE_REPLACED = "replaced"
 SCHEDULE_KEPT = "kept"  # create_only found a stored schedule with the id and left it as it is
+SCHEDULE_REFRESHED = "refreshed"
+
+
+@dataclass(frozen=True)
+class ScheduleInstallResult:
+    """Outcome of one atomic ``ScheduleStore.install`` transaction."""
+
+    state: str
+    schedule_id: str
+    timing_revision: int
+    next_fire_at: Optional[str]
+    seen_version: str
+    previous: Optional["ScheduledMessage"] = None
+    saved: Optional["ScheduledMessage"] = None
+
+
+class ScheduleInstallRefused(RuntimeError):
+    """A typed refusal from ``ScheduleStore.install`` matching ``schedules.install.reply`` outcomes."""
+
+    def __init__(self, outcome: str, message: str, *, current_version: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+        self.current_version = current_version
 
 
 # A person set a new run time for a one-time schedule while its run was under way.
@@ -793,6 +838,8 @@ class ScheduleStore:
         system_mutation_request_binding: Optional[dict[str, Any]] = None,
         deferred_message: DeferredMessageClaim | None = None,
         create_only: bool = False,
+        owner_vouched: Optional[bool] = None,
+        delivery_ref: Optional[str] = None,
     ) -> str:
         """Install a schedule: create it, or replace the stored definition of one with its id.
 
@@ -823,7 +870,12 @@ class ScheduleStore:
         def decide(row: Optional[dict[str, Any]]) -> RowWrite:
             if row is None:
                 remaining = msg.repeat_count if remaining_count_override is _UNSET_REMAINING_COUNT else remaining_count_override
-                return RowWrite(columns=_definition_columns(msg, remaining_count=remaining), insert=True, result=SCHEDULE_INSTALLED)
+                columns = _definition_columns(msg, remaining_count=remaining)
+                if owner_vouched is not None:
+                    columns["owner_vouched"] = 1 if owner_vouched else 0
+                if delivery_ref is not None:
+                    columns["delivery_ref"] = delivery_ref
+                return RowWrite(columns=columns, insert=True, result=SCHEDULE_INSTALLED)
             if create_only:
                 return RowWrite(result=SCHEDULE_KEPT)
             current = _row_message(row, self._logger)
@@ -842,7 +894,15 @@ class ScheduleStore:
                 remaining = _runs_after_edit(row.get("remaining_count"), msg, current)
             written = msg.model_copy(deep=True)
             written.timing_revision = current.timing_revision + int(_next_run_changed(msg, current))
-            return RowWrite(columns=_definition_columns(written, remaining_count=remaining), result=SCHEDULE_REPLACED)
+            columns = _definition_columns(written, remaining_count=remaining)
+            if owner_vouched is not None:
+                columns["owner_vouched"] = 1 if owner_vouched else 0
+            elif (row.get("owner_canonical_user_id") or None) != columns.get("owner_canonical_user_id"):
+                # Owner changed without an explicit vouching decision: never inherit the previous owner's vouch.
+                columns["owner_vouched"] = 0
+            if delivery_ref is not None:
+                columns["delivery_ref"] = delivery_ref
+            return RowWrite(columns=columns, result=SCHEDULE_REPLACED)
 
         try:
             write = self._repository.write_locked(
@@ -858,6 +918,283 @@ class ScheduleStore:
             "Schedule %s %s, next fire at %s", msg.schedule_id, outcome, msg.next_fire_at
         )
         return outcome
+
+    def install(
+        self,
+        msg: "ScheduledMessage",
+        *,
+        mode: str,
+        team_id: str,
+        owner_id: str,
+        owner_vouched: bool,
+        delivery_ref: Optional[str] = None,
+        expected_record_digest: Optional[str] = None,
+        require_seen_version_on_update: bool = False,
+        allow_team_owner_change: bool = False,
+        check_existing: Optional[Callable[["ScheduledMessage"], None]] = None,
+        system_mutation_permit_fn: Optional[
+            Callable[["ScheduledMessage", "ScheduledMessage"], Optional[ScheduleMutationPermit]]
+        ] = None,
+        command_outcome: Optional[CommandOutcome] = None,
+    ) -> ScheduleInstallResult:
+        """Install a schedule atomically (``create``, ``replace``, ``ensure``, ``refresh``) with its command outcome."""
+
+        prepare_schedule_for_add(
+            msg,
+            claim_team_id=team_id,
+            default_cron_timezone=self.default_cron_timezone,
+        )
+
+        def _insert_new() -> RowWrite:
+            columns = _definition_columns(msg, remaining_count=msg.repeat_count)
+            columns["owner_vouched"] = 1 if owner_vouched else 0
+            columns["run_permit_refusal"] = None
+            if delivery_ref is not None:
+                columns["delivery_ref"] = delivery_ref
+            digest = schedule_record_digest(msg)
+            return RowWrite(
+                columns=columns,
+                insert=True,
+                listed_digest=digest,
+                result=ScheduleInstallResult(
+                    state=SCHEDULE_INSTALLED,
+                    schedule_id=msg.schedule_id,
+                    timing_revision=msg.timing_revision,
+                    next_fire_at=msg.next_fire_at,
+                    seen_version=digest,
+                    previous=None,
+                    saved=msg,
+                ),
+            )
+
+        def decide(row: Optional[dict[str, Any]]) -> RowWrite:
+            if mode == "create":
+                if row is not None:
+                    raise ScheduleInstallRefused("id_in_use", f"Schedule {msg.schedule_id} already exists.")
+                return _insert_new()
+
+            if mode == "ensure":
+                if row is None:
+                    return _insert_new()
+                current = _row_message(row, self._logger)
+                existing_owner = owner_canonical_user_id_for_schedule(current)
+                if current.claim_team_id != team_id or (
+                    existing_owner != owner_id
+                    and not (allow_team_owner_change and is_system_managed_schedule(current))
+                ):
+                    raise ScheduleInstallRefused("id_in_use", f"Schedule {msg.schedule_id} already exists.")
+                digest = schedule_record_digest(current)
+                return RowWrite(
+                    listed_digest=digest,
+                    result=ScheduleInstallResult(
+                        state=SCHEDULE_KEPT,
+                        schedule_id=msg.schedule_id,
+                        timing_revision=current.timing_revision,
+                        next_fire_at=current.next_fire_at,
+                        seen_version=digest,
+                        previous=current,
+                        saved=current,
+                    ),
+                )
+
+            if mode == "replace":
+                if row is None:
+                    return _insert_new()
+                current = _row_message(row, self._logger)
+                existing_owner = owner_canonical_user_id_for_schedule(current)
+                if current.claim_team_id != team_id:
+                    raise ScheduleInstallRefused("id_in_use", f"Schedule {msg.schedule_id} is already in use.")
+                if existing_owner != owner_id and not (
+                    allow_team_owner_change and is_system_managed_schedule(current)
+                ):
+                    raise ScheduleInstallRefused("not_allowed", f"Schedule {msg.schedule_id} belongs to another person.")
+                if is_system_managed_schedule(current) and msg.management_class != ScheduleManagementClass.SYSTEM:
+                    raise ScheduleInstallRefused(
+                        "not_allowed", "A system-managed schedule cannot be replaced as user-managed."
+                    )
+                if check_existing is not None:
+                    check_existing(current)
+                current_digest = schedule_record_digest(current)
+                if require_seen_version_on_update and not expected_record_digest:
+                    raise ScheduleInstallRefused(
+                        "invalid_request", "Changing an existing schedule requires seen_version."
+                    )
+                if expected_record_digest and current_digest != expected_record_digest:
+                    raise ScheduleInstallRefused(
+                        "changed_since_read",
+                        "The schedule changed since you listed it. Refresh and try again.",
+                        current_version=current_digest,
+                    )
+                written = msg.model_copy(deep=True)
+                written.schedule_memory = _merge_replace_memory(
+                    _stored_message(row).schedule_memory, written.schedule_memory
+                )
+                written.timing_revision = current.timing_revision + int(_next_run_changed(msg, current))
+                permit = (
+                    system_mutation_permit_fn(current, written)
+                    if system_mutation_permit_fn is not None and is_system_managed_schedule(current)
+                    else None
+                )
+                self._require_replace_authority(
+                    current,
+                    written,
+                    permit=permit,
+                    operation=ScheduleMutationOperation.UPDATE,
+                    request_binding=None,
+                )
+                if written.repeat_count != row.get("repeat_count"):
+                    remaining = written.repeat_count
+                else:
+                    remaining = _runs_after_edit(row.get("remaining_count"), written, current)
+                was_vouched = bool(row.get("owner_vouched"))
+                columns = _definition_columns(written, remaining_count=remaining)
+                columns["owner_vouched"] = 1 if owner_vouched else 0
+                columns["run_permit_refusal"] = None
+                if not owner_vouched or was_vouched != owner_vouched:
+                    columns["run_permit_json"] = None
+                    columns["owner_permit_json"] = None
+                    columns["run_permit_recheck_at"] = None
+                if delivery_ref is not None:
+                    columns["delivery_ref"] = delivery_ref
+                if existing_owner != owner_id:
+                    columns["run_permit_recheck_at"] = None
+                new_digest = schedule_record_digest(written)
+                return RowWrite(
+                    columns=columns,
+                    listed_digest=new_digest,
+                    result=ScheduleInstallResult(
+                        state=SCHEDULE_REPLACED,
+                        schedule_id=msg.schedule_id,
+                        timing_revision=written.timing_revision,
+                        next_fire_at=written.next_fire_at,
+                        seen_version=new_digest,
+                        previous=current,
+                        saved=written,
+                    ),
+                )
+
+            if mode == "refresh":
+                if msg.management_class != ScheduleManagementClass.SYSTEM:
+                    raise ScheduleInstallRefused("not_system_managed", "Only system-managed schedules can be refreshed.")
+                if row is None:
+                    raise ScheduleInstallRefused("not_found", f"Schedule {msg.schedule_id} was not found.")
+                current = _row_message(row, self._logger)
+                if current.claim_team_id != team_id:
+                    raise ScheduleInstallRefused("not_found", f"Schedule {msg.schedule_id} was not found.")
+                if not is_system_managed_schedule(current):
+                    raise ScheduleInstallRefused("not_system_managed", "Only system-managed schedules can be refreshed.")
+                incoming_kind = effective_system_schedule_kind(msg)
+                current_kind = effective_system_schedule_kind(current)
+                if (
+                    incoming_kind is not None
+                    and incoming_kind != SystemScheduleKind.UNCLASSIFIED
+                    and current_kind != incoming_kind
+                ):
+                    raise ScheduleInstallRefused(
+                        "invalid_request", "The refresh kind does not match the stored schedule."
+                    )
+                existing_owner = owner_canonical_user_id_for_schedule(current)
+                if existing_owner and existing_owner != owner_id and not allow_team_owner_change:
+                    raise ScheduleInstallRefused("not_found", f"Schedule {msg.schedule_id} was not found.")
+                if check_existing is not None:
+                    check_existing(current)
+                current_digest = schedule_record_digest(current)
+                if require_seen_version_on_update and not expected_record_digest:
+                    raise ScheduleInstallRefused(
+                        "invalid_request", "Refreshing a schedule requires seen_version."
+                    )
+                if expected_record_digest and current_digest != expected_record_digest:
+                    raise ScheduleInstallRefused(
+                        "changed_since_read",
+                        "The schedule changed since you listed it. Refresh and try again.",
+                        current_version=current_digest,
+                    )
+                candidate = current.model_copy(deep=True)
+                person_changed = existing_owner != owner_id
+                if current_kind == SystemScheduleKind.HEARTBEAT_LAUNCHER:
+                    timing_changed = (
+                        candidate.interval_ms != msg.interval_ms
+                        or candidate.cron_expression != msg.cron_expression
+                        or candidate.cron_timezone != msg.cron_timezone
+                    )
+                    candidate.interval_ms = msg.interval_ms
+                    candidate.cron_expression = msg.cron_expression
+                    candidate.cron_timezone = msg.cron_timezone
+                    if timing_changed:
+                        candidate.timing_revision = current.timing_revision + 1
+                from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
+
+                if candidate.payload_meta is None:
+                    candidate.payload_meta = MessageMeta()
+                if candidate.payload_meta.gateway_context is None:
+                    candidate.payload_meta.gateway_context = GatewayContext()
+                stored_gc = candidate.payload_meta.gateway_context
+                incoming_gc = getattr(msg.payload_meta, "gateway_context", None)
+                if person_changed:
+                    for name in PERSON_GATEWAY_FIELDS:
+                        setattr(stored_gc, name, getattr(incoming_gc, name, None) if incoming_gc is not None else None)
+                stored_gc.canonical_user_id = owner_id
+                if delivery_ref is not None:
+                    stored_gc.delivery_ref = delivery_ref
+                if incoming_gc is not None and getattr(incoming_gc, "heartbeat_source_id", None):
+                    stored_gc.heartbeat_source_id = incoming_gc.heartbeat_source_id
+                incoming_conv = getattr(msg.payload_meta, "conversation_id", None)
+                next_conv = incoming_conv or (new_id("conversation_id") if person_changed else None)
+                if next_conv and next_conv != candidate.payload_meta.conversation_id:
+                    candidate.payload_meta.conversation_id = next_conv
+                    candidate.payload_meta.followup_to_task_id = None
+                incoming_tz = getattr(msg.payload_meta, "request_timezone", None)
+                if incoming_tz:
+                    candidate.payload_meta.request_timezone = incoming_tz
+                permit = (
+                    system_mutation_permit_fn(current, candidate)
+                    if system_mutation_permit_fn is not None
+                    else None
+                )
+                self._require_replace_authority(
+                    current,
+                    candidate,
+                    permit=permit,
+                    operation=ScheduleMutationOperation.UPDATE,
+                    request_binding=None,
+                )
+                columns = _definition_columns(candidate, remaining_count=row.get("remaining_count"))
+                columns["owner_vouched"] = 1 if owner_vouched else 0
+                columns["run_permit_refusal"] = None
+                if delivery_ref is not None:
+                    columns["delivery_ref"] = delivery_ref
+                if person_changed:
+                    columns["run_permit_recheck_at"] = None
+                new_digest = schedule_record_digest(candidate)
+                return RowWrite(
+                    columns=columns,
+                    listed_digest=new_digest,
+                    result=ScheduleInstallResult(
+                        state=SCHEDULE_REFRESHED,
+                        schedule_id=msg.schedule_id,
+                        timing_revision=candidate.timing_revision,
+                        next_fire_at=candidate.next_fire_at,
+                        seen_version=new_digest,
+                        previous=current,
+                        saved=candidate,
+                    ),
+                )
+
+            raise ScheduleInstallRefused("invalid_request", f"Unsupported install mode: {mode!r}")
+
+        write = self._repository.write_locked(
+            msg.schedule_id,
+            decide,
+            command_outcome=command_outcome,
+        )
+        result: ScheduleInstallResult = write.result
+        self._logger.info(
+            "Schedule %s %s via schedules.install, next fire at %s",
+            msg.schedule_id,
+            result.state,
+            result.next_fire_at,
+        )
+        return result
 
     @staticmethod
     def _require_replace_authority(
@@ -968,6 +1305,7 @@ class ScheduleStore:
         claim_named_agent_type: Optional[str] = None,
         claim_agent_id: Optional[str] = None,
         remaining_count_override: Any = _UNSET_REMAINING_COUNT,
+        owner_vouched: bool = False,
     ) -> Optional[bool]:
         """Atomically install a schedule once while preserving an existing row verbatim."""
 
@@ -1005,6 +1343,7 @@ class ScheduleStore:
                 claim_agent_id=getattr(msg, "claim_agent_id", None),
                 owner_canonical_user_id=owner_canonical_user_id_for_schedule(msg),
                 parallel_thread=schedule_runs_in_parallel_lane(msg.payload_meta),
+                owner_vouched=owner_vouched,
             )
             if created:
                 self._logger.info(
@@ -1823,37 +2162,79 @@ class ScheduleStore:
             self._logger.error(f"Failed to count enabled schedules: {e}")
             return 0
 
-    # -- run permits (custom_agents.schedule_permits) ---------------------------------
+    # -- run permits (team_services.scheduler / custom_agents.schedule_permits) --------
     # Runtime bookkeeping kept on the row beside next_fire_at: never part of
     # schedule_json or the schedule's control state, so setting it needs no
     # schedule permit. Storage errors propagate: callers decide what a
-    # missing answer means (the manager retries; a worker asks the manager).
+    # missing answer means (the scheduler retries; a worker asks svc.scheduler).
 
-    def run_permit(self, schedule_id: str) -> Optional["SignedSchedulePermitV1"]:
-        """The schedule's stored run permit as the manager signed it, or None.
-
-        Not verified here; whoever uses it verifies it. A stored value that is
-        not a permit is logged and treated as none.
-        """
-
-        from custom_messages.contracts.access_v2 import SignedSchedulePermitV1
+    def is_owner_vouched(self, schedule_id: str) -> bool:
+        """Whether the schedule row carries the explicit owner_vouched mark."""
 
         row = self._row(schedule_id)
-        raw = row.get("run_permit_json") if row else None
+        return bool(row.get("owner_vouched")) if row else False
+
+    def delivery_ref_of(self, schedule_id: str) -> Optional[str]:
+        """The opaque ``delivery_ref`` saved on the schedule row by ``schedules.install``, or None."""
+
+        row = self._row(schedule_id)
+        value = row.get("delivery_ref") if row else None
+        return str(value) if value else None
+
+    def set_delivery_ref(self, schedule_id: str, delivery_ref: Optional[str]) -> bool:
+        """Update the schedule row's opaque ``delivery_ref`` (and ``gateway_context.delivery_ref``
+        when no ``session_key`` is stored on the schedule). Used during team transfer import to
+        bind imported schedules to the destination instance's delivery-ref key."""
+
+        def decide(row: Optional[dict[str, Any]]) -> RowWrite:
+            if row is None:
+                return RowWrite(result=False)
+            columns: dict[str, Any] = {"delivery_ref": delivery_ref}
+            if row.get("schedule_json"):
+                msg = _stored_message(row)
+                gc = getattr(getattr(msg, "payload_meta", None), "gateway_context", None)
+                if gc is not None and not getattr(gc, "session_key", None):
+                    gc.delivery_ref = delivery_ref
+                    columns["schedule_json"] = msg.model_dump_json()
+            return RowWrite(columns=columns, result=True)
+
+        return bool(self._repository.write_locked(schedule_id, decide).result)
+
+    def _parse_permit_column(self, schedule_id: str, column: str) -> Optional[Any]:
+        from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+
+        row = self._row(schedule_id)
+        raw = row.get(column) if row else None
         if not raw:
             return None
         try:
-            return SignedSchedulePermitV1.model_validate_json(raw)
+            return AuthorityTokenRecord.model_validate_json(raw)
         except ValueError:
             self._logger.warning(
-                "A schedule's stored run permit is not readable; treating it as none. "
-                "event=schedule_permit_unreadable schedule_id=%s",
+                "A schedule's stored %s is not a readable protocol 1 permit token; treating it as none. "
+                "event=schedule_permit_unreadable schedule_id=%s column=%s",
+                column,
                 schedule_id,
+                column,
             )
             return None
 
+    def run_permit(self, schedule_id: str) -> Optional[Any]:
+        """The schedule's stored protocol 1 run permit token as the scheduler signed it, or None.
+
+        Not verified here; whoever uses it verifies it. A stored value that is
+        not a valid ``AuthorityTokenRecord`` is logged and treated as none.
+        """
+
+        return self._parse_permit_column(schedule_id, "run_permit_json")
+
+    def owner_permit(self, schedule_id: str) -> Optional[Any]:
+        """The schedule's stored protocol 1 owner permit token (for system-work schedules with an admin owner)."""
+
+        return self._parse_permit_column(schedule_id, "owner_permit_json")
+
     def rows_needing_run_permit(self, *, now: datetime, limit: int) -> List[str]:
-        """Schedule ids whose run permit the manager should issue, renew or re-check (one query)."""
+        """Schedule ids whose run permit the scheduler should issue, renew or re-check (one query)."""
 
         return self._repository.rows_needing_run_permit(now_iso=now.astimezone(timezone.utc).isoformat(), limit=limit)
 
@@ -1861,18 +2242,34 @@ class ScheduleStore:
         self,
         schedule_id: str,
         *,
-        permit: Optional["SignedSchedulePermitV1"],
+        permit: Optional[Any],
         checked_owner: Optional[str],
         recheck_at: datetime,
+        owner_permit: Optional[Any] = None,
+        refusal_reason: Optional[str] = None,
+        require_owner_vouched: Optional[bool] = None,
     ) -> bool:
-        """Record the manager's check: the permit it issued (or None) and when to look again.
+        """Record the scheduler's check: the permit it issued (or None) and when to look again.
 
-        False when the row is gone or its owner is no longer ``checked_owner``.
+        False when the row is gone, its owner is no longer ``checked_owner``, or
+        ``require_owner_vouched`` no longer matches ``owner_vouched``.
         """
+
+        def _dump(token: Optional[Any]) -> Optional[str]:
+            if token is None:
+                return None
+            if hasattr(token, "model_dump_json"):
+                return str(token.model_dump_json())
+            import json
+
+            return json.dumps(token)
 
         return self._repository.set_run_permit(
             schedule_id,
-            permit_json=permit.model_dump_json() if permit is not None else None,
+            permit_json=_dump(permit),
+            owner_permit_json=_dump(owner_permit),
             checked_owner=checked_owner,
             recheck_at=recheck_at.astimezone(timezone.utc).isoformat(),
+            refusal_reason=refusal_reason if permit is None else None,
+            require_owner_vouched=require_owner_vouched,
         )

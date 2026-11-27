@@ -71,9 +71,15 @@ def claimed_schedule_id(meta: MessageMeta) -> str | None:
     if gateway is None:
         return None
     if gateway.schedule_run is not None:
-        return gateway.schedule_run.permit.permit.schedule_id
+        permit = gateway.schedule_run.permit
+        inner = getattr(permit, "permit", None)
+        if inner is not None:
+            return getattr(inner, "schedule_id", None)
+        raw = getattr(permit, "schedule_id", None)
+        return raw if isinstance(raw, str) and raw else None
     if gateway.task_context is not None:
-        return gateway.task_context.context.schedule_id
+        raw = getattr(gateway.task_context, "schedule_id", None)
+        return raw if isinstance(raw, str) and raw else None
     return None
 
 

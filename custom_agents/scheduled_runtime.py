@@ -12,11 +12,9 @@ from access_control.ownership import PRIVATE_UPDATE, objective_access
 from custom_agents.contract_drain_state import is_contract_draining
 from custom_agents.access_runtime import resolve_meta_identity, verified_meta_person_id
 from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_schedule
-from custom_agents.schedule_permits import maybe_renew_schedule_permits, sign_system_run
-from custom_agents.scheduled_run_contexts import ScheduledRun, sign_scheduled_run
+from custom_agents.scheduled_run_contexts import ScheduledRun, sign_scheduled_run, sign_system_run_async
 from custom_agents.scheduled_run_failures import report_failing_scheduled_runs
 from custom_agents.task_context_runtime import inactive_owner, run_owner, scheduled_owner_roles
-from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 
 from custom_agents.lease_loss_wind_down import is_winding_down, start_lease_loss_wind_down
@@ -67,12 +65,7 @@ from custom_agents.schedule_store import (
     owner_canonical_user_id_for_schedule,
     schedule_stopped_reason,
 )
-from custom_agents.schedule_management import (
-    ScheduleMutationAuthorityMode,
-    ScheduleMutationOperation,
-    build_schedule_mutation_permit,
-    is_system_managed_schedule,
-)
+from custom_agents.schedule_management import is_system_managed_schedule
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -530,41 +523,6 @@ async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope:
     )
 
 
-async def _store_replace(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
-    """Replace the row; a stored system schedule needs the trusted-runtime permit for this exact change."""
-
-    existing = await agent.task_manager.operations_runtime.run(
-        agent._schedule_store.get_scheduled_message, schedule_msg.schedule_id
-    )
-    runtime_permit = (
-        build_schedule_mutation_permit(
-            schedule=existing,
-            operation=ScheduleMutationOperation.UPDATE,
-            authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
-            actor_principal_id=str(getattr(agent, "id", "") or "runtime"),
-            owner_canonical_user_id=str(
-                owner_canonical_user_id_for_schedule(existing) or ""
-            ),
-            team_id=str(getattr(agent, "team_id", "") or ""),
-            candidate=schedule_msg,
-        )
-        if existing is not None and is_system_managed_schedule(existing)
-        else None
-    )
-    store_kwargs: dict[str, Any] = dict(claim_scope)
-    if runtime_permit is not None:
-        store_kwargs["system_mutation_permit"] = runtime_permit
-    await agent.task_manager.operations_runtime.run(
-        agent._schedule_store.add, schedule_msg, **store_kwargs
-    )
-    agent._logger.info(
-        "[%s] ScheduledMessage %s stored. Next fire at %s",
-        agent.id,
-        schedule_msg.schedule_id,
-        schedule_msg.next_fire_at,
-    )
-
-
 async def handle_scheduled_message(
     agent: Any,
     msg: ScheduledMessage,
@@ -572,32 +530,35 @@ async def handle_scheduled_message(
     msg_header: Optional[MessageHeader] = None,
     msg_meta: Optional[MessageMeta] = None,
 ) -> None:
-    """Install a schedule another runtime process sent (the gateway, InternalImprovementAgent).
+    """Install the reserved internal-improvement schedule sent by InternalImprovementAgent (F4).
 
-    Its ``install_mode`` decides what happens to a stored schedule with the
-    same id. A model's ``schedule_message`` action never comes here; it only
-    creates (``schedule_installation.create_schedule_from_turn_action``).
+    Every other schedule (gateway, user, maintenance, worker, objective) is installed
+    through ``schedules.install`` on team services; any other inbox ``ScheduledMessage``
+    is refused and logged.
     """
 
-    if msg.install_mode == "refresh":
-        # Only the person and session of an existing runtime-managed schedule
-        # change; nothing is installed (custom_agents.schedule_context_refresh).
-        await agent.task_manager.operations_runtime.run(
-            partial(refresh_schedule_gateway_context, agent), msg.model_copy(deep=True)
+    if not is_internal_improvement_schedule_name(msg.schedule_name):
+        sender = getattr(msg_header, "from_agent_id", None) or getattr(
+            getattr(msg, "payload_header", None), "from_agent_id", None
+        )
+        agent._logger.warning(
+            "[%s] Refused inbox ScheduledMessage %s (%r); only the reserved internal-improvement "
+            "schedule may be installed via inbox messages. "
+            "event=scheduled_message_install_refused schedule_id=%s sender=%s",
+            getattr(agent, "id", "unknown"),
+            msg.schedule_id,
+            msg.schedule_name,
+            msg.schedule_id,
+            sender,
         )
         return
-    if is_internal_improvement_schedule_name(msg.schedule_name):
-        # Only TeamArchitect installs this reserved schedule, exactly as
-        # InternalImprovementAgent asks for it (logged when refused).
-        reserved = prepare_internal_improvement_schedule_for_manager(agent, msg)
-        if reserved is None:
-            return
-        msg = reserved
-    schedule_msg, claim_scope = await prepare_install(agent, msg, msg_header, msg_meta)
-    if schedule_msg.install_mode == "ensure":
-        await _store_ensure(agent, schedule_msg, claim_scope)
-    else:
-        await _store_replace(agent, schedule_msg, claim_scope)
+    # Only TeamArchitect installs this reserved schedule, exactly as
+    # InternalImprovementAgent asks for it (ensure-only, logged when refused).
+    reserved = prepare_internal_improvement_schedule_for_manager(agent, msg)
+    if reserved is None:
+        return
+    schedule_msg, claim_scope = await prepare_install(agent, reserved, msg_header, msg_meta)
+    await _store_ensure(agent, schedule_msg, claim_scope)
     if agent._scheduler_wake:
         agent._scheduler_wake.set()
 
@@ -779,9 +740,13 @@ async def _prepared_heartbeat_run(
     if inactive_owner(owner, schedule_id=item.heartbeat_item_id):
         return None
     if item.objective_id:
+        schedule_store = getattr(agent, "_schedule_store", None)
+        vouched = bool(schedule_store is not None and schedule_store.is_owner_vouched(scheduled_message.schedule_id))
         roles = scheduled_owner_roles(
-            internal_meta.gateway_context, owner, schedule_id=item.heartbeat_item_id,
+            owner,
+            schedule_id=item.heartbeat_item_id,
             system_managed=is_system_managed_schedule(scheduled_message),
+            owner_vouched=vouched,
         ) if owner is not None else ()
         if not await _heartbeat_objective_allowed(
             agent, scheduled_message, item, person_id=_person_id(owner), roles=roles,
@@ -1278,6 +1243,8 @@ async def _enqueue_runtime_schedule(
     agent: Any,
     schedule_id: str,
     scheduled_message: ScheduledMessage,
+    *,
+    claim_token: Optional[str] = None,
 ) -> Optional[bool]:
     """Fires of the runtime's own schedule kinds, which have their own paths; None for any other schedule.
 
@@ -1287,7 +1254,9 @@ async def _enqueue_runtime_schedule(
     spec = system_schedule_spec_for_name(scheduled_message.schedule_name)
     kind = spec.kind if spec is not None else None
     if kind is SystemScheduleKind.INTERNAL_IMPROVEMENT:
-        return await enqueue_internal_improvement_job(agent, schedule_id, scheduled_message)
+        return await enqueue_internal_improvement_job(
+            agent, schedule_id, scheduled_message, claim_token=claim_token
+        )
     if kind is SystemScheduleKind.ISOLATED_RECOVERY_CHECKPOINT:
         return await enqueue_isolated_recovery_checkpoint(agent, schedule_id, scheduled_message)
     if kind is SystemScheduleKind.PROVIDER_OVERLOAD_RETRY:
@@ -1473,22 +1442,6 @@ def _runs_for_nobody(scheduled_message: ScheduledMessage) -> bool:
     return spec is not None and spec.system_work
 
 
-def _sign_for_nobody(agent: Any, meta: Any, schedule_id: str) -> bool:
-    """Sign a run as system work for no person; False (logged) when nothing could sign it."""
-
-    sign_system_run(agent, meta, schedule_id=schedule_id)
-    gateway_context = getattr(meta, "gateway_context", None)
-    if getattr(gateway_context, "task_context", None) or getattr(gateway_context, "schedule_run", None):
-        return True
-    agent._logger.warning(
-        "A scheduled run for no person could not be signed; it waits for the next try. "
-        "event=system_work_run_unsigned agent_id=%s schedule_id=%s",
-        getattr(agent, "id", None),
-        schedule_id,
-    )
-    return False
-
-
 async def _enqueue_owner_run(
     agent: Any,
     schedule_id: str,
@@ -1498,6 +1451,7 @@ async def _enqueue_owner_run(
     is_aar_review_schedule: bool,
     schedule_admission: ScheduleOccurrenceV1 | None,
     claim_token: Optional[str] = None,
+    from_runtime_mailbox: bool = False,
 ) -> bool:
     """A schedule's run as a task that works for its owner.
 
@@ -1530,17 +1484,25 @@ async def _enqueue_owner_run(
     gateway_context = getattr(internal_meta, "gateway_context", None)
     if getattr(gateway_context, "scheduled_job_id", None):
         scheduled_job_id = gateway_context.scheduled_job_id
-    # Each firing gets a fresh context signed by the scheduler for the owner,
-    # in this process or by the manager for a worker process without the key.
-    # A kind whose runs work for no person (system schedule table,
-    # ``system_work``) is signed as system work instead.
+    # Each firing gets its protocol 1 identity from the schedule's standing
+    # permit or from svc.scheduler (run_context.sign). A kind whose runs work
+    # for no person (system schedule table, ``system_work``) is signed as
+    # system work instead.
     if for_nobody:
-        if not await asyncio.to_thread(_sign_for_nobody, agent, internal_meta, scheduled_job_id):
+        if not await sign_system_run_async(
+            agent, internal_meta, schedule_id=scheduled_job_id, claim_token=claim_token
+        ):
             return False
     elif not await sign_scheduled_run(
         agent,
         internal_meta,
-        ScheduledRun(scheduled_message, claim_token, scheduled_job_id, owner),
+        ScheduledRun(
+            scheduled_message,
+            claim_token,
+            scheduled_job_id,
+            owner,
+            from_runtime_mailbox=from_runtime_mailbox,
+        ),
     ):
         return False
     if await _coalesce_scheduled_fire_if_active(
@@ -1575,8 +1537,9 @@ async def enqueue_fired_scheduled_task(
 ) -> bool:
     """Handle one fire: the runtime's own kinds by their paths, anything else as a run for its owner.
 
-    ``claim_token`` is this agent's claim on the schedule row; a worker
-    without the scheduler key shows it to the manager to get the run signed.
+    ``claim_token`` is this agent's claim on the schedule row; an agent host
+    without a standing permit shows it to ``team_services.scheduler``
+    (``run_context.sign`` on ``svc.scheduler``) to get the run signed.
     """
 
     if str(scheduled_message.schedule_name or "").startswith(OBSOLETE_DELEGATION_ASSURANCE_PREFIX):
@@ -1603,7 +1566,9 @@ async def enqueue_fired_scheduled_task(
         # occurrence is done without a run.
         return True
     scheduled_message = prepared
-    handled = await _enqueue_runtime_schedule(agent, schedule_id, scheduled_message)
+    handled = await _enqueue_runtime_schedule(
+        agent, schedule_id, scheduled_message, claim_token=claim_token
+    )
     if handled is not None:
         return handled
     is_aar_review_schedule = str(scheduled_message.schedule_name or "").startswith(
@@ -1636,6 +1601,7 @@ async def enqueue_fired_scheduled_task(
         is_aar_review_schedule=is_aar_review_schedule,
         schedule_admission=schedule_admission,
         claim_token=claim_token,
+        from_runtime_mailbox=from_runtime_mailbox,
     )
 
 
@@ -2021,9 +1987,6 @@ async def _scheduler_pass(
     # A task left holding the work slot with no turn must not block the queue
     # until new work happens to arrive.
     await release_orphaned_slot_when_idle(agent)
-    # The team lead in the manager process issues and renews schedules' run
-    # permits, so workers without the key need not ask it for each run.
-    await maybe_renew_schedule_permits(agent)
 
     can_claim_scheduled_work, parallel_only = await _schedule_claim_scope(agent)
     now = datetime.now(timezone.utc)

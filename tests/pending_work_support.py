@@ -217,6 +217,7 @@ class Delivery:
         self.transport_subject = route
         self.redelivery_count = 0
         self.max_deliver = 5
+        self.stored_at = None
         self.acked = False
 
     async def ack(self) -> None:

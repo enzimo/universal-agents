@@ -3,41 +3,52 @@
 A task proves whom it works for in one of two ways, carried in its
 ``GatewayContext``:
 
-- a signed task context (``task_context``, ``access_control.identity``): the
-  gateway signs one for each person's request, and the scheduler signs one
-  for a scheduled run started in the manager process, which holds the key;
-- a schedule run identity (``schedule_run``): a scheduled run started by a
-  worker that holds no scheduler key carries its schedule's permit, which the
-  manager signed once for the schedule (``custom_agents.schedule_permits``),
-  plus the run's own unsigned fields (a fresh context id, the conversation and
-  the start time).
+- a protocol 1 root-task authority token (``task_context``, verified by
+  ``access_control.authority_verifier.AuthorityTokenVerifier``): the gateway
+  signs one with its host certificate when it admits a person's task, and the
+  team services' scheduler signs one for a scheduled run;
+- a schedule run identity (``schedule_run``, Step 5 on the old wrapper): a
+  scheduled run started with its schedule's standing scheduler-signed permit
+  token plus the run's own unsigned fields (a fresh ``schedule_run_<hex>``
+  context id, the conversation and the start time). Bare permit tokens
+  (``schedule_permit:*`` / ``schedule_owner_permit:*``) are refused if
+  presented directly in ``task_context``.
 
-``resolve_task_identity`` accepts either and returns the same
-``TaskContextV1`` shape, so the access hook, the broker's gate and the
-schedule tools decide exactly as before; there is no second decision path.
+``resolve_task_identity`` (and its async counterpart
+``resolve_task_identity_async``, which fetches a missing issuer certificate or
+stale revocations record once on demand before verifying) reads only verified
+protocol 1 tokens and returns the uniform ``TaskContextV1`` shape carrying the
+signing certificate's verified ``issuer_roles``.
 
-Why permits (owner's decision 2026-09-27): only the manager holds the
-scheduler key, and asking the manager to sign every run of every worker does
-not scale. So the manager signs once per schedule and workers never contact it
-for a normal run. A permit names no roles, so it cannot carry stale ones: for
-each run identity this checks, live, that the schedule still exists, is
-turned on and is still owned by the permit's person, and reads that person's
-current standing and roles from the gateway's copy of the team's people
-(``access_control.people_directory``). A disabled or removed person, a
-deleted or turned-off schedule, or a changed owner refuses the run's next
-tool call. The live facts are cached for ``LIVE_CHECK_SECONDS`` (30 seconds)
-per schedule and permit, bounded to ``LIVE_CHECK_CACHE_SIZE`` entries, so a
-busy run does not read the database for every tool call; a change therefore
-applies within 30 seconds.
+For each permit-backed run identity this checks, live, that the schedule still
+exists, is turned on and is still owned by the permit's person, and reads that
+person's current standing and roles from the team's people copy
+(``access_control.people_directory``). A disabled or removed person, a deleted
+or turned-off schedule, or a changed owner refuses the run's next tool call.
+The live facts are cached for ``LIVE_CHECK_SECONDS`` (30 seconds) per schedule
+and permit token, bounded to ``LIVE_CHECK_CACHE_SIZE`` entries.
+
+Effective lifetime of a permit-backed run (F3): a standing permit lasts at most
+7 days and is renewed by ``team_services.scheduler`` when fewer than 2 days
+remain, while the run itself lasts ``DEFAULT_RUN_LIFETIME`` (7 days) from
+``started_at_utc``. When a long or paused run outlives the frozen permit it
+started with, ``_run_context`` verifies the frozen permit's signature and
+binding without expiry and falls back to the schedule's current stored permit
+(same schedule, same person, same binding kind, verified now). If renewal was
+refused or no matching current permit is stored, the run stops.
+
+Signed "no roles" marker (F2): any token carrying the ``unvouched_run_`` request
+id prefix or ``schedule_unvouched_permit:<schedule_id>`` binding resolves with
+``person_roles=()`` whoever issued it, with no live lookup.
 
 A permit for no person (system work) is accepted only for a turned-on,
 runtime-managed schedule whose kind the system schedule table marks
-``system_work`` (``custom_messages.system_schedules``; today the
-internal-improvement maintenance of a built-in system agent).
+``system_work`` (``custom_messages.system_schedules``).
 
-This module reads the schedule row straight from storage
-(``StoredScheduleFacts``) so the broker, which runs no agents, can check run
-identities too.
+Steps 6–7 handoff note: once queued work moves onto protocol 1 ``task.request``
+frames whose ``verify_frame`` compares ``/body/work/root_task_id`` with
+``token.bound_to.id``, Steps 6–7 must replace the ``ScheduleRunIdentityV1``
+wrapper path with per-run tokens or scheduler-dispatched frames.
 """
 
 from __future__ import annotations
@@ -47,30 +58,43 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping, Protocol
 
-from access_control.identity import (
-    DEFAULT_CONTEXT_LIFETIME,
-    ISSUER_SCHEDULER,
-    ContextVerifier,
+from access_control.authority_verifier import (
+    AuthorityTokenVerifier,
+    FETCHABLE_REFUSAL_CODES,
     IdentityRejected,
+    IssuerRequirement,
+    REFUSAL_BAD_AUTHORITY,
+    REFUSAL_EXPIRED,
+    REFUSAL_INVALID_PERMIT,
+    REFUSAL_MALFORMED,
+    REFUSAL_MISSING,
+    VerifiedTaskToken,
 )
 from access_control.people_directory import PeopleDirectory, PeopleStore, PersonNow
 from custom_messages.contracts.access_v2 import (
-    SchedulePermitV1,
     ScheduleRunIdentityV1,
-    SignedTaskContextV1,
     TaskContextV1,
 )
 from custom_messages.enums import ScheduleManagementClass, SystemScheduleKind
 from custom_messages.system_schedules import is_system_work_kind
+from custom_messages.wire.authority_bindings import (
+    AUTHORITY_TOKEN_MAX_LIFETIME_SECONDS,
+    AuthorityTokenRecord,
+    GATEWAY_ISSUER_ROLE,
+    SCHEDULER_ISSUER_ROLE,
+    SCHEDULE_OWNER_PERMIT_PREFIX,
+    SCHEDULE_RUN_CONTEXT_PREFIX,
+)
 from storage.config import StorageSettings
 
 logger = logging.getLogger(__name__)
 
 LIVE_CHECK_SECONDS = 30.0
 LIVE_CHECK_CACHE_SIZE = 1024
+DEFAULT_RUN_LIFETIME = timedelta(seconds=AUTHORITY_TOKEN_MAX_LIFETIME_SECONDS)
 # A run may say it started at most this far in the future (clocks differ a little).
 RUN_START_SKEW = timedelta(minutes=5)
 
@@ -86,6 +110,9 @@ class ScheduleFacts:
     system_kind: str | None
     # The agent type that claims and runs the schedule (claim_named_agent_type).
     runner_type: str | None = None
+    # The schedule's current standing permits as stored now (used by F3 fallback when a frozen permit expires).
+    run_permit_json: str | None = None
+    owner_permit_json: str | None = None
 
     @property
     def system_work(self) -> bool:
@@ -134,6 +161,8 @@ class StoredScheduleFacts:
         # The row's owner column is authoritative (schedule_store.apply_persisted_schedule_owner).
         owner = str(row[20] or "").strip() if len(row) > 20 else ""
         runner = str(row[13] or "").strip() if len(row) > 13 else ""
+        run_permit_json = str(row[21]) if len(row) > 21 and row[21] else None
+        owner_permit_json = str(row[23]) if len(row) > 23 and row[23] else None
         return ScheduleFacts(
             schedule_id=schedule_id,
             enabled=bool(row[9]),
@@ -143,6 +172,8 @@ class StoredScheduleFacts:
             if system_managed
             else None,
             runner_type=runner or None,
+            run_permit_json=run_permit_json,
+            owner_permit_json=owner_permit_json,
         )
 
 
@@ -195,17 +226,19 @@ class ScheduleRunLookup:
     def from_storage(cls, storage: StorageSettings) -> "ScheduleRunLookup":
         return cls(StoredScheduleFacts(storage), _StoredPeople(storage))
 
-    def facts(self, permit: SchedulePermitV1) -> tuple[ScheduleFacts | None, PersonNow | None]:
-        """The schedule row and the permit's person as recorded now (cached per team, schedule and permit)."""
+    def facts(self, permit: VerifiedTaskToken) -> tuple[ScheduleFacts | None, PersonNow | None]:
+        """The schedule row and the permit's person as recorded now (cached per team, schedule and token)."""
+
+        schedule_id = str(permit.schedule_id or "")
 
         def read() -> _LiveFacts:
-            schedule = self.schedules.schedule_facts(permit.schedule_id)
+            schedule = self.schedules.schedule_facts(schedule_id)
             person = (
                 PeopleDirectory(self.people, permit.team_id).person(permit.person_id) if permit.person_id else None
             )
             return _LiveFacts(schedule, person, self.clock())
 
-        found = self._cached((permit.team_id, permit.schedule_id, permit.permit_id), read)
+        found = self._cached((permit.team_id, schedule_id, permit.token_id), read)
         return found.schedule, found.person
 
     def schedule(self, schedule_id: str) -> ScheduleFacts | None:
@@ -214,6 +247,18 @@ class ScheduleRunLookup:
         return self._cached(
             ("", schedule_id, ""), lambda: _LiveFacts(self.schedules.schedule_facts(schedule_id), None, self.clock())
         ).schedule
+
+    def refresh_schedule(self, schedule_id: str) -> ScheduleFacts | None:
+        """Re-read a schedule row directly from storage and update the cache."""
+
+        found = _LiveFacts(self.schedules.schedule_facts(schedule_id), None, self.clock())
+        key = ("", schedule_id, "")
+        with self._lock:
+            self._cache[key] = found
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.max_entries:
+                self._cache.popitem(last=False)
+        return found.schedule
 
     def _cached(self, key: tuple[str, str, str], read: Callable[[], _LiveFacts]) -> _LiveFacts:
         now = self.clock()
@@ -231,7 +276,35 @@ class ScheduleRunLookup:
         return found
 
 
-def _live_problem(permit: SchedulePermitV1, schedule: ScheduleFacts | None, person: PersonNow | None) -> str | None:
+def verified_token_to_task_context(
+    verified: VerifiedTaskToken,
+    *,
+    conversation_id: str | None = None,
+) -> TaskContextV1:
+    """Convert a verified protocol 1 root-task token into the uniform ``TaskContextV1`` view."""
+
+    issuer_kind = verified.issuer_kind
+    if issuer_kind not in (GATEWAY_ISSUER_ROLE, SCHEDULER_ISSUER_ROLE):
+        raise IdentityRejected(
+            "The authority token's issuer certificate holds neither the gateway nor the scheduler role.",
+            code=REFUSAL_BAD_AUTHORITY,
+        )
+    return TaskContextV1(
+        context_id=verified.request_id,
+        issuer=issuer_kind,
+        issuer_roles=tuple(sorted(verified.issuer_roles)),
+        team_id=verified.team_id,
+        person_id=verified.person_id,
+        person_roles=() if verified.is_unvouched else verified.person_roles,
+        root_task_id=verified.root_task_id,
+        conversation_id=conversation_id,
+        schedule_id=verified.schedule_id,
+        issued_at_utc=verified.issued_at,
+        expires_at_utc=verified.expires_at,
+    )
+
+
+def _live_problem(permit: VerifiedTaskToken, schedule: ScheduleFacts | None, person: PersonNow | None) -> str | None:
     """Why the permit's schedule or person no longer allows its runs, or None."""
 
     if schedule is None:
@@ -250,41 +323,172 @@ def _live_problem(permit: SchedulePermitV1, schedule: ScheduleFacts | None, pers
     return None
 
 
-def _run_times(run: ScheduleRunIdentityV1, moment: datetime) -> tuple[datetime, datetime]:
+def _run_times(run: ScheduleRunIdentityV1, check_moment: datetime) -> tuple[datetime, datetime]:
     """The run's start and end, as a task context would state them; raises when outside them."""
 
     started = run.started_at_utc
-    if started > moment + RUN_START_SKEW:
-        raise IdentityRejected("The scheduled run says it starts in the future.")
-    expires = started + DEFAULT_CONTEXT_LIFETIME
-    if moment >= expires:
-        raise IdentityRejected("The scheduled run's identity has expired.")
+    if started > check_moment + RUN_START_SKEW:
+        raise IdentityRejected("The scheduled run says it starts in the future.", code=REFUSAL_EXPIRED)
+    expires = started + DEFAULT_RUN_LIFETIME
+    if check_moment >= expires:
+        raise IdentityRejected("The scheduled run's identity has expired.", code=REFUSAL_EXPIRED)
     return started, expires
+
+
+def _parse_schedule_run(run_value: ScheduleRunIdentityV1 | Mapping[str, Any]) -> ScheduleRunIdentityV1:
+    try:
+        run = (
+            run_value
+            if isinstance(run_value, ScheduleRunIdentityV1)
+            else ScheduleRunIdentityV1.model_validate(run_value)
+        )
+    except Exception as exc:
+        raise IdentityRejected(f"The scheduled run identity is malformed: {exc}", code=REFUSAL_MALFORMED) from exc
+    if not run.context_id.startswith(SCHEDULE_RUN_CONTEXT_PREFIX):
+        raise IdentityRejected(
+            "A permit-backed scheduled run identity must use a schedule_run_ request id.",
+            code=REFUSAL_INVALID_PERMIT,
+        )
+    return run
+
+
+def _people_override(verifier: AuthorityTokenVerifier, schedule_runs: ScheduleRunLookup | None) -> PeopleStore | None:
+    if schedule_runs is not None and not verifier.has_people:
+        return schedule_runs.people
+    return None
+
+
+def _current_permit_json(facts: ScheduleFacts | None, bound_id: str) -> str | None:
+    if facts is None:
+        return None
+    if bound_id.startswith(SCHEDULE_OWNER_PERMIT_PREFIX):
+        return facts.owner_permit_json
+    return facts.run_permit_json
+
+
+def _fallback_current_permit(
+    run: ScheduleRunIdentityV1,
+    *,
+    frozen_exc: IdentityRejected,
+    verifier: AuthorityTokenVerifier,
+    team_id: str,
+    schedule_runs: ScheduleRunLookup | None,
+    moment: datetime,
+    valid_at: datetime | None,
+    reached_at: datetime | None,
+    people_override: PeopleStore | None,
+) -> VerifiedTaskToken:
+    """When a run's frozen permit expired, verify and adopt the schedule's current renewed permit (F3).
+
+    Verifies the frozen permit's signature, issuer, revocations and binding without expiry
+    first, then reads the schedule's current stored permit matching the same schedule, person
+    and binding kind (regular, unvouched, or owner permit) verified at the check moment.
+    """
+
+    frozen = verifier.verify_schedule_permit(
+        run.permit,
+        team_id=team_id,
+        now=moment,
+        check_expiry=False,
+        require_active_person=False,
+        people=people_override,
+    )
+    if not (frozen.issued_at - RUN_START_SKEW <= run.started_at_utc < frozen.expires_at):
+        raise frozen_exc
+    if schedule_runs is None or frozen.schedule_id is None:
+        raise frozen_exc
+    facts = schedule_runs.schedule(frozen.schedule_id)
+    raw_current = _current_permit_json(facts, frozen.root_task_id)
+    if not raw_current or frozen.token_id in raw_current:
+        facts = schedule_runs.refresh_schedule(frozen.schedule_id)
+        raw_current = _current_permit_json(facts, frozen.root_task_id)
+    if not raw_current:
+        raise frozen_exc
+    try:
+        candidate = AuthorityTokenRecord.model_validate_json(raw_current)
+    except ValueError as exc:
+        raise frozen_exc from exc
+    if candidate.token_id == frozen.token_id:
+        raise frozen_exc
+    current = verifier.verify_schedule_permit(
+        candidate,
+        team_id=team_id,
+        now=moment,
+        valid_at=valid_at,
+        reached_at=reached_at,
+        people=people_override,
+    )
+    if (
+        current.schedule_id != frozen.schedule_id
+        or current.person_id != frozen.person_id
+        or current.root_task_id != frozen.root_task_id
+    ):
+        raise IdentityRejected(
+            "The schedule's current permit does not match this run.",
+            code=REFUSAL_INVALID_PERMIT,
+        )
+    return current
 
 
 def _run_context(
     run_value: ScheduleRunIdentityV1 | Mapping[str, Any],
     *,
-    verifier: ContextVerifier,
+    verifier: AuthorityTokenVerifier,
     team_id: str,
     schedule_runs: ScheduleRunLookup | None,
     moment: datetime,
+    valid_at: datetime | None,
+    reached_at: datetime | None,
+    require_issuer: IssuerRequirement,
 ) -> TaskContextV1:
-    run = run_value if isinstance(run_value, ScheduleRunIdentityV1) else ScheduleRunIdentityV1.model_validate(run_value)
-    permit = verifier.verify_permit(run.permit, team_id=team_id, now=moment)
-    started, expires = _run_times(run, moment)
+    if require_issuer == GATEWAY_ISSUER_ROLE:
+        raise IdentityRejected(
+            "Only a gateway-signed authority token is accepted here.",
+            code=REFUSAL_BAD_AUTHORITY,
+        )
+    run = _parse_schedule_run(run_value)
+    people_override = _people_override(verifier, schedule_runs)
+    try:
+        permit = verifier.verify_schedule_permit(
+            run.permit,
+            team_id=team_id,
+            now=moment,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            people=people_override,
+        )
+    except IdentityRejected as frozen_exc:
+        if frozen_exc.code != REFUSAL_EXPIRED:
+            raise
+        permit = _fallback_current_permit(
+            run,
+            frozen_exc=frozen_exc,
+            verifier=verifier,
+            team_id=team_id,
+            schedule_runs=schedule_runs,
+            moment=moment,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            people_override=people_override,
+        )
+    check_moment = valid_at or reached_at or moment
+    started, expires = _run_times(run, check_moment)
     if schedule_runs is None:
-        raise IdentityRejected("This process cannot check scheduled runs (it has no access to the schedules).")
+        raise IdentityRejected(
+            "This process cannot check scheduled runs (it has no access to the schedules).",
+            code=REFUSAL_INVALID_PERMIT,
+        )
     schedule, person = schedule_runs.facts(permit)
     problem = _live_problem(permit, schedule, person)
     if problem is not None:
-        raise IdentityRejected(problem)
+        raise IdentityRejected(problem, code=REFUSAL_INVALID_PERMIT)
     return TaskContextV1(
         context_id=run.context_id,
-        issuer=ISSUER_SCHEDULER,
+        issuer=SCHEDULER_ISSUER_ROLE,
+        issuer_roles=tuple(sorted(permit.issuer_roles)),
         team_id=permit.team_id,
         person_id=permit.person_id,
-        person_roles=tuple(sorted(set(person.roles))) if person is not None else (),
+        person_roles=() if (person is None or permit.is_unvouched) else tuple(sorted(set(person.roles))),
         conversation_id=run.conversation_id,
         schedule_id=permit.schedule_id,
         issued_at_utc=started,
@@ -298,32 +502,17 @@ def job_schedule_id(
     """The scheduled job a verified task is a run of, or None ("access follows the work").
 
     A run is a job run only when a worker type runs a person's own schedule
-    (``ScheduleFacts.worker_job``). There every agent is in the schedule, so
-    the schedule's access counts, and its workers draw on nothing else: they
-    work for the schedule. Every other scheduled run is treated like a
-    person's request, so the agents inherit the access of whom they work for:
-    a schedule the team lead runs, and the runtime's own timers (heartbeat
-    items, objective work sessions, after-action reviews; their contexts name
-    a system-managed schedule or a heartbeat item, which has no schedule row).
-    An after-action review's schedule is owned by the person whose work the
-    reports describe, or by nobody for system work
-    (``custom_agents.after_action_report_identity``).
-
-    Only the scheduler says a task is a schedule's run: a context it signed,
-    or a schedule run identity checked against the schedule's permit (both
-    have issuer ``scheduler``). A schedule id in a context anyone else signed
-    is ignored and logged, so a schedule's access (``SubjectKind.SCHEDULE``)
-    never reaches a person's own tasks. A process that cannot read the
-    schedules keeps the schedule id (the stricter reading) and logs it. A job
-    deleted during a run is, for the rest of that run, read like the person's
-    request (its own access already ended with it, ``ScheduleStore.remove``):
-    heartbeat item runs also name an id with no row, so a missing row cannot
-    mean "job".
+    (``ScheduleFacts.worker_job``). Only the scheduler says a task is a
+    schedule's run: a token signed by a certificate holding the ``scheduler``
+    role, or a schedule run identity checked against a scheduler-signed permit.
     """
 
     if context.schedule_id is None:
         return None
-    if context.issuer != ISSUER_SCHEDULER:
+    scheduler_signed = context.issuer == SCHEDULER_ISSUER_ROLE and (
+        not context.issuer_roles or SCHEDULER_ISSUER_ROLE in context.issuer_roles
+    )
+    if not scheduler_signed:
         logger.warning(
             "A task context names a schedule but was not signed by the scheduler; ignoring it. "
             "event=schedule_id_from_non_scheduler_ignored issuer=%s schedule_id=%s context_id=%s",
@@ -348,53 +537,160 @@ def job_schedule_id(
 
 def resolve_task_identity(
     *,
-    verifier: ContextVerifier,
+    verifier: AuthorityTokenVerifier,
     team_id: str,
-    task_context: SignedTaskContextV1 | Mapping[str, Any] | None,
+    task_context: AuthorityTokenRecord | Mapping[str, Any] | Any | None,
     schedule_run: ScheduleRunIdentityV1 | Mapping[str, Any] | None,
     schedule_runs: ScheduleRunLookup | None,
     now: datetime | None = None,
+    valid_at: datetime | None = None,
+    reached_at: datetime | None = None,
+    require_issuer: IssuerRequirement = "any",
 ) -> TaskContextV1:
-    """Who the task works for, from its signed task context or its schedule run identity (module docstring).
+    """Who the task works for, from its verified protocol 1 token or schedule run identity.
 
-    Raises ``IdentityRejected`` (or ``ValueError`` for a malformed value)
-    when neither proves it. A task carries one or the other, never both.
+    Raises ``IdentityRejected`` when neither proves it. A task carries one or
+    the other, never both. Pass ``valid_at`` / ``reached_at`` from
+    ``InboundDelivery.stored_at`` when admitting queued JetStream messages
+    (Decision 52).
     """
 
-    moment = now or datetime.now(timezone.utc)
+    moment = now if now is not None else verifier.now()
     if schedule_run is None:
-        return verifier.verify(task_context, team_id=team_id, now=moment)
+        verified = verifier.verify_root_task(
+            task_context,
+            team_id=team_id,
+            now=moment,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            require_issuer=require_issuer,
+            people=_people_override(verifier, schedule_runs),
+        )
+        if verified.person_id is None and verified.schedule_id is None:
+            raise IdentityRejected(
+                "An authority token must name either a person or a schedule.",
+                code=REFUSAL_BAD_AUTHORITY,
+            )
+        return verified_token_to_task_context(verified)
     if task_context is not None:
-        raise IdentityRejected("The task carries both a signed task context and a scheduled run identity.")
-    return _run_context(schedule_run, verifier=verifier, team_id=team_id, schedule_runs=schedule_runs, moment=moment)
+        raise IdentityRejected(
+            "The task carries both an authority token and a scheduled run identity.",
+            code=REFUSAL_MALFORMED,
+        )
+    return _run_context(
+        schedule_run,
+        verifier=verifier,
+        team_id=team_id,
+        schedule_runs=schedule_runs,
+        moment=moment,
+        valid_at=valid_at,
+        reached_at=reached_at,
+        require_issuer=require_issuer,
+    )
+
+
+async def resolve_task_identity_async(
+    *,
+    verifier: AuthorityTokenVerifier,
+    team_id: str,
+    task_context: AuthorityTokenRecord | Mapping[str, Any] | Any | None,
+    schedule_run: ScheduleRunIdentityV1 | Mapping[str, Any] | None,
+    schedule_runs: ScheduleRunLookup | None,
+    now: datetime | None = None,
+    valid_at: datetime | None = None,
+    reached_at: datetime | None = None,
+    require_issuer: IssuerRequirement = "any",
+) -> TaskContextV1:
+    """Async resolver: fetches a missing issuer certificate or stale revocations once before verifying (C12)."""
+
+    if schedule_run is not None and task_context is not None:
+        raise IdentityRejected(
+            "The task carries both an authority token and a scheduled run identity.",
+            code=REFUSAL_MALFORMED,
+        )
+    raw = schedule_run if schedule_run is not None else task_context
+    if raw is None:
+        raise IdentityRejected(
+            "The task has no authority token, so nobody vouches for who it works for.",
+            code=REFUSAL_MISSING,
+        )
+    await verifier.ensure_issuer_known(raw, now=now)
+    try:
+        return resolve_task_identity(
+            verifier=verifier,
+            team_id=team_id,
+            task_context=task_context,
+            schedule_run=schedule_run,
+            schedule_runs=schedule_runs,
+            now=now,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            require_issuer=require_issuer,
+        )
+    except IdentityRejected as refused:
+        if schedule_run is None or schedule_runs is None or refused.code not in FETCHABLE_REFUSAL_CODES:
+            raise
+        # A renewed current permit (F3 fallback) may carry a newer scheduler certificate epoch.
+        run = _parse_schedule_run(schedule_run)
+        schedule_id = getattr(run.permit, "schedule_id", None)
+        bound_id = str(getattr(getattr(run.permit, "bound_to", None), "id", "") or "")
+        if not isinstance(schedule_id, str) or not schedule_id:
+            raise
+        raw_current = _current_permit_json(schedule_runs.schedule(schedule_id), bound_id)
+        if not raw_current:
+            raise
+        try:
+            candidate = AuthorityTokenRecord.model_validate_json(raw_current)
+        except ValueError:
+            raise refused from None
+        if not await verifier.ensure_issuer_known(candidate, now=now):
+            raise
+        return resolve_task_identity(
+            verifier=verifier,
+            team_id=team_id,
+            task_context=task_context,
+            schedule_run=schedule_run,
+            schedule_runs=schedule_runs,
+            now=now,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            require_issuer=require_issuer,
+        )
 
 
 def reported_task_person(
     *,
-    verifier: ContextVerifier,
+    verifier: AuthorityTokenVerifier,
     team_id: str,
-    task_context: SignedTaskContextV1 | Mapping[str, Any] | None,
+    task_context: AuthorityTokenRecord | Mapping[str, Any] | Any | None,
     schedule_run: ScheduleRunIdentityV1 | Mapping[str, Any] | None,
 ) -> str | None:
     """Whose completed work is reported, from the original signature only.
 
-    This is historical attribution, never authority to execute. A request
-    may outlive its context, and a finished schedule may already be deleted.
-    Both still prove the original person. Return only their id, never roles
-    or a context that a caller could use to authorize work. Review runs get
-    fresh identity and access decisions through ``resolve_task_identity``.
+    Historical attribution, never authority to execute. Checks signature,
+    certificate, team, installation, and current revocations without rejecting
+    on token expiry or a person who has since been disabled or removed.
     """
 
     if schedule_run is None:
-        return verifier.verify(task_context, team_id=team_id, check_expiry=False).person_id
+        return verifier.verify_root_task(
+            task_context,
+            team_id=team_id,
+            check_expiry=False,
+            require_active_person=False,
+        ).person_id
     if task_context is not None:
-        raise IdentityRejected("The task carries both a signed task context and a scheduled run identity.")
-    run = (
-        schedule_run
-        if isinstance(schedule_run, ScheduleRunIdentityV1)
-        else ScheduleRunIdentityV1.model_validate(schedule_run)
-    )
-    return verifier.verify_permit(run.permit, team_id=team_id, check_expiry=False).person_id
+        raise IdentityRejected(
+            "The task carries both an authority token and a scheduled run identity.",
+            code=REFUSAL_MALFORMED,
+        )
+    run = _parse_schedule_run(schedule_run)
+    return verifier.verify_schedule_permit(
+        run.permit,
+        team_id=team_id,
+        check_expiry=False,
+        require_active_person=False,
+    ).person_id
 
 
 @dataclass(frozen=True)
@@ -408,38 +704,41 @@ class ReportedScheduleRun:
 
 def reported_schedule_run(
     *,
-    verifier: ContextVerifier,
+    verifier: AuthorityTokenVerifier,
     team_id: str,
-    task_context: SignedTaskContextV1 | Mapping[str, Any] | None,
+    task_context: AuthorityTokenRecord | Mapping[str, Any] | Any | None,
     schedule_run: ScheduleRunIdentityV1 | Mapping[str, Any] | None,
 ) -> ReportedScheduleRun | None:
-    """The schedule and person of a finished scheduled run, from its original signature only.
-
-    Like ``reported_task_person``, historical attribution for notices, never
-    authority to execute: the run may have outlived its identity and its
-    schedule may be gone. None when the identity names no schedule (a
-    person's request signed by the gateway). Raises ``IdentityRejected`` or
-    ``ValueError`` when the signature does not check out. A permit run's
-    start time is the run's own unsigned field, read only to date notices.
-    """
+    """The schedule and person of a finished scheduled run, from its original signature only."""
 
     if schedule_run is None:
-        context = verifier.verify(task_context, team_id=team_id, check_expiry=False)
-        if context.issuer != ISSUER_SCHEDULER or not context.schedule_id:
+        verified = verifier.verify_root_task(
+            task_context,
+            team_id=team_id,
+            check_expiry=False,
+            require_active_person=False,
+        )
+        if not verified.is_scheduler_issued or not verified.schedule_id:
             return None
-        return ReportedScheduleRun(context.schedule_id, context.person_id, context.issued_at_utc)
+        return ReportedScheduleRun(verified.schedule_id, verified.person_id, verified.issued_at)
     if task_context is not None:
-        raise IdentityRejected("The task carries both a signed task context and a scheduled run identity.")
-    run = (
-        schedule_run
-        if isinstance(schedule_run, ScheduleRunIdentityV1)
-        else ScheduleRunIdentityV1.model_validate(schedule_run)
+        raise IdentityRejected(
+            "The task carries both an authority token and a scheduled run identity.",
+            code=REFUSAL_MALFORMED,
+        )
+    run = _parse_schedule_run(schedule_run)
+    permit = verifier.verify_schedule_permit(
+        run.permit,
+        team_id=team_id,
+        check_expiry=False,
+        require_active_person=False,
     )
-    permit = verifier.verify_permit(run.permit, team_id=team_id, check_expiry=False)
+    assert permit.schedule_id is not None
     return ReportedScheduleRun(permit.schedule_id, permit.person_id, run.started_at_utc)
 
 
 __all__ = [
+    "DEFAULT_RUN_LIFETIME",
     "LIVE_CHECK_CACHE_SIZE",
     "LIVE_CHECK_SECONDS",
     "ReportedScheduleRun",
@@ -448,7 +747,9 @@ __all__ = [
     "ScheduleRunLookup",
     "StoredScheduleFacts",
     "job_schedule_id",
-    "resolve_task_identity",
     "reported_schedule_run",
     "reported_task_person",
+    "resolve_task_identity",
+    "resolve_task_identity_async",
+    "verified_token_to_task_context",
 ]

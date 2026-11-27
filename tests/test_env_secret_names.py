@@ -21,7 +21,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from runtime_settings.security import REMOVED_TOOL_CREDENTIAL_ENV_VARS
+from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS, REMOVED_TOOL_CREDENTIAL_ENV_VARS
 from runtime_settings.services import REMOVED_LINKED_KEY_ENV_VARS
 from env_secrets import (
     DEFAULT_SECRET_FILE_ENV_VARS,
@@ -98,8 +98,15 @@ READ_ONLY_BY_BROKER_TOOLS: dict[str, str] = {
 # them, to remove them from a child's environment, or to hand a CLI the task
 # person's own stored token. The web search and crawling keys are refused too
 # (runtime_settings.services): they are linked accounts in the credential
-# store, and onboarding names them only to hand an imported key over.
-REFUSED_AT_STARTUP = frozenset(REMOVED_TOOL_CREDENTIAL_ENV_VARS) | frozenset(REMOVED_LINKED_KEY_ENV_VARS)
+# store, and onboarding names them only to hand an imported key over. Task
+# context signing keys (REMOVED_SIGNING_KEY_ENV_VARS) were replaced by
+# installation-authority host certificates and are read only during the
+# one-time first-start conversion, then refused at startup.
+REFUSED_AT_STARTUP = (
+    frozenset(REMOVED_TOOL_CREDENTIAL_ENV_VARS)
+    | frozenset(REMOVED_LINKED_KEY_ENV_VARS)
+    | frozenset(REMOVED_SIGNING_KEY_ENV_VARS)
+)
 # Third-party servers and tools that must receive no listed variable.
 RECEIVE_NOTHING = frozenset({PROCESS_NATS, PROCESS_OPENSHELL_CLI, PROCESS_SEALBOX, PROCESS_POSTGRES})
 

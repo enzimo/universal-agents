@@ -69,7 +69,7 @@ from custom_tools.providers.schedules import (
 )
 from tests.task_work_support import set_agent_ref
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 from tests.tool_result_support import tool_json
 
@@ -165,6 +165,7 @@ def _lead(tmp_path: Path, store: ScheduleStore):
         )
     agent.team_comms = SimpleNamespace(send_message=AsyncMock(return_value=1))
     agent._schedule_store = store
+    set_agent_ref(agent)
     return agent
 
 
@@ -177,7 +178,11 @@ def _persons_running_task(agent: Any, person: str) -> tuple[Task, MessageHeader,
         is_response_requested=True,
         msg_correlation_id=f"corr_{person}",
         conversation_id=f"conv_{person}",
-        gateway_context=GatewayContext(canonical_user_id=person, session_key=f"session_{person}"),
+        gateway_context=GatewayContext(
+            canonical_user_id=person,
+            session_key=f"session_{person}",
+            task_context=signed_task_token(person, team_id=TEAM, roles=("owner",)),
+        ),
     )
     manager = agent.task_manager
     assert manager.add_task(task, header, meta, owner_person_id=None)
@@ -338,7 +343,7 @@ class _ToolAgent:
             session_key=f"session_{person}",
             chat_id=f"chat_{person}",
             channel_name="telegram",
-            task_context=context_signer().issue(team_id=TEAM, person_id=person, person_roles=("owner",)),
+            task_context=signed_task_token(person, team_id=TEAM, roles=("owner",), root_task_id="task_current"),
         )
         task_info = SimpleNamespace(
             header=MessageHeader(from_agent_id="gateway", to_routing_path="agent_lead", response_routing_key="gateway", agent_signature=""),

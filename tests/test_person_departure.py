@@ -46,7 +46,6 @@ from access_control import safe_open
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService
 from access_control.entities import PersonPrincipal, agent_role_resolver
-from access_control.identity import ContextSigner
 from access_control.requests import AccessRequests
 from assistant_gateway.application.commands.context import GatewayActorContext
 from assistant_gateway.application.commands.identity import IdentityCommandHandler, IdentityCommandRequest
@@ -58,7 +57,6 @@ from assistant_gateway.person_departure import GatewayPersonDeparture
 from assistant_gateway.runtime_ports import MembershipRoleIdentityAuthorizer
 from assistant_gateway.store import GatewayStateStore
 from tests.task_work_support import TurnHost
-from custom_agents import task_context_runtime
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.heartbeat_store import HeartbeatStore
 from custom_agents.memory_review_store import MemoryReviewStore
@@ -110,10 +108,11 @@ from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import create_pinned_memory_repository
 from tests.system_schedule_kind_support import PERSON_KIND, STAND_IN_KIND, use_kind
 from tests.broker_access_support import (
-    context_signer,
+    broker_gateway_identity,
+    broker_scheduler_identity,
     forget_task_context_keys,
     store_account_link,
-    use_scheduler_key,
+    use_broker_authority_verifier,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -175,12 +174,39 @@ class _Inbox:
         self.finished.append(request)
 
 
-class _ManagerInProcess:
-    """The gateway's manager transport, delivering to the real manager handler with a gateway-signed context."""
+def _sign_for_access_person(
+    access: AccessRepository,
+    person_id: str,
+    *,
+    as_scheduler: bool = False,
+) -> Any:
+    from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from id_generation import new_id
 
-    def __init__(self, agent: Any, signer: ContextSigner) -> None:
+    record = access.team_person(TEAM, person_id)
+    assert record is not None
+    identity = broker_scheduler_identity(TEAM) if as_scheduler else broker_gateway_identity(TEAM)
+    req_id = new_id("task_context")
+    return AuthorityTokenRecord.model_validate(
+        root_task_token(
+            identity,
+            team=TEAM,
+            root_task_id=req_id,
+            request_id=req_id,
+            person_ref=record.person_ref,
+            schedule_id="sched_departure_test" if as_scheduler else None,
+            issued=datetime.now(timezone.utc),
+        )
+    )
+
+
+class _ManagerInProcess:
+    """The gateway's manager transport, delivering to the real manager handler with a gateway-signed authority token."""
+
+    def __init__(self, agent: Any, access: AccessRepository) -> None:
         self.agent = agent
-        self.signer = signer
+        self.access = access
         self.available = True
 
     async def request_person_standing(
@@ -188,10 +214,8 @@ class _ManagerInProcess:
     ) -> PersonStandingCommandV1:
         if not self.available:
             raise RuntimeError("The manager is not available.")
-        # The gateway signs the acting administrator with their current roles.
-        signed = self.signer.issue(
-            team_id=TEAM, person_id=actor_person_id, person_roles=(ROLES[actor_person_id],)
-        )
+        # The gateway signs the acting administrator's opaque person_ref with its host key.
+        signed = _sign_for_access_person(self.access, actor_person_id)
         await handle_person_standing_command(
             self.agent,
             command=command,
@@ -265,8 +289,7 @@ class World:
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    use_scheduler_key(monkeypatch)
-    task_context_runtime._verifier.cache_clear()
+    forget_task_context_keys()
     monkeypatch.delenv("SECURITY_LAYER_MODE", raising=False)
     clock = _Clock()
     layout = InstanceLayout.at(tmp_path / "instance")
@@ -284,6 +307,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     access = AccessRepository(storage)
     directory = PeopleDirectorySync(identity=gateway.identity_repository, open_store=lambda: access, team_id=TEAM, clock=clock)
     directory.sync_all()
+    use_broker_authority_verifier(people=access)
     identity = GatewayIdentityService(
         repository=gateway.identity_repository,
         unit_of_work_factory=gateway,
@@ -344,7 +368,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         _scheduler_wake=SimpleNamespace(set=lambda: None),
         _finalize_conversation_turn=AsyncMock(return_value=None),
     )
-    manager = _ManagerInProcess(agent, context_signer())
+    manager = _ManagerInProcess(agent, access)
     departures = PersonDepartureRepository(storage)
     records = GatewayPersonDeparture(
         state_store=gateway,
@@ -372,7 +396,6 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     service.cedar.close()
     forget_task_context_keys()
-    task_context_runtime._verifier.cache_clear()
 
 
 # -- what a person has ------------------------------------------------------------------
@@ -945,12 +968,20 @@ def test_a_command_not_from_the_gateway_for_an_administrator_is_refused(world: W
     ids = _give_work(world, MIA)
     world.gateway.remove_team_membership(canonical_user_id=MIA, team_id=TEAM)
     world.identity._people_directory.record(MIA)  # the copy says removed; only the command is in question
-    scheduler = ContextSigner.from_env("scheduler")
-    assert scheduler is not None
+    with world.gateway.identity_unit_of_work() as uow:
+        uow.identity.create_gateway_user(canonical_user_id="member_nora", display_name="Nora", timezone="UTC")
+        uow.identity.create_team_membership(canonical_user_id="member_nora", team_id=TEAM, role="member")
+        uow.commit()
+    world.identity._people_directory.record("member_nora")
 
     unsigned = _send(world, signed=None)
-    by_scheduler = _send(world, signed=scheduler.issue(team_id=TEAM, person_id=ADAM, person_roles=("admin",)))
-    by_member = _send(world, signed=context_signer().issue(team_id=TEAM, person_id=OTTO, person_roles=("member",)), principal=OTTO, roles=("member",))
+    by_scheduler = _send(world, signed=_sign_for_access_person(world.access, ADAM, as_scheduler=True))
+    by_member = _send(
+        world,
+        signed=_sign_for_access_person(world.access, "member_nora"),
+        principal="member_nora",
+        roles=("member",),
+    )
 
     assert unsigned.success is False and unsigned.message.startswith("unsigned_sender")
     assert (by_scheduler.success, by_scheduler.message) == (False, "sender_not_gateway")

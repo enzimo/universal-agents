@@ -148,7 +148,7 @@ from storage.config import resolve_storage_settings
 from storage.change_ledger import ChangeRequestStore
 from storage.knowledge_repository import create_knowledge_repository
 from storage.pinned_memory_repository import SqlitePinnedMemoryRepository
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 from tests.knowledge_privacy_checks import (
     Canary,
@@ -654,8 +654,8 @@ class StandIn:
         self._pinned_memory_repository = SqlitePinnedMemoryRepository(str(db_path))
         gateway_context = None
         if person_id:
-            signed = context_signer().issue(
-                team_id=TEAM, person_id=person_id, person_roles=("member",)
+            signed = signed_task_token(
+                person_id, team_id=TEAM, roles=("member",)
             )
             gateway_context = GatewayContext(
                 source="webchat",
@@ -667,7 +667,7 @@ class StandIn:
             # request's admission before seeding pages or invoking its tools,
             # as the real task snapshot transaction does in the runtime.
             ChangeRequestStore(storage).open(
-                team_id=TEAM, request_id=signed.context.context_id,
+                team_id=TEAM, request_id=signed.bound_to.request_id,
                 person_id=person_id, now=datetime.now(timezone.utc),
             )
         self.meta = MessageMeta(

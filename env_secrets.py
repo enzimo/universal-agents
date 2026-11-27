@@ -300,7 +300,10 @@ def withheld_names(
 
     if process not in PROCESS_NAMES:
         raise ValueError(f"Unknown process {process!r}; expected one of {sorted(PROCESS_NAMES)}")
+    from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
+
     denying = [entry for entry in _entries_with_renames(listed, renamed or {}) if process not in entry.recipients]
+    denying.extend(ListedVariable(name=name, recipients=frozenset()) for name in REMOVED_SIGNING_KEY_ENV_VARS)
     return frozenset(key for key in env if any(entry.covers(key) for entry in denying))
 
 

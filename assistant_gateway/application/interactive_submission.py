@@ -23,6 +23,7 @@ from assistant_gateway.application.manager_client import GatewayManagerClient
 from assistant_gateway.application.ports import GatewayIdGenerator
 from assistant_gateway.application.request_context import (
     GatewayAdmissionDecision,
+    GatewayAuthorityTokenUnavailable,
     GatewayRequestContextService,
     GatewayRequestRoute,
 )
@@ -540,6 +541,41 @@ class GatewayInteractiveSubmissionService:
                     query_handler=request.query_handler,
                     response_task_id=task.task_id,
                 )
+            await self._request_context.ensure_signer_ready()
+            try:
+                gateway_context = self._request_context.build_gateway_context(
+                    session_key=session.session_key,
+                    delivery_mode=DELIVERY_MODE_INTERACTIVE,
+                    route=thread.route,
+                    manager_agent_id=manager_id,
+                    # A request admitted while its thread is set to Run
+                    # concurrently may run beside the lead's other work
+                    # (custom_agents.execution_lanes).
+                    parallel_thread=parallel_thread,
+                    # Vouches for the request's files (sent_files_access).
+                    root_task_id=task.task_id,
+                    conversation_id=thread.conversation_id,
+                    context_id=request_context_id(task),
+                )
+            except GatewayAuthorityTokenUnavailable as exc:
+                self._logger.warning(
+                    "Gateway did not publish interactive user request because its host could not "
+                    "sign an authority token yet. event=gateway_user_request_signer_unavailable "
+                    "correlation_id=%s task_id=%s conversation_id=%s session_key=%s person_id=%s",
+                    correlation_id,
+                    task.task_id,
+                    thread.conversation_id,
+                    session.session_key,
+                    thread.route.canonical_user_id or session.owner_canonical_user_id or "",
+                )
+                self._requests.finish(correlation_id)
+                await self._responses.queue_manager_unavailable(correlation_id, message=str(exc))
+                return await self._responses.await_terminal_response(
+                    correlation_id=correlation_id,
+                    session_key=session.session_key,
+                    query_handler=request.query_handler,
+                    response_task_id=task.task_id,
+                )
             envelope = MessageEnvelope(
                 msg_content=task,
                 msg_meta=MessageMeta(
@@ -550,20 +586,7 @@ class GatewayInteractiveSubmissionService:
                     request_timezone=thread.request_timezone,
                     requester_type=RequesterType.USER_REQUESTER,
                     is_response_requested=True,
-                    gateway_context=self._request_context.build_gateway_context(
-                        session_key=session.session_key,
-                        delivery_mode=DELIVERY_MODE_INTERACTIVE,
-                        route=thread.route,
-                        manager_agent_id=manager_id,
-                        # A request admitted while its thread is set to Run
-                        # concurrently may run beside the lead's other work
-                        # (custom_agents.execution_lanes).
-                        parallel_thread=parallel_thread,
-                        # Vouches for the request's files (sent_files_access).
-                        root_task_id=task.task_id,
-                        conversation_id=thread.conversation_id,
-                        context_id=request_context_id(task),
-                    ),
+                    gateway_context=gateway_context,
                 ),
                 msg_header=MessageHeader(
                     from_agent_id=self._settings.response_route,

@@ -468,24 +468,40 @@ An authority token (`authority` in the frame) proves that work acts for a person
   `message_context_<sha256>` for a message that can bring a person's files, which is
   every new chat request, guidance and answer the gateway sends
   (`access_control.ownership`: `request_context_id`, `steering_context_id`,
-  `answer_context_id`); `schedule_run_<hex>` for a scheduled run that a worker process
-  starts from its schedule's permit (`custom_agents.schedule_permits`); and
-  `task_context_<hex>` for every other context, among them scheduled runs and system
-  work the manager signs (`access_control.identity.ContextSigner.issue`). The schema
-  takes any `record_id`, so all three forms and a stored signed context converted at the
-  upgrade keep their ids, and nothing keyed by a request id is converted. A command or
-  access-request token has no request id, and a frame whose root-task token lacks one is
-  refused as `malformed`.
+  `answer_context_id`); `schedule_run_<hex>` for a vouched scheduled run (both a run
+  started from its schedule's standing permit in `custom_agents.schedule_permits` and
+  a per-run token signed by `team_services.scheduler` via `run_context.sign`);
+  `unvouched_run_<hex>` for a scheduled run of an unvouched person's schedule signed by
+  `team_services.scheduler` (and converted 0.9 roleless scheduler contexts), which
+  causes every receiver to resolve `person_roles=()` regardless of issuer; and
+  `task_context_<hex>` for every other root-task token, including gateway requests
+  without file uploads and scheduler-signed system work (`team_services.scheduler`). The
+  schema takes any `record_id`, so all four forms and a stored 0.9 signed context
+  converted at the first 0.10 start keep their ids, and nothing keyed by a request id is
+  converted. A command or access-request token has no request id, and a frame whose
+  root-task token lacks one is refused as `malformed`.
 - It names no roles: receivers read the person's current roles and standing from the
-  team's people records, so a role taken away while a token lasts no longer counts.
+  team's people records, so a role taken away while a token lasts no longer counts
+  (except that tokens or permits carrying the signed unvouched marker always resolve
+  with `person_roles=()`).
 - A scheduled job's run has a token the scheduler signed with the run's `schedule_id`,
-  bound to the run's root task and so naming a request id; the run's holder gets it with the task, or with `custody.confirmed` when the run went
-  to a worker pool. A run's schedule comes only from there: the work context names no
-  schedule, so a host that passes the task on cannot change it, and a run handed back
-  and dispatched again keeps it.
+  bound to the run's root task and so naming a request id; the run's holder gets it with
+  the task, or with `custody.confirmed` when the run went to a worker pool. A run's
+  schedule comes only from there: the work context names no schedule, so a host that
+  passes the task on cannot change it, and a run handed back and dispatched again keeps
+  it. While 0.9 wrappers carry scheduled runs, the team services' scheduler also keeps
+  one standing scheduler-signed schedule permit per active schedule (`run_permit_json`,
+  bound as `root_task` with id `schedule_permit:<schedule_id>`,
+  `schedule_unvouched_permit:<schedule_id>` for an unvouched person's schedule whose
+  runs carry `person_roles=()`, or `schedule_owner_permit:<schedule_id>` on
+  `owner_permit_json`), which verifiers accept only inside a `ScheduleRunIdentityV1`
+  and refuse anywhere a root-task token is expected. A permit-backed run lasts up to
+  `authority_token_max_seconds` (7 days) from its `started_at_utc`; if the permit
+  captured when the run started expires mid-run, the resolver verifies it without
+  expiry and falls back to the schedule's current renewed stored permit for the same
+  schedule, person, and binding kind.
 - System work, a run of a schedule that works for no person, carries a scheduler's token
   that names its `schedule_id` and no person. No other token may leave out the person.
-  Today's signed context for such a run also names its schedule and no person.
 
 A receiver refuses with `bad_authority` a token on a kind whose `authority` is `none`, or
 at an address whose `authority_by_address` is `none` (a `task.request` to a worker pool), a
@@ -1798,7 +1814,7 @@ Trust records (`TrustStore.add`) follow the same order without the reader's chec
 
 What each record says, and what `TrustStore.verify` checks about it:
 - **Host liveness.** A host writes only its own record, under its runtime id. The record names the certificate it is signed with: its id, membership epoch and `sha256`, the SHA-256 of the certificate record's signing bytes, which `TrustStore.add` recorded. It allows at most that certificate's sessions. Its roles, teams and agent types are the certificate's, so the record does not repeat them.
-- **Agent records.** The key is `<team>.<partition>.<agent>` of the body, where the partition is the agent's ("Partitions", `custom_messages.wire.partitions.agent_record_key`), and the team is one the writer's certificate serves. A host's write grant names the partitions it owns, so only the owner of an agent's partition can store its record; a key with another partition, or the two-part key of an earlier release, is refused (`invalid_body` at `/key`). A host's grant covers every key of its partitions, including keys that end in another partition's agent, so a reader takes an event, a deletion included, only under the key the agent's own partition gives and ignores any other (logged as `invalid_body` at `/key`): a deletion elsewhere removes no agent from its view. A reader accepts an agent record only from the host its placement names, with the same agent type. Its session must name the same agent, type and host and still be current; only that session decides its role. The reader checks these joins, since verification of one record cannot establish them. Readers bind every report to its actual bucket key and retain replay protection after deletion, separately for each signing host. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person. The record may also carry `requests`: the root task ids of the people's requests the agent's model turns ran for now or since its previous record (at most about 2 seconds earlier, the write interval), each from the verified gateway-signed context of the turn's task, never from a message field, and none for scheduled runs or system work. They are opaque task ids and name no person; a reader maps an id only through its own record of a person's request and ignores ids it does not hold (the gateway's Web Chat agent trail). A reader built before `requests` existed refuses a record that carries it as an unknown field, so while the label is a pre-release a working agent drops out of such a reader's view until that reader runs this contract too. Hosts remove their agents' records after writing `exiting` and closing their sessions, and retry unfinished cleanup. They remove only a current verified record of their own, with a conditional delete on its bucket revision. Unchanged records are refreshed with current certificates. A record whose signer cannot be verified is left in place; its key alone authorizes no deletion.
+- **Agent records.** The key is `<team>.<partition>.<agent>` of the body, where the partition is the agent's ("Partitions", `custom_messages.wire.partitions.agent_record_key`), and the team is one the writer's certificate serves. A host's write grant names the partitions it owns, so only the owner of an agent's partition can store its record; a key with another partition, or the two-part key of an earlier release, is refused (`invalid_body` at `/key`). A host's grant covers every key of its partitions, including keys that end in another partition's agent, so a reader takes an event, a deletion included, only under the key the agent's own partition gives and ignores any other (logged as `invalid_body` at `/key`): a deletion elsewhere removes no agent from its view. A reader accepts an agent record only from the host its placement names, with the same agent type. Its session must name the same agent, type and host and still be current; only that session decides its role. The reader checks these joins, since verification of one record cannot establish them. Readers bind every report to its actual bucket key and retain replay protection after deletion, separately for each signing host. The record may carry the agent's `display_name`, the name the team lead routes by and the gateway's Team page shows; it names an agent, never a person. The record may also carry `requests`: the root task ids of the people's requests the agent's model turns ran for now or since its previous record (at most about 2 seconds earlier, the write interval), each from the verified gateway-signed authority token of the turn's task, never from a message field, and none for scheduled runs or system work. They are opaque task ids and name no person; a reader maps an id only through its own record of a person's request and ignores ids it does not hold (the gateway's Web Chat agent trail). A reader built before `requests` existed refuses a record that carries it as an unknown field, so while the label is a pre-release a working agent drops out of such a reader's view until that reader runs this contract too. Hosts remove their agents' records after writing `exiting` and closing their sessions, and retry unfinished cleanup. They remove only a current verified record of their own, with a conditional delete on its bucket revision. Unchanged records are refreshed with current certificates. A record whose signer cannot be verified is left in place; its key alone authorizes no deletion.
 - **Placement.** The key and team follow the same rule. The team services write a placement with compare-and-set on the last key-value revision and the next sequence. The fencing token written into admission records is the signed sequence, not the revision, which the server assigns and nobody signs. `host_epoch` is the membership epoch of the host's certificate when the agent was placed. Renewals raise the epoch without moving the agent: a reader accepts the placement while the host's liveness record names a certificate of that runtime at `host_epoch` or later.
 - **Partition ownership.** The key is `<team>.partition.<partition>` of the body, in `UA1_PLACEMENT` beside the placements, and only the team services sign it. The partition is below the installation's count (`invalid_body` at `/body/partition`). The team services write it like a placement, with compare-and-set and the next sequence, under the same mutation lock as `sessions.open` and `sessions.close` (`SessionService._changing` shared with `PartitionService`): `sessions.open` re-reads the partition's ownership inside that lock before its placement compare-and-set so a concurrent release and open cannot place an agent in a released partition. Its `state` is `owned` when they give a host a partition that holds no placed agent, and when a partition with all its agents arrives at its new host, only a host whose credential would still fit ("Credential size"). It is `released`, still naming the old host, when they start moving a partition away, before the old host gives it up ("Credentials follow ownership"). The authority names only `owned` partitions in a host's credential, and a renewal by a host that a `released` record names needs a new NATS key. `host_epoch` follows the placement's rule. A partition without a record has no owner, and the team services place no agent in it, nor in a `released` one. The team services refuse a session or placement for an agent whose partition the asking host does not own (`partition_not_owned`, "Agent sessions"), and a new agent's session or placement in a `released` partition. Placement readers take only two-part keys, `<team>.<agent>`, so an ownership record is never read as a placement.
 - **Team view.** The key is exactly `<team>.<entry>.<id>`: a team the writer's certificate serves, the body's entry type, and one more token that names the entry (it need not be a task id, which may hold dots). Entries name people only by opaque references and the display names the team's policy allows. An Objective's title is the person's own words, so the team services delete an entry when its item closes and when the person it names departs. A task's entry repeats its holder's custody window ("Custody windows").
@@ -2707,7 +2723,7 @@ never repairs the stored record. New pause commands require a valid timestamp.
 `list_scheduled_jobs`, level `read`. It is not a new runtime tool. Gateway reads use
 a command token bound to `request_id`; lead and worker reads use root-task authority.
 The receiver checks the same owner scope before reading details. System work may read
-only the schedule named by its signed context. A missing or invisible schedule returns
+only the schedule named by its authority token. A missing or invisible schedule returns
 `not_found`; a refused scope returns `not_allowed`. An offset beyond the text or another
 invalid selection returns `invalid_request`; an unsuccessful read returns `runtime_error`.
 This read has no covered change, stores no outcome and uses `/message_id` as its key.

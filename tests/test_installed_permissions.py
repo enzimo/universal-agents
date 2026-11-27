@@ -43,7 +43,7 @@ from tests.change_approval_support import SignedTaskManager, change_agent, needs
 HANDLER_ID = "test.reviewed.echo"
 OWNER_ID = "usr_installed_permission_owner"
 ADMIN_ID = "usr_installed_permission_admin"
-TEAM_ID = "team_installed_permissions"
+TEAM_ID = "team_installed_perms"
 
 
 @pytest.fixture(autouse=True)

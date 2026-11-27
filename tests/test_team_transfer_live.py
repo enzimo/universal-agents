@@ -190,13 +190,17 @@ def run(base: Path) -> None:
         if key.startswith(("SECURE_TOOL_BROKER", "TEAM_INSTANCE")):
             del os.environ[key]
     os.environ.update({k: v for k, v in broker_env(new_config).items() if k.startswith(("SECURE_TOOL_BROKER", "TEAM_INSTANCE"))})
+    from runtime_settings.security import REMOVED_SIGNING_KEY_ENV_VARS
     from secure_tool_broker.credential_state_store import read_credential_state
+    new_env_text = (new_root / "team.env").read_text()
+    old_env_text = (old_root / "team.env").read_text()
     checks = {
         "github sign-in moved": read_credential_state("github.token", owner_id="usr_ana") == GITHUB,
         "team model key moved": [e.key for e in ModelKeyStore("team_e2e", scope=TEAM_SCOPE).entries()] == [MODEL],
-        "bot token in new team.env": "123:e2e-bot-token" in (new_root / "team.env").read_text(),
-        "new signing key differs": (new_root / "team.env").read_text().split("ACCESS_GATEWAY_SIGNING_KEY=")[1].split("\n")[0]
-            != (old_root / "team.env").read_text().split("ACCESS_GATEWAY_SIGNING_KEY=")[1].split("\n")[0],
+        "bot token in new team.env": "123:e2e-bot-token" in new_env_text,
+        "no removed signing keys in new team.env": all(k not in new_env_text for k in REMOVED_SIGNING_KEY_ENV_VARS),
+        "new broker token differs": new_env_text.split("SECURE_TOOL_BROKER_TOKEN=")[1].split("\n")[0]
+            != old_env_text.split("SECURE_TOOL_BROKER_TOKEN=")[1].split("\n")[0],
         "grant moved": [g.grant_id for g in AccessRepository(new_config.manager_storage_settings).list_team("team_e2e")] == ["g_e2e"],
         "people moved": sorted(p.canonical_user_id for p in create_gateway_state_repository(new_config.state_storage_settings).list_team_people("team_e2e")) == ["usr_ana", "usr_ben"],
         "notice for ana": any(n.kind.value == "credentials_imported" for n, _read in AccessRepository(new_config.manager_storage_settings).notices_for("team_e2e", person_id="usr_ana", roles=())),

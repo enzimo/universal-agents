@@ -33,7 +33,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from access_control.identity import ENV_VERIFY_KEYS
 from custom_agents import task_message_runtime
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.manager_control_runtime import _runtime_work_roots
@@ -44,7 +43,11 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, RequesterType
 from storage.config import resolve_storage_settings
 from storage.person_departure_repository import PersonDepartureRepository
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 # The admission harness (tests.test_turn_action_outbox._make_agent) runs in this team.
 TEAM = "test_team"
@@ -57,8 +60,8 @@ NOW = "2026-10-11T00:00:00+00:00"
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -85,7 +88,7 @@ def _lead(tmp_path: Path):
 
 
 def _signed_for(person: str | None, *, claims: str | None) -> GatewayContext:
-    signed = context_signer().issue(team_id=TEAM, person_id=person, person_roles=("member",)) if person else None
+    signed = signed_task_token(person, team_id=TEAM, roles=("member",)) if person else None
     return GatewayContext(canonical_user_id=claims, task_context=signed)
 
 
@@ -184,13 +187,12 @@ async def test_a_subtask_works_for_its_parents_verified_person(tmp_path) -> None
 def test_a_permit_backed_scheduled_run_is_archived_as_its_schedule_owners(tmp_path, monkeypatch) -> None:
     """A worker without the scheduler key starts the run with its schedule's permit (``schedule_permits``)."""
 
-    from custom_agents.schedule_permits import renew_schedule_permits
     from tests import scheduled_run_support as runs
 
     world = runs.build_world(tmp_path, monkeypatch)
     runs.record_people(world, (runs.ANN, PersonStanding.ACTIVE, ("member",)))
     runs.save_schedule(world)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    runs.issue_permits(world)
 
     async def start_run() -> dict:
         await runs.subscribe(world)

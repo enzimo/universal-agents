@@ -1,12 +1,12 @@
-"""Gateway-owned user schedule creation, and schedule lists and controls through the team services.
+"""Gateway-owned user schedule creation, lists and controls through the team services.
 
-Creating a schedule still publishes a durable ``ScheduledMessage`` to the team lead (queued
-work moves in phase 3). Listing, pausing, resuming, turning off and removing go to the team
+Creating, listing, pausing, resuming, turning off and removing schedules all go to the team
 services as ``schedules.*`` commands for the signed-in person (``team_services.schedules``),
-which decide whose schedules they are and who may change system schedules. A chat's own
-list names the chat by its opaque delivery reference (``GatewayDeliveryRefs``). A change
-names the listed version (``seen_version``); a chat command that names only a schedule id
-looks the current version up first, so it acts on the schedule as named, as before.
+which decide whose schedules they are, vouch for the owner on ``schedules.install``, and
+check who may change system schedules. A chat's own list and install name the chat by its
+opaque delivery reference (``GatewayDeliveryRefs``). A change names the listed version
+(``seen_version``); a chat command that names only a schedule id looks the current version
+up first, so it acts on the schedule as named, as before.
 """
 
 from __future__ import annotations
@@ -29,18 +29,12 @@ from assistant_gateway.application.session_service import (
     GatewaySessionService,
 )
 from assistant_gateway.domain.sessions import SessionRecord
-from custom_messages.contracts.envelope_v1 import MessageEnvelope
-from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
+from custom_messages.contracts.routing_v1 import MessageHeader
 from assistant_gateway.application.team_commands import GatewayTeamCommandService, TeamServicesUnavailable
 from custom_messages.contracts.schedule_v1 import (
     SYSTEM_SCHEDULE_CHANGE_KIND,
-    ScheduledMessage,
-    ScheduleTaskMemory,
 )
-from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import (
-    MessageMetaType,
-    RequesterType,
     ScheduleManagementClass,
 )
 
@@ -191,71 +185,51 @@ class GatewayScheduleApplication:
         return bool(self._person_changes.may_change(person_id, SYSTEM_SCHEDULE_CHANGE_KIND))
 
     async def add(self, request: GatewayScheduleCreateRequest) -> str:
-        """Create and durably publish one user-managed recurring schedule."""
+        """Create one user-managed recurring schedule through ``schedules.install`` on team services."""
 
-        manager_id = self._require_manager_id()
         session = self._resolve_session(request.session_key, request.route)
         schedule_id = self._id_generator.new_scheduled_job_id()
         correlation_id = self._id_generator.new_correlation_id()
         schedule_conversation_id = self._id_generator.new_conversation_id()
         resolved_route = self._resolved_route(request.route, session)
-        payload_header = self._manager_header(manager_id)
-        # The person's own time zone: the manager reads the schedule's cron
-        # expression in it (the manager fills the schedule's cron_timezone from it).
-        person_timezone = self._request_context.requester_presentation_for_session(session, resolved_route).timezone
-        payload_meta = MessageMeta(
-            from_agent_name=f"{self._settings.instance_name}_gateway",
-            msg_correlation_id=correlation_id,
-            conversation_id=schedule_conversation_id,
-            request_timezone=person_timezone or self._settings.request_timezone,
-            requester_type=RequesterType.TIMER_REQUESTER,
-            is_response_requested=True,
-            gateway_context=self._request_context.build_gateway_context(
-                session_key=session.session_key,
-                delivery_mode="cron",
-                scheduled_job_id=schedule_id,
-                route=resolved_route,
-                manager_agent_id=manager_id,
-            ),
+        person = self._person(request.route, session)
+        person_timezone = (
+            self._request_context.requester_presentation_for_session(session, resolved_route).timezone
+            or self._settings.request_timezone
         )
-        schedule_message = ScheduledMessage(
-            schedule_id=schedule_id,
-            schedule_name=request.name,
-            management_class=ScheduleManagementClass.USER,
-            payload=Task(
-                task_type=MessageMetaType.REQUEST,
-                problem_statement=request.instruction.strip(),
-            ),
-            payload_header=payload_header,
-            payload_meta=payload_meta,
-            interval_ms=(
-                request.interval_seconds * 1000
-                if request.interval_seconds is not None
-                else None
-            ),
-            cron_expression=request.cron_expression,
-            repeat_count=None,
-            schedule_memory=ScheduleTaskMemory(),
-        )
-        envelope = MessageEnvelope(
-            msg_content=schedule_message,
-            msg_meta=MessageMeta(
-                from_agent_name=self._settings.user_display_name,
-                msg_correlation_id=correlation_id,
-                conversation_id=session.conversation_id,
-                request_timezone=self._settings.request_timezone,
-                requester_type=RequesterType.USER_REQUESTER,
-                is_response_requested=False,
-                gateway_context=self._request_context.build_gateway_context(
-                    session_key=session.session_key,
-                    delivery_mode="cron",
-                    scheduled_job_id=schedule_id,
-                    route=resolved_route,
-                    manager_agent_id=manager_id,
-                ),
-            ),
-            msg_header=self._manager_header(manager_id),
-        )
+        if request.cron_expression:
+            timing: dict[str, Any] = {
+                "kind": "cron",
+                "expression": request.cron_expression,
+                "time_zone": person_timezone,
+            }
+        elif request.interval_seconds is not None:
+            timing = {"kind": "interval", "interval_ms": int(request.interval_seconds) * 1000}
+        else:
+            raise ScheduleControlRefused("invalid_request", "A schedule needs an interval or a cron expression.")
+        body: dict[str, Any] = {
+            "schedule_id": schedule_id,
+            "mode": "create",
+            "name": request.name,
+            "management_class": ScheduleManagementClass.USER.value,
+            "timing": timing,
+            "repeat_count": 0,
+            "enabled": True,
+            "action": {"type": "task", "instruction": {"type": "inline", "text": request.instruction.strip()}},
+            "run_notes": {"schedule_kind": "", "policy": {"notify": "on_change", "notify_on_failure": False}},
+        }
+        if self._delivery_refs is not None:
+            body["deliver_to"] = {
+                "delivery_ref": self._delivery_refs.ref(session.session_key),
+                "conversation_id": schedule_conversation_id,
+                "time_zone": person_timezone,
+            }
+        reply = await self._team_commands.request("schedules.install", body, person_id=person)
+        if reply.get("outcome") != "ok":
+            raise ScheduleControlRefused(
+                str(reply.get("outcome")),
+                str(reply.get("message") or "The schedule could not be created."),
+            )
         self._delivery.register_scheduled_request(
             scheduled_job_id=schedule_id,
             correlation_id=correlation_id,
@@ -264,8 +238,8 @@ class GatewayScheduleApplication:
             request_text=request.instruction,
             conversation_id=schedule_conversation_id,
             followup_to_task_id=None,
+            owner_canonical_user_id=person,
         )
-        await self._manager.publish_durable(envelope, routing_key=manager_id)
         return schedule_id
 
     async def list(

@@ -10,35 +10,55 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from access_control.identity import (
-    ISSUER_GATEWAY,
-    ISSUER_SCHEDULER,
-    ContextSigner,
-    ContextVerifier,
-    generate_signing_key,
-    verify_keys_value,
-)
+from access_control.authority_verifier import AuthorityTokenVerifier
 from custom_agents import turn_registry, working_requests
 from custom_messages.contracts.routing_v1 import GatewayContext
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
 from custom_tools.runtime_context import task_work
+from custom_transport.protocol1.authority_tokens import root_task_token
+from custom_transport.protocol1.host_keys import HostKeys
+from custom_transport.protocol1.identity import HostIdentity
+from tests.broker_access_support import (
+    TEST_TEAM as TEAM,
+    broker_authority_verifier,
+    broker_gateway_identity,
+    broker_people_store,
+    broker_scheduler_identity,
+)
 
-TEAM = "team_one"
-GATEWAY_PRIVATE, GATEWAY_PUBLIC = generate_signing_key(ISSUER_GATEWAY)
-SCHEDULER_PRIVATE, SCHEDULER_PUBLIC = generate_signing_key(ISSUER_SCHEDULER)
-GATEWAY = ContextSigner.from_value(ISSUER_GATEWAY, GATEWAY_PRIVATE)
-SCHEDULER = ContextSigner.from_value(ISSUER_SCHEDULER, SCHEDULER_PRIVATE)
-VERIFIER = ContextVerifier.from_value(verify_keys_value([GATEWAY_PUBLIC, SCHEDULER_PUBLIC]))
+NOW = datetime.now(timezone.utc)
+GATEWAY = broker_gateway_identity()
+SCHEDULER = broker_scheduler_identity()
+ANN = broker_people_store().register(TEAM, "person_ann", roles=("member",))
+VERIFIER: AuthorityTokenVerifier = broker_authority_verifier()
 
 
-def _person_context(signer: ContextSigner = GATEWAY, **fields: Any):
-    values: dict[str, Any] = {"team_id": TEAM, "person_id": "person_ann", "root_task_id": "task_request_1"}
-    values.update(fields)
-    return signer.issue(**values)
+def _person_token(
+    issuer: HostIdentity = GATEWAY,
+    *,
+    team: str = TEAM,
+    person_ref: str | None = ANN.person_ref,
+    root_task_id: str = "task_request_1",
+    request_id: str = "task_context_1",
+    schedule_id: str | None = None,
+) -> AuthorityTokenRecord:
+    raw = root_task_token(
+        issuer,
+        team=team,
+        root_task_id=root_task_id,
+        request_id=request_id,
+        person_ref=person_ref,
+        schedule_id=schedule_id,
+        issued=NOW,
+    )
+    return AuthorityTokenRecord.model_validate(raw)
 
 
 class _Tasks:
@@ -73,12 +93,12 @@ def _access(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 
 def test_a_turn_for_a_persons_request_reports_its_root_task() -> None:
-    agent = _agent({"task_1": _meta(task_context=_person_context())})
+    agent = _agent({"task_1": _meta(task_context=_person_token())})
     assert working_requests.turn_request_id(agent, "task_1") == "task_request_1"
 
 
 def test_a_delegated_task_carries_the_same_context_and_reports_the_same_request() -> None:
-    parent = GatewayContext(task_context=_person_context())
+    parent = GatewayContext(task_context=_person_token())
     child = SimpleNamespace(gateway_context=parent.model_copy(deep=True))  # delegation_runtime copies it
     assert working_requests.turn_request_id(_agent({"child": child}), "child") == "task_request_1"
 
@@ -86,14 +106,23 @@ def test_a_delegated_task_carries_the_same_context_and_reports_the_same_request(
 @pytest.mark.parametrize(
     "context",
     [
-        pytest.param(lambda: _person_context(SCHEDULER), id="scheduler-signed run"),
-        pytest.param(lambda: _person_context(schedule_id="schedule_7"), id="gateway-delivered scheduled job"),
-        pytest.param(lambda: _person_context(person_id=None), id="system work"),
-        pytest.param(lambda: _person_context(root_task_id=None), id="no request task"),
-        pytest.param(lambda: _person_context(team_id="team_other"), id="another team"),
+        pytest.param(lambda: _person_token(SCHEDULER), id="scheduler-signed run"),
         pytest.param(
-            lambda: ContextSigner.from_value(ISSUER_GATEWAY, generate_signing_key(ISSUER_GATEWAY)[0]).issue(
-                team_id=TEAM, person_id="person_ann", root_task_id="task_request_1"),
+            lambda: _person_token(SCHEDULER, schedule_id="schedule_7"),
+            id="scheduler-signed scheduled job",
+        ),
+        pytest.param(
+            lambda: _person_token(SCHEDULER, person_ref=None, schedule_id="schedule_sys"),
+            id="system work",
+        ),
+        pytest.param(lambda: _person_token(team="team_other"), id="another team"),
+        pytest.param(
+            lambda: _person_token(
+                HostIdentity(
+                    HostKeys(GATEWAY.runtime, GATEWAY.keys.key_id, Ed25519PrivateKey.generate(), b"0" * 32),
+                    GATEWAY.certificate,
+                )
+            ),
             id="unknown key",
         ),
     ],
@@ -104,8 +133,8 @@ def test_contexts_that_are_no_verified_persons_request_report_nothing(context: A
 
 
 def test_a_forged_context_reports_nothing() -> None:
-    signed = _person_context()
-    forged = signed.model_copy(update={"context": signed.context.model_copy(update={"root_task_id": "task_other"})})
+    signed = _person_token()
+    forged = signed.model_copy(update={"bound_to": signed.bound_to.model_copy(update={"id": "task_other"})})
     assert working_requests.turn_request_id(_agent({"task_1": _meta(task_context=forged)}), "task_1") is None
 
 
@@ -122,7 +151,7 @@ def test_an_unexpected_failure_is_logged_and_reports_nothing(monkeypatch, caplog
         raise OSError("store unreadable")
 
     monkeypatch.setattr(working_requests, "resolve_task_identity", broken)
-    agent = _agent({"task_1": _meta(task_context=_person_context())})
+    agent = _agent({"task_1": _meta(task_context=_person_token())})
     with caplog.at_level(logging.WARNING):
         assert working_requests.turn_request_id(agent, "task_1") is None
     assert "event=working_request_unresolved agent_id=agent_1 task_id=task_1" in caplog.text
@@ -131,7 +160,7 @@ def test_an_unexpected_failure_is_logged_and_reports_nothing(monkeypatch, caplog
 @pytest.mark.asyncio
 async def test_a_turn_decides_once_when_it_starts_and_reports_at_start_and_end(monkeypatch) -> None:
     reports: list[tuple[str, ...]] = []
-    agent = _agent({"task_1": _meta(task_context=_person_context())})
+    agent = _agent({"task_1": _meta(task_context=_person_token())})
     agent._report_record_state = lambda: reports.append(working_requests.working_request_ids(agent))
     monkeypatch.setattr("custom_agents.person_model_runtime.restore_team_model", lambda *args: None)
 

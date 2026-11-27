@@ -40,7 +40,7 @@ from custom_messages.contracts.routing_v1 import (
 from custom_messages.contracts.runtime_v1 import TEAM_ARCHITECT_AGENT_TYPE
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, ProgressState, RequesterType
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.change_approval_support import use_signed_contexts
 
 REPORT = "Audit findings: linked the home page to five pages."
@@ -181,7 +181,7 @@ async def test_report_terminal_state_keeps_its_original_signed_request_open(tmp_
     db = str(tmp_path / "shared.db")
     lead = TaskManager(db_path=db)
     lead.set_owner_identity("lead", "Lead", "team", TEAM_ARCHITECT_AGENT_TYPE)
-    signed = context_signer().issue(team_id="team", person_id="alice", person_roles=("member",))
+    signed = signed_task_token("alice", team_id="team", roles=("member",), root_task_id="request")
     meta = MessageMeta(gateway_context=GatewayContext(task_context=signed))
     lead.add_task(Task(task_id="request", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id="alice")
     lead.update_main_task_state("request", ProgressState.WAITING, datetime.now(timezone.utc).isoformat())
@@ -203,7 +203,7 @@ async def test_report_terminal_state_keeps_its_original_signed_request_open(tmp_
     lead.update_main_task_state(report.task_id, terminal, datetime.now(timezone.utc).isoformat())
     assert lead.get_task_info("request").state is ProgressState.WAITING
     with sqlite3.connect(db) as conn:
-        assert conn.execute("SELECT state FROM change_requests WHERE request_id=?", (signed.context.context_id,)).fetchone()[0] == "open"
+        assert conn.execute("SELECT state FROM change_requests WHERE request_id=?", (signed.bound_to.request_id,)).fetchone()[0] == "open"
     # Use the tools' verified actor, not an actor assembled from claimed identity.
     facade = SimpleNamespace(
         id="lead", name="Lead", team_id="team", named_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
@@ -215,7 +215,7 @@ async def test_report_terminal_state_keeps_its_original_signed_request_open(tmp_
     assert saved.page.revision == 1
     lead.complete_task("request", datetime.now(timezone.utc).isoformat())
     with sqlite3.connect(db) as conn:
-        assert conn.execute("SELECT state FROM change_requests WHERE request_id=?", (signed.context.context_id,)).fetchone()[0] == "ended"
+        assert conn.execute("SELECT state FROM change_requests WHERE request_id=?", (signed.bound_to.request_id,)).fetchone()[0] == "ended"
 
 
 @pytest.mark.parametrize(("report", "suppressed"), [(True, True), (False, False)])

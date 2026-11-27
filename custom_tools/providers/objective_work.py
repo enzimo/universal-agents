@@ -233,21 +233,36 @@ def _install_objective_work_schedule(
         # Reconfiguration changes the definition, not a run's notes. Equal
         # memory in candidate/base makes update keep the latest stored notes.
         schedule.schedule_memory = existing_schedule.schedule_memory
-    permit = _objective_work_schedule_permit(
-        agent,
-        schedule=existing_schedule,
-        operation=ScheduleMutationOperation.UPDATE,
-        owner_canonical_user_id=owner_canonical_user_id,
-        candidate=schedule,
+    from custom_agents.schedule_install_client import (
+        extract_task_authority_token,
+        extract_task_delivery_ref,
+        install_schedule_via_team_services_sync,
     )
+
+    authority_token = extract_task_authority_token(current.meta)
+    delivery_ref = extract_task_delivery_ref(current.meta)
     schedule_persisted = False
     try:
         if existing_schedule is None:
-            store.add(schedule, system_mutation_permit=permit)
+            install_schedule_via_team_services_sync(
+                agent,
+                schedule,
+                mode="create",
+                authority_token=authority_token,
+                delivery_ref=delivery_ref,
+            )
         else:
-            # Roll back only the snapshot this write saved. The store assigns
-            # a timing revision, so the input copy is not the saved version.
-            schedule = store.update(schedule, base=existing_schedule, system_mutation_permit=permit)
+            install_schedule_via_team_services_sync(
+                agent,
+                schedule,
+                mode="replace",
+                authority_token=authority_token,
+                seen_version=schedule_record_digest(existing_schedule),
+                delivery_ref=delivery_ref,
+            )
+        saved = store.get_scheduled_message(schedule_id)
+        if saved is not None:
+            schedule = saved
         schedule_persisted = True
         policy = agent.task_manager.operations_runtime.run_sync(
             agent.task_manager.objective_work_coordinator.set_schedule,

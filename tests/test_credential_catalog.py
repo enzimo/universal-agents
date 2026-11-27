@@ -2305,7 +2305,8 @@ def test_api_request_user_agent_setting_in_schemas_example_and_env(
     )
 
 
-def test_broker_service_injects_configured_user_agent_into_tool_context() -> None:
+@pytest.mark.asyncio
+async def test_broker_service_injects_configured_user_agent_into_tool_context() -> None:
     from types import SimpleNamespace
 
     from access_control.caller_tokens import CALLER_GATEWAY, CALLER_MANAGER, BrokerCaller
@@ -2317,7 +2318,7 @@ def test_broker_service_injects_configured_user_agent_into_tool_context() -> Non
         links = None
         catalog = None
 
-        def check_broker_action(self, *_args, **_kwargs) -> GateResult:
+        async def check_broker_action_async(self, *_args, **_kwargs) -> GateResult:
             return GateResult(allowed=True)
 
     service = SecureToolBrokerService(
@@ -2327,7 +2328,7 @@ def test_broker_service_injects_configured_user_agent_into_tool_context() -> Non
     )
     base = ToolContext(canonical_user_id="usr_alice", team_id="team_ua", principal_type="user")
     validated = SimpleNamespace(provider="credential_catalog", action="credential.api_request", params={})
-    admitted = service._admitted_context(
+    admitted = await service._admitted_context(
         BrokerCaller(label=CALLER_MANAGER),
         validated,
         base,
@@ -2338,7 +2339,7 @@ def test_broker_service_injects_configured_user_agent_into_tool_context() -> Non
     gateway_validated = SimpleNamespace(
         provider="credential_catalog", action="signup.execute_approved", params={}
     )
-    admitted_gw = service._admitted_context(
+    admitted_gw = await service._admitted_context(
         BrokerCaller(label=CALLER_GATEWAY),
         gateway_validated,
         base,

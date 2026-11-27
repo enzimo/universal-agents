@@ -11,14 +11,12 @@ import pytest
 import yaml
 from mcp.shared.message import SessionMessage
 
-from access_control.identity import ContextVerifier
 from custom_agents import access_runtime
 from custom_agents.sdk.strands import mcp as strands_mcp
 from mcp_control import sdk_compat
 from mcp_control import transports as mcp_transports
 from mcp_control.hosting import HostedMCPStartError
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_verify_keys
 from tests.change_approval_support import SignedTaskManager, use_signed_contexts
 
 
@@ -396,7 +394,9 @@ async def test_brokered_invocation_names_the_agent_and_its_signed_person(
         "named_agent_type": "WebResearchAgent",
         "attributes": {},
     }
-    verified = ContextVerifier.from_value(context_verify_keys()).verify(payload["task_context"], team_id="team_ua")
+    from tests.broker_access_support import broker_authority_verifier
+
+    verified = broker_authority_verifier().verify_root_task(payload["task_context"], team_id="team_ua")
     assert verified.person_id == "user_ach"
 
 

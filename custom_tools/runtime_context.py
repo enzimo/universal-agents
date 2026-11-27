@@ -135,10 +135,10 @@ def active_task_context(
 
 
 def active_signed_task_context(agent: UniversalAgent) -> dict[str, Any] | None:
-    """The active task's signed context, as JSON for another process.
+    """The active task's protocol 1 authority token, as JSON for another process.
 
     Enforcement points outside this process (the broker) trust who a task works
-    for only from this signed value (``access_control.identity``).
+    for only from this verified token (``access_control.authority_verifier``).
     """
 
     _task_id, meta = active_task_context(agent)
@@ -147,11 +147,10 @@ def active_signed_task_context(agent: UniversalAgent) -> dict[str, Any] | None:
 
 
 def active_schedule_run(agent: UniversalAgent) -> dict[str, Any] | None:
-    """The active task's schedule run identity (a schedule permit and the run's fields), as JSON.
+    """The active task's schedule run identity (a scheduler-signed permit token and the run's fields), as JSON.
 
-    Set instead of a signed task context on a scheduled run started by an
-    agent without the scheduler key; enforcement points check it with
-    ``access_control.task_identity.resolve_task_identity``.
+    Set instead of a root-task authority token on a permit-backed scheduled run;
+    enforcement points check it with ``access_control.task_identity.resolve_task_identity``.
     """
 
     _task_id, meta = active_task_context(agent)

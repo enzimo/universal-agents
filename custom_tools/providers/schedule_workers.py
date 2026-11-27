@@ -54,9 +54,15 @@ def install_scheduled_worker_draft(
     target_agent_type: str,
     worker_policy_json: str,
     requirements_json: str,
+    source_meta: Any,
 ) -> dict[str, Any] | None:
-    """Persist an inert automatic job before checked policy activation."""
+    """Persist a schedule through ``schedules.install`` on ``svc.team``, then configure any worker draft."""
     from custom_agents.schedule_changes import WorkerConfigurationRequestV1
+    from custom_agents.schedule_install_client import (
+        extract_task_authority_token,
+        extract_task_delivery_ref,
+        install_schedule_via_team_services_sync,
+    )
     from custom_agents.schedule_store import schedule_claim_scope_for_agent
     from custom_agents.system_schedule_changes import configure_worker
 
@@ -65,10 +71,26 @@ def install_scheduled_worker_draft(
         claim_scope["claim_named_agent_type"] = target_agent_type
         claim_scope["claim_agent_id"] = None
         schedule.payload_meta.to_named_agent_type = target_agent_type
+    schedule.claim_team_id = claim_scope.get("claim_team_id") or schedule.claim_team_id
+    schedule.claim_named_agent_type = claim_scope.get("claim_named_agent_type")
+    schedule.claim_agent_id = claim_scope.get("claim_agent_id")
     automation = bool(worker_policy_json or requirements_json)
     if automation:
         schedule.enabled = False
-    store.add(schedule, **claim_scope)
+    # Read the authority token and delivery_ref from the active task's meta (not the
+    # saved-schedule copy, which deliberately clears schedule_run so a saved schedule
+    # never keeps a run's identity).
+    authority_token = extract_task_authority_token(source_meta)
+    delivery_ref = extract_task_delivery_ref(source_meta)
+    reply = install_schedule_via_team_services_sync(
+        agent,
+        schedule,
+        mode="create",
+        authority_token=authority_token,
+        delivery_ref=delivery_ref,
+    )
+    if reply.get("next_fire_at") and not schedule.next_fire_at:
+        schedule.next_fire_at = str(reply["next_fire_at"])
     if not automation:
         return None
     saved = {

@@ -66,7 +66,6 @@ from custom_agents.tool_setup_runs import (
     RunPieceV1,
     ToolSetupRunV1,
 )
-from custom_messages.contracts.access_v2 import TaskContextV1
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import (
@@ -718,9 +717,7 @@ async def test_c01_c15_wait_deferred_behind_setup_run_starts_at_setup_completion
 async def test_c15_stage_timed_wait_refuses_without_charging_when_next_run_no_longer_fits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import os
-
-    from access_control.identity import ENV_SCHEDULER_SIGNING_KEY, ISSUER_SCHEDULER, ContextSigner
+    from tests.broker_access_support import signed_scheduler_token
 
     use_scheduler_key(monkeypatch)
     now_box = [datetime.now(timezone.utc).replace(second=0, microsecond=0)]
@@ -742,18 +739,13 @@ async def test_c15_stage_timed_wait_refuses_without_charging_when_next_run_no_lo
                 enabled=True,
             )
         )
-        signer = ContextSigner.from_value(ISSUER_SCHEDULER, os.environ[ENV_SCHEDULER_SIGNING_KEY])
-        signed = signer.sign(
-            TaskContextV1(
-                context_id="ctx-tight",
-                issuer=ISSUER_SCHEDULER,
-                team_id=TEST_TEAM,
-                person_id="alice",
-                person_roles=("member",),
-                schedule_id="sched-tight",
-                issued_at_utc=now_box[0],
-                expires_at_utc=now_box[0] + timedelta(hours=1),
-            )
+        signed = signed_scheduler_token(
+            "alice",
+            team_id=TEST_TEAM,
+            roles=("member",),
+            root_task_id=TASK_ID,
+            request_id="ctx-tight",
+            schedule_id="sched-tight",
         )
         meta = MessageMeta(gateway_context=GatewayContext(task_context=signed))
         agent = _make_runtime_agent(db_path, meta=meta, schedule_store=store)

@@ -123,13 +123,12 @@ def scheduled_world(tmp_path, monkeypatch):
 
 def test_a_fired_schedule_wakes_the_retained_drain(scheduled_world):
     from tests import scheduled_run_support as runs
-    from custom_agents.schedule_permits import renew_schedule_permits
     from custom_messages.contracts.access_v2 import PersonStanding
 
     world = scheduled_world
     runs.record_people(world, (runs.ANN, PersonStanding.ACTIVE, ("member",)))
     runs.save_schedule(world)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    runs.issue_permits(world)
     world.worker.is_executing = False  # no turn holds the slot, so the drain runs a pass
     world.worker.main_lane_busy = False
 

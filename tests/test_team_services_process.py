@@ -674,3 +674,152 @@ async def test_c20_dead_letter_family_does_not_block_svc_team_serving_on_large_s
     assert marked == ["inst-c20"]
     stop.set()
     await asyncio.wait_for(task, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_team_services_roles_and_svc_scheduler_address_isolation() -> None:
+    """team_services carries both team_services and scheduler roles and isolates svc.scheduler from svc.team."""
+
+    from custom_transport.protocol1.live import Unsupported
+    from team_services.scheduler import SCHEDULER_ADDRESS
+
+    assert process.TEAM_SERVICES_ROLES == ("team_services", "scheduler")
+    assert process.team_services_profile("team_one").roles == ("team_services", "scheduler")
+
+    team_family = OperationFamily({"schedules.list": _answer}, frozenset({"schedules.list"}))
+    scheduler_family = OperationFamily(
+        {"run_context.sign": _answer},
+        frozenset({"run_context.sign"}),
+        address=SCHEDULER_ADDRESS,
+    )
+    services = TeamServices(_sessions(), [team_family, scheduler_family])
+
+    assert "schedules.list" in services.served_at("svc.team")
+    assert "run_context.sign" not in services.served_at("svc.team")
+    assert services.served_at(SCHEDULER_ADDRESS) == frozenset({"run_context.sign"})
+    assert services.side_by_side_at(SCHEDULER_ADDRESS) == frozenset({"run_context.sign"})
+
+    sign_frame = SimpleNamespace(frame=SimpleNamespace(kind="run_context.sign"))
+    list_frame = SimpleNamespace(frame=SimpleNamespace(kind="schedules.list"))
+
+    assert await services.handle_address(SCHEDULER_ADDRESS, sign_frame) == {"outcome": "ok"}  # type: ignore[arg-type]
+    assert await services.handle_address("svc.team", list_frame) == {"outcome": "ok"}  # type: ignore[arg-type]
+    with pytest.raises(Unsupported):
+        await services.handle_address("svc.team", sign_frame)  # type: ignore[arg-type]
+    with pytest.raises(Unsupported):
+        await services.handle_address(SCHEDULER_ADDRESS, list_frame)  # type: ignore[arg-type]
+
+
+def test_owner_vouched_column_vouches_schedule_and_resets_on_owner_change(tmp_path, monkeypatch) -> None:
+    """A schedule with owner_vouched=1 needs no embedded gateway token; changing its owner clears the vouch."""
+
+    from custom_agents.schedule_store import ScheduleStore
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from custom_messages.contracts.routing_v1 import GatewayContext, MessageMeta
+    from custom_messages.contracts.schedule_v1 import ScheduledMessage
+    from custom_messages.contracts.task_v1 import Task
+    from custom_messages.enums import MessageMetaType, ScheduleManagementClass
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import broker_person_ref, forget_task_context_keys
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "vouched.db")}})
+    store = ScheduleStore(storage_settings=storage)
+    AccessRepository(storage).replace_people(
+        "team_one",
+        [
+            TeamPersonV1(person_ref=broker_person_ref("usr_ann"), team_id="team_one", person_id="usr_ann", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW),
+            TeamPersonV1(person_ref=broker_person_ref("usr_bob"), team_id="team_one", person_id="usr_bob", standing=PersonStanding.ACTIVE, roles=("member",), changed_at_utc=NOW),
+        ],
+        at=NOW,
+    )
+    sched = bind_test_scheduler(monkeypatch, store=store, team_id="team_one", storage_settings=storage)
+    try:
+        schedule = ScheduledMessage(
+            schedule_id="sched_vouched_1",
+            schedule_name="Daily check",
+            management_class=ScheduleManagementClass.USER,
+            payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check."),
+            payload_meta=MessageMeta(gateway_context=GatewayContext(canonical_user_id="usr_ann")),
+            interval_ms=86_400_000,
+        )
+        store.add(schedule, owner_vouched=True)
+        assert store.is_owner_vouched("sched_vouched_1") is True
+        assert sched.scheduler.renew_permits().issued == ["sched_vouched_1"]
+        assert store.run_permit("sched_vouched_1") is not None
+
+        # Saving with a different owner without an explicit vouch clears owner_vouched.
+        # Under F2, the unvouched schedule still gets a standing permit carrying the
+        # signed "no roles" marker (schedule_unvouched_permit:), never a vouched permit.
+        reassigned = schedule.model_copy(deep=True)
+        reassigned.payload_meta.gateway_context.canonical_user_id = "usr_bob"
+        store.add(reassigned)
+        assert store.is_owner_vouched("sched_vouched_1") is False
+        result = sched.scheduler.renew_permits()
+        assert result.renewed == ["sched_vouched_1"]
+        bob_permit = store.run_permit("sched_vouched_1")
+        assert bob_permit is not None
+        assert bob_permit.bound_to.id == "schedule_unvouched_permit:sched_vouched_1"
+        verified_bob = sched.verifier.verify_schedule_permit(bob_permit, team_id="team_one")
+        assert (verified_bob.person_id, verified_bob.person_roles, verified_bob.is_unvouched) == ("usr_bob", (), True)
+    finally:
+        forget_task_context_keys()
+
+
+def test_team_operations_wires_scheduler_verifier_with_access_repo_and_host_trust(tmp_path) -> None:
+    """team_operations passes host (for locked trust_state) and access_repo (PeopleStore) to SchedulerOperations."""
+
+    import threading
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from storage.access_repository import AccessRepository
+    from team_services.scheduler import SCHEDULER_ADDRESS
+    from tests.broker_access_support import (
+        broker_person_ref,
+        broker_scheduler_identity,
+        broker_trust_store,
+        signed_task_token,
+    )
+
+    config = GatewayInstanceConfig.create(
+        instance_name="sched_wire",
+        instance_root=str(tmp_path / "instance"),
+        team_id="team_one",
+        timezone="UTC",
+        display_name="Owner",
+    )
+    config.state.storage.sqlite.path = str(tmp_path / "manager.db")
+    config.layout.ensure_directories()
+    AccessRepository(config.manager_storage_settings).replace_people(
+        "team_one",
+        [
+            TeamPersonV1(
+                person_ref=broker_person_ref("usr_ann"),
+                team_id="team_one",
+                person_id="usr_ann",
+                standing=PersonStanding.ACTIVE,
+                roles=("member",),
+                changed_at_utc=NOW,
+            )
+        ],
+        at=NOW,
+    )
+    lock = threading.RLock()
+    trust = broker_trust_store()
+    fake_host = SimpleNamespace(
+        live=SimpleNamespace(identity=broker_scheduler_identity("team_one"), trust=trust),
+        trust_state=lambda: (trust, lock),
+        nc=None,
+        refresh_trust=AsyncMock(),
+    )
+    families = process.team_operations(config, lambda: datetime.now(timezone.utc), host=fake_host)  # type: ignore[arg-type]
+    scheduler_families = [f for f in families if f.address == SCHEDULER_ADDRESS]
+    assert len(scheduler_families) == 1
+    assert set(scheduler_families[0].handlers) == {"run_context.sign"}
+    scheduler_ops = scheduler_families[0].handlers["run_context.sign"].__self__
+    verifier = scheduler_ops._verifier_fn()
+    assert verifier is not None
+    token = signed_task_token("usr_ann", team_id="team_one", roles=("member",))
+    verified = verifier.verify_root_task(token, team_id="team_one", require_issuer="gateway")
+    assert verified.person_id == "usr_ann" and verified.person_roles == ("member",)

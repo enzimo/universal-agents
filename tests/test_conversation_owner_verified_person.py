@@ -33,7 +33,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from access_control.identity import ENV_VERIFY_KEYS
 from custom_agents import task_message_runtime
 from custom_agents.conversation_store import ConversationStore
 from custom_agents.task_manager import TaskManager
@@ -44,7 +43,12 @@ from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, RequesterType, ScheduleManagementClass
 from storage.config import resolve_storage_settings
 from storage.person_departure_repository import PersonDepartureRepository
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_scheduler_token,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 
 # The admission harness (tests.test_turn_action_outbox._make_agent) runs in this team.
 TEAM = "test_team"
@@ -55,8 +59,8 @@ ACCESS_LOGGER = "custom_agents.access_runtime"
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -104,7 +108,7 @@ def _listed(store: ConversationStore, person: str) -> list[str]:
 @pytest.mark.asyncio
 async def test_a_task_signed_for_ann_that_claims_bob_makes_anns_conversation(tmp_path, caplog) -> None:
     agent = _lead(tmp_path)
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
 
     with caplog.at_level(logging.WARNING, logger=ACCESS_LOGGER):
         await _admit(agent, GatewayContext(canonical_user_id=BOB, task_context=signed), task_id="t1", conversation_id="c1")
@@ -138,11 +142,12 @@ async def test_manager_startup_preserves_conversation_ownership(tmp_path, identi
 
     agent = _lead(tmp_path)
     owner = ANN if identity_kind == "person" else None
-    signed = (
-        context_signer().issue(team_id=TEAM, person_id=owner, person_roles=("member",) if owner else ())
-        if identity_kind != "unsigned"
-        else None
-    )
+    if identity_kind == "person":
+        signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
+    elif identity_kind == "system":
+        signed = signed_scheduler_token(None, team_id=TEAM, schedule_id="sched_system")
+    else:
+        signed = None
     await _admit(agent, GatewayContext(canonical_user_id=BOB, task_context=signed), task_id="t1", conversation_id="c1")
     epoch = agent._conversation_store.create_context_epoch(
         conversation_id="c1", trigger="test", through_turn_index=1,
@@ -174,14 +179,13 @@ async def test_manager_startup_preserves_conversation_ownership(tmp_path, identi
 def test_a_permit_backed_scheduled_run_records_its_owners_conversation(tmp_path, monkeypatch) -> None:
     """A worker without the scheduler key starts the run with its schedule's permit (``schedule_permits``)."""
 
-    from custom_agents.schedule_permits import renew_schedule_permits
     from tests import scheduled_run_support as runs
 
     world = runs.build_world(tmp_path, monkeypatch)
     world.worker._conversation_store = ConversationStore(world.db_path, artifacts_dir=tmp_path / "artifacts")
     runs.record_people(world, (runs.ANN, PersonStanding.ACTIVE, ("member",)))
     runs.save_schedule(world)
-    renew_schedule_permits(world.manager, signer=world.signer)
+    runs.issue_permits(world)
 
     async def start_run() -> dict:
         await runs.subscribe(world)
@@ -243,7 +247,7 @@ def test_a_schedules_dedicated_conversation_belongs_to_its_owner(tmp_path) -> No
 @pytest.mark.asyncio
 async def test_a_conversation_leaves_with_its_owner_not_with_the_claimed_person(tmp_path) -> None:
     agent = _lead(tmp_path)
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",))
     await _admit(agent, GatewayContext(canonical_user_id=BOB, task_context=signed), task_id="t1", conversation_id="c1")
     departures = PersonDepartureRepository(resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "tasks.db")}}))
     now = datetime.now(timezone.utc)

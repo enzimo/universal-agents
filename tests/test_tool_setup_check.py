@@ -31,7 +31,6 @@ from access_catalog.catalog import CatalogSource
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService
 from access_control.entities import agent_role_resolver
-from access_control.identity import ContextVerifier
 from custom_agents import access_runtime
 from custom_agents.task_manager import TaskManager
 from custom_agents.tool_setup_runs import needs_workflow, plan_run
@@ -52,10 +51,12 @@ from storage.config import resolve_storage_settings
 from tests.broker_access_support import (
     BROKER_ROOT,
     agent_context,
+    broker_authority_verifier,
     caller_headers,
     caller_token,
-    context_signer,
-    context_verify_keys,
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
 )
 from tests.test_account_links import _isolated_credentials, link  # noqa: F401 - autouse fixture
 
@@ -73,8 +74,8 @@ pytestmark = pytest.mark.skipif(not BINARY.is_file(), reason="build ua-cedar-aut
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The manager's storage, the broker with its gate (authorization on), and account states."""
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     storage = resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
     store = AccessRepository(storage)
     catalogs = CatalogSource(None)
@@ -87,7 +88,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     gate = BrokerAccessGate(
         catalogs=catalogs,
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEAM,
         access=service,
         links=store,
@@ -195,9 +196,13 @@ def _lead(world, *, roles: tuple[str, ...] = ("owner",), enabled: bool = True, l
 
     manager = TaskManager(db_path=str(world.tmp_path / "manager.db"))
     manager.set_owner_identity("agent-TeamArchitect", "TeamArchitect", TEAM, "TeamArchitect")
-    signed = context_signer().issue(team_id=TEAM, person_id=PERSON, person_roles=roles)
-    meta = MessageMeta(conversation_id="conv-1")
-    meta.gateway_context = SimpleNamespace(task_context=signed, canonical_user_id=PERSON)
+    from custom_messages.contracts.routing_v1 import GatewayContext
+
+    signed = signed_task_token(PERSON, team_id=TEAM, roles=roles, root_task_id="task-lead")
+    meta = MessageMeta(
+        conversation_id="conv-1",
+        gateway_context=GatewayContext(task_context=signed, canonical_user_id=PERSON),
+    )
     manager.add_task(Task(task_id="task-lead", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
     agent = SimpleNamespace(
         id="agent-TeamArchitect",

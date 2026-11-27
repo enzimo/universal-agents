@@ -302,6 +302,12 @@ class GatewayStateRepository(
         owner_canonical_user_id: Optional[str] = None,
     ) -> list[SessionRecord]: ...
 
+    def list_unowned_sessions(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[SessionRecord]: ...
+
     def count_sessions(
         self,
         *,
@@ -1877,6 +1883,21 @@ class _RelationalGatewayStateRepository:
         params.append(limit)
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
+        return [SessionRecord(**dict(row)) for row in rows]
+
+    def list_unowned_sessions(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[SessionRecord]:
+        query = f"""
+            SELECT {_SESSION_COLUMNS}
+            FROM gateway_sessions
+            WHERE owner_canonical_user_id IS NULL
+            ORDER BY updated_at DESC LIMIT {self._dialect.bind}
+        """
+        with self._connect() as conn:
+            rows = conn.execute(query, (limit,)).fetchall()
         return [SessionRecord(**dict(row)) for row in rows]
 
     def count_sessions(

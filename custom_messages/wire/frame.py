@@ -33,6 +33,10 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from pydantic import MISSING, ValidationError
 
+from custom_messages.wire.authority_bindings import (
+    AUTHORITY_ISSUER_ROLES,
+    SCHEDULER_ISSUER_ROLE as SCHEDULE_ISSUER_ROLE,
+)
 from custom_messages.wire.canonical import CanonicalJsonError, canonical_bytes, parse
 from custom_messages.wire.encoding import b64url, b64url_decode, body_digest, format_timestamp, signed_bytes
 from custom_messages.wire.kinds import (
@@ -75,11 +79,7 @@ __all__ = [
 ]
 
 REPLY_SUFFIX = ".reply"
-# Hosts whose certificates may sign authority tokens (README, "On behalf of a person").
-AUTHORITY_ISSUER_ROLES = frozenset({"gateway", "scheduler"})
-# The only role whose certificate may sign a token naming a schedule, and so the only
-# one that signs a token naming no person: system work, which a schedule runs.
-SCHEDULE_ISSUER_ROLE = "scheduler"
+# AUTHORITY_ISSUER_ROLES and SCHEDULE_ISSUER_ROLE are imported from authority_bindings.
 # Where a frame carries its authority token.
 AUTHORITY_AT = "/authority"
 # The token type bound to one command; it lasts at most COMMAND_TOKEN_MAX_SECONDS.

@@ -420,3 +420,99 @@ def test_an_interrupted_wait_stops_the_authority(tmp_path: Path, monkeypatch) ->
         message_hosts.start_installation_authority(layout, [sys.executable, "-c", "import time; time.sleep(30)"], {},
                                                    cwd=tmp_path, timeout_seconds=10)
     assert started[0].poll() is not None
+
+
+def test_message_services_after_authority_ready_runs_between_authority_and_team_services(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C39: the authority-token conversion hook runs after installation-authority is ready and
+    before team-services starts."""
+
+    layout = InstanceLayout.at(tmp_path)
+    events: list[str] = []
+
+    def fake_start(name: str):
+        def _start(*_args, **_kwargs):
+            events.append(f"start:{name}")
+            return FakeProcess(name, events)
+
+        return _start
+
+    monkeypatch.setattr(message_hosts, "start_installation_authority", fake_start("authority"))
+    monkeypatch.setattr(message_hosts, "start_team_services", fake_start("team-services"))
+
+    services = message_hosts.MessageServices(
+        layout,
+        dict,
+        TransportSettings,
+        ["authority"],
+        {},
+        ["team-services"],
+        {},
+        cwd=tmp_path,
+        after_authority_ready=lambda: events.append("hook:after_authority_ready"),
+    )
+
+    assert services.start() is True
+    assert events == ["start:authority", "hook:after_authority_ready", "start:team-services"]
+
+
+def test_after_authority_ready_failure_stops_authority_and_returns_exit_code_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C39: if the conversion hook fails, team-services never starts, the authority and external
+    processes are stopped cleanly, and launch stops with exit code 2."""
+
+    from docker.launch_headless import start_message_services_before_services
+
+    layout = InstanceLayout.at(tmp_path)
+    events: list[str] = []
+    ext_process = FakeProcess("nats", events)
+
+    monkeypatch.setattr(
+        message_hosts,
+        "start_installation_authority",
+        lambda *_args, **_kwargs: (events.append("start:authority"), FakeProcess("authority", events))[1],
+    )
+    monkeypatch.setattr(
+        message_hosts,
+        "start_team_services",
+        lambda *_args, **_kwargs: pytest.fail("team-services must not start when after_authority_ready fails"),
+    )
+    monkeypatch.setattr(
+        "docker.launch_headless.terminate_process",
+        lambda process, _name: process.terminate(),
+    )
+
+    def failing_hook() -> None:
+        events.append("hook:fail")
+        raise RuntimeError("Authority-token first-start conversion exited with status 1")
+
+    services = message_hosts.MessageServices(
+        layout,
+        dict,
+        TransportSettings,
+        ["authority"],
+        {},
+        ["team-services"],
+        {},
+        cwd=tmp_path,
+        after_authority_ready=failing_hook,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="docker.launch_headless"):
+        code = start_message_services_before_services(
+            services,
+            external_processes=(("nats", ext_process),),  # type: ignore[arg-type]
+            before_external_shutdown=lambda: events.append("before_external_shutdown"),
+        )
+
+    assert code == 2
+    assert events == [
+        "start:authority",
+        "hook:fail",
+        "stop:authority",
+        "before_external_shutdown",
+        "stop:nats",
+    ]
+    assert "Authority-token first-start conversion exited with status 1" in caplog.text

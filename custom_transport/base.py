@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Awaitable, Callable, Optional
 
@@ -95,6 +96,9 @@ class InboundDelivery:
     # unacknowledged message returns to the queue after ``ack_wait_seconds``.
     max_deliver: Optional[int] = None
     ack_wait_seconds: Optional[float] = None
+    # Server-assigned UTC timestamp when JetStream stored this message (Decision 52:
+    # queued work verifies its authority token at this time rather than delivery time).
+    stored_at: Optional[datetime] = None
     _ack: Optional[Callable[[], Awaitable[None]]] = None
     _nak: Optional[Callable[[Optional[float]], Awaitable[None]]] = None
     _term: Optional[Callable[[Optional[str]], Awaitable[None]]] = None

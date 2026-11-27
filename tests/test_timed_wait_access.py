@@ -22,7 +22,6 @@ from access_catalog.catalog import load_catalog
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
-from access_control.identity import ISSUER_SCHEDULER, ContextSigner
 from access_control.inbox import StoredAccessInbox
 from access_control.requests import AccessRequests
 from access_control.starter_profiles import apply_starter_profile
@@ -77,9 +76,10 @@ from runtime_settings.timed_waits import TimedWaitLimits
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
 from tests.broker_access_support import (
-    context_signer,
-    context_verify_keys,
     forget_task_context_keys,
+    signed_scheduler_token,
+    signed_task_token,
+    use_broker_authority_verifier,
     use_scheduler_key,
 )
 from tests.task_work_support import bind_task
@@ -98,9 +98,9 @@ needs_cedar = pytest.mark.skipif(
 
 
 @pytest.fixture
-def storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
+def storage(tmp_path: Path):
     forget_task_context_keys()
+    use_broker_authority_verifier()
     access_runtime._runtime_access.cache_clear()
     yield resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "manager.db")}})
     access_runtime._runtime_access.cache_clear()
@@ -120,7 +120,7 @@ def _make_access_agent(
     signed_context: Any | None = None,
 ) -> Any:
     if signed_context is None:
-        signed_context = context_signer().issue(team_id=TEAM, person_id=person, person_roles=person_roles)
+        signed_context = signed_task_token(person, team_id=TEAM, roles=person_roles, root_task_id=task_id)
     meta = SimpleNamespace(gateway_context=SimpleNamespace(task_context=signed_context), conversation_id="conv-1")
     task_manager = SimpleNamespace(
         storage_settings=storage,
@@ -193,7 +193,7 @@ def test_a1_worker_may_call_wait_and_hook_refuses_long_wait_until_granted(storag
     assert allowed_event.cancel_tool is False
 
     # Grant fn:long_wait for this task; both decide_call and the hook now allow it.
-    work_id = worker.task_manager.get_task_info("task-1").meta.gateway_context.task_context.context.context_id
+    work_id = worker.task_manager.get_task_info("task-1").meta.gateway_context.task_context.bound_to.request_id
     service = _service(storage)
     try:
         service.grant_by_person(
@@ -251,7 +251,7 @@ def test_a1_non_admin_member_needs_person_grant_for_long_wait_but_not_wait(stora
     assert decide_call(worker, WAIT_TOOL_NAME, {"minutes": 5, "reason": "check"}).allowed
     assert not decide_call(worker, LONG_WAIT_TOOL_NAME, {"minutes": 60, "reason": "check"}).allowed
 
-    work_id = worker.task_manager.get_task_info("task-1").meta.gateway_context.task_context.context.context_id
+    work_id = worker.task_manager.get_task_info("task-1").meta.gateway_context.task_context.bound_to.request_id
     service = _service(storage)
     try:
         # Even with a task grant on the worker, the member side still refuses until an admin grants the member.
@@ -298,7 +298,7 @@ def test_c22_member_long_wait_request_approved_by_admin_in_one_step(storage: dic
         person=MEMBER.person_id,
         person_roles=("member",),
     )
-    work_id = worker.task_manager.get_task_info("task-1").meta.gateway_context.task_context.context.context_id
+    work_id = worker.task_manager.get_task_info("task-1").meta.gateway_context.task_context.bound_to.request_id
     assert not decide_call(worker, LONG_WAIT_TOOL_NAME, {"minutes": 60, "reason": "redeploy"}).allowed
 
     service = AccessService(
@@ -358,8 +358,6 @@ def test_c03_schedule_grant_allows_long_wait_only_in_that_schedules_run(
     storage: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     use_scheduler_key(monkeypatch)
-    scheduler_signer = ContextSigner.from_env(ISSUER_SCHEDULER)
-    assert scheduler_signer is not None
     # Real schedule rows in the same database so task_identity.job_schedule_id recognizes the job runs.
     store = ScheduleStore(db_path=str(storage.sqlite.path))
     for schedule_id in ("sched_upgrade", "sched_other"):
@@ -398,24 +396,25 @@ def test_c03_schedule_grant_allows_long_wait_only_in_that_schedules_run(
     finally:
         service.cedar.close()
 
-    sched_ctx = scheduler_signer.issue(
+    sched_ctx = signed_scheduler_token(
+        OWNER.person_id,
         team_id=TEAM,
-        person_id=OWNER.person_id,
-        person_roles=("owner", "admin"),
+        roles=("owner", "admin"),
         root_task_id="run-1",
         schedule_id="sched_upgrade",
     )
-    other_sched_ctx = scheduler_signer.issue(
+    other_sched_ctx = signed_scheduler_token(
+        OWNER.person_id,
         team_id=TEAM,
-        person_id=OWNER.person_id,
-        person_roles=("owner", "admin"),
+        roles=("owner", "admin"),
         root_task_id="run-2",
         schedule_id="sched_other",
     )
-    chat_ctx = context_signer().issue(
+    chat_ctx = signed_task_token(
+        OWNER.person_id,
         team_id=TEAM,
-        person_id=OWNER.person_id,
-        person_roles=("owner", "admin"),
+        roles=("owner", "admin"),
+        root_task_id="chat-1",
     )
 
     in_job = _make_access_agent(storage, task_id="run-1", signed_context=sched_ctx)
@@ -445,7 +444,9 @@ def test_c03_authorize_scheduled_job_access_lists_long_wait_under_ask_a_person_e
         manager.set_owner_identity(agent_id="lead", agent_name="lead", team_id=TEAM, named_agent_type="TeamArchitect")
         owner_ctx = GatewayContext(
             canonical_user_id=OWNER.person_id,
-            task_context=context_signer().issue(team_id=TEAM, person_id=OWNER.person_id, person_roles=("owner", "admin")),
+            task_context=signed_task_token(
+                OWNER.person_id, team_id=TEAM, roles=("owner", "admin"), root_task_id="request"
+            ),
         )
         manager.add_task(
             Task(task_id="request", task_type=MessageMetaType.REQUEST, problem_statement="Configure daily job"),

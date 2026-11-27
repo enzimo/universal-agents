@@ -62,7 +62,6 @@ from custom_tools.providers.schedules import (
 )
 from tests.task_work_support import set_agent_ref
 from tests.pending_work_support import call_tool_on_agent_loop
-from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
 
 
@@ -76,10 +75,12 @@ def signed_contexts(monkeypatch: pytest.MonkeyPatch) -> None:
 def signed_gateway_context(canonical_user_id: str, **fields) -> GatewayContext:
     """A gateway context signed for the person, as the gateway sends it."""
 
+    from tests.broker_access_support import signed_task_token
+
     return GatewayContext(
         canonical_user_id=canonical_user_id,
-        task_context=context_signer().issue(
-            team_id="team_1", person_id=canonical_user_id, person_roles=("owner",)
+        task_context=signed_task_token(
+            canonical_user_id, team_id="team_1", roles=("owner",)
         ),
         **fields,
     )
@@ -253,22 +254,6 @@ async def test_agent_send_message_cannot_forge_gateway_manager_control(
     runtime_result = await send_message(json.dumps(forged_runtime_control))
 
     assert "reserved for the authenticated gateway" in runtime_result
-    forged_run_context_request = {
-        "msg_content": {
-            "message_class": "ScheduledRunContextRequestV1",
-            "request_id": "run_context_forged",
-            "team_id": "team_1",
-            "agent_id": agent.id,
-            "schedule_id": "hb_sched_instance_ida",
-            "claim_token": "sched_claim_guess",
-            "scheduled_job_id": "hb_sched_instance_ida",
-        },
-        "msg_meta": {"to_named_agent_type": "TeamArchitect"},
-    }
-
-    run_context_result = await send_message(json.dumps(forged_run_context_request))
-
-    assert "reserved for the agent runtimes" in run_context_result
     forged_system_schedule = {
         "msg_content": {
             "message_class": "ScheduledMessage",
@@ -412,7 +397,8 @@ def test_schedule_tools_create_pause_resume_disable_and_remove(tmp_path: Path):
     assert listing["schedules"][0]["notify_policy"] == "on_change"
     assert "schedule_memory" not in listing["schedules"][0]
     detail = tool_json(list_scheduled_jobs(schedule_id=schedule_id))["schedules"][0]["detail"]
-    assert "session_sched" in detail["text"]
+    assert "usr_sched_a" in detail["text"]
+    assert "tool schedule" in detail["text"]
     stored = agent._schedule_store.get_scheduled_message(schedule_id)
     assert stored is not None
     assert stored.schedule_memory is not None
@@ -756,11 +742,11 @@ def test_schedule_telemetry_reports_counts_timing_and_scheduler_identity(
     assert schedule["interval_ms"] == 120000
     assert schedule["interval_seconds"] == 120
     assert schedule["scheduled_by"]["from_agent_id"] == "gateway_queue"
-    assert schedule["scheduled_by"]["from_agent_name"] == "user"
+    assert schedule["scheduled_by"]["from_agent_name"] == "team_services"
     assert schedule["scheduled_by"]["followup_to_task_id"].startswith(
         "sched_conv_seed_"
     )
-    assert schedule["target"]["to_routing_path"] == "manager_id"
+    assert schedule["target"]["to_routing_path"] == "++<self>++"
     assert "gateway_context" not in schedule
     assert "schedule_memory" not in schedule
     assert "project status" in schedule["problem_preview"]
@@ -855,8 +841,11 @@ def test_recovery_checkpoint_schedule_sends_task_query(tmp_path: Path):
     assert any(action.action_type == PlanActionType.ASK_USER for action in plan_actions)
 
 
-def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
-    task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
+def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    db_path = str(tmp_path / "task_history.db")
+    task_manager = TaskManager(db_path=db_path)
     task_manager.set_owner_identity(
         agent_id="manager_id",
         agent_name="manager",
@@ -909,13 +898,22 @@ def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
         schedule_name=f"after_action_report_batch_review:{recorded.batch.batch_id}",
         payload=review_task,
         repeat_count=1,
-        next_fire_at=recorded.batch.scheduled_review_at,
+        next_fire_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+    )
+    schedule_store = ScheduleStore(db_path=db_path, storage_settings=task_manager.storage_settings)
+    schedule_store.add(schedule, claim_team_id="team_1", claim_named_agent_type="TeamArchitect")
+    bind_test_scheduler(
+        monkeypatch, store=schedule_store, team_id="team_1", storage_settings=task_manager.storage_settings
+    )
+    claimed = schedule_store.claim_next_due(
+        claimer_agent_id="manager_id", claimer_named_agent_type="TeamArchitect", claimer_team_id="team_1"
     )
     agent = SimpleNamespace(
         id="manager_id",
         name="manager",
         team_id="team_1",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -933,7 +931,11 @@ def test_aar_batch_review_schedule_queues_hydrated_manager_task(tmp_path: Path):
     )
 
     assert (
-        asyncio.run(enqueue_fired_scheduled_task(agent, schedule.schedule_id, schedule))
+        asyncio.run(
+            enqueue_fired_scheduled_task(
+                agent, schedule.schedule_id, schedule, claim_token=claimed["claim_token"]
+            )
+        )
         is True
     )
 
@@ -1040,7 +1042,53 @@ def test_aar_batch_review_schedule_skips_when_no_pending_reports(tmp_path: Path)
     assert task_manager.get_task_info("task_internal_aar_skip") is None
 
 
-def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
+def _setup_permitted_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+    task_manager: TaskManager,
+    schedule: ScheduledMessage,
+    *,
+    owner_id: str | None = None,
+) -> tuple[ScheduleStore, str | None]:
+    """Store ``schedule``, bind the test protocol 1 scheduler, and issue its permit or claim it."""
+
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from storage.access_repository import AccessRepository
+    from tests.broker_access_support import broker_person_ref
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    store = ScheduleStore(storage_settings=task_manager.storage_settings, default_cron_timezone="UTC")
+    if owner_id is not None:
+        AccessRepository(task_manager.storage_settings).record_person(
+            TeamPersonV1(
+                person_ref=broker_person_ref(owner_id),
+                team_id="team_1",
+                person_id=owner_id,
+                standing=PersonStanding.ACTIVE,
+                roles=("admin",),
+                changed_at_utc=datetime.now(timezone.utc),
+            )
+        )
+    store.add(
+        schedule,
+        claim_team_id="team_1",
+        claim_named_agent_type="TeamArchitect",
+        owner_vouched=owner_id is not None,
+    )
+    sched = bind_test_scheduler(
+        monkeypatch, store=store, team_id="team_1", storage_settings=task_manager.storage_settings
+    )
+    sched.scheduler.renew_permits()
+    claim_token = None
+    if store.run_permit(schedule.schedule_id) is None:
+        claimed = store.claim_next_due(
+            claimer_agent_id="manager_id", claimer_named_agent_type="TeamArchitect", claimer_team_id="team_1"
+        )
+        assert claimed is not None
+        claim_token = claimed["claim_token"]
+    return store, claim_token
+
+
+def test_fired_scheduled_task_carries_objective_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
     task_manager.set_owner_identity(
         agent_id="manager_id",
@@ -1088,11 +1136,13 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
         repeat_count=1,
         next_fire_at="2026-03-18T00:00:00+00:00",
     )
+    schedule_store, claim_token = _setup_permitted_schedule(monkeypatch, task_manager, schedule)
     agent = SimpleNamespace(
         id="manager_id",
         name="manager",
         team_id="team_1",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -1115,6 +1165,7 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
                 agent,
                 schedule.schedule_id,
                 schedule,
+                claim_token=claim_token,
                 from_runtime_mailbox=True,
             )
         )
@@ -1129,7 +1180,7 @@ def test_fired_scheduled_task_carries_objective_link(tmp_path: Path):
     assert queued.task.execution_history[-1].objective_id == objective.objective_id
 
 
-def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path):
+def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
     task_manager.set_owner_identity(
         agent_id="manager_id",
@@ -1166,11 +1217,13 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
         cron_expression="*/5 * * * *",
         next_fire_at="2026-03-18T00:00:00+00:00",
     )
+    schedule_store, claim_token = _setup_permitted_schedule(monkeypatch, task_manager, schedule)
     agent = SimpleNamespace(
         id="manager_id",
         name="manager",
         team_id="team_1",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -1193,6 +1246,7 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
                 agent,
                 schedule.schedule_id,
                 schedule,
+                claim_token=claim_token,
                 from_runtime_mailbox=True,
             )
         )
@@ -1217,7 +1271,12 @@ def test_gateway_cron_schedule_fire_keeps_stored_conversation_id(tmp_path: Path)
     assert turn["delivery_state"] == "pending_gateway"
 
 
-def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: Path):
+def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from storage.access_repository import AccessRepository
+    from tests.broker_access_support import broker_person_ref
+    from tests.scheduled_run_support import bind_test_scheduler
+
     db_path = str(tmp_path / "task_history.db")
     task_manager = TaskManager(db_path=db_path)
     task_manager.set_owner_identity(
@@ -1226,7 +1285,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
         team_id="team_1",
         named_agent_type="TeamArchitect",
     )
-    schedule_store = ScheduleStore(db_path=db_path)
+    schedule_store = ScheduleStore(db_path=db_path, storage_settings=task_manager.storage_settings)
     schedule = ScheduledMessage(
         schedule_id="sched_legacy_owner_context",
         payload=Task(
@@ -1254,10 +1313,24 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
     schedule_store.add(schedule)
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "UPDATE scheduled_messages SET owner_canonical_user_id = ? WHERE schedule_id = ?",
+            "UPDATE scheduled_messages SET owner_canonical_user_id = ?, owner_vouched = 1 WHERE schedule_id = ?",
             ("usr_admin", schedule.schedule_id),
         )
         conn.commit()
+    AccessRepository(task_manager.storage_settings).record_person(
+        TeamPersonV1(
+            person_ref=broker_person_ref("usr_admin"),
+            team_id="team_1",
+            person_id="usr_admin",
+            standing=PersonStanding.ACTIVE,
+            roles=("admin",),
+            changed_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    sched = bind_test_scheduler(
+        monkeypatch, store=schedule_store, team_id="team_1", storage_settings=task_manager.storage_settings
+    )
+    sched.scheduler.renew_permits()
 
     restored = schedule_store.get_scheduled_message(schedule.schedule_id)
     assert restored is not None
@@ -1267,6 +1340,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
         team_id="team_1",
         named_agent_type="TeamArchitect",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -1299,7 +1373,7 @@ def test_legacy_schedule_row_owner_reaches_fired_task_runtime_context(tmp_path: 
     assert queued.meta.gateway_context.canonical_user_id == "usr_admin"
 
 
-def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obligation(tmp_path: Path):
+def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obligation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     task_manager = TaskManager(db_path=str(tmp_path / "task_history.db"))
     task_manager.set_owner_identity(
         agent_id="manager_id",
@@ -1365,11 +1439,13 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
         next_fire_at="2026-03-18T00:00:00+00:00",
         schedule_memory=ScheduleTaskMemory(schedule_kind="source_monitor"),
     )
+    schedule_store, claim_token = _setup_permitted_schedule(monkeypatch, task_manager, schedule)
     agent = SimpleNamespace(
         id="manager_id",
         name="manager",
         team_id="team_1",
         task_manager=task_manager,
+        _schedule_store=schedule_store,
         paused=False,
         is_executing=True,
         main_lane_busy=True,
@@ -1392,6 +1468,7 @@ def test_recurring_fired_schedule_keeps_history_without_followup_delivery_obliga
                 agent,
                 schedule.schedule_id,
                 schedule,
+                claim_token=claim_token,
                 from_runtime_mailbox=True,
             )
         )
@@ -1471,3 +1548,525 @@ def test_a_persons_system_timer_records_notes_with_both_tools(tmp_path: Path):
     assert recorded["recorded"] is True
     memory = agent._schedule_store.get_scheduled_message(timer.schedule_id).schedule_memory
     assert (memory.ledger.total_notifications, memory.ledger.total_runs) == (1, 1)
+
+
+def test_permit_backed_scheduled_run_creates_unvouched_schedule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """C28 + C29: a permit-backed scheduled run can call create_scheduled_job and installs an unvouched schedule."""
+    from custom_messages.contracts.access_v2 import PersonStanding, ScheduleRunIdentityV1, TeamPersonV1
+    from custom_transport.protocol1.authority_tokens import schedule_permit_token
+    from storage.access_repository import AccessRepository
+    from tests.broker_access_support import broker_person_ref, broker_scheduler_identity
+    from tests.scheduled_run_support import bind_test_scheduler
+
+    db_path = str(tmp_path / "permit_create.db")
+    agent = _FakeAgent(db_path)
+    set_agent_ref(agent)
+    now = datetime.now(timezone.utc)
+    AccessRepository(agent.task_manager.storage_settings).replace_people(
+        "team_1",
+        [
+            TeamPersonV1(
+                person_ref=broker_person_ref("usr_sched_a"),
+                team_id="team_1",
+                person_id="usr_sched_a",
+                standing=PersonStanding.ACTIVE,
+                roles=("owner",),
+                changed_at_utc=now,
+            )
+        ],
+        at=now,
+    )
+    bound = bind_test_scheduler(
+        monkeypatch,
+        store=agent._schedule_store,
+        team_id="team_1",
+        storage_settings=agent.task_manager.storage_settings,
+    )
+    src_id = tool_json(create_scheduled_job(instruction="Daily check", interval_seconds=3600))["schedule_id"]
+    assert agent._schedule_store.is_owner_vouched(src_id) is True
+
+    # Simulate a permit-backed run of src_id: task_context=None, schedule_run.permit carries the standing permit.
+    gc = agent.task_manager._task_info.meta.gateway_context
+    permit = schedule_permit_token(
+        broker_scheduler_identity("team_1"),
+        team="team_1",
+        schedule_id=src_id,
+        person_ref=broker_person_ref("usr_sched_a"),
+        issued=now,
+    )
+    gc.task_context = None
+    gc.schedule_run = ScheduleRunIdentityV1(
+        permit=permit,
+        context_id="schedule_run_c28",
+        conversation_id="conversation_id_sched",
+        started_at_utc=now,
+    )
+
+    child = tool_json(create_scheduled_job(instruction="Follow up next week", delay_seconds=600))
+    assert "schedule_id" in child
+    assert child["owner_vouched"] is False
+    assert "not vouched" in child["notice"]
+    child_id = child["schedule_id"]
+    assert agent._schedule_store.is_owner_vouched(child_id) is False
+    from access_control.authority_verifier import AuthorityTokenVerifier
+    from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
+    from custom_messages.wire.authority_bindings import SCHEDULE_UNVOUCHED_PERMIT_PREFIX
+    from tests.broker_access_support import broker_trust_store
+
+    child_permit = agent._schedule_store.run_permit(child_id)
+    assert child_permit is not None
+    assert child_permit.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}{child_id}"
+    resolved_child = resolve_task_identity(
+        verifier=AuthorityTokenVerifier(broker_trust_store(), people=AccessRepository(agent.task_manager.storage_settings)),
+        team_id="team_1",
+        task_context=None,
+        schedule_run=ScheduleRunIdentityV1(
+            permit=child_permit,
+            context_id="schedule_run_c49_child",
+            conversation_id="conversation_id_sched",
+            started_at_utc=now,
+        ),
+        schedule_runs=ScheduleRunLookup.from_storage(agent.task_manager.storage_settings),
+        now=now,
+    )
+    assert resolved_child.person_id == "usr_sched_a"
+    assert resolved_child.person_roles == ()
+    assert bound.scheduler.issue_permit_for_schedule(child_id) is True
+    assert agent._schedule_store.run_permit(child_id).bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}{child_id}"
+
+
+@pytest.mark.asyncio
+async def test_turn_action_install_refusal_logs_actual_outcome(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """C30 + F5 (FA-3): non-id_in_use refusals raise a terminal TurnActionRefused and log their outcome."""
+    from custom_agents.schedule_installation import (
+        ScheduleActionInstallRefused,
+        create_schedule_from_turn_action,
+    )
+    from custom_agents.turn_action_refusal import TurnActionRefused
+
+    db_path = str(tmp_path / "turn_action_refusal.db")
+    agent = _FakeAgent(db_path)
+    agent._logger = logging.getLogger("test.turn_action_refusal")
+    set_agent_ref(agent)
+    source_meta = agent.task_manager._task_info.meta
+    source_header = agent.task_manager._task_info.header
+
+    bad_cron = ScheduledMessage(
+        schedule_id="sched_bad_cron",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Bad cron reminder."),
+        cron_expression="not a valid cron",
+        cron_timezone="UTC",
+        next_fire_at="2030-01-01T00:00:00+00:00",
+    )
+    with caplog.at_level(logging.WARNING, logger="test.turn_action_refusal"):
+        with pytest.raises(ScheduleActionInstallRefused) as exc_info:
+            await create_schedule_from_turn_action(
+                agent,
+                bad_cron,
+                msg_header=source_header,
+                msg_meta=source_meta,
+            )
+    assert isinstance(exc_info.value, TurnActionRefused)
+    assert exc_info.value.outcome == "invalid_request"
+    assert exc_info.value.schedule_id == "sched_bad_cron"
+    assert agent._schedule_store.get_scheduled_message("sched_bad_cron") is None
+    assert "event=schedule_action_install_refused" in caplog.text
+    assert "outcome=invalid_request" in caplog.text
+    assert "belongs to someone else" not in caplog.text
+
+    # Contrast: an id_in_use collision with another person's schedule still returns cleanly and logs id_in_use.
+    other_agent = _FakeAgent(db_path, canonical_user_id="usr_sched_b")
+    set_agent_ref(other_agent)
+    other_sched = ScheduledMessage(
+        schedule_id="sched_taken_by_b",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Owner B's reminder."),
+        interval_ms=60_000,
+    )
+    await create_schedule_from_turn_action(
+        other_agent,
+        other_sched,
+        msg_header=other_agent.task_manager._task_info.header,
+        msg_meta=other_agent.task_manager._task_info.meta,
+    )
+    assert other_agent._schedule_store.get_scheduled_message("sched_taken_by_b") is not None
+
+    caplog.clear()
+    set_agent_ref(agent)
+    collision = ScheduledMessage(
+        schedule_id="sched_taken_by_b",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Owner A colliding."),
+        interval_ms=60_000,
+    )
+    with caplog.at_level(logging.WARNING, logger="test.turn_action_refusal"):
+        await create_schedule_from_turn_action(
+            agent,
+            collision,
+            msg_header=source_header,
+            msg_meta=source_meta,
+        )
+    assert "event=schedule_action_id_in_use" in caplog.text
+    assert "belongs to someone else" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_turn_action_outbox_marks_schedule_install_refusal_failed_terminal_f5(tmp_path: Path):
+    """F5 (FA-3): ScheduleActionInstallRefused drives the outbox straight to failed_terminal and notifies the task."""
+    from types import SimpleNamespace
+    from typing import Any
+
+    from custom_agents.schedule_installation import ScheduleActionInstallRefused
+    from custom_agents.turn_action_outbox_runtime import _schedule_turn_action_recovery
+
+    marked_records: list[tuple[str, dict[str, Any]]] = []
+    marked_batches: list[tuple[str, str]] = []
+    history_entries: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _Ops:
+        async def run(self, fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+    record = SimpleNamespace(
+        action_id="act_sched_1",
+        batch_id="batch_sched_1",
+        source_task_id="task_sched_1",
+        action_index=0,
+        action_type="schedule_message",
+        phase="local_commit",
+        attempt_count=1,
+        recoverability="automatic_retry",
+        target_route=None,
+        message_id=None,
+        side_effects={},
+    )
+    task_manager = SimpleNamespace(
+        operations_runtime=_Ops(),
+        get_turn_action_record=lambda aid: record if aid == "act_sched_1" else None,
+        block_turn_actions_after=lambda batch_id, idx, reason="": None,
+        mark_turn_action_record=lambda aid, **kw: marked_records.append((aid, kw)),
+        mark_turn_action_batch_status=lambda bid, status, **kw: marked_batches.append((bid, status)),
+        append_history_entry=lambda tid, summary, **kw: history_entries.append((tid, summary, kw)),
+    )
+    fake_self = SimpleNamespace(
+        id="lead_1",
+        name="TeamLead",
+        task_manager=task_manager,
+        _logger=logging.getLogger("test.outbox_refusal"),
+        _turn_action_outbox_int=lambda _k, default: default,
+    )
+    refusal = ScheduleActionInstallRefused("invalid_request", "sched_bad", "Invalid cron expression.")
+    with pytest.raises(ScheduleActionInstallRefused):
+        await _schedule_turn_action_recovery(
+            fake_self,
+            batch_id="batch_sched_1",
+            action_id="act_sched_1",
+            exc=refusal,
+        )
+    assert any(kw.get("status") == "failed_terminal" and kw.get("recoverability") == "terminal" for _, kw in marked_records)
+    assert ("batch_sched_1", "failed") in marked_batches
+    assert any(tid == "task_sched_1" and "refused for good" in summary for tid, summary, _ in history_entries)
+
+
+@pytest.mark.asyncio
+async def test_schedule_install_client_resends_same_request_id_and_rereads_store_f5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """F5 (FA-4/CR-3): stable request_id, single resend on timeout/unavailable, store confirmation, and sync deadline."""
+    import asyncio
+    import threading
+    from datetime import timedelta
+
+    import custom_agents.schedule_install_client as install_client
+    from assistant_gateway.application.team_commands import TeamServicesUnavailable
+    from custom_agents.schedule_install_client import (
+        extract_task_authority_token,
+        install_schedule_via_team_services,
+        install_schedule_via_team_services_sync,
+    )
+    from custom_transport.protocol1.live import NO_ANSWER_IN_TIME, ServiceUnavailable
+
+    db_path = str(tmp_path / "install_retry.db")
+    agent = _FakeAgent(db_path)
+    token = extract_task_authority_token(agent.task_manager._task_info.meta)
+    sched = ScheduledMessage(
+        schedule_id="sched_retry_1",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="Check status daily."),
+        payload_meta=agent.task_manager._task_info.meta.model_copy(deep=True),
+        interval_ms=3_600_000,
+        claim_team_id="team_1",
+    )
+
+    # 1. First attempt times out -> resends once with the exact same request_id and succeeds.
+    seen_request_ids: list[str] = []
+
+    async def _flaky_ask(_agent, kind, body, *, authority=None, timeout=None):
+        assert kind == "schedules.install"
+        seen_request_ids.append(body["request_id"])
+        if len(seen_request_ids) == 1:
+            raise ServiceUnavailable(kind, "svc.team", NO_ANSWER_IN_TIME)
+        return {
+            "outcome": "ok",
+            "state": "installed",
+            "schedule_id": body["schedule_id"],
+            "version": {"seen_version": "v1", "timing_revision": 0},
+        }
+
+    monkeypatch.setattr(install_client, "ask_team", _flaky_ask)
+    reply = await install_schedule_via_team_services(
+        agent, sched, mode="create", authority_token=token, timeout=2.0
+    )
+    assert reply["outcome"] == "ok"
+    assert len(seen_request_ids) == 2
+    assert seen_request_ids[0] == seen_request_ids[1]
+    assert seen_request_ids[0].startswith("sched_install_")
+
+    # 2. Both attempts fail with TeamServicesUnavailable AFTER commit -> re-reads store and confirms.
+    committed_sched = sched.model_copy(deep=True)
+    committed_sched.schedule_id = "sched_committed_lost_reply"
+    committed_sched.next_fire_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    seen_lost: list[str] = []
+
+    async def _lost_reply_after_commit(_agent, kind, body, *, authority=None, timeout=None):
+        seen_lost.append(body["request_id"])
+        if len(seen_lost) == 1:
+            agent._schedule_store.add(committed_sched, claim_team_id="team_1", owner_vouched=True)
+        raise TeamServicesUnavailable("Reply lost after commit.")
+
+    monkeypatch.setattr(install_client, "ask_team", _lost_reply_after_commit)
+    confirmed = await install_schedule_via_team_services(
+        agent, committed_sched, mode="create", authority_token=token, timeout=2.0
+    )
+    assert confirmed["outcome"] == "ok"
+    assert confirmed["schedule_id"] == "sched_committed_lost_reply"
+    assert confirmed["owner_vouched"] is True
+    assert len(seen_lost) == 2 and seen_lost[0] == seen_lost[1]
+
+    # 3. Both attempts fail and nothing was committed -> raises the error.
+    absent_sched = sched.model_copy(deep=True)
+    absent_sched.schedule_id = "sched_never_saved"
+
+    async def _always_unavailable(_agent, kind, body, *, authority=None, timeout=None):
+        raise ServiceUnavailable(kind, "svc.team", NO_ANSWER_IN_TIME)
+
+    monkeypatch.setattr(install_client, "ask_team", _always_unavailable)
+    with pytest.raises(ServiceUnavailable):
+        await install_schedule_via_team_services(
+            agent, absent_sched, mode="create", authority_token=token, timeout=1.0
+        )
+
+    # 4. Sync wrapper enforces one overall deadline and cancels the submitted coroutine on timeout (CR-3).
+    cancelled_event = threading.Event()
+    bg_loop = asyncio.new_event_loop()
+    bg_thread = threading.Thread(target=bg_loop.run_forever, daemon=True)
+    bg_thread.start()
+    try:
+        async def _hang_forever(_agent, kind, body, *, authority=None, timeout=None):
+            try:
+                await asyncio.sleep(30.0)
+            except asyncio.CancelledError:
+                cancelled_event.set()
+                raise
+
+        monkeypatch.setattr(install_client, "ask_team", _hang_forever)
+        agent._runtime_loop = bg_loop
+        slow_sched = sched.model_copy(deep=True)
+        slow_sched.schedule_id = "sched_sync_timeout"
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError):
+            await asyncio.to_thread(
+                install_schedule_via_team_services_sync,
+                agent,
+                slow_sched,
+                mode="create",
+                authority_token=token,
+                timeout=0.25,
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed < 1.5, f"expected single overall deadline ~0.25s, took {elapsed:.2f}s"
+        assert cancelled_event.wait(timeout=1.0), "timed-out install coroutine must be cancelled"
+    finally:
+        agent._runtime_loop = None
+        bg_loop.call_soon_threadsafe(bg_loop.stop)
+        bg_thread.join(timeout=2.0)
+        bg_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_schedule_install_client_separate_installs_get_distinct_request_ids_c51(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """C51: separate installs with the same schedule_id get fresh request_ids while outbox retries keep theirs."""
+    import custom_agents.schedule_install_client as install_client
+    from access_control.people_directory import PeopleDirectory
+    from custom_agents.schedule_install_client import (
+        extract_task_authority_token,
+        install_schedule_via_team_services,
+    )
+    from custom_agents.schedule_installation import (
+        create_schedule_from_turn_action,
+        turn_action_install_request_id,
+    )
+    from custom_agents.schedule_store import schedule_record_digest
+    from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
+    from team_services.schedules import ScheduleOperations
+    from tests.people_directory_support import access_store_at
+    from tests.team_services_support import checked_reply, stand_in_frame
+
+    db_path = str(tmp_path / "c51_installs.db")
+    agent = _FakeAgent(db_path)
+    token = extract_task_authority_token(agent.task_manager._task_info.meta)
+    person_ref = str(token["person"])
+    now = datetime.now(timezone.utc)
+
+    access = access_store_at(tmp_path / "access")
+    access.record_person(
+        TeamPersonV1(
+            team_id="team_1",
+            person_id="alice",
+            person_ref=person_ref,
+            standing=PersonStanding.ACTIVE,
+            roles=("member",),
+            changed_at_utc=now,
+        )
+    )
+    operations = ScheduleOperations(
+        agent._schedule_store,
+        PeopleDirectory(access, "team_1"),
+        None,
+        lambda _person: True,
+        lambda: datetime.now(timezone.utc),
+        logging.getLogger("test.c51_installs"),
+    )
+
+    sent_request_ids: list[str] = []
+
+    async def _real_team_services(_agent, kind, body, *, authority=None, timeout=None):
+        assert kind == "schedules.install"
+        sent_request_ids.append(body["request_id"])
+        frame = stand_in_frame(
+            "team_1",
+            kind,
+            body,
+            person_ref=person_ref,
+            request_id=str(token["bound_to"]["id"]),
+            sender_roles=frozenset({"lead_host"}),
+            binding="root_task",
+        )
+        frame.frame.issuer.agent = "lead_1"
+        frame.authority.token.schedule_id = None
+        return checked_reply(kind, operations.answer(frame))
+
+    monkeypatch.setattr(install_client, "ask_team", _real_team_services)
+
+    def _build_sched(schedule_id: str, instruction: str) -> ScheduledMessage:
+        return ScheduledMessage(
+            schedule_id=schedule_id,
+            management_class=ScheduleManagementClass.USER,
+            payload=Task(task_type=MessageMetaType.REQUEST, problem_statement=instruction),
+            payload_meta=agent.task_manager._task_info.meta.model_copy(deep=True),
+            interval_ms=3_600_000,
+            claim_team_id="team_1",
+        )
+
+    # 1. Delete + re-create with the exact same schedule_id and definition within the 7-day retention window.
+    sched_recreate = _build_sched("objwork_sched_1", "Run objective work session A.")
+    first = await install_schedule_via_team_services(agent, sched_recreate, mode="create", authority_token=token)
+    assert first["state"] == "installed"
+    assert agent._schedule_store.get_scheduled_message("objwork_sched_1") is not None
+
+    assert agent._schedule_store.remove("objwork_sched_1") is True
+    assert agent._schedule_store.get_scheduled_message("objwork_sched_1") is None
+
+    second = await install_schedule_via_team_services(agent, sched_recreate, mode="create", authority_token=token)
+    assert second["state"] == "installed"
+    assert sent_request_ids[0] != sent_request_ids[1]
+    recreated = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert recreated is not None
+    assert recreated.payload.problem_statement == "Run objective work session A."
+
+    # 2. Replace A -> B -> A -> B inside the 7-day retention window must actually write B on the third replace.
+    sched_b = _build_sched("objwork_sched_1", "Run objective work session B.")
+    sched_a = _build_sched("objwork_sched_1", "Run objective work session A.")
+
+    saved_1 = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert saved_1 is not None
+    r1 = await install_schedule_via_team_services(
+        agent, sched_b, mode="replace", authority_token=token, seen_version=schedule_record_digest(saved_1)
+    )
+    assert r1["state"] == "replaced"
+
+    saved_2 = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert saved_2 is not None and saved_2.payload.problem_statement == "Run objective work session B."
+    r2 = await install_schedule_via_team_services(
+        agent, sched_a, mode="replace", authority_token=token, seen_version=schedule_record_digest(saved_2)
+    )
+    assert r2["state"] == "replaced"
+
+    saved_3 = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert saved_3 is not None and saved_3.payload.problem_statement == "Run objective work session A."
+    r3 = await install_schedule_via_team_services(
+        agent, sched_b, mode="replace", authority_token=token, seen_version=schedule_record_digest(saved_3)
+    )
+    assert r3["state"] == "replaced"
+    saved_4 = agent._schedule_store.get_scheduled_message("objwork_sched_1")
+    assert saved_4 is not None
+    assert saved_4.payload.problem_statement == "Run objective work session B."
+    assert len(set(sent_request_ids)) == len(sent_request_ids)
+
+    # 3. A refusal stored in protocol1_operation_outcomes does not poison a later create after the owner is active.
+    access.record_person(
+        TeamPersonV1(
+            team_id="team_1",
+            person_id="alice",
+            person_ref=person_ref,
+            standing=PersonStanding.DISABLED,
+            roles=(),
+            changed_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    sched_after_refusal = _build_sched("sched_retry_after_refusal", "Check after reactivation.")
+    with pytest.raises(PermissionError):
+        await install_schedule_via_team_services(agent, sched_after_refusal, mode="create", authority_token=token)
+    assert agent._schedule_store.get_scheduled_message("sched_retry_after_refusal") is None
+
+    access.record_person(
+        TeamPersonV1(
+            team_id="team_1",
+            person_id="alice",
+            person_ref=person_ref,
+            standing=PersonStanding.ACTIVE,
+            roles=("member",),
+            changed_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    recovered = await install_schedule_via_team_services(
+        agent, sched_after_refusal, mode="create", authority_token=token
+    )
+    assert recovered["state"] == "installed"
+    assert agent._schedule_store.get_scheduled_message("sched_retry_after_refusal") is not None
+
+    # 4. Turn-action outbox passes a request_id tied to its durable action_id so retries share one id across restarts.
+    outbox_req_1 = turn_action_install_request_id("turn_batch_abc123def456_action_0")
+    outbox_req_2 = turn_action_install_request_id("turn_batch_999888777666_action_0")
+    assert outbox_req_1 == turn_action_install_request_id("turn_batch_abc123def456_action_0")
+    assert outbox_req_1 != outbox_req_2
+
+    sched_outbox = _build_sched("sched_outbox_1", "Remind me at 5pm.")
+    before_count = len(sent_request_ids)
+    await create_schedule_from_turn_action(
+        agent,
+        sched_outbox,
+        msg_meta=agent.task_manager._task_info.meta,
+        request_id=outbox_req_1,
+    )
+    await create_schedule_from_turn_action(
+        agent,
+        sched_outbox,
+        msg_meta=agent.task_manager._task_info.meta,
+        request_id=outbox_req_1,
+    )
+    assert sent_request_ids[before_count:] == [outbox_req_1, outbox_req_1]
+    assert agent._schedule_store.get_scheduled_message("sched_outbox_1") is not None

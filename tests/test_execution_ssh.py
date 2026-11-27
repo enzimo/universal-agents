@@ -341,6 +341,7 @@ async def _running_ssh_broker(
     from secure_tool_broker.access_gate import build_broker_access_gate
     from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
     from secure_tool_broker.service import SecureToolBrokerService
+    from tests.broker_access_support import broker_authority_verifier
 
     auth_enabled = bool(instance.config.authorization.enabled)
     gate = build_broker_access_gate(
@@ -349,6 +350,7 @@ async def _running_ssh_broker(
         authorization_enabled=auth_enabled,
         storage_settings=instance.config.manager_storage_settings,
         cedar_binary=str(CEDAR_BINARY) if auth_enabled else None,
+        verifier=broker_authority_verifier(),
         lead_agent_type="TeamArchitect",
     )
     ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
@@ -3734,6 +3736,7 @@ async def test_c80_smaller_fixes_secure_cli_case_lazy_init_body_limit_unknown_re
     from secure_tool_broker.execution_ssh import BrokerExecutionSSHConfig
     from secure_tool_broker.service import SecureToolBrokerService
     from secure_tools.registry import list_providers
+    from tests.broker_access_support import broker_authority_verifier
 
     # (a) secure_cli refuses mixed-case execution_ssh names and omits execution_ssh from secure_cli_only list.
     assert "execution_ssh" not in list_providers(secure_cli_only=True)
@@ -3764,6 +3767,7 @@ async def test_c80_smaller_fixes_secure_cli_case_lazy_init_body_limit_unknown_re
         authorization_enabled=False,
         storage_settings=instance.config.manager_storage_settings,
         lead_agent_type="TeamArchitect",
+        verifier=broker_authority_verifier(),
     )
     ssh_cfg = BrokerExecutionSSHConfig.from_runtime_settings(
         instance_root_path=str(instance.root),

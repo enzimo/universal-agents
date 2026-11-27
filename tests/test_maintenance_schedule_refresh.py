@@ -3,8 +3,8 @@
 Real gateway application code, manager schedule handling, SQLite schedule store,
 Cedar and signed task contexts. At each gateway start (and when the manager
 becomes available again) the gateway sends ``refresh`` for the maintenance
-schedules; the manager replaces only the stored person and session
-(``custom_agents.schedule_context_refresh``). Roles do not come from the
+schedules; ``team_services.schedules`` (refresh mode) replaces only the stored
+person, delivery reference, and conversation. Roles do not come from the
 refresh: runs and escalations read the owner's current roles from the
 gateway's copy of the team's people (``access_control.people_directory``). So:
 
@@ -33,8 +33,8 @@ from typing import Any
 
 import pytest
 
-from access_control.identity import ContextVerifier
 from access_control.people import effective_roles
+from access_control.task_identity import ScheduleRunLookup, resolve_task_identity
 from assistant_gateway.application.maintenance_schedules import (
     GatewayHeartbeatScheduleSettings,
     GatewayInternalImprovementScheduleSettings,
@@ -47,6 +47,9 @@ from assistant_gateway.application.request_context import (
     GatewayRequestContextService,
     GatewayRequestContextSettings,
 )
+from assistant_gateway.application.team_commands import GatewayTeamCommandService
+from custom_transport.protocol1.delivery_refs import DeliveryRefs
+from tests.team_services_support import checked_reply, stand_in_frame
 from tests.task_work_support import acting_as
 from custom_agents.access_runtime import decide_call
 from custom_agents.internal_improvement_runtime import (
@@ -65,16 +68,17 @@ from custom_agents.schedule_management import (
 from custom_agents.scheduled_runtime import handle_scheduled_message
 from custom_agents.task_context_runtime import sign_system_escalation
 from custom_agents.task_manager import TaskManager
-from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1, new_person_ref
+from custom_messages.contracts.access_v2 import PersonStanding, TeamPersonV1
 from custom_messages.contracts.routing_v1 import ManagerEscalationContext, MessageHeader
 from custom_messages.contracts.task_v1 import Task
 from custom_messages.enums import MessageMetaType, RequesterType, SystemScheduleKind
 from storage.access_repository import AccessRepository
 from tests.broker_access_support import (
-    context_signer,
+    BrokerGatewayTokenSigner,
+    broker_person_ref,
     forget_task_context_keys,
-    use_scheduler_key,
 )
+from tests.scheduled_run_support import bind_test_scheduler
 from tests.test_internal_improvement_runtime import _Manager, _Worker
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,7 +125,27 @@ class _ManagerRoute:
         self.published.append(envelope)
 
 
-def _gateway(identity: _Identity, route: _ManagerRoute, *, memory_review: bool = False) -> GatewayMaintenanceScheduleApplication:
+class _InProcessScheduleCommands:
+    """In-process gateway ``team_commands`` port routing ``schedules.install`` to ``ScheduleOperations``."""
+
+    def __init__(self, schedule_ops: Any) -> None:
+        self._ops = schedule_ops
+
+    async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
+        frame = stand_in_frame(TEAM, kind, body, person_ref=person_ref, request_id=request_id)
+        return checked_reply(kind, await self._ops.handle(frame))
+
+
+def _gateway(
+    identity: _Identity,
+    route: _ManagerRoute,
+    *,
+    memory_review: bool = False,
+    schedule_ops: Any = None,
+    delivery_refs: Any = None,
+) -> GatewayMaintenanceScheduleApplication:
+    from uuid import uuid4
+
     session = SimpleNamespace(
         owner_canonical_user_id=FIRST_USER,
         conversation_id="conversation_owner",
@@ -130,6 +154,12 @@ def _gateway(identity: _Identity, route: _ManagerRoute, *, memory_review: bool =
         user_id=FIRST_USER,
         chat_id="chat_owner",
         thread_id=None,
+    )
+    refs = delivery_refs or DeliveryRefs(TEAM, b"m" * 32)
+    team_commands = GatewayTeamCommandService(
+        team_services=_InProcessScheduleCommands(schedule_ops),
+        references=SimpleNamespace(person_ref=broker_person_ref),
+        request_ids=lambda: f"cmd-{uuid4().hex}",
     )
     return GatewayMaintenanceScheduleApplication(
         settings=GatewayMaintenanceScheduleSettings(
@@ -176,21 +206,21 @@ def _gateway(identity: _Identity, route: _ManagerRoute, *, memory_review: bool =
                 users_enabled=True,
             ),
             identity=identity,  # type: ignore[arg-type]
-            context_signer=context_signer(),
+            token_signer=BrokerGatewayTokenSigner(team_id=TEAM),
+            person_ref_resolver=broker_person_ref,
         ),
         delivery=SimpleNamespace(upsert_scheduled_target=lambda **_: None),
         manager=route,  # type: ignore[arg-type]
         id_generator=SimpleNamespace(new_correlation_id=lambda: "correlation"),
+        team_commands=team_commands,
+        delivery_refs=refs,
     )
 
 
 async def _gateway_start(gateway: GatewayMaintenanceScheduleApplication, route: _ManagerRoute, manager: _Manager) -> None:
-    """The gateway starts (ensure_all) and the manager handles what it sent, in order."""
+    """The gateway starts (ensure_all), installing and refreshing maintenance schedules via ``schedules.install``."""
 
     await gateway.ensure_all()
-    for envelope in route.published:
-        await handle_scheduled_message(manager, envelope.msg_content)
-    route.published.clear()
 
 
 async def _install_maintenance(manager: _Manager) -> None:
@@ -201,8 +231,14 @@ async def _install_maintenance(manager: _Manager) -> None:
     await handle_scheduled_message(manager, schedule)
 
 
-def _verified(signed: Any) -> Any:
-    return ContextVerifier.from_env().verify(signed, team_id=TEAM)
+def _verified(world, gateway_context: Any) -> Any:
+    return resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=gateway_context.task_context,
+        schedule_run=gateway_context.schedule_run,
+        schedule_runs=ScheduleRunLookup.from_storage(world.tasks.storage_settings),
+    )
 
 
 def _record_people(world) -> None:
@@ -211,7 +247,7 @@ def _record_people(world) -> None:
     now = datetime.now(timezone.utc)
     people = [
         TeamPersonV1(
-            person_ref=new_person_ref(),
+            person_ref=broker_person_ref(person_id),
             team_id=TEAM,
             person_id=person_id,
             standing=PersonStanding.ACTIVE,
@@ -225,14 +261,26 @@ def _record_people(world) -> None:
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    use_scheduler_key(monkeypatch)
-    manager = _Manager(tmp_path / "schedules.db")
+    db_path = tmp_path / "tasks.db"
+    tasks = TaskManager(db_path=str(db_path))
+    tasks.set_owner_identity("agent-TeamArchitect", "TeamArchitect", TEAM, "TeamArchitect")
+    manager = _Manager(db_path)
     route = _ManagerRoute()
     identity = _Identity()
-    # One task store for every escalation, as in the manager: the access store lives beside it.
-    tasks = TaskManager(db_path=str(tmp_path / "tasks.db"))
-    tasks.set_owner_identity("agent-TeamArchitect", "TeamArchitect", TEAM, "TeamArchitect")
-    world = SimpleNamespace(tmp_path=tmp_path, manager=manager, route=route, identity=identity, tasks=tasks)
+    sched = bind_test_scheduler(
+        monkeypatch, store=manager._schedule_store, team_id=TEAM, storage_settings=tasks.storage_settings
+    )
+    world = SimpleNamespace(
+        tmp_path=tmp_path,
+        manager=manager,
+        route=route,
+        identity=identity,
+        tasks=tasks,
+        scheduler=sched.scheduler,
+        schedule_ops=sched.schedule_ops,
+        delivery_refs=DeliveryRefs(TEAM, b"m" * 32),
+        verifier=sched.verifier,
+    )
     _record_people(world)
     yield world
     forget_task_context_keys()
@@ -241,20 +289,17 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interval_seconds", [60, 120])
 async def test_gateway_restart_keeps_heartbeat_due_time_and_configured_cadence(world, interval_seconds):
-    application = _gateway(world.identity, world.route)
+    application = _gateway(
+        world.identity, world.route, schedule_ops=world.schedule_ops, delivery_refs=world.delivery_refs
+    )
     application._settings = replace(application._settings, heartbeat=GatewayHeartbeatScheduleSettings(
         enabled=True, source_id="heartbeat_source", schedule_id="heartbeat_launcher", interval_seconds=60,
     ))
     await application.ensure_heartbeat()
-    for envelope in world.route.published:
-        await handle_scheduled_message(world.manager, envelope.msg_content)
     before = world.manager._schedule_store.get_scheduled_message("heartbeat_launcher")
     assert before is not None
-    world.route.published.clear()
     application._settings = replace(application._settings, heartbeat=replace(application._settings.heartbeat, interval_seconds=interval_seconds))
     await application.ensure_heartbeat()
-    for envelope in world.route.published:
-        await handle_scheduled_message(world.manager, envelope.msg_content)
     after = world.manager._schedule_store.get_scheduled_message("heartbeat_launcher")
     assert after is not None
     assert (after.next_fire_at, after.interval_ms) == (before.next_fire_at, interval_seconds * 1000)
@@ -263,6 +308,7 @@ async def test_gateway_restart_keeps_heartbeat_due_time_and_configured_cadence(w
 def _escalation_for(world, *, task_id: str = ESCALATION_TASK) -> tuple[Any, Any]:
     """A maintenance run's escalation as TeamArchitect admits it, and the team lead handling it."""
 
+    world.scheduler.issue_permit_for_schedule(MAINTENANCE_ID)
     schedule = world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID)
     schedule.next_fire_at = "2026-09-25T12:00:00+00:00"
     world.manager.team_comms.sent.clear()
@@ -293,54 +339,72 @@ def test_an_existing_maintenance_schedule_gets_the_first_users_session_at_gatewa
     asyncio.run(_install_maintenance(world.manager))
     assert world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context.task_context is None
 
-    with caplog.at_level(logging.INFO, logger="custom_agents.schedule_context_refresh"):
-        asyncio.run(_gateway_start(_gateway(world.identity, world.route), world.route, world.manager))
+    with caplog.at_level(logging.INFO, logger="test.team_schedules"):
+        asyncio.run(
+            _gateway_start(
+                _gateway(world.identity, world.route, schedule_ops=world.schedule_ops, delivery_refs=world.delivery_refs),
+                world.route,
+                world.manager,
+            )
+        )
 
-    stored = world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context
-    signed = _verified(stored.task_context)
-    assert (signed.issuer, signed.person_id, signed.person_roles) == ("gateway", FIRST_USER, ("admin", "owner"))
-    assert (stored.canonical_user_id, stored.session_key, stored.delivery_mode) == (
+    store = world.manager._schedule_store
+    stored = store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context
+    assert store.is_owner_vouched(MAINTENANCE_ID) is True
+    assert store.delivery_ref_of(MAINTENANCE_ID) == world.delivery_refs.ref("session_owner")
+    assert (stored.canonical_user_id, stored.delivery_mode) == (
         FIRST_USER,
-        "session_owner",
         INTERNAL_IMPROVEMENT_DELIVERY_MODE,
     )
-    assert "event=schedule_context_refreshed" in caplog.text and MAINTENANCE_ID in caplog.text
+    assert "event=team_schedule_installed" in caplog.text and MAINTENANCE_ID in caplog.text
 
     admitted, lead = _escalation_for(world)
-    context = _verified(admitted.gateway_context.task_context)
+    context = _verified(world, admitted.gateway_context)
     assert (context.issuer, context.person_id, context.person_roles) == ("scheduler", FIRST_USER, ("admin", "owner"))
-    assert admitted.gateway_context.session_key == "session_owner"
     assert decide_for(lead, "notify_user", {}).allowed
 
 
 def test_a_schedule_created_after_the_gateways_last_refresh_works_for_its_owner(world, caplog) -> None:
     """The gateway started first; the manager created the schedule later (the old gap)."""
 
-    with caplog.at_level(logging.INFO, logger="custom_agents.schedule_context_refresh"):
-        asyncio.run(_gateway_start(_gateway(world.identity, world.route), world.route, world.manager))
-    assert "reason=schedule_missing" in caplog.text
+    with caplog.at_level(logging.INFO, logger="assistant_gateway.application.maintenance_schedules"):
+        asyncio.run(
+            _gateway_start(
+                _gateway(world.identity, world.route, schedule_ops=world.schedule_ops, delivery_refs=world.delivery_refs),
+                world.route,
+                world.manager,
+            )
+        )
+    assert "outcome=not_found" in caplog.text
     asyncio.run(_install_maintenance(world.manager))
 
     admitted, lead = _escalation_for(world)
 
-    context = _verified(admitted.gateway_context.task_context)
+    context = _verified(world, admitted.gateway_context)
     assert (context.person_id, context.person_roles) == (FIRST_USER, ("admin", "owner"))
     assert decide_for(lead, "notify_user", {}).allowed
 
 
 def test_a_role_change_applies_at_the_next_escalation_without_a_refresh(world) -> None:
     asyncio.run(_install_maintenance(world.manager))
-    asyncio.run(_gateway_start(_gateway(world.identity, world.route), world.route, world.manager))
+    asyncio.run(
+        _gateway_start(
+            _gateway(world.identity, world.route, schedule_ops=world.schedule_ops, delivery_refs=world.delivery_refs),
+            world.route,
+            world.manager,
+        )
+    )
     world.identity.roles[FIRST_USER] = "member"
     _record_people(world)
     first, _lead = _escalation_for(world, task_id="escalation_member")
+    first_roles = _verified(world, first.gateway_context).person_roles
 
     world.identity.roles[FIRST_USER] = "admin"
     _record_people(world)
     second, lead = _escalation_for(world, task_id="escalation_admin")
 
-    assert _verified(first.gateway_context.task_context).person_roles == ("member",)
-    assert _verified(second.gateway_context.task_context).person_roles == ("admin",)
+    assert first_roles == ("member",)
+    assert _verified(world, second.gateway_context).person_roles == ("admin",)
     assert decide_for(lead, "notify_user", {}).allowed
 
 
@@ -389,25 +453,44 @@ def test_a_refresh_keeps_pause_disable_cadence_and_next_fire_time(world, how) ->
     _pause_or_disable(world.manager, how)
     before = _operator_state(world.manager)
 
-    asyncio.run(_gateway_start(_gateway(world.identity, world.route), world.route, world.manager))
+    asyncio.run(
+        _gateway_start(
+            _gateway(world.identity, world.route, schedule_ops=world.schedule_ops, delivery_refs=world.delivery_refs),
+            world.route,
+            world.manager,
+        )
+    )
 
     assert _operator_state(world.manager) == before
-    stored = world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context
-    assert _verified(stored.task_context).person_id == FIRST_USER
+    store = world.manager._schedule_store
+    assert store.is_owner_vouched(MAINTENANCE_ID) is True
+    assert store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context.canonical_user_id == FIRST_USER
 
 
 def test_a_refresh_of_a_missing_schedule_creates_nothing(world, caplog) -> None:
-    with caplog.at_level(logging.INFO, logger="custom_agents.schedule_context_refresh"):
-        asyncio.run(_gateway_start(_gateway(world.identity, world.route), world.route, world.manager))
+    with caplog.at_level(logging.INFO, logger="assistant_gateway.application.maintenance_schedules"):
+        asyncio.run(
+            _gateway_start(
+                _gateway(world.identity, world.route, schedule_ops=world.schedule_ops, delivery_refs=world.delivery_refs),
+                world.route,
+                world.manager,
+            )
+        )
 
     assert world.manager._schedule_store.get_all() == []
-    assert "event=schedule_context_refresh_skipped reason=schedule_missing" in caplog.text
+    assert "event=gateway_maintenance_schedule_install_refused" in caplog.text and "outcome=not_found" in caplog.text
 
 
 def test_the_managers_own_installers_never_replace_a_refreshed_context(world) -> None:
     asyncio.run(_install_maintenance(world.manager))
-    asyncio.run(_gateway_start(_gateway(world.identity, world.route), world.route, world.manager))
-    refreshed = world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context
+    asyncio.run(
+        _gateway_start(
+            _gateway(world.identity, world.route, schedule_ops=world.schedule_ops, delivery_refs=world.delivery_refs),
+            world.route,
+            world.manager,
+        )
+    )
+    refreshed_ref = world.manager._schedule_store.delivery_ref_of(MAINTENANCE_ID)
 
     # An InternalImprovementAgent starting again, and the memory-review cleanup scan.
     asyncio.run(_install_maintenance(world.manager))
@@ -416,12 +499,18 @@ def test_the_managers_own_installers_never_replace_a_refreshed_context(world) ->
     )
     assert world.manager._schedule_store.add_if_absent(cleanup_install) is False
 
-    kept = world.manager._schedule_store.get_scheduled_message(MAINTENANCE_ID).payload_meta.gateway_context
-    assert kept.task_context == refreshed.task_context and kept.session_key == "session_owner"
+    assert world.manager._schedule_store.is_owner_vouched(MAINTENANCE_ID) is True
+    assert world.manager._schedule_store.delivery_ref_of(MAINTENANCE_ID) == refreshed_ref
 
 
 def test_a_paused_memory_review_schedule_stays_paused_across_gateway_restarts(world) -> None:
-    gateway = _gateway(world.identity, world.route, memory_review=True)
+    gateway = _gateway(
+        world.identity,
+        world.route,
+        memory_review=True,
+        schedule_ops=world.schedule_ops,
+        delivery_refs=world.delivery_refs,
+    )
     asyncio.run(_gateway_start(gateway, world.route, world.manager))
     store = world.manager._schedule_store
     stored = store.get_scheduled_message(MEMORY_REVIEW_ID)
@@ -439,6 +528,7 @@ def test_a_paused_memory_review_schedule_stays_paused_across_gateway_restarts(wo
     assert store.set_paused_until(MEMORY_REVIEW_ID, paused.paused_until, system_mutation_permit=permit)
     before = store.get_scheduled_message(MEMORY_REVIEW_ID)
     world.identity.roles[FIRST_USER] = "admin"
+    _record_people(world)
 
     asyncio.run(_gateway_start(gateway, world.route, world.manager))
 
@@ -449,5 +539,56 @@ def test_a_paused_memory_review_schedule_stays_paused_across_gateway_restarts(wo
         before.next_fire_at,
         before.interval_ms,
     )
-    # Its person and roles are still refreshed.
-    assert _verified(after.payload_meta.gateway_context.task_context).person_roles == ("admin",)
+    # Its owner stays vouched and its scheduler-signed run permit reflects the current roles via PeopleDirectory.
+    assert store.is_owner_vouched(MEMORY_REVIEW_ID) is True
+    permit_token = store.run_permit(MEMORY_REVIEW_ID)
+    assert permit_token is not None
+    assert world.verifier.verify_schedule_permit(permit_token, team_id=TEAM).person_roles == ("admin",)
+
+
+def test_maintenance_schedules_retry_after_transient_team_services_outage(world) -> None:
+    """C30: maintenance installs skipped while svc.team is down are queued and retried on the background loop."""
+    from assistant_gateway.application.team_commands import TeamServicesUnavailable
+
+    gateway = _gateway(
+        world.identity,
+        world.route,
+        memory_review=True,
+        schedule_ops=world.schedule_ops,
+        delivery_refs=world.delivery_refs,
+    )
+    real_request = gateway._team_commands.request
+    outage = {"down": True}
+
+    async def _flaky_request(kind: str, body: dict[str, Any], *, person_id: str) -> dict[str, Any]:
+        if outage["down"]:
+            raise TeamServicesUnavailable("team services are starting")
+        return await real_request(kind, body, person_id=person_id)
+
+    gateway._team_commands.request = _flaky_request  # type: ignore[method-assign]
+
+    asyncio.run(gateway.ensure_all())
+    assert world.manager._schedule_store.get_scheduled_message(MEMORY_REVIEW_ID) is None
+    assert (MEMORY_REVIEW_ID, "ensure") in gateway._pending_retries
+    assert (MEMORY_REVIEW_ID, "refresh") in gateway._pending_retries
+
+    # Team services come back; the background retry loop installs and refreshes the queued schedules.
+    outage["down"] = False
+
+    async def _run_until_drained() -> None:
+        stop = asyncio.Event()
+        task = asyncio.create_task(gateway.run(stop, retry_interval_seconds=0.01))
+        try:
+            for _ in range(50):
+                if not gateway._pending_retries:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            stop.set()
+            await task
+
+    asyncio.run(_run_until_drained())
+    assert not gateway._pending_retries
+    stored = world.manager._schedule_store.get_scheduled_message(MEMORY_REVIEW_ID)
+    assert stored is not None
+    assert world.manager._schedule_store.is_owner_vouched(MEMORY_REVIEW_ID) is True

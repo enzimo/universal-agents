@@ -6,10 +6,8 @@ has no dependency on the section or its writer, so both can import it.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 from enum import StrEnum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import Field, JsonValue, model_validator
@@ -60,7 +58,7 @@ class CarriedScheduleV2(TransferModel):
     """Markdown is the schedule configuration, with separate immutable provenance."""
 
     remaining_count: Optional[int] = Field(default=None, ge=0)
-    # The old instance's gateway key vouched for the saved context's person (module docstring).
+    # Whether the exported schedule's owner was vouched for (read from scheduled_messages.owner_vouched).
     owner_vouched: bool = False
     markdown: str = Field(min_length=1)
 
@@ -174,33 +172,6 @@ def run_time_passed(schedule: "ScheduledMessage", now: datetime) -> bool:
     return (due if due.tzinfo else due.replace(tzinfo=timezone.utc)) <= now
 
 
-# -- the gateway signing key ---------------------------------------------------------
-
-
-def gateway_signing_key(config: Any, layout: Any) -> Optional[str]:
-    """The instance's gateway signing key value, from where its launcher reads secrets; None when unset.
-
-    ``team.env`` (or the configured env file), or, for an instance whose
-    secrets come from the environment, the environment or a Docker secret file
-    (``ACCESS_GATEWAY_SIGNING_KEY_FILE``).
-    """
-
-    from access_control.identity import ENV_GATEWAY_SIGNING_KEY
-    from internal_credentials import parse_env_file
-
-    if config.launch.secrets_from_environment:
-        source: dict[str, str] = dict(os.environ)
-    else:
-        source = parse_env_file(
-            Path(config.launch.env_file_path or layout.team_env_path)
-        )
-    value = str(source.get(ENV_GATEWAY_SIGNING_KEY) or "").strip()
-    secret_file = str(source.get(f"{ENV_GATEWAY_SIGNING_KEY}_FILE") or "").strip()
-    if not value and secret_file:
-        value = Path(secret_file).read_text(encoding="utf-8").strip()
-    return value or None
-
-
 __all__ = [
     "CarriedScheduleV2",
     "ExecutionRecordV1",
@@ -210,7 +181,6 @@ __all__ = [
     "ScheduleTransferRecordV2",
     "ScheduledTargetV1",
     "SessionRouteV1",
-    "gateway_signing_key",
     "is_one_time",
     "record_key",
     "run_time_passed",

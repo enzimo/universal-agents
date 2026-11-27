@@ -171,6 +171,7 @@ class TaskManager(
         logger: logging.Logger = None,
         storage_settings: Optional[StorageSettings] = None,
         objective_execution_paths: Optional[List[str]] = None,
+        authority_verifier: Any = None,
     ):
         from custom_agents.task_operation_runtime import TaskOperationRuntime
 
@@ -208,6 +209,7 @@ class TaskManager(
             db_path=self._db_path,
             logger=self._logger,
             storage_settings=self._storage_settings,
+            authority_verifier=authority_verifier,
         )
         self.task_archive_repository = create_task_archive_repository(
             self._storage_settings,

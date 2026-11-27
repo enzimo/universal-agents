@@ -36,7 +36,7 @@ from custom_messages.enums import MessageMetaType
 from custom_tools.provider_contract import tool_name
 from custom_tools.registry import ALL_PROVIDER_TOOLS
 from tests.task_work_support import bind_task, install_test_tool_sync, set_agent_ref
-from tests.broker_access_support import context_signer
+from tests.broker_access_support import signed_task_token
 from tests.test_access_request_tools import BINARY, OWNER, TEAM, make_agent, owner_service
 from tests.test_access_request_tools import storage as access_storage
 
@@ -185,10 +185,16 @@ def test_the_same_agent_shows_each_person_what_they_authorized(lead, storage, tm
     give(service, OWNER, SCHEDULES)
     assert "create_scheduled_job" in next_model_call(hook, registry)
 
+    from custom_messages.contracts.routing_v1 import GatewayContext
+
     # The lead now works on a task for another person, who authorized nothing.
-    meta = MessageMeta(conversation_id="conv-2")
-    meta.gateway_context = SimpleNamespace(
-        task_context=context_signer().issue(team_id=TEAM, person_id=MEMBER.person_id, person_roles=("member",))
+    meta = MessageMeta(
+        conversation_id="conv-2",
+        gateway_context=GatewayContext(
+            task_context=signed_task_token(
+                MEMBER.person_id, team_id=TEAM, roles=("member",), root_task_id="task-member"
+            )
+        ),
     )
     agent.task_manager.add_task(Task(task_id="task-member", task_type=MessageMetaType.REQUEST), MessageHeader(), meta, owner_person_id=None)
     bind_task("task-member")

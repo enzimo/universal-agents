@@ -13,7 +13,6 @@ import pytest
 from access_catalog.catalog import load_catalog
 from access_control.data_folders import DataFolderRegistry
 from access_control.entities import PersonPrincipal
-from custom_agents import access_runtime
 from custom_messages.contracts.access_v2 import AccessLevel
 from custom_tools import file_access
 from custom_tools.non_interactive_file_tools import workspace_file_link
@@ -26,7 +25,12 @@ from custom_tools.registry import FILES_PROVIDER
 from runtime_settings.instance_layout import InstanceLayout, person_folder_name
 from storage.access_repository import AccessRepository
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer, context_verify_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_scheduler_token,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 from tests.task_work_support import set_agent_ref
 
 TEAM = "team-download-links"
@@ -42,19 +46,39 @@ def _make_agent(
     expired: bool = False,
 ) -> SimpleNamespace:
     if signed:
-        now = (
-            datetime.now(timezone.utc) - timedelta(hours=2)
-            if expired
-            else datetime.now(timezone.utc)
-        )
-        lifetime = timedelta(minutes=5) if expired else timedelta(hours=1)
-        context = context_signer().issue(
-            team_id=TEAM,
-            person_id=person,
-            person_roles=roles if person else (),
-            now=now,
-            lifetime=lifetime,
-        )
+        if person:
+            if expired:
+                from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+                from custom_transport.protocol1.authority_tokens import root_task_token
+                from tests.broker_access_support import broker_gateway_identity, broker_people_store
+
+                rec = broker_people_store().register(TEAM, person, roles=roles)
+                past = datetime.now(timezone.utc) - timedelta(hours=2)
+                context = AuthorityTokenRecord.model_validate(
+                    root_task_token(
+                        broker_gateway_identity(TEAM),
+                        team=TEAM,
+                        root_task_id="task-link-1",
+                        request_id="task_context_expired",
+                        person_ref=rec.person_ref,
+                        issued=past,
+                        expires_at=past + timedelta(minutes=5),
+                    )
+                )
+            else:
+                context = signed_task_token(
+                    person,
+                    team_id=TEAM,
+                    roles=roles,
+                    root_task_id="task-link-1",
+                )
+        else:
+            context = signed_scheduler_token(
+                None,
+                team_id=TEAM,
+                root_task_id="task-link-1",
+                schedule_id="sched-link-1",
+            )
     else:
         context = None
     meta = SimpleNamespace(
@@ -99,11 +123,11 @@ def layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> InstanceLayout:
     for name in ("TEAM_INSTANCE_ROOT", "TEAM_INSTANCE_CONFIG", "TOOL_DENY_PATHS"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("INTERNAL_WEBSITE_BASE_URL", "https://team.example.test/")
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield inst
     set_agent_ref(None)
-    access_runtime._runtime_access.cache_clear()
+    forget_task_context_keys()
 
 
 def _payload(result: dict) -> dict:

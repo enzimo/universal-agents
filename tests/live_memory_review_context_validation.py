@@ -30,15 +30,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import nats
 
-from access_control.identity import (
-    ENV_VERIFY_KEYS,
-    ISSUER_GATEWAY,
-    ContextSigner,
-    generate_signing_key,
-    verify_keys_value,
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
 )
 from config_loader import load_config
-from custom_agents import access_runtime
 from custom_messages.contracts.runtime_v1 import MEM_REVIEW_AGENT_TYPE
 from custom_agents.memory_review_runtime import enqueue_stale_conversation_review_jobs
 from custom_agents.memory_review_store import MemoryReviewStore
@@ -76,13 +73,9 @@ def _task_for_person(storage_settings: Any, team_id: str, person_id: str) -> Ite
     only inside this block, then the previous verification keys come back.
     """
 
-    private, public = generate_signing_key(ISSUER_GATEWAY)
-    previous = os.environ.get(ENV_VERIFY_KEYS)
-    os.environ[ENV_VERIFY_KEYS] = verify_keys_value([public])
-    access_runtime._runtime_access.cache_clear()
-    signed = ContextSigner.from_value(ISSUER_GATEWAY, private).issue(
-        team_id=team_id, person_id=person_id, person_roles=("member",)
-    )
+    forget_task_context_keys()
+    use_broker_authority_verifier()
+    signed = signed_task_token(person_id, team_id=team_id, roles=("member",))
     meta = SimpleNamespace(gateway_context=SimpleNamespace(task_context=signed, canonical_user_id=person_id))
     try:
         yield SimpleNamespace(
@@ -91,11 +84,7 @@ def _task_for_person(storage_settings: Any, team_id: str, person_id: str) -> Ite
             get_task_info=lambda _task_id: SimpleNamespace(meta=meta),
         )
     finally:
-        if previous is None:
-            os.environ.pop(ENV_VERIFY_KEYS, None)
-        else:
-            os.environ[ENV_VERIFY_KEYS] = previous
-        access_runtime._runtime_access.cache_clear()
+        forget_task_context_keys()
 
 
 def _redact_url(raw_url: str) -> str:

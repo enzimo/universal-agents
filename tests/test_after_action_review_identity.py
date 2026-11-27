@@ -39,11 +39,10 @@ from custom_agents import access_runtime
 from custom_agents.schedule_store import ScheduleStore
 from custom_agents.scheduled_runtime import enqueue_fired_scheduled_task
 from custom_agents.strands_agent import UniversalAgent
-from custom_agents.task_context_runtime import scheduler_signer
 from custom_agents.task_manager import TaskManager
 from custom_agents.task_manager_after_action_reports import UNVERIFIED_IDENTITY_STALE_REASON
 from custom_agents.task_records import ReportedWorkIdentity
-from custom_messages.contracts.access_v2 import PersonStanding, ScheduleRunIdentityV1, TeamPersonV1, new_person_ref
+from custom_messages.contracts.access_v2 import PersonStanding, ScheduleRunIdentityV1, TeamPersonV1
 from custom_messages.contracts.routing_v1 import GatewayContext, MessageHeader, MessageMeta
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.contracts.task_v1 import AfterActionReport, Task
@@ -57,16 +56,23 @@ from custom_messages.enums import (
     SystemScheduleKind,
 )
 from custom_messages.records.reviews import AfterActionReportReviewBatchRecord, AfterActionReportReviewRecord
+from custom_messages.wire.authority_bindings import AuthorityTokenRecord
 from custom_tools.providers.context_memory import (
     list_pending_after_action_reports,
     resolve_after_action_report_review,
 )
+from custom_transport.protocol1.authority_tokens import root_task_token, schedule_permit_token
 from tests.task_work_support import bind_task, set_agent_ref
 from storage.access_repository import AccessRepository
 from storage.knowledge_repository import create_knowledge_repository
-from tests.broker_access_support import context_signer, forget_task_context_keys, use_scheduler_key
+from tests.broker_access_support import (
+    broker_gateway_identity,
+    broker_person_ref,
+    broker_scheduler_identity,
+    forget_task_context_keys,
+)
 from tests.knowledge_support import BACKENDS, knowledge_storage
-from tests.scheduled_run_support import NOW
+from tests.scheduled_run_support import NOW, bind_test_scheduler
 
 TEAM = "team_1"
 ANN = "usr_ann"
@@ -79,7 +85,7 @@ CEDAR = ROOT / "target" / "debug" / "ua-cedar-authorizer"
 needs_cedar = pytest.mark.skipif(not CEDAR.is_file(), reason="build ua-cedar-authorizer first (cargo build)")
 
 
-def _build_world(db_path: str) -> SimpleNamespace:
+def _build_world(db_path: str, monkeypatch: pytest.MonkeyPatch | None = None) -> SimpleNamespace:
     """The team lead in the manager process, over one SQLite database."""
 
     tasks = TaskManager(db_path=db_path)
@@ -113,7 +119,19 @@ def _build_world(db_path: str) -> SimpleNamespace:
         manager, batch
     )
     _record_people(tasks, {ANN: PersonStanding.ACTIVE, BOB: PersonStanding.ACTIVE})
-    return SimpleNamespace(tasks=tasks, store=store, manager=manager, db_path=db_path)
+    sched = (
+        bind_test_scheduler(monkeypatch, store=store, team_id=TEAM, storage_settings=tasks.storage_settings)
+        if monkeypatch is not None
+        else None
+    )
+    return SimpleNamespace(
+        tasks=tasks,
+        store=store,
+        manager=manager,
+        db_path=db_path,
+        scheduler=sched.scheduler if sched is not None else None,
+        verifier=sched.verifier if sched is not None else None,
+    )
 
 
 def _record_people(tasks: TaskManager, standings: dict[str, PersonStanding]) -> None:
@@ -123,7 +141,7 @@ def _record_people(tasks: TaskManager, standings: dict[str, PersonStanding]) -> 
         TEAM,
         [
             TeamPersonV1(
-                person_ref=new_person_ref(),
+                person_ref=broker_person_ref(person_id),
                 team_id=TEAM,
                 person_id=person_id,
                 standing=standing,
@@ -138,17 +156,20 @@ def _record_people(tasks: TaskManager, standings: dict[str, PersonStanding]) -> 
 
 @pytest.fixture
 def keys(monkeypatch: pytest.MonkeyPatch):
-    """This process holds the scheduler key and trusts the gateway's, as the manager process does."""
+    """Trust the test protocol 1 authority (gateway + scheduler)."""
 
-    use_scheduler_key(monkeypatch)
+    from tests.broker_access_support import use_broker_authority_verifier
+
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
     set_agent_ref(None)
 
 
 @pytest.fixture
-def world(tmp_path: Path, keys):
-    return _build_world(str(tmp_path / "manager.db"))
+def world(tmp_path: Path, keys, monkeypatch: pytest.MonkeyPatch):
+    return _build_world(str(tmp_path / "manager.db"), monkeypatch)
 
 
 # -- helpers ------------------------------------------------------------------------------
@@ -157,11 +178,13 @@ def world(tmp_path: Path, keys):
 def _person_meta(person_id: str) -> MessageMeta:
     """A request's meta as the gateway sends it: the person and their signed context."""
 
+    from tests.broker_access_support import signed_task_token
+
     return MessageMeta(
         from_agent_name="gateway",
         gateway_context=GatewayContext(
             canonical_user_id=person_id,
-            task_context=context_signer().issue(team_id=TEAM, person_id=person_id, person_roles=("admin",)),
+            task_context=signed_task_token(person_id, team_id=TEAM, roles=("admin",)),
         ),
     )
 
@@ -169,12 +192,12 @@ def _person_meta(person_id: str) -> MessageMeta:
 def _system_meta() -> MessageMeta:
     """A maintenance run's meta: signed by the scheduler for no person."""
 
-    signer = scheduler_signer()
-    assert signer is not None
+    from tests.broker_access_support import signed_scheduler_token
+
     return MessageMeta(
         from_agent_name="scheduler",
         gateway_context=GatewayContext(
-            task_context=signer.issue(team_id=TEAM, person_id=None, schedule_id="sched_maintenance")
+            task_context=signed_scheduler_token(None, team_id=TEAM, schedule_id="sched_maintenance")
         ),
     )
 
@@ -231,7 +254,24 @@ def _owner(schedule: ScheduledMessage) -> str | None:
 
 
 def _fire(world, schedule: ScheduledMessage) -> None:
-    assert asyncio.run(enqueue_fired_scheduled_task(world.manager, schedule.schedule_id, schedule)) is True
+    if world.scheduler is not None:
+        world.scheduler.renew_permits()
+    claim_token = None
+    if world.store.run_permit(schedule.schedule_id) is None and world.store.get_row(schedule.schedule_id) is not None:
+        with world.store._repository._connect() as conn:
+            conn.execute(
+                "UPDATE scheduled_messages SET next_fire_at = ?, claimed_by_agent_id = NULL, claim_token = NULL WHERE schedule_id = ?",
+                ("2000-01-01T00:00:00+00:00", schedule.schedule_id),
+            )
+            conn.commit()
+        claimed = world.store.claim_next_due(
+            claimer_agent_id=MANAGER_ID, claimer_named_agent_type=LEAD_TYPE, claimer_team_id=TEAM
+        )
+        if claimed is not None and claimed["schedule_id"] == schedule.schedule_id:
+            claim_token = claimed["claim_token"]
+    assert asyncio.run(
+        enqueue_fired_scheduled_task(world.manager, schedule.schedule_id, schedule, claim_token=claim_token)
+    ) is True
 
 
 def _access_agent(world, task_id: str) -> SimpleNamespace:
@@ -387,20 +427,37 @@ def test_an_existing_review_cannot_be_reassigned_to_another_person(world) -> Non
 
 
 def _historical_meta(world, source: str) -> MessageMeta:
-    started = datetime.now(timezone.utc) - timedelta(days=8)
+    now = datetime.now(timezone.utc)
+    started = now - timedelta(minutes=30)
+    expired = now - timedelta(minutes=5)
     if source == "expired_context":
-        signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("admin",), now=started)
+        signed = AuthorityTokenRecord.model_validate(
+            root_task_token(
+                broker_gateway_identity(TEAM),
+                team=TEAM,
+                root_task_id="task_historical",
+                request_id="task_context_historical",
+                person_ref=broker_person_ref(ANN),
+                issued=started,
+                expires_at=expired,
+            )
+        )
         return MessageMeta(gateway_context=GatewayContext(canonical_user_id=ANN, task_context=signed))
-    signer = scheduler_signer()
-    assert signer is not None
     schedule = ScheduledMessage(
         schedule_id="sched_finished_source", repeat_count=1,
         payload=Task(task_type=MessageMetaType.REQUEST, problem_statement="One-shot delegated work."),
         payload_meta=_person_meta(ANN), next_fire_at=started.isoformat(),
     )
     world.store.add(schedule, claim_team_id=TEAM, claim_named_agent_type="WebResearchAgent")
-    permit = signer.issue_permit(
-        team_id=TEAM, schedule_id=schedule.schedule_id, person_id=ANN, now=started, lifetime=timedelta(days=7),
+    permit = AuthorityTokenRecord.model_validate(
+        schedule_permit_token(
+            broker_scheduler_identity(TEAM),
+            team=TEAM,
+            schedule_id=schedule.schedule_id,
+            person_ref=broker_person_ref(ANN),
+            issued=started,
+            expires_at=expired,
+        )
     )
     # A finished one-shot schedule no longer exists when the report arrives.
     world.store.update_after_fire(schedule.schedule_id)
@@ -449,11 +506,11 @@ def test_changed_historical_signatures_never_attribute_reports_to_a_person(world
     context = meta.gateway_context
     if context.task_context is not None:
         signed = context.task_context
-        context.task_context = signed.model_copy(update={"context": signed.context.model_copy(update={"person_id": BOB})})
+        context.task_context = signed.model_copy(update={"person": broker_person_ref(BOB)})
     else:
         run = context.schedule_run
         signed = run.permit
-        changed = signed.model_copy(update={"permit": signed.permit.model_copy(update={"person_id": BOB})})
+        changed = signed.model_copy(update={"person": broker_person_ref(BOB)})
         context.schedule_run = run.model_copy(update={"permit": changed})
     parent = _parent_task(world, "task_forged", meta)
     _receive(world, _report("aar_forged", parent.task_id), meta)
@@ -647,10 +704,10 @@ def _old_review_schedule(batch_id: str, schedule_id: str) -> ScheduledMessage:
     )
 
 
-def test_old_scheduled_batches_are_closed_unreviewed(tmp_path: Path, keys, caplog) -> None:
+def test_old_scheduled_batches_are_closed_unreviewed(tmp_path: Path, keys, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     db_path = str(tmp_path / "manager.db")
     _save_old_rows(db_path, batch_id="aar_batch_old", parent_task_id="task_old", report_id="aar_old", schedule_id="sched_old")
-    world = _build_world(db_path)  # opening the stores adds the new columns
+    world = _build_world(db_path, monkeypatch)  # opening the stores adds the new columns
     world.store.add(_old_review_schedule("aar_batch_old", "sched_old"), claim_team_id=TEAM, claim_named_agent_type=LEAD_TYPE)
 
     with caplog.at_level(logging.WARNING, logger="custom_agents.task_manager_after_action_reports"):
@@ -665,10 +722,10 @@ def test_old_scheduled_batches_are_closed_unreviewed(tmp_path: Path, keys, caplo
     assert (review.status, review.stale_reason) == (AfterActionReportReviewStatus.IGNORED, UNVERIFIED_IDENTITY_STALE_REASON)
 
 
-def test_old_pending_reviews_are_never_listed_and_old_open_batches_close_with_their_task(tmp_path: Path, keys) -> None:
+def test_old_pending_reviews_are_never_listed_and_old_open_batches_close_with_their_task(tmp_path: Path, keys, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = str(tmp_path / "manager.db")
     _save_old_rows(db_path, batch_id="aar_batch_open", parent_task_id="task_parent_ann", report_id="aar_old", schedule_id=None)
-    world = _build_world(db_path)
+    world = _build_world(db_path, monkeypatch)
     meta = _person_meta(ANN)
     parent = _parent_task(world, "task_parent_ann", meta)
     _receive(world, _report("aar_new", parent.task_id), meta.model_copy(deep=True))
@@ -890,7 +947,7 @@ def test_a_saved_lesson_resumes_after_resolution_failure_and_restart(world, monk
 
     # Recreate both storage owners, like a process restart. Recovery must use
     # persisted state, not a cached result from the first tool call.
-    restarted = _build_world(world.db_path)
+    restarted = _build_world(world.db_path, monkeypatch)
     restarted.tasks.restore_runtime_state()
     restarted.manager.authorization_config["enabled"] = space != "system"
     agent = _knowledge_agent(restarted, task_id)

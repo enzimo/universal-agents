@@ -1677,17 +1677,19 @@ catalog lacks or a missing account link or sign-in, use `manager_escalation`
 with the schedule and the tool ID. Wait through the existing task workflow and verify the actual
 operation after repair. Never treat a review message as access.
 
-A worker started as its own process starts a claimed run with the schedule's
-permit, which TeamLead signs once per schedule (`scheduled_run_permit_attached`
-in the logs); each check reads the owner's current roles and standing, so a
-disabled owner or a turned-off schedule refuses the run's next tool call within
-30 seconds. A schedule without a permit (new, or its owner is not vouched for:
-`schedule_permit_refused` with the reason) makes the worker ask TeamLead to sign
-that one run. While the TeamLead process is down, or it refuses (for example
-the owner was disabled or the worker no longer holds the claim), the schedule
-stays due and is retried; the logs show `scheduled_run_not_started_unsigned`
-with the reason. Such a run never reaches a model, so there is no
-`access_denied` to answer: check the reason instead of granting access.
+An agent starting a claimed scheduled run uses the schedule's standing permit,
+which the team services' scheduler signs once per schedule
+(`scheduled_run_permit_attached` in the logs); each check reads the owner's
+current roles and standing, so a disabled owner or a turned-off schedule
+refuses the run's next tool call within 30 seconds. A schedule without a usable
+permit (new, or its owner is not vouched for: `schedule_permit_refused` with
+the reason) makes the agent ask the team services' scheduler (`svc.scheduler`,
+`run_context.sign`) to sign that one run. While the team services process is
+down, or it refuses (for example the owner was disabled or the agent no longer
+holds the claim), the schedule stays due and is retried; the logs show
+`scheduled_run_not_started_unsigned` with the reason. Such a run never reaches
+a model, so there is no `access_denied` to answer: check the reason instead of
+granting access.
 
 Change shared rules through `agent.schedule_workers.defaults.<rule>` for the
 team or `agent.schedule_worker_rules.<rule>` with agent-type scope. Add registered

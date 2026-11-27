@@ -24,7 +24,13 @@ def _verified(monkeypatch):
 
 
 def test_a_context_the_gateway_signed_for_a_person_is_their_request() -> None:
-    context = SimpleNamespace(issuer=ISSUER_GATEWAY, person_id="alice", context_id="ctx_1")
+    context = SimpleNamespace(
+        issuer=ISSUER_GATEWAY,
+        issuer_roles=(ISSUER_GATEWAY,),
+        schedule_id=None,
+        person_id="alice",
+        context_id="ctx_1",
+    )
 
     work = verified_work(_agent(context))
 
@@ -35,10 +41,22 @@ def test_a_context_the_gateway_signed_for_a_person_is_their_request() -> None:
 
 
 def test_a_scheduler_signed_context_is_scheduled_work_and_no_context_is_system_upkeep() -> None:
-    scheduled = SimpleNamespace(issuer="scheduler", person_id="alice", context_id="ctx_run")
+    scheduled = SimpleNamespace(
+        issuer="scheduler",
+        issuer_roles=("scheduler",),
+        schedule_id="sched_1",
+        person_id="alice",
+        context_id="ctx_run",
+    )
 
     assert agent_change_writer(_agent(scheduled)) == ChangeWriter(ChangeWriterKind.SCHEDULED, person_id="alice")
     assert agent_change_writer(_agent(None)) == ChangeWriter(ChangeWriterKind.SYSTEM)
     # A gateway context with no person is work for nobody, never a request.
-    unowned = SimpleNamespace(issuer=ISSUER_GATEWAY, person_id="", context_id="ctx_2")
+    unowned = SimpleNamespace(
+        issuer=ISSUER_GATEWAY,
+        issuer_roles=(ISSUER_GATEWAY,),
+        schedule_id=None,
+        person_id="",
+        context_id="ctx_2",
+    )
     assert agent_change_writer(_agent(unowned)) == ChangeWriter(ChangeWriterKind.SYSTEM)

@@ -1,0 +1,56 @@
+{
+  "protocol": "1.0-pre",
+  "kind": "run_context.sign.reply",
+  "message_id": "01928f3a-7b2c-7b09-8000-000000000b09",
+  "idempotency_key": "run_context.sign.reply:XleOoLYeNCquup8MfHo5CIbWq7MCGNPM3XPt74ip7j8",
+  "issuer": {
+    "installation": "install_example",
+    "team": "team_example",
+    "runtime": "scheduler-1",
+    "membership_epoch": 1,
+    "revocation_epoch": 1,
+    "key_id": "test-scheduler-key-1"
+  },
+  "audience": {
+    "installation": "install_example",
+    "team": "team_example",
+    "target": "agent",
+    "id": "researcher-2",
+    "runtime": "worker-host-1"
+  },
+  "subject": "_INBOX.worker-host-1.01928f3a-7b2c-7446-8000-000000000446",
+  "issued_at": "2026-10-22T04:30:00.000Z",
+  "expires_at": "2026-10-22T04:30:30.000Z",
+  "algorithm": "ed25519",
+  "body": {
+    "outcome": "ok",
+    "system_work": false,
+    "authority": {
+      "token_id": "01928f3a-7b2c-7b0a-8000-000000000b0a",
+      "issuer": {
+        "installation": "install_example",
+        "runtime": "scheduler-1",
+        "membership_epoch": 1,
+        "key_id": "test-scheduler-key-1"
+      },
+      "audience": {
+        "installation": "install_example",
+        "team": "team_example"
+      },
+      "person": "person_7c1",
+      "bound_to": {
+        "type": "root_task",
+        "id": "run_scheduled_job_id_1_0430",
+        "request_id": "unvouched_run_a4c2e8f19b30"
+      },
+      "schedule_id": "scheduled_job_id_1",
+      "issued_at": "2026-10-22T04:30:00.000Z",
+      "expires_at": "2026-10-23T04:30:00.000Z",
+      "algorithm": "ed25519",
+      "signature": "7Lclo2X5qUz_Hyx9qQA8nKNoBVwYiP72yCMCVuaMdkIkiqPg0S2YT6oWZqGzeyHWcC02GPq-HdbRKSUk5hfQAA"
+    }
+  },
+  "causation_id": "01928f3a-7b2c-7446-8000-000000000446",
+  "body_digest": "7vrh6fB0HseDeWC_cjxC208kSRTMu8eXyGAxqgCYR_4",
+  "signature": "IL9Yn6eJi4dYrM8xjxokm6vO9-SPuEOP7lBA-6Hn-ekOVC9HcBTxZVkzdHh5BJyf5RKPDd9ovALoIxc04DaOCA"
+}

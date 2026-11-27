@@ -17,7 +17,6 @@ from custom_tools.runtime_context import _agent_ctx
 from tests.task_work_support import set_agent_ref
 from custom_tools.user_attachment_tools import inspect_user_attachment
 from storage.config import resolve_storage_settings
-from tests.broker_access_support import context_signer
 from tests.change_approval_support import use_signed_contexts
 
 
@@ -57,8 +56,10 @@ def _set_person_agent(attachment: UserTaskAttachment, layout, person: str) -> No
         problem_statement="Process the attachment.",
         attachments=[attachment],
     )
+    from tests.broker_access_support import signed_task_token
+
     # The person comes only from the gateway-signed task context.
-    signed = context_signer().issue(team_id=ATTACHMENT_TEAM, person_id=person, person_roles=("member",))
+    signed = signed_task_token(person, team_id=ATTACHMENT_TEAM, roles=("member",), root_task_id="task_1")
     meta = SimpleNamespace(gateway_context=SimpleNamespace(canonical_user_id=person, task_context=signed))
     task_manager = SimpleNamespace(
         operations_runtime=TaskOperationRuntime(),

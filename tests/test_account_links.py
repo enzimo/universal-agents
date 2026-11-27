@@ -20,7 +20,6 @@ from access_catalog.catalog import CatalogSource
 from access_control.caller_tokens import CALLER_MANAGER, BrokerCaller
 from access_control.cedar import CedarAccessClient
 from access_control.decisions import AccessService
-from access_control.identity import ContextVerifier
 from custom_messages.contracts.access_v2 import (
     AccessLevel,
     AccountLinkRequestV1,
@@ -67,8 +66,8 @@ from tests.broker_access_support import (
     BROKER_ROOT,
     TEST_TEAM,
     agent_context,
+    broker_authority_verifier,
     caller_headers,
-    context_verify_keys,
     gateway_headers,
 )
 
@@ -104,7 +103,7 @@ def world(tmp_path: Path):
     )
     gate = BrokerAccessGate(
         catalogs=CatalogSource(tmp_path / "instance"),
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=None,
         links=store,
@@ -646,7 +645,7 @@ tools:
     catalogs = CatalogSource(instance_root)
     gate = BrokerAccessGate(
         catalogs=catalogs,
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=None,
         links=store,
@@ -933,7 +932,6 @@ async def test_gate_link_form_is_admin_only_ignores_sharing_and_works_with_auth_
     from access_catalog.instance_tools import write_instance_tool
     from access_control.account_sharing import TeamAccountSharing
     from access_control.caller_tokens import CALLER_GATEWAY
-    from access_control.identity import ContextVerifier
     from custom_messages.contracts.access_v2 import (
         AccessLevel,
         AccountSharing,
@@ -944,7 +942,7 @@ async def test_gate_link_form_is_admin_only_ignores_sharing_and_works_with_auth_
     from secure_tool_broker.service import SecureToolBrokerService
     from storage.access_repository import AccessRepository
     from storage.config import resolve_storage_settings
-    from tests.broker_access_support import BROKER_ROOT, caller_headers, context_verify_keys
+    from tests.broker_access_support import BROKER_ROOT, caller_headers
 
     instance_root = tmp_path / "instance"
     write_instance_tool(
@@ -997,7 +995,7 @@ async def test_gate_link_form_is_admin_only_ignores_sharing_and_works_with_auth_
     # Authorization off (access=None) and private sharing: gate links still work and remain admin-only.
     gate = BrokerAccessGate(
         catalogs=catalogs,
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=None,
         links=store,
@@ -1229,7 +1227,7 @@ tools:
     )
     gate = BrokerAccessGate(
         catalogs=CatalogSource(instance_root),
-        verifier=ContextVerifier.from_value(context_verify_keys()),
+        verifier=broker_authority_verifier(),
         team_id=TEST_TEAM,
         access=None,
         links=store,

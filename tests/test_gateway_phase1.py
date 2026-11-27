@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -77,7 +78,7 @@ from custom_messages.contracts.routing_v1 import (
     MessageHeader,
     MessageMeta,
 )
-from custom_messages.contracts.schedule_v1 import AutomationMessage, ScheduledMessage
+from custom_messages.contracts.schedule_v1 import AutomationMessage
 from custom_messages.contracts.task_v1 import (
     Task,
     TaskAnswer,
@@ -174,21 +175,15 @@ class _FixedGatewayClock:
 
 
 @pytest.fixture
-def gateway_signed_commands(monkeypatch: pytest.MonkeyPatch):
-    """The manager reads a command's person only from its gateway-signed context."""
+def gateway_signed_commands():
+    """The manager reads a command's person only from its verified protocol 1 authority token."""
 
-    from tests.broker_access_support import context_verify_keys, forget_task_context_keys
+    from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
-
-
-def _gateway_signer():
-    from tests.broker_access_support import context_signer
-
-    return context_signer()
 
 
 class _FakeGatewayManagerRuntime:
@@ -2620,12 +2615,21 @@ async def test_gateway_installs_schedule_after_manager_owned_heartbeat_seed(
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
     )
 
-    published: list[MessageEnvelope] = []
+    installed: list[dict[str, Any]] = []
 
-    async def fake_publish(envelope: MessageEnvelope, routing_key: str) -> None:
-        published.append(envelope)
+    class _CaptureTeamCommands:
+        async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
+            assert kind == "schedules.install"
+            installed.append(dict(body))
+            return {
+                "outcome": "ok",
+                "state": "installed" if body["mode"] != "refresh" else "refreshed",
+                "schedule_id": str(body["schedule_id"]),
+                "timing_revision": 0,
+                "version": {"state": "available", "seen_version": "a" * 64},
+            }
 
-    gateway._manager_client.publish_durable = fake_publish  # type: ignore[method-assign]
+    gateway._maintenance_schedules._team_commands._team_services = _CaptureTeamCommands()  # type: ignore[assignment]
 
     heartbeat_store = HeartbeatStore(storage_settings=config.manager_storage_settings)
     heartbeat_store.ensure_source(source_id="hb_source_test", title="Heartbeat")
@@ -2650,13 +2654,10 @@ async def test_gateway_installs_schedule_after_manager_owned_heartbeat_seed(
             "HEARTBEAT.*.md"
         )
     )
-    assert [message.msg_content.install_mode for message in published] == ["ensure", "refresh"]
-    assert isinstance(published[0].msg_content, ScheduledMessage)
-    assert published[0].msg_content.schedule_id == "hb_sched_test"
-    payload_meta = published[0].msg_content.payload_meta
-    assert payload_meta is not None
-    assert payload_meta.gateway_context is not None
-    assert payload_meta.gateway_context.heartbeat_source_id == "hb_source_test"
+    assert [body["mode"] for body in installed] == ["ensure", "refresh"]
+    assert installed[0]["schedule_id"] == "hb_sched_test"
+    assert installed[0]["system_schedule_kind"] == "heartbeat_launcher"
+    assert "hb_source_test" in installed[0]["action"]["instruction"]["text"]
     scheduled_target = gateway.state_store.get_scheduled_target("hb_sched_test")
     assert scheduled_target is not None
     assert scheduled_target.session_key == config.heartbeat.session_key
@@ -2725,29 +2726,28 @@ async def test_gateway_heartbeat_reuses_legacy_non_cli_delivery_session_after_ow
     assert migrated_session is not None
     assert migrated_session.owner_canonical_user_id == config.user.canonical_user_id
 
-    published: list[MessageEnvelope] = []
+    installed: list[tuple[dict[str, Any], str]] = []
 
-    async def fake_publish(envelope: MessageEnvelope, routing_key: str) -> None:
-        published.append(envelope)
+    class _CaptureTeamCommands:
+        async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
+            assert kind == "schedules.install"
+            installed.append((dict(body), person_ref))
+            return {
+                "outcome": "ok",
+                "state": "installed" if body["mode"] != "refresh" else "refreshed",
+                "schedule_id": str(body["schedule_id"]),
+                "timing_revision": 0,
+                "version": {"state": "available", "seen_version": "a" * 64},
+            }
 
-    gateway._manager_client.publish_durable = fake_publish  # type: ignore[method-assign]
+    gateway._maintenance_schedules._team_commands._team_services = _CaptureTeamCommands()  # type: ignore[assignment]
 
     await gateway._maintenance_schedules.ensure_heartbeat()
 
-    assert [message.msg_content.install_mode for message in published] == ["ensure", "refresh"]
-    schedule = published[0].msg_content
-    assert isinstance(schedule, ScheduledMessage)
-    assert schedule.payload_meta is not None
-    assert schedule.payload_meta.gateway_context is not None
-    assert (
-        schedule.payload_meta.gateway_context.canonical_user_id
-        == config.user.canonical_user_id
-    )
-    assert published[0].msg_meta.gateway_context is not None
-    assert (
-        published[0].msg_meta.gateway_context.canonical_user_id
-        == config.user.canonical_user_id
-    )
+    assert [body["mode"] for body, _ref in installed] == ["ensure", "refresh"]
+    assert installed[0][0]["schedule_id"] == "hb_sched_test"
+    if "deliver_to" in installed[0][0]:
+        assert installed[0][0]["deliver_to"]["conversation_id"] == "legacy_heartbeat_conversation"
     scheduled_target = gateway.state_store.get_scheduled_target("hb_sched_test")
     assert scheduled_target is not None
     assert scheduled_target.session_key == config.heartbeat.session_key
@@ -2771,12 +2771,21 @@ async def test_gateway_installs_local_memreview_schedules(tmp_path: Path):
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
     )
 
-    published: list[MessageEnvelope] = []
+    installed: list[dict[str, Any]] = []
 
-    async def fake_publish(envelope: MessageEnvelope, routing_key: str) -> None:
-        published.append(envelope)
+    class _CaptureTeamCommands:
+        async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
+            assert kind == "schedules.install"
+            installed.append(dict(body))
+            return {
+                "outcome": "ok",
+                "state": "installed" if body["mode"] != "refresh" else "refreshed",
+                "schedule_id": str(body["schedule_id"]),
+                "timing_revision": 0,
+                "version": {"state": "available", "seen_version": "a" * 64},
+            }
 
-    gateway._manager_client.publish_durable = fake_publish  # type: ignore[method-assign]
+    gateway._maintenance_schedules._team_commands._team_services = _CaptureTeamCommands()  # type: ignore[assignment]
 
     await gateway._maintenance_schedules.ensure_specialist_schedules()
 
@@ -2785,27 +2794,19 @@ async def test_gateway_installs_local_memreview_schedules(tmp_path: Path):
     # the team's coremem audit, then the first user's own usermem and
     # stale-conversation pair (the only active person).
     person = config.user.canonical_user_id
-    assert [item.msg_content.install_mode for item in published] == ["ensure", "refresh"] * 3
-    schedules = {item.msg_content.schedule_id: item.msg_content for item in published}
+    assert [item["mode"] for item in installed] == ["ensure", "refresh"] * 3
+    schedules = {item["schedule_id"]: item for item in installed}
     usermem_id = person_system_schedule_id("mem_rev_user", "test_instance", person)
     stale_id = person_system_schedule_id("mem_rev_stale", "test_instance", person)
     assert set(schedules) == {"mem_rev_core_test_instance", usermem_id, stale_id}
-    assert (
-        schedules["mem_rev_core_test_instance"].schedule_name
-        == "memory_review:coremem:test_instance"
-    )
-    assert schedules["mem_rev_core_test_instance"].interval_ms == 123000
-    assert schedules[usermem_id].schedule_name == f"memory_review:usermem:test_instance:{person}"
-    assert schedules[usermem_id].interval_ms == 456000
-    assert (
-        schedules[stale_id].schedule_name
-        == f"memory_review:stale_conversations:test_instance:{person}"
-    )
-    assert schedules[stale_id].interval_ms == 789000
+    assert schedules["mem_rev_core_test_instance"]["name"] == "memory_review:coremem:test_instance"
+    assert schedules["mem_rev_core_test_instance"]["timing"] == {"kind": "interval", "interval_ms": 123000}
+    assert schedules[usermem_id]["name"] == f"memory_review:usermem:test_instance:{person}"
+    assert schedules[usermem_id]["timing"] == {"kind": "interval", "interval_ms": 456000}
+    assert schedules[stale_id]["name"] == f"memory_review:stale_conversations:test_instance:{person}"
+    assert schedules[stale_id]["timing"] == {"kind": "interval", "interval_ms": 789000}
     for schedule_id in schedules:
-        assert schedules[schedule_id].claim_named_agent_type == "MemReviewAgent"
-        assert schedules[schedule_id].payload_meta.to_named_agent_type == "MemReviewAgent"
-        assert schedules[schedule_id].payload_meta.gateway_context.canonical_user_id == person
+        assert schedules[schedule_id]["worker"]["agent_type"] == "MemReviewAgent"
         target = gateway.state_store.get_scheduled_target(schedule_id)
         assert target is not None
         assert target.conversation_id
@@ -2825,7 +2826,21 @@ async def test_gateway_add_cron_job_preallocates_dedicated_schedule_conversation
         output_sink=None,
         state_store=GatewayStateStore(str(tmp_path / "state.db")),
     )
-    gateway._manager_client.publish_durable = AsyncMock()
+    installed: list[dict[str, Any]] = []
+
+    class _CaptureTeamCommands:
+        async def command(self, kind: str, body: dict[str, Any], *, person_ref: str, request_id: str) -> dict[str, Any]:
+            assert kind == "schedules.install"
+            installed.append(dict(body))
+            return {
+                "outcome": "ok",
+                "state": "installed",
+                "schedule_id": str(body["schedule_id"]),
+                "timing_revision": 0,
+                "version": {"state": "available", "seen_version": "a" * 64},
+            }
+
+    gateway._schedule_application._team_commands._team_services = _CaptureTeamCommands()  # type: ignore[assignment]
     gateway.state_store.create_session(
         session_key="session_cron",
         conversation_id="conversation_source",
@@ -2843,22 +2858,17 @@ async def test_gateway_add_cron_job_preallocates_dedicated_schedule_conversation
         interval_seconds=60,
     )
 
-    gateway._manager_client.publish_durable.assert_awaited_once()
-    envelope = gateway._manager_client.publish_durable.await_args.args[0]
-    assert isinstance(envelope.msg_content, ScheduledMessage)
-    schedule = envelope.msg_content
-    assert schedule.schedule_id == schedule_id
-    assert envelope.msg_meta.conversation_id == "conversation_source"
-    assert schedule.payload_meta is not None
-    assert schedule.payload_meta.conversation_id
-    assert schedule.payload_meta.conversation_id != "conversation_source"
-    request = gateway.state_store.get_request(schedule.payload_meta.msg_correlation_id)
-    assert request is not None
-    assert request.conversation_id == schedule.payload_meta.conversation_id
+    assert len(installed) == 1
+    body = installed[0]
+    assert body["schedule_id"] == schedule_id
+    assert body["mode"] == "create"
     target = gateway.state_store.get_scheduled_target(schedule_id)
     assert target is not None
     assert target.session_key == "session_cron"
-    assert target.conversation_id == schedule.payload_meta.conversation_id
+    assert target.conversation_id
+    assert target.conversation_id != "conversation_source"
+    if "deliver_to" in body:
+        assert body["deliver_to"]["conversation_id"] == target.conversation_id
 
 
 @pytest.mark.asyncio

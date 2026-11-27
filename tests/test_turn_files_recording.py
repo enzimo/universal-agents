@@ -20,10 +20,9 @@ working for Ann (signed task context). Covers:
   agent process received (sent again with other files, under a new key or
   under the same key after a restart) gets none of its files onto the task,
   its turn or the model's text, at admission and on guidance and answers;
-- a request the gateway signed before the update (its context names no task)
-  is admitted without its files, logged with its own reason and advice; a
-  guidance or interrupt answer under the gateway's status-check context
-  (which names no task either) keeps none, without that advice;
+- a request or guidance whose authority token names another task (such as
+  the gateway's status-check token) is admitted without its files, logged
+  with reason=another_task;
 - a delegated task keeps no files from guidance, and the lead sends guidance
   on without files, saying how many came with it;
 - an answer refused as stale keeps none of its files, and a guidance or an
@@ -50,7 +49,6 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-from access_control.identity import ENV_VERIFY_KEYS
 from assistant_gateway.inbound_attachments import (
     InboundAttachmentStoragePolicy,
     store_inbound_attachment_bytes_with_policy,
@@ -86,7 +84,11 @@ from custom_messages.enums import (
 from custom_tools.providers.diagnostics import get_recovery_context
 from custom_tools.providers.heartbeat import get_task_history_window
 from runtime_settings.instance_layout import InstanceLayout
-from tests.broker_access_support import context_signer, context_verify_keys, forget_task_context_keys
+from tests.broker_access_support import (
+    forget_task_context_keys,
+    signed_task_token,
+    use_broker_authority_verifier,
+)
 from tests.task_work_support import use_agent
 from tests.test_conversation_attachments_regression import ANN, CONVERSATION, SESSION, TEAM, _admit, _lead
 from tests.test_conversation_summary import _RecordingSummaryModel
@@ -101,8 +103,8 @@ RUNTIME_LOGGER = "custom_agents.conversation_runtime"
 
 @pytest.fixture(autouse=True)
 def _verify_keys(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv(ENV_VERIFY_KEYS, context_verify_keys())
     forget_task_context_keys()
+    use_broker_authority_verifier()
     yield
     forget_task_context_keys()
 
@@ -191,13 +193,12 @@ def _gateway_meta(
     """Message meta as the gateway sends ``steering``: a fresh context naming the task and conversation,
     with the id bound to this message and its files."""
 
-    signed = context_signer().issue(
+    signed = signed_task_token(
+        person,
         team_id=TEAM,
-        person_id=person,
-        person_roles=("member",),
+        roles=("member",),
         root_task_id=task_id,
-        conversation_id=conversation_id,
-        context_id=steering_context_id(steering),
+        request_id=steering_context_id(steering),
     )
     return MessageMeta(
         conversation_id=conversation_id,
@@ -516,7 +517,7 @@ def _copied_task_context(agent) -> MessageMeta:
     for Ann and it names TASK and CONVERSATION."""
 
     admitted = agent.task_manager.get_task_info(TASK).meta.gateway_context
-    assert admitted.task_context.context.root_task_id == TASK
+    assert admitted.task_context.bound_to.id == TASK
     return MessageMeta(
         conversation_id=CONVERSATION, is_response_requested=True, gateway_context=admitted.model_copy(deep=True)
     )
@@ -630,16 +631,15 @@ async def test_a_guidance_context_every_agent_process_received_vouches_for_no_ot
 
 @pytest.mark.parametrize("kind", [TaskSteeringType.PROACTIVE_GUIDANCE, TaskSteeringType.INTERRUPT_RESPONSE])
 @pytest.mark.asyncio
-async def test_a_status_check_context_on_guidance_keeps_no_files_and_is_not_blamed_on_the_update(
+async def test_a_status_check_context_on_guidance_keeps_no_files(
     lead, layout: InstanceLayout, statuses, caplog: pytest.LogCaptureFixture, kind: TaskSteeringType
 ) -> None:
-    """The gateway's status check carries Ann's context naming no task, on the subject every agent process
-    receives. A faulty one puts it on guidance with a file: refused for naming no task, and the warning
-    does not send the operator after a request queued across the update."""
+    """The gateway's status check carries Ann's token bound to its own probe id, on the subject every
+    agent process receives. A faulty one puts it on guidance with a file: refused as another_task."""
 
     before_turn, before_own = _turn_files(lead), _own(lead.task_manager, lead._conversation_store)
     scan = _upload(layout, "scan.png")
-    status_check = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    status_check = signed_task_token(ANN, team_id=TEAM, roles=("member",), root_task_id="task_status_probe")
     meta = MessageMeta(
         conversation_id=CONVERSATION,
         is_response_requested=True,
@@ -651,7 +651,7 @@ async def test_a_status_check_context_on_guidance_keeps_no_files_and_is_not_blam
 
     _assert_not_kept(lead, scan, before_turn, before_own)
     [refused] = _messages(caplog, "sent_file_refused")
-    assert f"reason=context_names_no_task attachment_id={scan.attachment_id} task_id={TASK}" in refused
+    assert f"reason=another_task attachment_id={scan.attachment_id} task_id={TASK}" in refused
     assert "does not vouch" in refused and "send the file again" not in refused
 
 
@@ -753,16 +753,16 @@ def test_a_copy_of_the_request_with_other_files_keeps_none(
 
 
 @pytest.mark.asyncio
-async def test_a_request_signed_before_the_update_is_admitted_without_its_files_and_says_why(
+async def test_a_request_with_another_tasks_token_is_admitted_without_its_files(
     tmp_path: Path, layout: InstanceLayout, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A request still queued for the lead when the instance was updated: the gateway before the update
-    signed only the team, the person and their roles, so the context names no task."""
+    """A new request carrying an authority token bound to another task is admitted for its person
+    without keeping any of its files (refused with reason=another_task)."""
 
     agent = _lead(tmp_path, layout)
     photo = _upload(layout, "photo.png")
     task = Task(task_id=TASK, task_type=MessageMetaType.REQUEST, problem_statement="What is in it?", attachments=[photo])
-    signed = context_signer().issue(team_id=TEAM, person_id=ANN, person_roles=("member",))
+    signed = signed_task_token(ANN, team_id=TEAM, roles=("member",), root_task_id="task_unrelated")
     meta = MessageMeta(
         conversation_id=CONVERSATION,
         msg_correlation_id="corr_queued",
@@ -781,8 +781,7 @@ async def test_a_request_signed_before_the_update_is_admitted_without_its_files_
     assert _turn_files(agent) == []
     assert agent._conversation_store.get_turn_by_task_id(TASK)["attachments_recorded"] is False
     [refused] = _messages(caplog, "sent_file_refused")
-    assert f"reason=context_names_no_task attachment_id={photo.attachment_id} task_id={TASK}" in refused
-    assert "names no task" in refused and "the person must send the file again" in refused
+    assert f"reason=another_task attachment_id={photo.attachment_id} task_id={TASK}" in refused
 
 
 # --- Refused guidance and answers ---------------------------------------------------------------

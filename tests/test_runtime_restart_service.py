@@ -55,7 +55,6 @@ from custom_tools.providers.changes import apply_change
 from tests.task_work_support import set_agent_ref
 from docker.launch_headless import pop_runtime_restart_request
 from storage.config import StorageSettings
-from tests.broker_access_support import context_signer, context_verify_keys
 from tests.knowledge_support import BACKENDS, knowledge_storage
 from tests.restart_team_support import FakeTeam
 
@@ -74,7 +73,9 @@ def _now() -> str:
 
 
 def _meta(owner_id: str, task_id: str) -> MessageMeta:
-    signed = context_signer().issue(team_id=TEAM, person_id=owner_id, person_roles=("owner",))
+    from tests.broker_access_support import signed_task_token
+
+    signed = signed_task_token(owner_id, team_id=TEAM, roles=("owner",), root_task_id=task_id)
     return MessageMeta(
         conversation_id=f"conversation_{task_id}",
         gateway_context=GatewayContext(source="test", task_context=signed, canonical_user_id=owner_id),
@@ -149,8 +150,10 @@ def _make_agent(
 ) -> Iterator[SimpleNamespace]:
     """TeamArchitect with its manager and access store on ``storage`` (the instance's SQLite by default)."""
 
-    monkeypatch.setenv("ACCESS_CONTEXT_VERIFY_KEYS", context_verify_keys())
-    access_runtime._runtime_access.cache_clear()
+    from tests.broker_access_support import forget_task_context_keys, use_broker_authority_verifier
+
+    forget_task_context_keys()
+    use_broker_authority_verifier()
     # The specialist's process answers within this; one that does not answer costs no longer.
     monkeypatch.setattr(runtime_restart_service, "TEAM_STATUS_TIMEOUT_SECONDS", 0.5)
     root = tmp_path / "instance"
