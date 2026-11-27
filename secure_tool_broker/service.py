@@ -141,7 +141,10 @@ from secure_tool_broker.google_workspace import (
     store_team_client,
 )
 from access_control.people import is_administrator
-from runtime_settings.security import reject_removed_tool_credential_env_vars
+from runtime_settings.security import (
+    reject_removed_signing_key_env_vars,
+    reject_removed_tool_credential_env_vars,
+)
 from mcp_control.hosting import HOSTED_MCP_START_FAILED_STATUS, HostedMCPStartError
 from secure_tool_broker.mcp_config import BrokerMCPConfig
 from secure_tool_broker.tool_setup_recheck import run_rechecks
@@ -3003,8 +3006,10 @@ async def run_secure_tool_broker(
     trust_reader: Any = None,
 ) -> None:
     # A token left in the environment would be a team-wide credential for a
-    # per-person tool; refuse to start and name the sign-in that replaces it.
+    # per-person tool, and 0.9 signing keys are private keys removed in 0.10;
+    # refuse to start and name the variables that must be unset.
     reject_removed_tool_credential_env_vars()
+    reject_removed_signing_key_env_vars()
     bitwarden_server_url = bitwarden_server_url_from_env()
     if bitwarden_server_url:
         config_result = await asyncio.to_thread(

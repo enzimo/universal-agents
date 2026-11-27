@@ -57,7 +57,6 @@ from custom_messages.wire.models import AuthorityToken
 from custom_transport.protocol1.identity import HostIdentity
 from custom_transport.protocol1.ids import new_message_id
 
-SCHEDULE_ISSUER_ROLE = SCHEDULER_ISSUER_ROLE
 _BODY_POINTER = "/body/"
 
 
@@ -118,7 +117,7 @@ def _check_signing_certificate(
     certificate = identity.certificate
     if not (certificate.roles & AUTHORITY_ISSUER_ROLES):
         raise ValueError("Only a gateway or scheduler host certificate may sign an authority token.")
-    if require_scheduler and SCHEDULE_ISSUER_ROLE not in certificate.roles:
+    if require_scheduler and SCHEDULER_ISSUER_ROLE not in certificate.roles:
         raise ValueError("Only a scheduler host certificate may sign a schedule or system-work token.")
     if team not in certificate.teams:
         raise ValueError(f"Host {certificate.runtime} certificate does not serve team {team}.")

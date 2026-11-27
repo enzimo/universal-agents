@@ -1042,6 +1042,52 @@ def test_removed_signing_key_env_vars_and_file_forms_are_refused(name: str) -> N
             reject_removed_signing_key_env_vars({key: "secret-canary-value"})
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "ACCESS_GATEWAY_SIGNING_KEY",
+        "ACCESS_GATEWAY_SIGNING_KEY_FILE",
+        "ACCESS_SCHEDULER_SIGNING_KEY",
+        "ACCESS_CONTEXT_VERIFY_KEYS",
+    ],
+)
+def test_runtime_process_and_broker_refuse_removed_signing_keys_directly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    """C43: processes started outside the launcher refuse removed signing keys directly."""
+
+    import argparse
+    import asyncio
+
+    from assistant_cli import _upgrade_authority_tokens
+    from assistant_gateway.runtime_config import build_runtime_config_from_instance_config
+    from runtime_settings.environment import _apply_env_overrides
+    from secure_tool_broker.service import run_secure_tool_broker
+    from tests.broker_access_support import BROKER_ROOT, open_gate
+
+    config = _make_config(tmp_path / f"direct_{key.lower()}")
+    monkeypatch.setenv(key, "secret-signing-canary")
+
+    # Standalone runtime settings load (strands_main / config_loader / runtime_config) refuses it.
+    with pytest.raises(ValueError, match=f"{key} is set") as env_refused:
+        _apply_env_overrides({})
+    assert "secret-signing-canary" not in str(env_refused.value)
+
+    with pytest.raises(ValueError, match=f"{key} is set") as runtime_refused:
+        build_runtime_config_from_instance_config(config)
+    assert "secret-signing-canary" not in str(runtime_refused.value)
+
+    # Standalone secure tool broker startup refuses it.
+    with pytest.raises(ValueError, match=f"{key} is set") as broker_refused:
+        asyncio.run(run_secure_tool_broker(host="127.0.0.1", port=1, token=BROKER_ROOT, access_gate=open_gate()))
+    assert "secret-signing-canary" not in str(broker_refused.value)
+
+    # The one-shot converter (assistant_cli upgrade authority-tokens) does not load settings
+    # through runtime_settings/environment.py, so it still accepts the 0.9 keys to convert.
+    _upgrade_authority_tokens(argparse.Namespace(config=str(config.config_path), allow_unverifiable=False))
+    assert authority_tokens_upgrade_done(config) is True
+
+
 def test_signing_keys_removed_from_templates_secrets_yaml_and_internal_credentials() -> None:
     request = InternalCredentialRequest(instance_name="fresh", storage_backend="postgres", include_nats_credentials=True)
     generated = generate_internal_credentials(request)

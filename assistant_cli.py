@@ -2644,9 +2644,11 @@ def _upgrade_authority_tokens(args: argparse.Namespace) -> None:
 
     Converts stored 0.9 signed task contexts and schedule permits into protocol 1
     authority tokens signed by the active ``gateway`` and ``team-services`` host
-    certificates. Exits non-zero if legacy records exist without 0.9 verification
-    keys (unless ``--allow-unverifiable`` is passed), if removed signing-key
-    variables are set on a fresh 0.10 install, or on any storage/authority error.
+    certificates. On a first start without the upgrade marker, removed signing-key
+    variables are accepted once (and warned about) so any stored 0.9 records can be
+    converted; once the marker exists, startup refuses them. Exits non-zero if
+    legacy records exist without 0.9 verification keys (unless
+    ``--allow-unverifiable`` is passed), or on any storage/authority error.
     """
 
     from instance_upgrades.authority_tokens import (
