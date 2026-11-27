@@ -69,7 +69,10 @@ from custom_messages.contracts.access_v2 import (
 )
 from custom_messages.enums import ScheduleManagementClass
 from custom_messages.system_schedules import is_system_work_kind
-from custom_messages.wire.authority_bindings import AuthorityTokenRecord
+from custom_messages.wire.authority_bindings import (
+    AuthorityTokenRecord,
+    UNVOUCHED_RUN_CONTEXT_PREFIX,
+)
 from custom_messages.wire.kinds import AUTHORITY_TOKEN_MAX_SECONDS
 from custom_transport.protocol1.authority_tokens import root_task_token, schedule_permit_token
 from custom_transport.protocol1.identity import HostIdentity
@@ -344,23 +347,24 @@ def _is_legacy_schedule_run(value: Any) -> bool:
     return isinstance(value, Mapping) and _is_legacy_signed_permit(value.get("permit"))
 
 
-def _contains_legacy_payload(value: Any, *, _depth: int = 0) -> bool:
-    if _depth > 8:
-        return False
+_MAX_NESTED_JSON_DECODES: Final = 3
+
+
+def _contains_legacy_payload(value: Any, *, _decode_depth: int = 0) -> bool:
     if isinstance(value, Mapping):
         if _is_legacy_signed_context(value) or _is_legacy_signed_permit(value) or _is_legacy_schedule_run(value):
             return True
-        return any(_contains_legacy_payload(child, _depth=_depth + 1) for child in value.values())
+        return any(_contains_legacy_payload(child, _decode_depth=_decode_depth) for child in value.values())
     if isinstance(value, list):
-        return any(_contains_legacy_payload(item, _depth=_depth + 1) for item in value)
-    if isinstance(value, str) and "key_id" in value and "signature" in value:
+        return any(_contains_legacy_payload(item, _decode_depth=_decode_depth) for item in value)
+    if _decode_depth < _MAX_NESTED_JSON_DECODES and isinstance(value, str) and "key_id" in value and "signature" in value:
         stripped = value.lstrip()
         if stripped.startswith(("{", "[")):
             try:
                 nested = json.loads(stripped)
             except ValueError:
                 return False
-            return _contains_legacy_payload(nested, _depth=_depth + 1)
+            return _contains_legacy_payload(nested, _decode_depth=_decode_depth + 1)
     return False
 
 
@@ -625,12 +629,24 @@ class _ConversionContext:
             identity = identities.scheduler
             target_schedule_id = legacy.schedule_id
         root_task_id = legacy.root_task_id or task_id_hint or legacy.context_id
+        request_id = legacy.context_id
+        if legacy.issuer != "gateway" and legacy.person_id is not None and not legacy.person_roles:
+            # 0.9 scheduler contexts with a person and person_roles=() were deliberately
+            # signed with no roles (unvouched owner); carry the signed "no roles" marker
+            # so 0.10 keeps person_roles=() instead of reading the owner's live roles (F2).
+            if not request_id.startswith(UNVOUCHED_RUN_CONTEXT_PREFIX):
+                candidate = f"{UNVOUCHED_RUN_CONTEXT_PREFIX}{request_id}"
+                if len(candidate) <= 128:
+                    request_id = candidate
+                else:
+                    digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:32]
+                    request_id = f"{UNVOUCHED_RUN_CONTEXT_PREFIX}{digest}"
         try:
             token = root_task_token(
                 identity,
                 team=self.team_id,
                 root_task_id=root_task_id,
-                request_id=legacy.context_id,
+                request_id=request_id,
                 issued=self.now,
                 person_ref=person_ref,
                 schedule_id=target_schedule_id,

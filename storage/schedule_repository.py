@@ -224,9 +224,16 @@ class ScheduleRepository(Protocol):
         recheck_at: str,
         owner_permit_json: Optional[str] = None,
         refusal_reason: Optional[str] = None,
+        require_owner_vouched: Optional[bool] = None,
     ) -> bool: ...
 
-    def mark_owner_vouched(self, schedule_id: str, *, checked_owner: str) -> bool: ...
+    def mark_owner_vouched(
+        self,
+        schedule_id: str,
+        *,
+        checked_owner: str,
+        expected_vouched: Optional[bool] = None,
+    ) -> bool: ...
 
 
 _SCHEDULE_COLUMN_MIGRATIONS: dict[str, str] = {
@@ -733,53 +740,74 @@ class _RelationalScheduleRepository:
         recheck_at: str,
         owner_permit_json: Optional[str] = None,
         refusal_reason: Optional[str] = None,
+        require_owner_vouched: Optional[bool] = None,
     ) -> bool:
         """Record the scheduler's check of a schedule's run permit (None when it issued none).
 
-        Applies only while the row's owner is still ``checked_owner``; if the
-        owner changed meanwhile, nothing is written and the next check sees it.
+        Applies only while the row's owner is still ``checked_owner`` (and, when
+        ``require_owner_vouched`` is set, while ``owner_vouched`` still matches the
+        checked state); if a concurrent install changed either, nothing is written
+        and the next check sees the new state (F4).
         """
 
+        bind = self._dialect.bind
+        vouched_clause = f" AND owner_vouched = {bind}" if require_owner_vouched is not None else ""
+        params: list[Any] = [
+            permit_json,
+            owner_permit_json,
+            checked_owner,
+            recheck_at,
+            refusal_reason,
+            schedule_id,
+            checked_owner,
+        ]
+        if require_owner_vouched is not None:
+            params.append(1 if require_owner_vouched else 0)
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE scheduled_messages
-                   SET run_permit_json = {self._dialect.bind},
-                       owner_permit_json = {self._dialect.bind},
-                       run_permit_owner = {self._dialect.bind},
-                       run_permit_recheck_at = {self._dialect.bind},
-                       run_permit_refusal = {self._dialect.bind}
-                 WHERE schedule_id = {self._dialect.bind}
-                   AND COALESCE(owner_canonical_user_id, '') = COALESCE({self._dialect.bind}, '')
+                   SET run_permit_json = {bind},
+                       owner_permit_json = {bind},
+                       run_permit_owner = {bind},
+                       run_permit_recheck_at = {bind},
+                       run_permit_refusal = {bind}
+                 WHERE schedule_id = {bind}
+                   AND COALESCE(owner_canonical_user_id, '') = COALESCE({bind}, '')
+                   {vouched_clause}
                 """,
-                (
-                    permit_json,
-                    owner_permit_json,
-                    checked_owner,
-                    recheck_at,
-                    refusal_reason,
-                    schedule_id,
-                    checked_owner,
-                ),
+                tuple(params),
             )
             conn.commit()
             return bool(cursor.rowcount > 0)
 
-    def mark_owner_vouched(self, schedule_id: str, *, checked_owner: str) -> bool:
-        """Durably record ``owner_vouched = 1`` while the row's owner is still ``checked_owner``."""
+    def mark_owner_vouched(
+        self,
+        schedule_id: str,
+        *,
+        checked_owner: str,
+        expected_vouched: Optional[bool] = None,
+    ) -> bool:
+        """Durably record ``owner_vouched = 1`` while the row's owner (and optional prior mark) matches."""
 
         if not checked_owner:
             return False
+        bind = self._dialect.bind
+        vouched_clause = f" AND owner_vouched = {bind}" if expected_vouched is not None else ""
+        params: list[Any] = [schedule_id, checked_owner]
+        if expected_vouched is not None:
+            params.append(1 if expected_vouched else 0)
         with self._connect() as conn:
             cursor = conn.execute(
                 f"""
                 UPDATE scheduled_messages
                    SET owner_vouched = 1,
                        run_permit_refusal = NULL
-                 WHERE schedule_id = {self._dialect.bind}
-                   AND owner_canonical_user_id = {self._dialect.bind}
+                 WHERE schedule_id = {bind}
+                   AND owner_canonical_user_id = {bind}
+                   {vouched_clause}
                 """,
-                (schedule_id, checked_owner),
+                tuple(params),
             )
             conn.commit()
             return bool(cursor.rowcount > 0)

@@ -747,23 +747,31 @@ async def test_schedules_install_13c5_vouching_rules_for_gateway_run_and_owner_p
                 body["seen_version"] = seen_version
             return body
 
-        # 1. Gateway-signed root-task token vouches for the schedule and issues a permit.
+        from custom_messages.wire.authority_bindings import (
+            SCHEDULE_PERMIT_PREFIX,
+            SCHEDULE_UNVOUCHED_PERMIT_PREFIX,
+        )
+
+        # 1. Gateway-signed root-task token vouches for the schedule and issues a vouched permit.
         gw_created = await _send(_user_body("req-gw-1", "sched_gw_vouched"), bo_gw_token)
         assert gw_created["outcome"] == "ok"
         assert store.is_owner_vouched("sched_gw_vouched") is True
         bo_permit = store.run_permit("sched_gw_vouched")
         assert bo_permit is not None
+        assert bo_permit.bound_to.id == f"{SCHEDULE_PERMIT_PREFIX}sched_gw_vouched"
 
-        # 2. Permit-backed scheduled run creates an UNVOUCHED schedule with no permit.
+        # 2. Permit-backed scheduled run creates an UNVOUCHED schedule with an unvouched (no-roles) permit (F2).
         from_permit = await _send(
             _user_body("req-permit-1", "sched_from_permit"),
             bo_permit.model_dump(mode="json", exclude_none=True),
         )
         assert from_permit["outcome"] == "ok"
         assert store.is_owner_vouched("sched_from_permit") is False
-        assert store.run_permit("sched_from_permit") is None
+        from_permit_token = store.run_permit("sched_from_permit")
+        assert from_permit_token is not None
+        assert from_permit_token.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}sched_from_permit"
 
-        # 3. Scheduler-signed per-run token (run_context.sign) creates an UNVOUCHED schedule with no permit.
+        # 3. Scheduler-signed per-run token (run_context.sign) creates an UNVOUCHED schedule with an unvouched permit.
         bo_run_token = root_task_token(
             sched_id,
             team=TEAM,
@@ -776,7 +784,9 @@ async def test_schedules_install_13c5_vouching_rules_for_gateway_run_and_owner_p
         from_run = await _send(_user_body("req-run-1", "sched_from_run"), bo_run_token)
         assert from_run["outcome"] == "ok"
         assert store.is_owner_vouched("sched_from_run") is False
-        assert store.run_permit("sched_from_run") is None
+        from_run_permit = store.run_permit("sched_from_run")
+        assert from_run_permit is not None
+        assert from_run_permit.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}sched_from_run"
 
         # 4. Administrator's internal_improvement owner permit creates user schedules UNVOUCHED and
         #    is refused for system-managed schedules (cannot bypass vouching via is_system_managed_schedule).
@@ -802,7 +812,9 @@ async def test_schedules_install_13c5_vouching_rules_for_gateway_run_and_owner_p
         from_owner_permit = await _send(_user_body("req-op-user", "sched_from_owner_permit"), owner_permit)
         assert from_owner_permit["outcome"] == "ok"
         assert store.is_owner_vouched("sched_from_owner_permit") is False
-        assert store.run_permit("sched_from_owner_permit") is None
+        from_owner_run_permit = store.run_permit("sched_from_owner_permit")
+        assert from_owner_run_permit is not None
+        assert from_owner_run_permit.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}sched_from_owner_permit"
 
         sys_body = {
             "request_id": "req-op-sys",
@@ -819,10 +831,13 @@ async def test_schedules_install_13c5_vouching_rules_for_gateway_run_and_owner_p
         assert sys_refused["outcome"] == "not_allowed"
         assert store.get_scheduled_message("sched_sys_from_owner_permit") is None
 
-        # 5. Scheduler-signed replace on an existing vouched schedule drops vouching and clears its permit.
+        # 5. Scheduler-signed replace on an existing vouched schedule drops vouching and replaces its vouched permit
+        #    with an unvouched (no-roles) permit.
         vouched_ada = await _send(_user_body("req-ada-1", "sched_ada_target"), ada_gw_token)
         assert store.is_owner_vouched("sched_ada_target") is True
-        assert store.run_permit("sched_ada_target") is not None
+        ada_vouched_permit = store.run_permit("sched_ada_target")
+        assert ada_vouched_permit is not None
+        assert ada_vouched_permit.bound_to.id == f"{SCHEDULE_PERMIT_PREFIX}sched_ada_target"
         replaced = await _send(
             _user_body(
                 "req-ada-rep",
@@ -834,7 +849,9 @@ async def test_schedules_install_13c5_vouching_rules_for_gateway_run_and_owner_p
         )
         assert replaced["outcome"] == "ok"
         assert store.is_owner_vouched("sched_ada_target") is False
-        assert store.run_permit("sched_ada_target") is None
+        ada_replaced_permit = store.run_permit("sched_ada_target")
+        assert ada_replaced_permit is not None
+        assert ada_replaced_permit.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}sched_ada_target"
 
         # 6. Once the source schedule of a per-run token is disabled, further installs are refused.
         store.set_enabled("sched_gw_vouched", False)

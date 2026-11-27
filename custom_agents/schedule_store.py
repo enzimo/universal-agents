@@ -1046,12 +1046,14 @@ class ScheduleStore:
                     remaining = written.repeat_count
                 else:
                     remaining = _runs_after_edit(row.get("remaining_count"), written, current)
+                was_vouched = bool(row.get("owner_vouched"))
                 columns = _definition_columns(written, remaining_count=remaining)
                 columns["owner_vouched"] = 1 if owner_vouched else 0
                 columns["run_permit_refusal"] = None
-                if not owner_vouched:
+                if not owner_vouched or was_vouched != owner_vouched:
                     columns["run_permit_json"] = None
                     columns["owner_permit_json"] = None
+                    columns["run_permit_recheck_at"] = None
                 if delivery_ref is not None:
                     columns["delivery_ref"] = delivery_ref
                 if existing_owner != owner_id:
@@ -2164,10 +2166,20 @@ class ScheduleStore:
         row = self._row(schedule_id)
         return bool(row.get("owner_vouched")) if row else False
 
-    def mark_owner_vouched(self, schedule_id: str, *, checked_owner: str) -> bool:
-        """Durably set ``owner_vouched = 1`` while the schedule's owner is still ``checked_owner``."""
+    def mark_owner_vouched(
+        self,
+        schedule_id: str,
+        *,
+        checked_owner: str,
+        expected_vouched: Optional[bool] = None,
+    ) -> bool:
+        """Durably set ``owner_vouched = 1`` while the schedule's owner (and optional prior mark) matches."""
 
-        return self._repository.mark_owner_vouched(schedule_id, checked_owner=checked_owner)
+        return self._repository.mark_owner_vouched(
+            schedule_id,
+            checked_owner=checked_owner,
+            expected_vouched=expected_vouched,
+        )
 
     def delivery_ref_of(self, schedule_id: str) -> Optional[str]:
         """The opaque ``delivery_ref`` saved on the schedule row by ``schedules.install``, or None."""
@@ -2242,10 +2254,12 @@ class ScheduleStore:
         recheck_at: datetime,
         owner_permit: Optional[Any] = None,
         refusal_reason: Optional[str] = None,
+        require_owner_vouched: Optional[bool] = None,
     ) -> bool:
         """Record the scheduler's check: the permit it issued (or None) and when to look again.
 
-        False when the row is gone or its owner is no longer ``checked_owner``.
+        False when the row is gone, its owner is no longer ``checked_owner``, or
+        ``require_owner_vouched`` no longer matches ``owner_vouched``.
         """
 
         def _dump(token: Optional[Any]) -> Optional[str]:
@@ -2264,4 +2278,5 @@ class ScheduleStore:
             checked_owner=checked_owner,
             recheck_at=recheck_at.astimezone(timezone.utc).isoformat(),
             refusal_reason=refusal_reason if permit is None else None,
+            require_owner_vouched=require_owner_vouched,
         )

@@ -2032,6 +2032,124 @@ def test_launch_headless_main_wires_converter_hook_and_isolates_legacy_keys(
     assert "ACCESS_CONTEXT_VERIFY_KEYS" in captured_hook_run["env"]
 
 
+def test_08f_roleless_09_scheduler_context_converts_with_unvouched_no_roles_marker_f2() -> None:
+    """F2 (G1/SEC-1): a 0.9 scheduler context signed with person_roles=() converts with the
+    unvouched_run_ marker so 0.10 keeps person_roles=() instead of granting live roles."""
+
+    from access_control.authority_verifier import AuthorityTokenVerifier
+    from access_control.task_identity import resolve_task_identity
+    from custom_messages.wire.authority_bindings import UNVOUCHED_RUN_CONTEXT_PREFIX
+    from instance_upgrades.authority_tokens import _ConversionContext, _LegacyKeyring
+    from tests.broker_access_support import (
+        broker_gateway_identity,
+        broker_people_store,
+        broker_scheduler_identity,
+        broker_trust_store,
+        forget_task_context_keys,
+    )
+
+    forget_task_context_keys()
+    try:
+        people_store = broker_people_store()
+        ada = people_store.register(TEAM, "ada", roles=("owner", "admin", "member"))
+        sched = _Legacy09Signer("scheduler", "sched-roleless")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        keyring = _LegacyKeyring.from_env({"ACCESS_SCHEDULER_SIGNING_KEY": sched.env_private_value})
+        identities = SigningIdentities(
+            gateway=broker_gateway_identity(TEAM),
+            scheduler=broker_scheduler_identity(TEAM),
+        )
+        ctx = _ConversionContext(
+            team_id=TEAM,
+            now=now,
+            keyring=keyring,
+            identities=identities,
+            people={"ada": ada},
+            system_work_schedule_ids=frozenset(),
+        )
+        verifier = AuthorityTokenVerifier(broker_trust_store(), people=people_store)
+
+        # 1. Roleless 0.9 scheduler context (unvouched owner) -> unvouched_run_ marker, person_roles=().
+        legacy_roleless = sched.sign_context(
+            context_id="task_context_unvouched_09",
+            team_id=TEAM,
+            person_id="ada",
+            person_roles=(),
+            root_task_id="task_unvouched",
+            schedule_id="sched_unvouched",
+            issued_at=now - timedelta(hours=1),
+            expires_at=now + timedelta(days=3),
+        )
+        token_roleless, verified_legacy = ctx.convert_signed_context(legacy_roleless, table="probe", record_id="r1")
+        assert verified_legacy is not None and verified_legacy.person_roles == ()
+        assert token_roleless is not None
+        assert token_roleless["bound_to"]["request_id"].startswith(UNVOUCHED_RUN_CONTEXT_PREFIX)
+        assert ctx.issues == []
+        resolved_roleless = resolve_task_identity(
+            verifier=verifier,
+            team_id=TEAM,
+            task_context=token_roleless,
+            schedule_run=None,
+            schedule_runs=None,
+        )
+        assert (resolved_roleless.person_id, resolved_roleless.person_roles, resolved_roleless.schedule_id) == (
+            "ada",
+            (),
+            "sched_unvouched",
+        )
+
+        # 2. Vouched 0.9 scheduler context with roles -> keeps original request_id and live roles.
+        legacy_vouched = sched.sign_context(
+            context_id="task_context_vouched_09",
+            team_id=TEAM,
+            person_id="ada",
+            person_roles=("owner",),
+            root_task_id="task_vouched",
+            schedule_id="sched_vouched",
+            issued_at=now - timedelta(hours=1),
+            expires_at=now + timedelta(days=3),
+        )
+        token_vouched, _ = ctx.convert_signed_context(legacy_vouched, table="probe", record_id="r2")
+        assert token_vouched is not None
+        assert token_vouched["bound_to"]["request_id"] == "task_context_vouched_09"
+        resolved_vouched = resolve_task_identity(
+            verifier=verifier,
+            team_id=TEAM,
+            task_context=token_vouched,
+            schedule_run=None,
+            schedule_runs=None,
+        )
+        assert resolved_vouched.person_roles == ("admin", "member", "owner")
+    finally:
+        forget_task_context_keys()
+
+
+def test_08g_legacy_scan_finds_deeply_nested_dict_contexts_c47() -> None:
+    """C47: dict and list nesting are uncapped in the legacy scan; only nested JSON-string decodes are capped."""
+
+    from instance_upgrades.authority_tokens import _raw_json_has_legacy_payload
+
+    gw = _Legacy09Signer("gateway", "gw-deep")
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    legacy = gw.sign_context(
+        context_id="task_context_deep",
+        team_id=TEAM,
+        person_id="ada",
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(days=1),
+    )
+
+    # 12 nested dicts (past the old _depth > 8 cap) must be detected.
+    wrapped: Any = legacy
+    for level in range(12):
+        wrapped = {f"level_{level}": wrapped}
+    assert _raw_json_has_legacy_payload(json.dumps(wrapped)) is True
+
+    # Also detected inside a JSON string nested 10 dicts deep (decode depth 1, dict depth 10).
+    nested_str = json.dumps({"outer": json.dumps(wrapped)})
+    assert _raw_json_has_legacy_payload(nested_str) is True
+
+
 # ---------------------------------------------------------------------------
 # A5: PostgreSQL conversion test (runs when TEST_POSTGRES_DSN is configured)
 # ---------------------------------------------------------------------------

@@ -750,13 +750,19 @@ def test_owner_vouched_column_vouches_schedule_and_resets_on_owner_change(tmp_pa
         assert store.run_permit("sched_vouched_1") is not None
 
         # Saving with a different owner without an explicit vouch clears owner_vouched.
+        # Under F2, the unvouched schedule still gets a standing permit carrying the
+        # signed "no roles" marker (schedule_unvouched_permit:), never a vouched permit.
         reassigned = schedule.model_copy(deep=True)
         reassigned.payload_meta.gateway_context.canonical_user_id = "usr_bob"
         store.add(reassigned)
         assert store.is_owner_vouched("sched_vouched_1") is False
         result = sched.scheduler.renew_permits()
-        assert result.refused == {"sched_vouched_1": "owner_not_vouched"}
-        assert store.run_permit("sched_vouched_1") is None
+        assert result.renewed == ["sched_vouched_1"]
+        bob_permit = store.run_permit("sched_vouched_1")
+        assert bob_permit is not None
+        assert bob_permit.bound_to.id == "schedule_unvouched_permit:sched_vouched_1"
+        verified_bob = sched.verifier.verify_schedule_permit(bob_permit, team_id="team_one")
+        assert (verified_bob.person_id, verified_bob.person_roles, verified_bob.is_unvouched) == ("usr_bob", (), True)
     finally:
         forget_task_context_keys()
 

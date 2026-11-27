@@ -468,16 +468,22 @@ An authority token (`authority` in the frame) proves that work acts for a person
   `message_context_<sha256>` for a message that can bring a person's files, which is
   every new chat request, guidance and answer the gateway sends
   (`access_control.ownership`: `request_context_id`, `steering_context_id`,
-  `answer_context_id`); `schedule_run_<hex>` for a scheduled run that starts from its
-  schedule's scheduler-signed standing permit (`custom_agents.schedule_permits`); and
-  `task_context_<hex>` for every other root-task token, among them scheduled runs and
-  system work signed by the team services' scheduler (`team_services.scheduler`). The
-  schema takes any `record_id`, so all three forms and a stored 0.9 signed context
+  `answer_context_id`); `schedule_run_<hex>` for a vouched scheduled run (both a run
+  started from its schedule's standing permit in `custom_agents.schedule_permits` and
+  a per-run token signed by `team_services.scheduler` via `run_context.sign`);
+  `unvouched_run_<hex>` for a scheduled run of an unvouched person's schedule signed by
+  `team_services.scheduler` (and converted 0.9 roleless scheduler contexts), which
+  causes every receiver to resolve `person_roles=()` regardless of issuer; and
+  `task_context_<hex>` for every other root-task token, including gateway requests
+  without file uploads and scheduler-signed system work (`team_services.scheduler`). The
+  schema takes any `record_id`, so all four forms and a stored 0.9 signed context
   converted at the first 0.10 start keep their ids, and nothing keyed by a request id is
   converted. A command or access-request token has no request id, and a frame whose
   root-task token lacks one is refused as `malformed`.
 - It names no roles: receivers read the person's current roles and standing from the
-  team's people records, so a role taken away while a token lasts no longer counts.
+  team's people records, so a role taken away while a token lasts no longer counts
+  (except that tokens or permits carrying the signed unvouched marker always resolve
+  with `person_roles=()`).
 - A scheduled job's run has a token the scheduler signed with the run's `schedule_id`,
   bound to the run's root task and so naming a request id; the run's holder gets it with
   the task, or with `custody.confirmed` when the run went to a worker pool. A run's
@@ -485,9 +491,15 @@ An authority token (`authority` in the frame) proves that work acts for a person
   passes the task on cannot change it, and a run handed back and dispatched again keeps
   it. While 0.9 wrappers carry scheduled runs, the team services' scheduler also keeps
   one standing scheduler-signed schedule permit per active schedule (`run_permit_json`,
-  bound as `root_task` with id `schedule_permit:<schedule_id>` or
-  `schedule_owner_permit:<schedule_id>`), which verifiers accept only inside a
-  `ScheduleRunIdentityV1` and refuse anywhere a root-task token is expected.
+  bound as `root_task` with id `schedule_permit:<schedule_id>`,
+  `schedule_unvouched_permit:<schedule_id>` for an unvouched person's schedule whose
+  runs carry `person_roles=()`, or `schedule_owner_permit:<schedule_id>` on
+  `owner_permit_json`), which verifiers accept only inside a `ScheduleRunIdentityV1`
+  and refuse anywhere a root-task token is expected. A permit-backed run lasts up to
+  `authority_token_max_seconds` (7 days) from its `started_at_utc`; if the permit
+  captured when the run started expires mid-run, the resolver verifies it without
+  expiry and falls back to the schedule's current renewed stored permit for the same
+  schedule, person, and binding kind.
 - System work, a run of a schedule that works for no person, carries a scheduler's token
   that names its `schedule_id` and no person. No other token may leave out the person.
 

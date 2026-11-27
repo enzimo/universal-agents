@@ -30,14 +30,18 @@ AUTHORITY_ISSUER_ROLES = frozenset({GATEWAY_ISSUER_ROLE, SCHEDULER_ISSUER_ROLE})
 # Maximum authority token lifetime from contracts/messages/v1/transport.yaml (7 days, verified in tests).
 AUTHORITY_TOKEN_MAX_LIFETIME_SECONDS = 7 * 24 * 60 * 60
 
-# Application conventions outside the protocol 1 contract (C01, C13):
+# Application conventions outside the protocol 1 contract (C01, C13, F2):
 # - Binding id prefixes for scheduler-signed schedule permits, kept distinct from real
 #   root-task ids so bare permits are always refused when presented as task tokens.
 SCHEDULE_PERMIT_PREFIX = "schedule_permit:"
 SCHEDULE_OWNER_PERMIT_PREFIX = "schedule_owner_permit:"
+SCHEDULE_UNVOUCHED_PERMIT_PREFIX = "schedule_unvouched_permit:"
 # - Request id prefix required on ScheduleRunIdentityV1 wrappers so permit runs can never
 #   collide with or adopt gateway message_context_* or task_context_* request ids and grants.
 SCHEDULE_RUN_CONTEXT_PREFIX = "schedule_run_"
+# - Request id prefix for scheduler-signed runs of an unvouched person's schedule (and
+#   converted 0.9 roleless scheduler contexts): receivers always resolve person_roles=().
+UNVOUCHED_RUN_CONTEXT_PREFIX = "unvouched_run_"
 
 # Wire field constraints matching contracts/messages/v1/frame.schema.json#/$defs/authority_token
 # (verified against custom_messages.wire.models.AuthorityToken in unit tests).
@@ -133,17 +137,47 @@ class AuthorityTokenRecord(_StrictTokenModel):
         return value
 
 
-def schedule_permit_binding_id(schedule_id: str, *, owner_permit: bool = False) -> str:
+def schedule_permit_binding_id(
+    schedule_id: str,
+    *,
+    owner_permit: bool = False,
+    unvouched: bool = False,
+) -> str:
     """The ``bound_to.id`` / ``bound_to.request_id`` carried by a schedule's permit token."""
 
-    prefix = SCHEDULE_OWNER_PERMIT_PREFIX if owner_permit else SCHEDULE_PERMIT_PREFIX
+    if owner_permit and unvouched:
+        raise ValueError("An owner schedule permit cannot be unvouched.")
+    if owner_permit:
+        prefix = SCHEDULE_OWNER_PERMIT_PREFIX
+    elif unvouched:
+        prefix = SCHEDULE_UNVOUCHED_PERMIT_PREFIX
+    else:
+        prefix = SCHEDULE_PERMIT_PREFIX
     return f"{prefix}{schedule_id}"
 
 
 def is_schedule_permit_binding(bound_id: str) -> bool:
     """Whether ``bound_id`` identifies a per-schedule permit rather than a single root task."""
 
-    return bound_id.startswith((SCHEDULE_PERMIT_PREFIX, SCHEDULE_OWNER_PERMIT_PREFIX))
+    return bound_id.startswith(
+        (SCHEDULE_PERMIT_PREFIX, SCHEDULE_OWNER_PERMIT_PREFIX, SCHEDULE_UNVOUCHED_PERMIT_PREFIX)
+    )
+
+
+def is_unvouched_permit_binding(bound_id: str) -> bool:
+    """Whether ``bound_id`` is a standing permit for an unvouched person's schedule (no roles)."""
+
+    return bound_id.startswith(SCHEDULE_UNVOUCHED_PERMIT_PREFIX)
+
+
+def is_unvouched_authority_binding(bound_id: str, request_id: str) -> bool:
+    """Whether a signed token or permit carries the unvouched 'no roles' marker (F2)."""
+
+    return (
+        request_id.startswith(UNVOUCHED_RUN_CONTEXT_PREFIX)
+        or is_unvouched_permit_binding(bound_id)
+        or is_unvouched_permit_binding(request_id)
+    )
 
 
 def _unwrap_token_object(raw: Any) -> Any:
@@ -258,9 +292,13 @@ __all__ = [
     "SCHEDULE_OWNER_PERMIT_PREFIX",
     "SCHEDULE_PERMIT_PREFIX",
     "SCHEDULE_RUN_CONTEXT_PREFIX",
+    "SCHEDULE_UNVOUCHED_PERMIT_PREFIX",
+    "UNVOUCHED_RUN_CONTEXT_PREFIX",
     "extract_token_issuer",
     "extract_token_log_fields",
     "is_schedule_permit_binding",
+    "is_unvouched_authority_binding",
+    "is_unvouched_permit_binding",
     "schedule_permit_binding_id",
     "token_issuer_lookup_bytes",
 ]

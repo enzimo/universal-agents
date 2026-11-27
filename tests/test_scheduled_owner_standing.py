@@ -100,8 +100,13 @@ def _anns_schedule(*, vouched: bool = True) -> ScheduledMessage:
     )
 
 
-def _fire(world, schedule: ScheduledMessage) -> bool:
-    world.store.add(schedule, claim_team_id=TEAM, claim_named_agent_type="TeamArchitect")
+def _fire(world, schedule: ScheduledMessage, *, owner_vouched: bool = True) -> bool:
+    world.store.add(
+        schedule,
+        claim_team_id=TEAM,
+        claim_named_agent_type="TeamArchitect",
+        owner_vouched=owner_vouched,
+    )
     world.scheduler.renew_permits()
     claim_token = None
     if world.store.run_permit(schedule.schedule_id) is None:
@@ -137,15 +142,13 @@ def test_a_persons_schedule_runs_with_their_current_roles(world) -> None:
     assert (context.issuer, context.person_id, context.person_roles) == (SCHEDULER_ISSUER_ROLE, ANN, ("member",))
 
 
-def test_a_person_field_the_gateway_never_signed_for_is_refused_by_the_scheduler(world, caplog) -> None:
+def test_a_person_field_the_gateway_never_signed_for_gets_no_roles(world) -> None:
     _record_ann(world, PersonStanding.ACTIVE, ("admin",))
 
-    with caplog.at_level(logging.INFO):
-        assert _fire(world, _anns_schedule(vouched=False)) is False
+    assert _fire(world, _anns_schedule(vouched=False), owner_vouched=False) is True
 
-    assert world.tasks.get_task_info(TASK_ID) is None
-    assert "reason=owner_not_vouched" in caplog.text
-    assert "event=scheduled_run_not_started_unsigned" in caplog.text
+    context = _run_context(world)
+    assert (context.issuer, context.person_id, context.person_roles) == (SCHEDULER_ISSUER_ROLE, ANN, ())
 
 
 @pytest.mark.parametrize("standing", [PersonStanding.DISABLED, PersonStanding.REMOVED])

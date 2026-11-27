@@ -43,8 +43,12 @@ from custom_messages.wire.authority_bindings import (
     SCHEDULE_OWNER_PERMIT_PREFIX,
     SCHEDULE_PERMIT_PREFIX,
     SCHEDULE_RUN_CONTEXT_PREFIX,
+    SCHEDULE_UNVOUCHED_PERMIT_PREFIX,
+    UNVOUCHED_RUN_CONTEXT_PREFIX,
     extract_token_issuer,
     is_schedule_permit_binding,
+    is_unvouched_authority_binding,
+    is_unvouched_permit_binding,
     schedule_permit_binding_id,
 )
 from custom_messages.wire.encoding import format_timestamp
@@ -243,24 +247,31 @@ def schedule_permit_token(
     issued: datetime,
     person_ref: Optional[str] = None,
     owner_permit: bool = False,
+    unvouched: bool = False,
     lifetime_seconds: int = AUTHORITY_TOKEN_MAX_SECONDS,
     expires_at: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    """A scheduler-signed standing permit token for one schedule (owner or system work).
+    """A scheduler-signed standing permit token for one schedule (owner, unvouched, or system work).
 
     Stored on the schedule row (``run_permit_json``, or ``owner_permit_json`` when
     ``owner_permit=True`` for a system-work schedule with a vouched administrator owner).
+    When ``unvouched=True``, uses the distinct ``schedule_unvouched_permit:<schedule_id>``
+    binding so receivers always resolve ``person_roles=()`` for runs backed by it (F2).
     Wrapped in ``ScheduleRunIdentityV1`` with a fresh ``schedule_run_<hex>`` id per run.
     """
 
     if not schedule_id:
         raise ValueError("A schedule permit token must name its schedule.")
+    if owner_permit and unvouched:
+        raise ValueError("An owner permit token cannot be unvouched.")
     if owner_permit and person_ref is None:
         raise ValueError("An owner permit token must name the schedule's vouched owner.")
+    if unvouched and person_ref is None:
+        raise ValueError("An unvouched schedule permit token must name its owner.")
     if person_ref is not None:
         require_person_ref(person_ref)
     _check_signing_certificate(identity, team=team, require_scheduler=True)
-    binding_id = schedule_permit_binding_id(schedule_id, owner_permit=owner_permit)
+    binding_id = schedule_permit_binding_id(schedule_id, owner_permit=owner_permit, unvouched=unvouched)
     expires = _resolve_expiry(
         issued,
         max_seconds=AUTHORITY_TOKEN_MAX_SECONDS,
@@ -285,10 +296,14 @@ __all__ = [
     "SCHEDULE_OWNER_PERMIT_PREFIX",
     "SCHEDULE_PERMIT_PREFIX",
     "SCHEDULE_RUN_CONTEXT_PREFIX",
+    "SCHEDULE_UNVOUCHED_PERMIT_PREFIX",
+    "UNVOUCHED_RUN_CONTEXT_PREFIX",
     "command_binding_id",
     "command_token",
     "extract_token_issuer",
     "is_schedule_permit_binding",
+    "is_unvouched_authority_binding",
+    "is_unvouched_permit_binding",
     "require_person_ref",
     "root_task_token",
     "schedule_permit_binding_id",

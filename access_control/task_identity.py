@@ -28,6 +28,19 @@ or turned-off schedule, or a changed owner refuses the run's next tool call.
 The live facts are cached for ``LIVE_CHECK_SECONDS`` (30 seconds) per schedule
 and permit token, bounded to ``LIVE_CHECK_CACHE_SIZE`` entries.
 
+Effective lifetime of a permit-backed run (F3): a standing permit lasts at most
+7 days and is renewed by ``team_services.scheduler`` when fewer than 2 days
+remain, while the run itself lasts ``DEFAULT_RUN_LIFETIME`` (7 days) from
+``started_at_utc``. When a long or paused run outlives the frozen permit it
+started with, ``_run_context`` verifies the frozen permit's signature and
+binding without expiry and falls back to the schedule's current stored permit
+(same schedule, same person, same binding kind, verified now). If renewal was
+refused or no matching current permit is stored, the run stops.
+
+Signed "no roles" marker (F2): any token carrying the ``unvouched_run_`` request
+id prefix or ``schedule_unvouched_permit:<schedule_id>`` binding resolves with
+``person_roles=()`` whoever issued it, with no live lookup.
+
 A permit for no person (system work) is accepted only for a turned-on,
 runtime-managed schedule whose kind the system schedule table marks
 ``system_work`` (``custom_messages.system_schedules``).
@@ -50,6 +63,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from access_control.authority_verifier import (
     AuthorityTokenVerifier,
+    FETCHABLE_REFUSAL_CODES,
     IdentityRejected,
     IssuerRequirement,
     REFUSAL_BAD_AUTHORITY,
@@ -71,6 +85,7 @@ from custom_messages.wire.authority_bindings import (
     AuthorityTokenRecord,
     GATEWAY_ISSUER_ROLE,
     SCHEDULER_ISSUER_ROLE,
+    SCHEDULE_OWNER_PERMIT_PREFIX,
     SCHEDULE_RUN_CONTEXT_PREFIX,
 )
 from storage.config import StorageSettings
@@ -95,6 +110,9 @@ class ScheduleFacts:
     system_kind: str | None
     # The agent type that claims and runs the schedule (claim_named_agent_type).
     runner_type: str | None = None
+    # The schedule's current standing permits as stored now (used by F3 fallback when a frozen permit expires).
+    run_permit_json: str | None = None
+    owner_permit_json: str | None = None
 
     @property
     def system_work(self) -> bool:
@@ -143,6 +161,8 @@ class StoredScheduleFacts:
         # The row's owner column is authoritative (schedule_store.apply_persisted_schedule_owner).
         owner = str(row[20] or "").strip() if len(row) > 20 else ""
         runner = str(row[13] or "").strip() if len(row) > 13 else ""
+        run_permit_json = str(row[21]) if len(row) > 21 and row[21] else None
+        owner_permit_json = str(row[23]) if len(row) > 23 and row[23] else None
         return ScheduleFacts(
             schedule_id=schedule_id,
             enabled=bool(row[9]),
@@ -152,6 +172,8 @@ class StoredScheduleFacts:
             if system_managed
             else None,
             runner_type=runner or None,
+            run_permit_json=run_permit_json,
+            owner_permit_json=owner_permit_json,
         )
 
 
@@ -226,6 +248,18 @@ class ScheduleRunLookup:
             ("", schedule_id, ""), lambda: _LiveFacts(self.schedules.schedule_facts(schedule_id), None, self.clock())
         ).schedule
 
+    def refresh_schedule(self, schedule_id: str) -> ScheduleFacts | None:
+        """Re-read a schedule row directly from storage and update the cache."""
+
+        found = _LiveFacts(self.schedules.schedule_facts(schedule_id), None, self.clock())
+        key = ("", schedule_id, "")
+        with self._lock:
+            self._cache[key] = found
+            self._cache.move_to_end(key)
+            while len(self._cache) > self.max_entries:
+                self._cache.popitem(last=False)
+        return found.schedule
+
     def _cached(self, key: tuple[str, str, str], read: Callable[[], _LiveFacts]) -> _LiveFacts:
         now = self.clock()
         with self._lock:
@@ -261,7 +295,7 @@ def verified_token_to_task_context(
         issuer_roles=tuple(sorted(verified.issuer_roles)),
         team_id=verified.team_id,
         person_id=verified.person_id,
-        person_roles=verified.person_roles,
+        person_roles=() if verified.is_unvouched else verified.person_roles,
         root_task_id=verified.root_task_id,
         conversation_id=conversation_id,
         schedule_id=verified.schedule_id,
@@ -324,6 +358,76 @@ def _people_override(verifier: AuthorityTokenVerifier, schedule_runs: ScheduleRu
     return None
 
 
+def _current_permit_json(facts: ScheduleFacts | None, bound_id: str) -> str | None:
+    if facts is None:
+        return None
+    if bound_id.startswith(SCHEDULE_OWNER_PERMIT_PREFIX):
+        return facts.owner_permit_json
+    return facts.run_permit_json
+
+
+def _fallback_current_permit(
+    run: ScheduleRunIdentityV1,
+    *,
+    frozen_exc: IdentityRejected,
+    verifier: AuthorityTokenVerifier,
+    team_id: str,
+    schedule_runs: ScheduleRunLookup | None,
+    moment: datetime,
+    valid_at: datetime | None,
+    reached_at: datetime | None,
+    people_override: PeopleStore | None,
+) -> VerifiedTaskToken:
+    """When a run's frozen permit expired, verify and adopt the schedule's current renewed permit (F3).
+
+    Verifies the frozen permit's signature, issuer, revocations and binding without expiry
+    first, then reads the schedule's current stored permit matching the same schedule, person
+    and binding kind (regular, unvouched, or owner permit) verified at the check moment.
+    """
+
+    frozen = verifier.verify_schedule_permit(
+        run.permit,
+        team_id=team_id,
+        now=moment,
+        check_expiry=False,
+        require_active_person=False,
+        people=people_override,
+    )
+    if schedule_runs is None or frozen.schedule_id is None:
+        raise frozen_exc
+    facts = schedule_runs.schedule(frozen.schedule_id)
+    raw_current = _current_permit_json(facts, frozen.root_task_id)
+    if not raw_current or frozen.token_id in raw_current:
+        facts = schedule_runs.refresh_schedule(frozen.schedule_id)
+        raw_current = _current_permit_json(facts, frozen.root_task_id)
+    if not raw_current:
+        raise frozen_exc
+    try:
+        candidate = AuthorityTokenRecord.model_validate_json(raw_current)
+    except ValueError as exc:
+        raise frozen_exc from exc
+    if candidate.token_id == frozen.token_id:
+        raise frozen_exc
+    current = verifier.verify_schedule_permit(
+        candidate,
+        team_id=team_id,
+        now=moment,
+        valid_at=valid_at,
+        reached_at=reached_at,
+        people=people_override,
+    )
+    if (
+        current.schedule_id != frozen.schedule_id
+        or current.person_id != frozen.person_id
+        or current.root_task_id != frozen.root_task_id
+    ):
+        raise IdentityRejected(
+            "The schedule's current permit does not match this run.",
+            code=REFUSAL_INVALID_PERMIT,
+        )
+    return current
+
+
 def _run_context(
     run_value: ScheduleRunIdentityV1 | Mapping[str, Any],
     *,
@@ -341,14 +445,30 @@ def _run_context(
             code=REFUSAL_BAD_AUTHORITY,
         )
     run = _parse_schedule_run(run_value)
-    permit = verifier.verify_schedule_permit(
-        run.permit,
-        team_id=team_id,
-        now=moment,
-        valid_at=valid_at,
-        reached_at=reached_at,
-        people=_people_override(verifier, schedule_runs),
-    )
+    people_override = _people_override(verifier, schedule_runs)
+    try:
+        permit = verifier.verify_schedule_permit(
+            run.permit,
+            team_id=team_id,
+            now=moment,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            people=people_override,
+        )
+    except IdentityRejected as frozen_exc:
+        if frozen_exc.code != REFUSAL_EXPIRED:
+            raise
+        permit = _fallback_current_permit(
+            run,
+            frozen_exc=frozen_exc,
+            verifier=verifier,
+            team_id=team_id,
+            schedule_runs=schedule_runs,
+            moment=moment,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            people_override=people_override,
+        )
     check_moment = valid_at or reached_at or moment
     started, expires = _run_times(run, check_moment)
     if schedule_runs is None:
@@ -366,7 +486,7 @@ def _run_context(
         issuer_roles=tuple(sorted(permit.issuer_roles)),
         team_id=permit.team_id,
         person_id=permit.person_id,
-        person_roles=tuple(sorted(set(person.roles))) if person is not None else (),
+        person_roles=() if (person is None or permit.is_unvouched) else tuple(sorted(set(person.roles))),
         conversation_id=run.conversation_id,
         schedule_id=permit.schedule_id,
         issued_at_utc=started,
@@ -493,17 +613,47 @@ async def resolve_task_identity_async(
             code=REFUSAL_MISSING,
         )
     await verifier.ensure_issuer_known(raw, now=now)
-    return resolve_task_identity(
-        verifier=verifier,
-        team_id=team_id,
-        task_context=task_context,
-        schedule_run=schedule_run,
-        schedule_runs=schedule_runs,
-        now=now,
-        valid_at=valid_at,
-        reached_at=reached_at,
-        require_issuer=require_issuer,
-    )
+    try:
+        return resolve_task_identity(
+            verifier=verifier,
+            team_id=team_id,
+            task_context=task_context,
+            schedule_run=schedule_run,
+            schedule_runs=schedule_runs,
+            now=now,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            require_issuer=require_issuer,
+        )
+    except IdentityRejected as refused:
+        if schedule_run is None or schedule_runs is None or refused.code not in FETCHABLE_REFUSAL_CODES:
+            raise
+        # A renewed current permit (F3 fallback) may carry a newer scheduler certificate epoch.
+        run = _parse_schedule_run(schedule_run)
+        schedule_id = getattr(run.permit, "schedule_id", None)
+        bound_id = str(getattr(getattr(run.permit, "bound_to", None), "id", "") or "")
+        if not isinstance(schedule_id, str) or not schedule_id:
+            raise
+        raw_current = _current_permit_json(schedule_runs.schedule(schedule_id), bound_id)
+        if not raw_current:
+            raise
+        try:
+            candidate = AuthorityTokenRecord.model_validate_json(raw_current)
+        except ValueError:
+            raise refused from None
+        if not await verifier.ensure_issuer_known(candidate, now=now):
+            raise
+        return resolve_task_identity(
+            verifier=verifier,
+            team_id=team_id,
+            task_context=task_context,
+            schedule_run=schedule_run,
+            schedule_runs=schedule_runs,
+            now=now,
+            valid_at=valid_at,
+            reached_at=reached_at,
+            require_issuer=require_issuer,
+        )
 
 
 def reported_task_person(

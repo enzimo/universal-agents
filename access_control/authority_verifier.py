@@ -50,6 +50,7 @@ from custom_messages.wire.authority_bindings import (
     extract_token_issuer,
     extract_token_log_fields,
     is_schedule_permit_binding,
+    is_unvouched_authority_binding,
     schedule_permit_binding_id,
 )
 
@@ -122,6 +123,11 @@ class VerifiedTaskToken:
     @property
     def is_permit(self) -> bool:
         return is_schedule_permit_binding(self.root_task_id)
+
+    @property
+    def is_unvouched(self) -> bool:
+        """Whether the signed token or permit carries the unvouched 'no roles' marker (F2)."""
+        return is_unvouched_authority_binding(self.root_task_id, self.request_id)
 
     @property
     def is_gateway_issued(self) -> bool:
@@ -437,6 +443,9 @@ class AuthorityTokenVerifier:
             people_override=people,
             require_active_person=require_active_person,
         )
+        if is_unvouched_authority_binding(bound_id, request_id):
+            # Signed "no roles" marker (F2): applies whoever issued the token, without live lookup.
+            person_roles = ()
         return VerifiedTaskToken(
             token=token,
             token_id=token.token_id,
@@ -465,14 +474,17 @@ class AuthorityTokenVerifier:
         if schedule_id is None:
             raise IdentityRejected("A schedule permit token must name its schedule.", code=REFUSAL_INVALID_PERMIT)
         regular_id = schedule_permit_binding_id(schedule_id, owner_permit=False)
+        unvouched_id = schedule_permit_binding_id(schedule_id, owner_permit=False, unvouched=True)
         owner_id = schedule_permit_binding_id(schedule_id, owner_permit=True)
-        if bound_id != request_id or bound_id not in {regular_id, owner_id}:
+        if bound_id != request_id or bound_id not in {regular_id, unvouched_id, owner_id}:
             raise IdentityRejected(
                 "The token is not a valid schedule permit for its schedule.",
                 code=REFUSAL_INVALID_PERMIT,
             )
         if bound_id == owner_id and person_ref is None:
             raise IdentityRejected("An owner schedule permit must name its owner.", code=REFUSAL_INVALID_PERMIT)
+        if bound_id == unvouched_id and person_ref is None:
+            raise IdentityRejected("An unvouched schedule permit must name its owner.", code=REFUSAL_INVALID_PERMIT)
 
     async def ensure_issuer_known(self, raw_token: Any, *, now: Optional[datetime] = None) -> bool:
         """Fetch the token's issuer certificate (or fresh revocations) if not already held locally.
@@ -701,6 +713,8 @@ class AuthorityTokenVerifier:
             people_override=people,
             require_active_person=False,
         )
+        if is_unvouched_authority_binding(bound_id, request_id):
+            person_roles = ()
         return VerifiedTaskToken(
             token=token,
             token_id=token.token_id,

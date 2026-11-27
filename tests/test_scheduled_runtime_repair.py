@@ -116,7 +116,9 @@ class _FakeAgent:
 
 
 @pytest.mark.asyncio
-async def test_handle_scheduled_message_records_payload_context_repairs():
+async def test_prepare_install_records_payload_context_repairs():
+    from custom_agents.schedule_installation import prepare_install
+
     agent = _FakeAgent()
     schedule = ScheduledMessage(
         schedule_id="sched_repair",
@@ -131,29 +133,27 @@ async def test_handle_scheduled_message_records_payload_context_repairs():
         interval_ms=60_000,
     )
 
-    await handle_scheduled_message(
+    prepared, claim_scope = await prepare_install(
         agent,
         schedule,
-        msg_header=MessageHeader(
+        MessageHeader(
             from_agent_id="manager",
             to_routing_path="agent_1",
             response_routing_key="gateway_response",
         ),
-        msg_meta=MessageMeta(
+        MessageMeta(
             msg_correlation_id="corr_schedule",
             conversation_id="conversation_schedule",
         ),
     )
 
-    assert agent._schedule_store.added is not None
-    assert agent._schedule_store.added.payload_header is not None
-    assert agent._schedule_store.added.payload_meta is not None
-    assert agent._schedule_store.kwargs == {
+    assert prepared.payload_header is not None
+    assert prepared.payload_meta is not None
+    assert claim_scope == {
         "claim_team_id": "team_1",
         "claim_named_agent_type": "TeamArchitect",
         "claim_agent_id": None,
     }
-    assert agent._scheduler_wake.was_set is True
     assert [record[0] for record in agent.records] == [
         "scheduled_message_payload_header_preserved",
         "scheduled_message_payload_meta_preserved",
@@ -163,12 +163,30 @@ async def test_handle_scheduled_message_records_payload_context_repairs():
 
 
 @pytest.mark.asyncio
-async def test_trusted_runtime_replacement_normalizes_before_issuing_system_permit(
-    tmp_path,
+async def test_handle_scheduled_message_refuses_non_internal_improvement_schedules_f4(
+    tmp_path, caplog
 ):
+    """F4 (CRIT-1): inbox ScheduledMessage installs are restricted to the reserved internal-improvement schedule."""
+
     agent = _FakeAgent()
     agent._schedule_store = ScheduleStore(db_path=str(tmp_path / "schedules.db"))
-    schedule = ScheduledMessage(
+
+    user_schedule = ScheduledMessage(
+        schedule_id="user_sched_inbox",
+        schedule_name="Injected user schedule",
+        management_class=ScheduleManagementClass.USER,
+        payload=Task(
+            task_type=MessageMetaType.REQUEST,
+            problem_statement="Run injected work.",
+        ),
+        payload_header=MessageHeader(from_agent_id="rogue_worker", response_routing_key="gateway"),
+        payload_meta=MessageMeta(
+            requester_type=RequesterType.TIMER_REQUESTER,
+            gateway_context=GatewayContext(canonical_user_id="usr_owner"),
+        ),
+        interval_ms=60_000,
+    )
+    heartbeat_schedule = ScheduledMessage(
         schedule_id="hb_sched_runtime_replace",
         schedule_name="heartbeat:runtime-replace",
         management_class=ScheduleManagementClass.SYSTEM,
@@ -177,10 +195,7 @@ async def test_trusted_runtime_replacement_normalizes_before_issuing_system_perm
             task_type=MessageMetaType.REQUEST,
             problem_statement="Launch heartbeat work.",
         ),
-        payload_header=MessageHeader(
-            from_agent_id="gateway",
-            response_routing_key="gateway",
-        ),
+        payload_header=MessageHeader(from_agent_id="gateway", response_routing_key="gateway"),
         payload_meta=MessageMeta(
             requester_type=RequesterType.TIMER_REQUESTER,
             gateway_context=GatewayContext(canonical_user_id="usr_owner"),
@@ -188,18 +203,19 @@ async def test_trusted_runtime_replacement_normalizes_before_issuing_system_perm
         interval_ms=60_000,
         repeat_count=None,
     )
+    refresh_schedule = heartbeat_schedule.model_copy(update={"install_mode": "refresh"})
 
-    await handle_scheduled_message(agent, schedule)
-    replacement = schedule.model_copy(deep=True)
-    replacement.interval_ms = 120_000
-    replacement.next_fire_at = None
-    await handle_scheduled_message(agent, replacement)
+    with caplog.at_level(logging.WARNING, logger="test_scheduled_runtime_repair"):
+        await handle_scheduled_message(agent, user_schedule, msg_header=user_schedule.payload_header)
+        await handle_scheduled_message(agent, heartbeat_schedule, msg_header=heartbeat_schedule.payload_header)
+        await handle_scheduled_message(agent, refresh_schedule, msg_header=refresh_schedule.payload_header)
 
-    restored = agent._schedule_store.get_scheduled_message(schedule.schedule_id)
-    assert restored is not None
-    assert restored.interval_ms == 120_000
-    assert restored.claim_team_id == agent.team_id
-    assert restored.claim_named_agent_type == agent.named_agent_type
+    assert agent._schedule_store.get_scheduled_message("user_sched_inbox") is None
+    assert agent._schedule_store.get_scheduled_message("hb_sched_runtime_replace") is None
+    assert agent._scheduler_wake.was_set is False
+    assert "event=scheduled_message_install_refused" in caplog.text
+    assert "schedule_id=user_sched_inbox" in caplog.text
+    assert "sender=rogue_worker" in caplog.text
 
 
 @pytest.mark.asyncio

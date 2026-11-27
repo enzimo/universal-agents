@@ -201,13 +201,61 @@ def test_svc_scheduler_refuses_a_run_for_a_disabled_or_removed_owner(world, capl
     assert "event=scheduled_run_skipped_owner_inactive" in caplog.text
 
 
-def test_svc_scheduler_refuses_unvouched_owner(world) -> None:
-    record_ann(world, PersonStanding.ACTIVE, ("admin",))
+def test_svc_scheduler_signs_unvouched_owner_with_no_roles_marker_f2(world, caplog) -> None:
+    """F2: unvouched schedules run with the signed unvouched_run_ marker, giving person_roles=()."""
+
+    from access_control.task_identity import resolve_task_identity
+    from custom_messages.wire.authority_bindings import UNVOUCHED_RUN_CONTEXT_PREFIX
+    from custom_transport.protocol1.authority_tokens import root_task_token
+    from tests.broker_access_support import broker_gateway_identity, broker_person_ref
+
+    record_ann(world, PersonStanding.ACTIVE, ("admin", "member"))
     save_schedule(world, vouched=False)
     claimed = claim(world)
 
-    reply = world.scheduler.answer(fake_verified_frame("run_context.sign", _sign_body(claimed), sender_agent=WORKER_ID))
-    assert reply["outcome"] == "owner_inactive"
+    with caplog.at_level(logging.INFO, logger="test.scheduler"):
+        reply = world.scheduler.answer(
+            fake_verified_frame("run_context.sign", _sign_body(claimed), sender_agent=WORKER_ID)
+        )
+
+    assert reply["outcome"] == "ok" and reply["system_work"] is False
+    token = reply["authority"]
+    assert token["bound_to"]["request_id"].startswith(UNVOUCHED_RUN_CONTEXT_PREFIX)
+    assert "event=scheduler_run_context_signed_unvouched" in caplog.text
+
+    # Resolver gives person_roles=() without live lookup, even after deleting the schedule row.
+    world.store.remove(SCHEDULE_ID)
+    resolved = resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=token,
+        schedule_run=None,
+        schedule_runs=None,
+    )
+    assert (resolved.issuer, resolved.person_id, resolved.person_roles, resolved.schedule_id) == (
+        SCHEDULER_ISSUER_ROLE,
+        ANN,
+        (),
+        SCHEDULE_ID,
+    )
+
+    # Whoever issued a token carrying unvouched_run_ gets person_roles=().
+    gw_unvouched = root_task_token(
+        broker_gateway_identity(TEAM),
+        team=TEAM,
+        root_task_id="task_gw_unvouched",
+        request_id=f"{UNVOUCHED_RUN_CONTEXT_PREFIX}gateway123",
+        person_ref=broker_person_ref(ANN),
+        issued=datetime.now(timezone.utc),
+    )
+    resolved_gw = resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=gw_unvouched,
+        schedule_run=None,
+        schedule_runs=None,
+    )
+    assert (resolved_gw.person_id, resolved_gw.person_roles) == (ANN, ())
 
 
 def test_svc_scheduler_refuses_a_context_that_names_another_schedule(world) -> None:
@@ -485,26 +533,26 @@ def test_heartbeat_launcher_with_standing_permit_still_asks_svc_scheduler_per_it
     assert SCHEDULE_ID not in signed
 
 
-# -- durable owner_vouched across gateway cert renewal and unvouched refusal (C25) -----
+# -- durable owner_vouched across gateway cert renewal and unvouched runs (C25, F2, F4) -----
 
 
-def test_owner_vouched_survives_gateway_certificate_renewal_c25(world) -> None:
-    """First verified gateway_vouches promotes owner_vouched=1 so cert renewal does not break schedules (C25)."""
+def test_owner_vouched_column_survives_gateway_certificate_renewal_and_saved_token_never_vouches(world) -> None:
+    """owner_vouched=1 survives cert renewal; a saved gateway token with owner_vouched=0 never vouches (F4)."""
 
-    from team_services.scheduler import gateway_vouches
+    from custom_messages.wire.authority_bindings import SCHEDULE_PERMIT_PREFIX, SCHEDULE_UNVOUCHED_PERMIT_PREFIX
 
     record_ann(world, PersonStanding.ACTIVE, ("member",))
     save_schedule(world, vouched=True)
-    assert world.store.is_owner_vouched(SCHEDULE_ID) is False
-
-    # First permit pass verifies the stored gateway token and durably marks owner_vouched=1.
-    assert issue_permits(world).issued == [SCHEDULE_ID]
     assert world.store.is_owner_vouched(SCHEDULE_ID) is True
 
-    # Simulate gateway certificate renewal/rotation where the old stored token can no longer be verified.
+    # First permit pass issues a vouched permit from owner_vouched=1.
+    assert issue_permits(world).issued == [SCHEDULE_ID]
+    first_permit = world.store.run_permit(SCHEDULE_ID)
+    assert first_permit is not None and first_permit.bound_to.id == f"{SCHEDULE_PERMIT_PREFIX}{SCHEDULE_ID}"
+
+    # Strip the stored token to mimic post-renewal inability to verify the old gateway token.
     stored = world.store.get_scheduled_message(SCHEDULE_ID)
     assert stored is not None
-    # Strip the stored token to mimic post-renewal inability to verify the old gateway token.
     stripped = stored.model_copy(deep=True)
     stripped.payload_meta.gateway_context.task_context = None
     world.store.update(stripped, base=stored)
@@ -515,12 +563,12 @@ def test_owner_vouched_survives_gateway_certificate_renewal_c25(world) -> None:
         checked_owner=ANN,
         recheck_at=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
-    assert gateway_vouches(world.store.get_scheduled_message(SCHEDULE_ID), ANN, team_id=TEAM, verifier=world.verifier) is False
     assert world.store.is_owner_vouched(SCHEDULE_ID) is True
 
-    # Both renew_permits and svc.scheduler run_context.sign still succeed via durable owner_vouched=1.
+    # Both renew_permits and svc.scheduler run_context.sign still succeed with roles via owner_vouched=1.
     assert issue_permits(world).issued == [SCHEDULE_ID]
-    assert world.store.run_permit(SCHEDULE_ID) is not None
+    renewed_permit = world.store.run_permit(SCHEDULE_ID)
+    assert renewed_permit is not None and renewed_permit.bound_to.id == f"{SCHEDULE_PERMIT_PREFIX}{SCHEDULE_ID}"
 
     world.store.set_run_permit(
         SCHEDULE_ID,
@@ -535,20 +583,59 @@ def test_owner_vouched_survives_gateway_certificate_renewal_c25(world) -> None:
         return await fire(world, claim(world))
 
     assert asyncio.run(scenario()) == {}
-    assert run_context(queued_run(world), world).person_id == ANN
+    ctx = run_context(queued_run(world), world)
+    assert (ctx.person_id, ctx.person_roles) == (ANN, ("member",))
+
+    # F4: a row carrying a saved gateway token but owner_vouched=0 gets only an unvouched permit, never vouched.
+    from tests.scheduled_run_support import WORKER_TYPE
+
+    spoofed_id = "sched_saved_token_unvouched"
+    spoofed = save_schedule(world, schedule_id=spoofed_id, vouched=True)
+    world.store.add(spoofed, claim_team_id=TEAM, claim_named_agent_type=WORKER_TYPE, owner_vouched=False)
+    assert world.store.is_owner_vouched(spoofed_id) is False
+    assert spoofed_id in issue_permits(world).issued
+    assert world.store.is_owner_vouched(spoofed_id) is False
+    spoofed_permit = world.store.run_permit(spoofed_id)
+    assert spoofed_permit is not None
+    assert spoofed_permit.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}{spoofed_id}"
 
 
-def test_unvouched_schedule_records_owner_not_vouched_refusal_c25(world) -> None:
-    """An unvouched person schedule records run_permit_refusal='owner_not_vouched' for stuck notices (C25)."""
+def test_unvouched_schedule_runs_with_no_roles_on_both_run_paths_f2(world) -> None:
+    """F2: an unvouched person schedule runs with person_roles=() on both run_context.sign and permit paths."""
 
-    record_ann(world, PersonStanding.ACTIVE, ("member",))
+    from custom_messages.wire.authority_bindings import (
+        SCHEDULE_UNVOUCHED_PERMIT_PREFIX,
+        UNVOUCHED_RUN_CONTEXT_PREFIX,
+    )
+
+    record_ann(world, PersonStanding.ACTIVE, ("admin", "member"))
     save_schedule(world, vouched=False)
     assert world.store.is_owner_vouched(SCHEDULE_ID) is False
 
+    # 1. Without a standing permit yet, worker asks svc.scheduler (run_context.sign path).
+    async def fire_once(schedule_id: str = SCHEDULE_ID):
+        await subscribe(world)
+        return await fire(world, claim(world, schedule_id=schedule_id))
+
+    assert asyncio.run(fire_once()) == {}
+    assert len(world.host.requests) == 1
+    first_run = queued_run(world)
+    first_ctx = run_context(first_run, world)
+    assert first_ctx.context_id.startswith(UNVOUCHED_RUN_CONTEXT_PREFIX)
+    assert (first_ctx.person_id, first_ctx.person_roles, first_ctx.schedule_id) == (ANN, (), SCHEDULE_ID)
+
+    # 2. Permit upkeep issues a standing unvouched permit; next run uses it with person_roles=().
+    permit_schedule_id = "sched_unvouched_permit"
+    save_schedule(world, schedule_id=permit_schedule_id, vouched=False)
     result = issue_permits(world)
-    assert result.issued == []
-    assert result.refused == {SCHEDULE_ID: "owner_not_vouched"}
-    assert world.store.run_permit(SCHEDULE_ID) is None
-    row = world.store.get_row(SCHEDULE_ID)
-    assert row is not None
-    assert row["run_permit_refusal"] == "owner_not_vouched"
+    assert permit_schedule_id in result.issued and result.refused == {}
+    permit = world.store.run_permit(permit_schedule_id)
+    assert permit is not None and permit.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}{permit_schedule_id}"
+    world.host.requests.clear()
+    assert asyncio.run(fire_once(permit_schedule_id)) == {}
+    assert world.host.requests == [], "second run used the standing unvouched permit"
+    runs = queued(world)
+    assert len(runs) == 2
+    second_run = [r for r in runs if r.meta.gateway_context.schedule_run is not None][0]
+    second_ctx = run_context(second_run, world)
+    assert (second_ctx.person_id, second_ctx.person_roles, second_ctx.schedule_id) == (ANN, (), permit_schedule_id)

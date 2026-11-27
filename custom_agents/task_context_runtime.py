@@ -152,9 +152,9 @@ def scheduled_owner_roles(
 ) -> tuple[str, ...]:
     """The owner's current roles when the owner is vouched for, else none (logged)."""
 
-    if not (system_managed or owner_vouched or gateway_vouches(gateway_context, owner.person_id, agent=agent)):
+    if not (system_managed or owner_vouched):
         logger.warning(
-            "A scheduled run's person is not vouched for by the gateway, so the run carries no roles and its "
+            "A scheduled run's person is not vouched for, so the run carries no roles and its "
             "access checks refuse most tools. event=scheduled_owner_not_vouched schedule_id=%s person_id=%s",
             schedule_id,
             owner.person_id,

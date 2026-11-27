@@ -15,7 +15,6 @@ from custom_agents.knowledge_curation_runtime import prepare_knowledge_curation_
 from custom_agents.scheduled_run_contexts import ScheduledRun, sign_scheduled_run, sign_system_run_async
 from custom_agents.scheduled_run_failures import report_failing_scheduled_runs
 from custom_agents.task_context_runtime import inactive_owner, run_owner, scheduled_owner_roles
-from custom_agents.schedule_context_refresh import refresh_schedule_gateway_context
 from custom_messages.contracts.schedule_worker_v1 import ScheduleOccurrenceV1
 
 from custom_agents.lease_loss_wind_down import start_lease_loss_wind_down
@@ -65,12 +64,7 @@ from custom_agents.schedule_store import (
     owner_canonical_user_id_for_schedule,
     schedule_stopped_reason,
 )
-from custom_agents.schedule_management import (
-    ScheduleMutationAuthorityMode,
-    ScheduleMutationOperation,
-    build_schedule_mutation_permit,
-    is_system_managed_schedule,
-)
+from custom_agents.schedule_management import is_system_managed_schedule
 from custom_messages.contracts.delivery_v1 import UserNotification
 from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
@@ -528,41 +522,6 @@ async def _store_ensure(agent: Any, schedule_msg: ScheduledMessage, claim_scope:
     )
 
 
-async def _store_replace(agent: Any, schedule_msg: ScheduledMessage, claim_scope: ScheduleClaimScope) -> None:
-    """Replace the row; a stored system schedule needs the trusted-runtime permit for this exact change."""
-
-    existing = await agent.task_manager.operations_runtime.run(
-        agent._schedule_store.get_scheduled_message, schedule_msg.schedule_id
-    )
-    runtime_permit = (
-        build_schedule_mutation_permit(
-            schedule=existing,
-            operation=ScheduleMutationOperation.UPDATE,
-            authority_mode=ScheduleMutationAuthorityMode.TRUSTED_RUNTIME,
-            actor_principal_id=str(getattr(agent, "id", "") or "runtime"),
-            owner_canonical_user_id=str(
-                owner_canonical_user_id_for_schedule(existing) or ""
-            ),
-            team_id=str(getattr(agent, "team_id", "") or ""),
-            candidate=schedule_msg,
-        )
-        if existing is not None and is_system_managed_schedule(existing)
-        else None
-    )
-    store_kwargs: dict[str, Any] = dict(claim_scope)
-    if runtime_permit is not None:
-        store_kwargs["system_mutation_permit"] = runtime_permit
-    await agent.task_manager.operations_runtime.run(
-        agent._schedule_store.add, schedule_msg, **store_kwargs
-    )
-    agent._logger.info(
-        "[%s] ScheduledMessage %s stored. Next fire at %s",
-        agent.id,
-        schedule_msg.schedule_id,
-        schedule_msg.next_fire_at,
-    )
-
-
 async def handle_scheduled_message(
     agent: Any,
     msg: ScheduledMessage,
@@ -570,32 +529,35 @@ async def handle_scheduled_message(
     msg_header: Optional[MessageHeader] = None,
     msg_meta: Optional[MessageMeta] = None,
 ) -> None:
-    """Install a schedule another runtime process sent (the gateway, InternalImprovementAgent).
+    """Install the reserved internal-improvement schedule sent by InternalImprovementAgent (F4).
 
-    Its ``install_mode`` decides what happens to a stored schedule with the
-    same id. A model's ``schedule_message`` action never comes here; it only
-    creates (``schedule_installation.create_schedule_from_turn_action``).
+    Every other schedule (gateway, user, maintenance, worker, objective) is installed
+    through ``schedules.install`` on team services; any other inbox ``ScheduledMessage``
+    is refused and logged.
     """
 
-    if msg.install_mode == "refresh":
-        # Only the person and session of an existing runtime-managed schedule
-        # change; nothing is installed (custom_agents.schedule_context_refresh).
-        await agent.task_manager.operations_runtime.run(
-            partial(refresh_schedule_gateway_context, agent), msg.model_copy(deep=True)
+    if not is_internal_improvement_schedule_name(msg.schedule_name):
+        sender = getattr(msg_header, "from_agent_id", None) or getattr(
+            getattr(msg, "payload_header", None), "from_agent_id", None
+        )
+        agent._logger.warning(
+            "[%s] Refused inbox ScheduledMessage %s (%r); only the reserved internal-improvement "
+            "schedule may be installed via inbox messages. "
+            "event=scheduled_message_install_refused schedule_id=%s sender=%s",
+            getattr(agent, "id", "unknown"),
+            msg.schedule_id,
+            msg.schedule_name,
+            msg.schedule_id,
+            sender,
         )
         return
-    if is_internal_improvement_schedule_name(msg.schedule_name):
-        # Only TeamArchitect installs this reserved schedule, exactly as
-        # InternalImprovementAgent asks for it (logged when refused).
-        reserved = prepare_internal_improvement_schedule_for_manager(agent, msg)
-        if reserved is None:
-            return
-        msg = reserved
-    schedule_msg, claim_scope = await prepare_install(agent, msg, msg_header, msg_meta)
-    if schedule_msg.install_mode == "ensure":
-        await _store_ensure(agent, schedule_msg, claim_scope)
-    else:
-        await _store_replace(agent, schedule_msg, claim_scope)
+    # Only TeamArchitect installs this reserved schedule, exactly as
+    # InternalImprovementAgent asks for it (ensure-only, logged when refused).
+    reserved = prepare_internal_improvement_schedule_for_manager(agent, msg)
+    if reserved is None:
+        return
+    schedule_msg, claim_scope = await prepare_install(agent, reserved, msg_header, msg_meta)
+    await _store_ensure(agent, schedule_msg, claim_scope)
     if agent._scheduler_wake:
         agent._scheduler_wake.set()
 

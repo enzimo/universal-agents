@@ -142,9 +142,9 @@ def _start_with_permit(world) -> object:
 # -- team_services.scheduler issues and renews -----------------------------------------
 
 
-def test_the_scheduler_issues_permits_only_for_vouched_active_owners_and_system_work(world, caplog) -> None:
-    record_people(world, (ANN, ACTIVE, ("member",)), (BOB, ACTIVE, ("member",)), (CAROL, PersonStanding.DISABLED, ()))
-    save_schedule(world)  # Ann's, saved with a gateway-signed protocol 1 token
+def test_the_scheduler_issues_permits_for_vouched_unvouched_active_owners_and_system_work(world, caplog) -> None:
+    record_people(world, (ANN, ACTIVE, ("member",)), (BOB, ACTIVE, ("admin", "member")), (CAROL, PersonStanding.DISABLED, ()))
+    save_schedule(world)  # Ann's, vouched
     save_schedule(world, schedule_id="sched_bob", owner=BOB, vouched=False)
     save_schedule(world, schedule_id="sched_carol", owner=CAROL)
     _save_maintenance(world)
@@ -152,11 +152,28 @@ def test_the_scheduler_issues_permits_only_for_vouched_active_owners_and_system_
     with caplog.at_level(logging.INFO, logger="test.scheduler"):
         result = _issue(world)
 
-    assert sorted(result.issued) == sorted([SCHEDULE_ID, MAINTENANCE_ID])
-    assert result.refused == {"sched_bob": "owner_not_vouched", "sched_carol": "owner_not_active"}
+    assert sorted(result.issued) == sorted([SCHEDULE_ID, "sched_bob", MAINTENANCE_ID])
+    assert result.refused == {"sched_carol": "owner_not_active"}
     anns = _verified(world, _stored(world))
-    assert (anns.issuer_kind, anns.person_id, anns.schedule_id) == (SCHEDULER_ISSUER_ROLE, ANN, SCHEDULE_ID)
+    assert (anns.issuer_kind, anns.person_id, anns.person_roles, anns.schedule_id, anns.is_unvouched) == (
+        SCHEDULER_ISSUER_ROLE,
+        ANN,
+        ("member",),
+        SCHEDULE_ID,
+        False,
+    )
     assert anns.expires_at - anns.issued_at == timedelta(seconds=AUTHORITY_TOKEN_MAX_LIFETIME_SECONDS)
+    # F2: Bob's unvouched schedule gets an unvouched standing permit carrying no roles.
+    bobs_raw = _stored(world, "sched_bob")
+    assert bobs_raw is not None and bobs_raw.bound_to.id == "schedule_unvouched_permit:sched_bob"
+    bobs = _verified(world, bobs_raw)
+    assert (bobs.issuer_kind, bobs.person_id, bobs.person_roles, bobs.schedule_id, bobs.is_unvouched) == (
+        SCHEDULER_ISSUER_ROLE,
+        BOB,
+        (),
+        "sched_bob",
+        True,
+    )
     maintenance = _verified(world, _stored(world, MAINTENANCE_ID))
     assert maintenance.person_id is None, "maintenance runs are system work for no person"
     # Maintenance schedule with an active admin owner also gets an owner_permit_json for escalations.
@@ -164,7 +181,7 @@ def test_the_scheduler_issues_permits_only_for_vouched_active_owners_and_system_
     assert owner_perm is not None
     verified_owner = _verified(world, owner_perm)
     assert (verified_owner.person_id, verified_owner.schedule_id) == (ANN, MAINTENANCE_ID)
-    assert _stored(world, "sched_bob") is None and _stored(world, "sched_carol") is None
+    assert _stored(world, "sched_carol") is None
     assert "event=schedule_permit_issued" in caplog.text and "event=schedule_permit_refused" in caplog.text
     # The permit is bookkeeping on the row, never part of the schedule itself.
     assert "schedule_permit" not in world.store._repository.get_schedule_row(SCHEDULE_ID)[0]
@@ -592,3 +609,257 @@ def test_a_permit_run_records_its_notes_with_notify_user_as_with_record_schedule
     assert recorded["recorded"] is True
     memory = world.store.get_scheduled_message(SCHEDULE_ID).schedule_memory
     assert (memory.ledger.total_notifications, memory.ledger.total_runs) == (1, 1)
+
+
+# -- F3: permit-backed runs fall back to the schedule's current renewed permit ---------
+
+
+def test_permit_run_falls_back_to_renewed_current_permit_at_49h_and_stops_when_refused_f3(world) -> None:
+    """F3: a run started with 2 days left on its permit keeps working at +49h after renewal,
+    and stops at +49h if renewal was refused or the schedule's vouching kind changed."""
+
+    from team_services.scheduler import RENEW_WITHIN
+
+    record_ann(world, ACTIVE, ("member",))
+    save_schedule(world, vouched=True)
+
+    # Issue the initial permit at T0 (inside the test cert validity); start the run with RENEW_WITHIN (2 days) left.
+    t0 = datetime.now(timezone.utc).replace(microsecond=0)
+    assert _issue(world, now=t0).issued == [SCHEDULE_ID]
+    frozen_permit = _stored(world)
+    assert frozen_permit is not None
+    start = t0 + timedelta(days=7) - RENEW_WITHIN
+    run = _run(frozen_permit, started=start)
+    lookup = ScheduleRunLookup.from_storage(world.tasks.storage_settings)
+
+    # At start and +47h, the frozen permit itself is still valid.
+    at_start = resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=None,
+        schedule_run=run,
+        schedule_runs=lookup,
+        now=t0,
+        valid_at=start,
+        reached_at=start,
+    )
+    assert at_start.expires_at_utc == start + timedelta(days=7)
+    at_47h = start + timedelta(hours=47)
+    assert resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=None,
+        schedule_run=run,
+        schedule_runs=lookup,
+        now=t0,
+        valid_at=at_47h,
+        reached_at=at_47h,
+    ).person_id == ANN
+
+    # At +49h BEFORE renewal (or when renewal was refused / permit cleared), the run is refused expired.
+    at_49h = start + timedelta(hours=49)
+    with pytest.raises(IdentityRejected) as before_renew:
+        resolve_task_identity(
+            verifier=world.verifier,
+            team_id=TEAM,
+            task_context=None,
+            schedule_run=run,
+            schedule_runs=lookup,
+            now=t0,
+            valid_at=at_49h,
+            reached_at=at_49h,
+        )
+    assert before_renew.value.code == "expired"
+
+    # Renew the schedule's standing permit (issued at start + 1h, valid for 7 more days).
+    renew_time = start + timedelta(hours=1)
+    assert _issue(world, now=renew_time).renewed == [SCHEDULE_ID]
+    renewed_permit = _stored(world)
+    assert renewed_permit is not None and renewed_permit.token_id != frozen_permit.token_id
+
+    # Now at +49h and +72h, the resolver falls back to the renewed permit; end stays started + 7d.
+    resolved_49h = resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=None,
+        schedule_run=run,
+        schedule_runs=lookup,
+        now=t0,
+        valid_at=at_49h,
+        reached_at=at_49h,
+    )
+    assert (resolved_49h.person_id, resolved_49h.person_roles, resolved_49h.expires_at_utc) == (
+        ANN,
+        ("member",),
+        start + timedelta(days=7),
+    )
+    at_72h = start + timedelta(hours=72)
+    assert resolve_task_identity(
+        verifier=world.verifier,
+        team_id=TEAM,
+        task_context=None,
+        schedule_run=run,
+        schedule_runs=lookup,
+        now=t0,
+        valid_at=at_72h,
+        reached_at=at_72h,
+    ).person_id == ANN
+
+    # Past started + 7 days (+169h), the run itself has expired even though the renewed permit is valid.
+    at_169h = start + timedelta(hours=169)
+    with pytest.raises(IdentityRejected) as past_run_end:
+        resolve_task_identity(
+            verifier=world.verifier,
+            team_id=TEAM,
+            task_context=None,
+            schedule_run=run,
+            schedule_runs=lookup,
+            now=t0,
+            valid_at=at_169h,
+            reached_at=at_169h,
+        )
+    assert past_run_end.value.code == "expired"
+
+    # If renewal is later refused (permit cleared), +49h stops immediately.
+    world.store.set_run_permit(
+        SCHEDULE_ID,
+        permit=None,
+        owner_permit=None,
+        checked_owner=ANN,
+        recheck_at=at_49h + timedelta(hours=1),
+        refusal_reason="owner_not_active",
+    )
+    fresh_lookup = ScheduleRunLookup.from_storage(world.tasks.storage_settings)
+    with pytest.raises(IdentityRejected) as after_refusal:
+        resolve_task_identity(
+            verifier=world.verifier,
+            team_id=TEAM,
+            task_context=None,
+            schedule_run=run,
+            schedule_runs=fresh_lookup,
+            now=t0,
+            valid_at=at_49h,
+            reached_at=at_49h,
+        )
+    assert after_refusal.value.code == "expired"
+
+    # If the schedule was replaced unvouched (now holds schedule_unvouched_permit:), a vouched run's
+    # expired frozen permit cannot adopt the mismatched binding kind.
+    unvouched_permit = AuthorityTokenRecord.model_validate(
+        schedule_permit_token(
+            broker_scheduler_identity(TEAM),
+            team=TEAM,
+            schedule_id=SCHEDULE_ID,
+            person_ref=broker_person_ref(ANN),
+            unvouched=True,
+            issued=renew_time,
+        )
+    )
+    world.store.set_run_permit(
+        SCHEDULE_ID,
+        permit=unvouched_permit,
+        owner_permit=None,
+        checked_owner=ANN,
+        recheck_at=renew_time + timedelta(days=5),
+    )
+    with pytest.raises(IdentityRejected) as kind_mismatch:
+        resolve_task_identity(
+            verifier=world.verifier,
+            team_id=TEAM,
+            task_context=None,
+            schedule_run=run,
+            schedule_runs=ScheduleRunLookup.from_storage(world.tasks.storage_settings),
+            now=t0,
+            valid_at=at_49h,
+            reached_at=at_49h,
+        )
+    assert kind_mismatch.value.code == "invalid_permit"
+
+
+# -- F4: CR-1 permit race and saved-token fallback removal -----------------------------
+
+
+def test_permit_pass_cannot_restore_vouched_mark_or_write_vouched_permit_after_unvouching_replace_f4(
+    world, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4 (CR-1): concurrent unvouching replace after read or after signing never gets a vouched permit or mark."""
+
+    import team_services.scheduler as scheduler_module
+    from custom_messages.wire.authority_bindings import SCHEDULE_UNVOUCHED_PERMIT_PREFIX
+
+    record_ann(world, ACTIVE, ("admin", "member"))
+    schedule = save_schedule(world, vouched=True)
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is True
+
+    # Interleaving A: row carries a saved gateway token; unvouching replace commits right after get_scheduled_message.
+    real_get = world.store.get_scheduled_message
+    fired_a = {"done": False}
+
+    def get_then_replace(schedule_id: str):
+        row = real_get(schedule_id)
+        if not fired_a["done"] and schedule_id == SCHEDULE_ID:
+            fired_a["done"] = True
+            edited = schedule.model_copy(deep=True)
+            edited.payload.problem_statement = "Replaced unvouched A."
+            edited.payload_meta.gateway_context.task_context = None
+            world.store.install(edited, mode="replace", team_id=TEAM, owner_id=ANN, owner_vouched=False)
+        return row
+
+    monkeypatch.setattr(world.store, "get_scheduled_message", get_then_replace)
+    _issue(world)
+    monkeypatch.setattr(world.store, "get_scheduled_message", real_get)
+
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is False
+    permit_a = _stored(world)
+    assert permit_a is not None
+    assert permit_a.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}{SCHEDULE_ID}"
+    assert _verified(world, permit_a).person_roles == ()
+
+    # Interleaving B: vouched by column; unvouching replace commits right after schedule_permit_token signs.
+    vouched_again = schedule.model_copy(deep=True)
+    vouched_again.payload_meta.gateway_context.task_context = None
+    world.store.install(vouched_again, mode="replace", team_id=TEAM, owner_id=ANN, owner_vouched=True)
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is True
+    assert _stored(world) is None
+
+    real_sign = scheduler_module.schedule_permit_token
+    fired_b = {"done": False}
+
+    def sign_then_replace(*args, **kwargs):
+        token = real_sign(*args, **kwargs)
+        if not fired_b["done"]:
+            fired_b["done"] = True
+            edited = vouched_again.model_copy(deep=True)
+            edited.payload.problem_statement = "Replaced unvouched B."
+            world.store.install(edited, mode="replace", team_id=TEAM, owner_id=ANN, owner_vouched=False)
+        return token
+
+    monkeypatch.setattr(scheduler_module, "schedule_permit_token", sign_then_replace)
+    result_b = _issue(world)
+    monkeypatch.setattr(scheduler_module, "schedule_permit_token", real_sign)
+
+    assert result_b.issued == [] and result_b.renewed == []
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is False
+    assert _stored(world) is None, "stale vouched permit write was rejected by AND owner_vouched = 1"
+
+
+def test_saved_gateway_token_with_owner_vouched_false_gets_no_vouched_permit_f4(world) -> None:
+    """F4: a row with a saved gateway token and owner_vouched=0 is never promoted and gets only an unvouched permit."""
+
+    from custom_messages.wire.authority_bindings import SCHEDULE_UNVOUCHED_PERMIT_PREFIX
+
+    record_ann(world, ACTIVE, ("admin", "member"))
+    sched = save_schedule(world, vouched=True)
+    # Explicitly clear owner_vouched while leaving the saved gateway token intact on the row.
+    world.store.add(sched, claim_team_id=TEAM, claim_named_agent_type=WORKER_TYPE, owner_vouched=False)
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is False
+    assert world.store.get_scheduled_message(SCHEDULE_ID).payload_meta.gateway_context.task_context is not None
+
+    _issue(world)
+
+    assert world.store.is_owner_vouched(SCHEDULE_ID) is False
+    permit = _stored(world)
+    assert permit is not None
+    assert permit.bound_to.id == f"{SCHEDULE_UNVOUCHED_PERMIT_PREFIX}{SCHEDULE_ID}"
+    resolved = _resolve(world, schedule_run=_run(permit))
+    assert (resolved.person_id, resolved.person_roles) == (ANN, ())

@@ -41,10 +41,15 @@ from custom_agents.schedule_store import (
     owner_canonical_user_id_for_schedule,
     schedule_stopped_reason,
 )
-from custom_agents.task_context_runtime import gateway_vouches, inactive_owner
+from custom_agents.task_context_runtime import inactive_owner
 from custom_messages.contracts.schedule_v1 import ScheduledMessage
 from custom_messages.system_schedules import is_system_work_kind
-from custom_messages.wire.authority_bindings import AuthorityTokenRecord, SCHEDULER_ISSUER_ROLE
+from custom_messages.wire.authority_bindings import (
+    AuthorityTokenRecord,
+    SCHEDULER_ISSUER_ROLE,
+    SCHEDULE_RUN_CONTEXT_PREFIX,
+    UNVOUCHED_RUN_CONTEXT_PREFIX,
+)
 from custom_messages.wire.frame import VerifiedFrame
 from custom_messages.wire.values import parse_timestamp
 from custom_transport.protocol1.authority_tokens import root_task_token, schedule_permit_token
@@ -95,31 +100,19 @@ def _person_ref_of(people: PeopleDirectory, person_id: str) -> Optional[str]:
 def is_schedule_vouched(
     schedule_id: str,
     schedule: ScheduledMessage,
-    owner_id: str,
     *,
     store: ScheduleStore,
-    team_id: str,
-    verifier: Optional[AuthorityTokenVerifier] = None,
 ) -> bool:
-    """Whether ``owner_id`` on ``schedule`` is vouched for by trusted installation state.
+    """Whether ``schedule`` is vouched for by the ``owner_vouched`` column or is system-managed (F4).
 
-    True when the schedule row carries ``owner_vouched = 1`` (from ``schedules.install``,
-    vouched import, upgrade conversion, or a prior verified gateway token), when the
-    schedule is runtime/system-managed, or when its stored
-    ``payload_meta.gateway_context.task_context`` is a verified gateway-signed authority
-    token for ``owner_id``. When the fallback succeeds, ``owner_vouched = 1`` is recorded
-    durably for ``owner_id`` so future gateway certificate renewals or epoch changes never
-    invalidate the schedule (C25).
+    The ``owner_vouched`` column is the sole vouching source for user schedules (written by
+    ``schedules.install``, upgrade conversion, and team-transfer import). Embedded saved
+    tokens are never used as a fallback and never mutate ``owner_vouched``.
     """
 
     if store.is_owner_vouched(schedule_id):
         return True
-    if is_system_managed_schedule(schedule):
-        return True
-    gateway_context = getattr(schedule.payload_meta, "gateway_context", None)
-    if gateway_vouches(gateway_context, owner_id, team_id=team_id, verifier=verifier):
-        return store.mark_owner_vouched(schedule_id, checked_owner=owner_id)
-    return False
+    return bool(is_system_managed_schedule(schedule))
 
 
 class SchedulerOperations:
@@ -282,32 +275,27 @@ class SchedulerOperations:
         owner: PersonNow = self._people.person(owner_id)
         if inactive_owner(owner, schedule_id=scheduled_job_id) or not owner.active:
             return {"outcome": "owner_inactive", "message": "The schedule's owner is not active."}
-        if not is_schedule_vouched(
-            schedule_id,
-            schedule,
-            owner_id,
-            store=self._store,
-            team_id=self._team_id,
-            verifier=self._verifier_fn(),
-        ):
-            self._store.set_run_permit(
-                schedule_id,
-                permit=None,
-                owner_permit=None,
-                checked_owner=owner_id,
-                recheck_at=now + RECHECK_REFUSED_AFTER,
-                refusal_reason=REFUSED_NOT_VOUCHED,
-            )
-            return {"outcome": "owner_inactive", "message": "The schedule's owner is not vouched for."}
         person_ref = _person_ref_of(self._people, owner_id)
         if person_ref is None:
             return {"outcome": "owner_inactive", "message": "The schedule's owner has no person reference."}
 
+        vouched = is_schedule_vouched(schedule_id, schedule, store=self._store)
+        run_prefix = SCHEDULE_RUN_CONTEXT_PREFIX if vouched else UNVOUCHED_RUN_CONTEXT_PREFIX
+        if not vouched:
+            self._logger.info(
+                "Signing an unvouched person's scheduled run with the no-roles marker. "
+                "event=scheduler_run_context_signed_unvouched schedule_id=%s scheduled_job_id=%s "
+                "agent_id=%s request_id=%s",
+                schedule_id,
+                scheduled_job_id,
+                asking_agent,
+                request_id,
+            )
         token = root_task_token(
             identity,
             team=self._team_id,
             root_task_id=root_task_id,
-            request_id=f"schedule_run_{uuid4().hex}",
+            request_id=f"{run_prefix}{uuid4().hex}",
             person_ref=person_ref,
             schedule_id=scheduled_job_id,
             issued=now,
@@ -374,8 +362,6 @@ class SchedulerOperations:
 
     def _permit_person_ref(
         self,
-        schedule_id: str,
-        schedule: ScheduledMessage,
         owner: Optional[str],
     ) -> tuple[Optional[str], Optional[str]]:
         """Return ``(person_ref, refusal_reason)`` for a person's schedule permit."""
@@ -384,15 +370,6 @@ class SchedulerOperations:
             return None, REFUSED_NO_OWNER
         if not self._people.person(owner).active:
             return None, REFUSED_OWNER_NOT_ACTIVE
-        if not is_schedule_vouched(
-            schedule_id,
-            schedule,
-            owner,
-            store=self._store,
-            team_id=self._team_id,
-            verifier=self._verifier_fn(),
-        ):
-            return None, REFUSED_NOT_VOUCHED
         person_ref = _person_ref_of(self._people, owner)
         if person_ref is None:
             return None, REFUSED_NO_PERSON_REF
@@ -423,8 +400,8 @@ class SchedulerOperations:
             )
             permit = AuthorityTokenRecord.model_validate(permit_dict)
             owner_permit: Optional[AuthorityTokenRecord] = None
-            if owner:
-                owner_ref, owner_refusal = self._permit_person_ref(schedule_id, schedule, owner)
+            if owner and is_schedule_vouched(schedule_id, schedule, store=self._store):
+                owner_ref, owner_refusal = self._permit_person_ref(owner)
                 if owner_refusal is None and owner_ref is not None:
                     owner_permit_dict = schedule_permit_token(
                         identity,
@@ -457,7 +434,7 @@ class SchedulerOperations:
             )
             return
 
-        person_ref, refusal = self._permit_person_ref(schedule_id, schedule, owner)
+        person_ref, refusal = self._permit_person_ref(owner)
         if refusal is not None or person_ref is None:
             reason = refusal or REFUSED_NO_PERSON_REF
             self._store.set_run_permit(
@@ -478,12 +455,20 @@ class SchedulerOperations:
             )
             return
 
+        system_managed = is_system_managed_schedule(schedule)
+        vouched_col = self._store.is_owner_vouched(schedule_id)
+        vouched = vouched_col or system_managed
+        # User-schedule permit writes are conditional on the checked owner_vouched state (F4)
+        # so a concurrent unvouching replace can never receive a stale vouched permit.
+        require_owner_vouched: Optional[bool] = None if system_managed else vouched_col
+
         permit_dict = schedule_permit_token(
             identity,
             team=self._team_id,
             schedule_id=schedule_id,
             person_ref=person_ref,
             owner_permit=False,
+            unvouched=not vouched,
             issued=now,
         )
         permit = AuthorityTokenRecord.model_validate(permit_dict)
@@ -494,14 +479,17 @@ class SchedulerOperations:
             owner_permit=None,
             checked_owner=owner,
             recheck_at=expires_at - RENEW_WITHIN,
+            require_owner_vouched=require_owner_vouched,
         ):
             return
         (result.renewed if renewing else result.issued).append(schedule_id)
         self._logger.info(
-            "Issued a schedule's run permit. event=%s schedule_id=%s person_id=%s token_id=%s expires_at=%s",
+            "Issued a schedule's run permit. event=%s schedule_id=%s person_id=%s vouched=%s "
+            "token_id=%s expires_at=%s",
             "schedule_permit_renewed" if renewing else "schedule_permit_issued",
             schedule_id,
             owner,
+            vouched,
             permit.token_id,
             permit.expires_at,
         )

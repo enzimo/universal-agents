@@ -529,7 +529,12 @@ def save_schedule(
         repeat_count=None,
         next_fire_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),  # due now
     )
-    world.store.add(schedule, claim_team_id=TEAM, claim_named_agent_type=WORKER_TYPE)
+    world.store.add(
+        schedule,
+        claim_team_id=TEAM,
+        claim_named_agent_type=WORKER_TYPE,
+        owner_vouched=vouched,
+    )
     return schedule
 
 

@@ -312,7 +312,9 @@ supported, because it may not read what a newer one saved.
      signed task context and schedule permit (waiting tasks, deferred messages,
      handbacks, schedules, permits, and gateway deliveries) with the old public
      keys and re-signs them as protocol 1 authority tokens with the same person,
-     request id, and remaining lifetime. No runtime service or model-running
+     request id, and remaining lifetime (0.9 scheduled runs that were signed
+     with no owner roles receive the signed unvouched marker so they stay
+     roleless after the upgrade). No runtime service or model-running
      process ever receives the old keys. If your 0.9 instance has no stored
      records that need conversion, this first start still succeeds without
      touching NATS. Once done, 0.10 writes
