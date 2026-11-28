@@ -34,7 +34,8 @@ def test_tool_providers_have_unique_names_and_tool_ownership() -> None:
     # get_execution_ssh_command, enroll_execution_ssh_key, run_execution_ssh_sudo,
     # upload_execution_ssh_bundle).
     # workspace_file_link was added to FILES_PROVIDER (fn:files).
-    assert len(ALL_PROVIDER_TOOLS) == 180
+    # wait (fn:wait) and long_wait (fn:long_wait) were added on 2026-11-26.
+    assert len(ALL_PROVIDER_TOOLS) == 182
 
 
 def test_agent_catalog_does_not_reexport_tool_registry_ownership() -> None:

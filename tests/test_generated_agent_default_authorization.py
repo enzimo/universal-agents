@@ -86,7 +86,7 @@ def test_default_settings_need_a_person_for_the_specialist_and_again_for_its_res
 
     # The specialist's approval does not apply the restart.
     reused = run_apply_change(agent, restart_plan["change_id"], call)
-    assert reused["status"] == "refused" and "changed after it was approved" in reused["reason"]
+    assert reused["status"] == "refused" and "belongs to another change" in reused["reason"]
     assert not list(_restart_requests(agent).glob("*.json"))
 
     restart_call = ToolCall("tooluse_restart")

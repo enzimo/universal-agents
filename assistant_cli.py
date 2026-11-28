@@ -1488,7 +1488,7 @@ def build_parser() -> argparse.ArgumentParser:
     access_revoke.add_argument("grant_id", help="The grant to revoke")
     access_block = access_commands.add_parser(
         "block",
-        help="Stop an agent type, agent, person, role or the team from using a tool set, tool, operation or folder",
+        help="Stop an agent type, agent, person, role or the team from using a tool set, tool, operation, folder or file path",
     )
     access_block.add_argument("--config", required=True, help="Path to instance_config.yaml")
     access_block.add_argument("--by", default=None, help="The person blocking (default: the default user)")
@@ -1505,7 +1505,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--tool", default=None, help="Tool id, tool#operation for one operation, or a tool set id such as internet"
     )
     access_block.add_argument("--operation", default=None, help="One operation, as tool#operation")
-    access_block.add_argument("--folder", default=None, help="Folder below team/, agents/ or data/<name>/")
+    access_block.add_argument("--folder", default=None, help="Folder or file path below team/, agents/ or data/<name>/")
     access_block.add_argument("--reason", required=True, help="Why, for the record and for the people who see it")
     access_block.add_argument(
         "--hours", type=int, default=None, help="Remove the block after this many hours (default: until removed)"

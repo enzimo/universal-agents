@@ -47,6 +47,26 @@ Enable thread-scoped sessions when you want independent conversations by thread:
 --discord-thread-scoped-sessions
 ```
 
+## Allowlists and Slash Commands
+
+`allowed_user_ids` and `allowed_channel_ids` apply to Discord slash commands
+with the same rule used for ordinary text and voice messages:
+
+- In guild channels and threads, both `allowed_channel_ids` (matching the
+  channel or a thread's parent channel) and `allowed_user_ids` (unless the
+  sender is a registered user) must allow the request.
+- In a one-to-one DM with the bot, a registered user (when
+  `gateway.users.enabled` is true) is allowed even when `allowed_channel_ids`
+  is set, whether the Discord app was installed for a server or for the user.
+- DMs and group DMs between other people through a user-installed app are not
+  treated as a DM with the bot and obey `allowed_channel_ids`.
+- When `allowed_channel_ids` is non-empty, anyone who is not a registered user
+  (including an owner listed in `allowed_user_ids` when `gateway.users.enabled`
+  is false) is refused in a bot DM for both messages and slash commands.
+- A refused slash command receives an ephemeral reply without running the
+  command, and the gateway logs `newuser_target=<discord_user_id>` for
+  onboarding.
+
 ## Group Policy
 
 `discord.group_policy` controls how guild channels accept ordinary text:

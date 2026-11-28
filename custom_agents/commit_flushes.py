@@ -26,7 +26,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from custom_transport.send_barrier import install_before_send
+from custom_transport.send_barrier import before_send, install_before_send
 from storage import sqlite_connection
 
 _LOGGER = logging.getLogger(__name__)
@@ -93,3 +93,34 @@ def flush_commits_at_exit(logger: logging.Logger) -> None:
         # Already logged with the database (event=sqlite_flush_failed); the
         # process is ending and these records were never sent anywhere.
         logger.warning("Exiting with SQLite commits that are not flushed. event=sqlite_flush_at_exit_failed")
+
+
+async def flush_local_pause_commits(
+    logger: logging.Logger,
+    *,
+    agent_id: str,
+    task_id: str,
+    pause_kind: str,
+) -> bool:
+    """Flush deferred SQLite commits after a local pause (``WAITING``) that may send nothing to NATS.
+
+    Reuses the process's send barrier (``custom_transport.send_barrier.before_send``)
+    so it is a no-op where deferral is off and a failed flush still stops future
+    sends as decision 82 requires. Never raises or undoes the pause: logs the
+    failure with identifiers and returns False.
+    """
+
+    try:
+        await before_send()
+    except Exception as exc:  # noqa: BLE001 - keep the local pause; send barrier already stopped future sends
+        logger.warning(
+            "Could not flush deferred SQLite commits after local pause; keeping the pause in place. "
+            "event=local_pause_commit_flush_failed agent_id=%s task_id=%s pause_kind=%s error_type=%s",
+            agent_id,
+            task_id,
+            pause_kind,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return False
+    return True

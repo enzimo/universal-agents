@@ -31,7 +31,12 @@ import custom_agents.team_skill_changes as team_skill_changes
 from access_control.changes import ChangeApproval
 from assistant_gateway.config import GatewayInstanceConfig
 from custom_agents import access_runtime
-from custom_agents.skill_installation import SkillInstallationService, verify_managed_skill_attestation
+from custom_agents.skill_installation import (
+    SkillInstallationService,
+    verify_managed_skill_attestation,
+    verify_managed_skill_attestation_digest,
+    verify_managed_skill_attestation_paths,
+)
 from custom_agents.skill_repository import SkillScanRejected, SkillScanResult
 from custom_agents.skill_uninstallation import SkillUninstallationService
 from custom_agents.team_config_helpers import filter_agent_tools
@@ -528,3 +533,64 @@ def test_disabled_skill_installation_hides_its_tools_and_refuses_plans(
         SkillInstallationService(agent).stage(repository_url=REPOSITORY_URL)
     with pytest.raises(PermissionError, match="disabled by operator configuration"):
         SkillUninstallationService(agent).stage(skill_name="reviewed-skill")
+
+
+def test_verify_managed_skill_attestation_digest_matches_path_verifier(tmp_path: Path) -> None:
+    from custom_agents.skill_repository import build_skill_tree_manifest
+
+    installed_root = tmp_path / "installed"
+    attestations_root = tmp_path / "attestations"
+    skill_dir = installed_root / "reviewed-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: reviewed-skill\ndescription: Demo.\n---\n", encoding="utf-8")
+    digest = build_skill_tree_manifest(skill_dir).tree_sha256
+
+    attestation = {
+        "skill_name": "reviewed-skill",
+        "installed_path": str(skill_dir.resolve()),
+        "tree_sha256": digest,
+    }
+    attestations_root.mkdir(parents=True)
+    (attestations_root / "reviewed-skill.json").write_text(json.dumps(attestation), encoding="utf-8")
+
+    assert (
+        verify_managed_skill_attestation_digest(
+            skill_name="reviewed-skill",
+            attestation=attestation,
+            tree_sha256=digest,
+        )
+        == digest
+    )
+    assert (
+        verify_managed_skill_attestation_paths(
+            skill_path=skill_dir,
+            installed_root=installed_root,
+            attestations_root=attestations_root,
+        )
+        == digest
+    )
+
+    with pytest.raises(PermissionError, match="targets another skill"):
+        verify_managed_skill_attestation_digest(
+            skill_name="other-skill",
+            attestation=attestation,
+            tree_sha256=digest,
+        )
+    with pytest.raises(PermissionError, match="changed after their reviewed installation"):
+        verify_managed_skill_attestation_digest(
+            skill_name="reviewed-skill",
+            attestation=attestation,
+            tree_sha256="0" * 64,
+        )
+    with pytest.raises(ValueError, match="SHA-256"):
+        verify_managed_skill_attestation_digest(
+            skill_name="reviewed-skill",
+            attestation={"skill_name": "reviewed-skill", "tree_sha256": "not-a-digest"},
+            tree_sha256=digest,
+        )
+    with pytest.raises(PermissionError, match="unreadable"):
+        verify_managed_skill_attestation_digest(
+            skill_name="reviewed-skill",
+            attestation="not-a-mapping",  # type: ignore[arg-type]
+            tree_sha256=digest,
+        )

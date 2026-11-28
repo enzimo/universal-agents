@@ -51,6 +51,7 @@ from runtime_settings.model_request_options import (
 )
 from runtime_settings.environment import _apply_env_overrides
 from runtime_settings.governance import refuse_removed_access_settings
+from runtime_settings.timed_waits import refuse_per_type_wait_limits
 from runtime_settings.worker_pools import move_worker_capacity_settings
 from runtime_settings.retired_concurrency import (
     drop_retired_concurrency_setting, refuse_retired_concurrency_setting,
@@ -1119,6 +1120,9 @@ def resolve_agent_type_settings(
         "access_workflows": _mapping_or_empty(raw_config.get("access_workflows")),
         "execution_control": _mapping_or_empty(raw_config.get("execution_control")),
     }
+    # Any agent type's override refuses every resolution, not only that type's start.
+    for type_name, overrides in _mapping_or_empty(raw_config.get("agent_types")).items():
+        refuse_per_type_wait_limits(_mapping_or_empty(_mapping_or_empty(overrides).get("agent")), str(type_name))
     if agent_type:
         agent_overrides = _mapping_or_empty(
             _mapping_or_empty(raw_config.get("agent_types")).get(agent_type)

@@ -60,6 +60,7 @@ DISCORD_BOT_TOKEN_ENV_VAR = "DISCORD_BOT_TOKEN"
 DISCORD_MAX_MESSAGE_LEN = 2000
 DISCORD_TYPING_REPEAT_SECONDS = 8.0
 VOICE_UNAVAILABLE_TEXT = "Voice input is not available for this assistant right now. Please send your message as text."
+DISCORD_SLASH_COMMAND_REFUSED_TEXT = "You are not allowed to use this command here."
 DISCORD_COMMAND_SPECS = (
     ("help", "Show available commands"),
     ("docs", "Open documentation"),
@@ -712,6 +713,13 @@ class DiscordInteractiveApp(BaseInteractiveApp):
         interaction,
         raw_text: str,
     ) -> None:
+        if not self._is_allowed_interaction(interaction):
+            await self._send_interaction_text(
+                interaction,
+                DISCORD_SLASH_COMMAND_REFUSED_TEXT,
+                ephemeral=True,
+            )
+            return
         user = getattr(interaction, "user", None)
         channel = getattr(interaction, "channel", None)
         user_id = str(getattr(user, "id", "discord_unknown"))
@@ -808,19 +816,17 @@ class DiscordInteractiveApp(BaseInteractiveApp):
             "bot can start sessions until an allowlist is configured."
         )
 
-    def _is_allowed(self, message) -> bool:
-        author = getattr(message, "author", None)
-        channel = getattr(message, "channel", None)
-        user_id = str(getattr(author, "id", "discord_unknown"))
-        channel_id = str(getattr(channel, "id", ""))
-        chat_id, _thread_id = self._resolve_channel_ids(channel)
-        channel_type = getattr(
-            channel,
-            "type",
-            type(channel).__name__ if channel is not None else "unknown",
-        )
+    def _is_allowed_source(
+        self,
+        *,
+        user_id: str,
+        channel_id: str,
+        chat_id: str,
+        channel_type: object,
+        is_direct_message: bool,
+        event_kind: str,
+    ) -> bool:
         registered_user = self.is_registered_gateway_user(user_id)
-        is_direct_message = getattr(message, "guild", None) is None
         if registered_user and is_direct_message:
             return True
         if (
@@ -829,8 +835,9 @@ class DiscordInteractiveApp(BaseInteractiveApp):
             and chat_id not in self.config.allowed_channel_ids
         ):
             logger.info(
-                "Ignoring Discord message from non-allowed channel: channel_id=%s chat_id=%s channel_type=%s "
+                "Ignoring Discord %s from non-allowed channel: channel_id=%s chat_id=%s channel_type=%s "
                 "user_id=%s newuser_target=%s.",
+                event_kind,
                 channel_id,
                 chat_id,
                 channel_type,
@@ -844,8 +851,9 @@ class DiscordInteractiveApp(BaseInteractiveApp):
             and not registered_user
         ):
             logger.info(
-                "Ignoring Discord message from non-allowed user: user_id=%s channel_id=%s chat_id=%s "
+                "Ignoring Discord %s from non-allowed user: user_id=%s channel_id=%s chat_id=%s "
                 "channel_type=%s newuser_target=%s.",
+                event_kind,
                 user_id,
                 channel_id,
                 chat_id,
@@ -854,6 +862,57 @@ class DiscordInteractiveApp(BaseInteractiveApp):
             )
             return False
         return True
+
+    def _is_allowed(self, message: object) -> bool:
+        author = getattr(message, "author", None)
+        channel = getattr(message, "channel", None)
+        user_id = str(getattr(author, "id", "discord_unknown"))
+        channel_id = str(getattr(channel, "id", ""))
+        chat_id, _thread_id = self._resolve_channel_ids(channel)
+        channel_type = getattr(
+            channel,
+            "type",
+            type(channel).__name__ if channel is not None else "unknown",
+        )
+        return self._is_allowed_source(
+            user_id=user_id,
+            channel_id=channel_id,
+            chat_id=chat_id,
+            channel_type=channel_type,
+            is_direct_message=_is_direct_message(message),
+            event_kind="message",
+        )
+
+    def _is_allowed_interaction(self, interaction: object) -> bool:
+        user = getattr(interaction, "user", None)
+        channel = getattr(interaction, "channel", None)
+        user_id = str(getattr(user, "id", "discord_unknown"))
+        channel_id = str(getattr(channel, "id", ""))
+        chat_id, _thread_id = self._resolve_channel_ids(channel)
+        channel_type = getattr(
+            channel,
+            "type",
+            type(channel).__name__ if channel is not None else "unknown",
+        )
+        is_direct = _is_direct_interaction(interaction)
+        if not is_direct and _is_interaction_context_missing(interaction):
+            logger.warning(
+                "Discord slash command has no server id and neither bot-DM nor private-channel "
+                "context; failing closed as non-DM: event=discord_interaction_context_missing "
+                "user_id=%s channel_id=%s chat_id=%s channel_type=%s.",
+                user_id,
+                channel_id,
+                chat_id,
+                channel_type,
+            )
+        return self._is_allowed_source(
+            user_id=user_id,
+            channel_id=channel_id,
+            chat_id=chat_id,
+            channel_type=channel_type,
+            is_direct_message=is_direct,
+            event_kind="slash command",
+        )
 
     def _should_process_message(self, message, text: str) -> bool:
         if getattr(message, "guild", None) is None:
@@ -1097,38 +1156,57 @@ class DiscordInteractiveApp(BaseInteractiveApp):
             return "reply.ogg"
         return "reply.mp3"
 
+    @staticmethod
+    def _interaction_send_kwargs(
+        *, view: object, include_view: bool, ephemeral: bool
+    ) -> dict[str, object]:
+        kwargs: dict[str, object] = {}
+        if ephemeral:
+            kwargs["ephemeral"] = True
+        if include_view and view is not None:
+            kwargs["view"] = view
+        return kwargs
+
     async def _send_interaction_text(
-        self, interaction, text: str, *, view=None
+        self,
+        interaction: object,
+        text: str,
+        *,
+        view: object = None,
+        ephemeral: bool = False,
     ) -> None:
-        chunks = _split_discord_text(text)
-        if not chunks:
-            chunks = [""]
+        chunks = _split_discord_text(text) or [""]
         response = getattr(interaction, "response", None)
         followup = getattr(interaction, "followup", None)
         if response is None:
             raise RuntimeError("Discord interaction is missing a response handle.")
-        if hasattr(response, "is_done") and response.is_done():
-            for chunk_index, chunk in enumerate(chunks):
-                if followup is None:
-                    raise RuntimeError(
-                        "Discord interaction followup handle is not available."
-                    )
-                if view is not None and chunk_index == len(chunks) - 1:
-                    await followup.send(chunk, view=view)
-                else:
-                    await followup.send(chunk)
+        start_index = 0
+        if not (hasattr(response, "is_done") and response.is_done()):
+            await response.send_message(
+                chunks[0],
+                **self._interaction_send_kwargs(
+                    view=view, include_view=len(chunks) == 1, ephemeral=ephemeral
+                ),
+            )
+            start_index = 1
+        if start_index >= len(chunks):
             return
-        if view is not None and len(chunks) == 1:
-            await response.send_message(chunks[0], view=view)
-        else:
-            await response.send_message(chunks[0])
         if followup is None:
+            if start_index == 0:
+                raise RuntimeError(
+                    "Discord interaction followup handle is not available."
+                )
             return
-        for chunk_index, chunk in enumerate(chunks[1:], start=1):
-            if view is not None and chunk_index == len(chunks) - 1:
-                await followup.send(chunk, view=view)
-            else:
-                await followup.send(chunk)
+        last_index = len(chunks) - 1
+        for chunk_index in range(start_index, len(chunks)):
+            await followup.send(
+                chunks[chunk_index],
+                **self._interaction_send_kwargs(
+                    view=view,
+                    include_view=chunk_index == last_index,
+                    ephemeral=ephemeral,
+                ),
+            )
 
     async def _send_text(
         self,
@@ -1376,14 +1454,31 @@ def _is_direct_message(message: object) -> bool:
 
 
 def _is_direct_interaction(interaction: object) -> bool:
-    """A slash command run in a DM with the bot: no server, and not through a user install.
+    """A slash command run in the one-to-one DM with the bot.
 
-    An app a person installed for themselves can run commands in DMs and
-    group DMs with other people, which also have no server; those are not
-    private (``is_user_integration``).
+    Discord reports where the command ran in ``interaction.context`` (discord.py
+    2.4+): ``context.dm_channel`` is True only in the DM with the bot, whether
+    the app was installed for a server or for the person. Commands run in a
+    guild, in a DM or group DM between other people
+    (``context.private_channel``), or without context information fail closed.
     """
 
     if getattr(interaction, "guild_id", _UNKNOWN) is not None:
         return False
-    user_install = getattr(interaction, "is_user_integration", None)
-    return callable(user_install) and not user_install()
+    context = getattr(interaction, "context", None)
+    return (
+        getattr(context, "dm_channel", False) is True
+        and getattr(context, "private_channel", False) is not True
+    )
+
+
+def _is_interaction_context_missing(interaction: object) -> bool:
+    """True when a non-guild interaction reports neither bot-DM nor private-channel context."""
+
+    if getattr(interaction, "guild_id", _UNKNOWN) is not None:
+        return False
+    context = getattr(interaction, "context", None)
+    return (
+        getattr(context, "dm_channel", False) is not True
+        and getattr(context, "private_channel", False) is not True
+    )

@@ -30,7 +30,6 @@ import hashlib
 import hmac
 import json
 import logging
-import mimetypes
 import os
 import stat
 import tempfile
@@ -43,6 +42,14 @@ from typing import Any
 from access_control import safe_open
 from access_control.safe_open import UnsafePath
 from access_control.sensitive_paths import sensitive_reason
+from assistant_gateway.attachment_media import (
+    DEFAULT_ATTACHMENT_CONTENT_TYPE,
+    INLINE_IMAGE_CONTENT_TYPES,
+    AttachmentKind,
+    attachment_kind_for_content_type,
+    parse_media_type,
+    resolve_attachment_content_type,
+)
 from custom_messages.contracts.delivery_v1 import UserNotificationAttachment
 from id_generation import new_id
 from runtime_settings.instance_layout import (
@@ -224,21 +231,41 @@ def _normalize_path(raw_path: Any, *, home: Path) -> Path:
     return candidate.resolve()
 
 
-def _infer_attachment_kind(*, requested: str | None, content_type: str, path: Path) -> str:
+def _infer_attachment_kind(*, requested: str | None, content_type: str) -> AttachmentKind:
+    """Derive ``kind`` from ``content_type`` and reject caller mismatches."""
+
     normalized = str(requested or "auto").strip().lower() or "auto"
     if normalized not in ATTACHMENT_KINDS:
         raise ValueError(f"kind must be one of {sorted(ATTACHMENT_KINDS)}")
-    if normalized != "auto":
-        return normalized
-    if content_type.startswith("image/"):
-        return "image"
-    if content_type.startswith("audio/"):
-        return "audio"
-    if content_type.startswith("video/"):
-        return "video"
-    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
-        return "image"
-    return "document"
+    derived = attachment_kind_for_content_type(content_type)
+    if normalized != "auto" and normalized != derived:
+        if content_type == DEFAULT_ATTACHMENT_CONTENT_TYPE:
+            raise ValueError(
+                f"kind {normalized!r} does not match content type {content_type!r} "
+                f"(sent as kind {derived!r}); set content_type to the file's media type "
+                "or leave kind out"
+            )
+        if normalized in {"audio", "video"}:
+            # Leaving kind out would send the file as ``derived`` (for example a
+            # voice.webm guessed as video/webm), so point at content_type instead.
+            raise ValueError(
+                f"kind {normalized!r} does not match content type {content_type!r} "
+                f"(sent as kind {derived!r}); set content_type to the file's "
+                f"{normalized} media type (for example '{normalized}/webm'), "
+                f"or leave kind out to send it as kind {derived!r}"
+            )
+        if content_type.startswith("image/") and derived == "document":
+            inline_types = ", ".join(sorted(INLINE_IMAGE_CONTENT_TYPES))
+            raise ValueError(
+                f"kind {normalized!r} does not match content type {content_type!r}: "
+                f"content type {content_type!r} is sent as kind {derived!r} "
+                f"(only {inline_types} are kind 'image'); leave kind out"
+            )
+        raise ValueError(
+            f"kind {normalized!r} does not match content type {content_type!r}: "
+            f"content type {content_type!r} is sent as kind {derived!r}; leave kind out"
+        )
+    return derived
 
 
 def validate_user_notification_attachments(
@@ -281,14 +308,25 @@ def validate_user_notification_attachments(
         if rejection:
             errors.append(f"attachments[{index}].path {rejection}: {resolved}")
             continue
-        content_type = str(payload.get("content_type") or "").strip()
-        if not content_type:
-            content_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+        raw_content_type = str(payload.get("content_type") or "").strip()
+        if raw_content_type:
+            parsed_content_type = parse_media_type(raw_content_type)
+            if parsed_content_type is None:
+                errors.append(
+                    f"attachments[{index}].content_type {raw_content_type!r} is not a "
+                    "media type such as 'image/png'; correct it or leave it out"
+                )
+                continue
+            content_type = parsed_content_type
+        else:
+            content_type = resolve_attachment_content_type(
+                None,
+                filename=resolved.name,
+            )
         try:
             kind = _infer_attachment_kind(
                 requested=str(payload.get("kind") or "auto"),
                 content_type=content_type,
-                path=resolved,
             )
         except ValueError as exc:
             errors.append(f"attachments[{index}].{exc}")
@@ -301,7 +339,7 @@ def validate_user_notification_attachments(
                 filename=filename,
                 content_type=content_type,
                 caption=caption,
-                kind=kind,  # type: ignore[arg-type]
+                kind=kind,
                 size_bytes=size_bytes,
             )
         )

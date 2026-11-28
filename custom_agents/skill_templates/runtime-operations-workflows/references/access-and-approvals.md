@@ -43,8 +43,15 @@ operator).
 ## Where access comes from
 
 - **Standard tools** come with a role: every agent can manage its own work,
+  use short timed pauses (`wait`, up to the team's without-approval limit per
+  task; delegated subtasks have their own budget),
   use files in its task's folders, and use the internet; TeamLead also has
   the team tools. They need no grant and cannot be removed, only blocked.
+  Longer timed pauses (`fn:long_wait`, level `write`, up to 24 hours per task) are not
+  in any standard tool set or starter profile: a person who holds `fn:long_wait`
+  approves requests for their own work in the Inbox (for one run, or kept for a
+  scheduled job); for a member who does not hold it, an administrator decides
+  the request, and approving it gives the member the access too.
 - **Starter profile**: each person chooses TeamLead's standing access for
   their own work with `/access profile` or on the Access page.
   - Trusted: the standard tool set plus shell and Python in the sandbox, which
@@ -185,6 +192,14 @@ operator).
 - Folders outside the workspace reach agents only as **data folders** that an
   administrator registers (`/access folders`, the Access page's Files tab, or
   a proposal); agents still need access to each one when access control is on.
+- A block on a folder or file path stops file tools from opening it and keeps
+  the containing folder out of sandboxed code; sibling files stay readable and
+  the blocked file's name still appears in its parent folder's listing. Blocks
+  match the exact spelling of a path. A folder holding a path TeamLead is
+  blocked from is not passed on to workers; the worker asks with
+  `request_access` and a person decides.
+- Access given on a file path does not open the file; ask for or give the
+  folder that holds it.
 
 ## Platform changes
 

@@ -66,7 +66,20 @@ before Chat unlocks.
 
 ## Guild Channels
 
-New direct-message users are accepted from the live registry immediately.
-Guild channels and threads still need to satisfy configured channel allowlists
-and group policy. Changing those channel allowlists is a static adapter config
-change and may require restart or config reload.
+New direct-message users are accepted from the live registry immediately for
+ordinary messages (including typed `/user` commands) and registered slash
+commands in their one-to-one DM with the bot when `gateway.users.enabled` is
+true. Guild channels and threads still need to satisfy configured channel
+allowlists and group policy. Slash commands obey `allowed_user_ids` and
+`allowed_channel_ids` with the same rule as text and voice messages: in a
+listed guild channel or a thread under one, an allowlisted user still passes
+even when `gateway.users.enabled` is false; in a bot DM, when
+`allowed_channel_ids` is non-empty, anyone who is not a registered user
+(including an owner listed in `allowed_user_ids` when `gateway.users.enabled`
+is false) is refused. DMs and group DMs between other people through a
+user-installed app are not treated as a bot DM and must satisfy
+`allowed_channel_ids`. Refused slash commands receive an ephemeral reply and
+are logged with `newuser_target=...`; see the `Allowlists and Slash Commands`
+section of the Discord channel guide (`channels/discord.md`) for the full
+rules. Changing those channel allowlists is a static adapter config change and
+may require restart or config reload.

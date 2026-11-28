@@ -96,8 +96,9 @@ then that person's own access.
 **Standard access.** Every agent may use the tools it needs for its own work
 without a grant: messages, its task queue, memory, skills, its execution plan
 and notes, its own status and configuration, the person's schedules and a
-record of the scheduled run it is doing, the file tools, and the access tools
-below. [Internet access](#internet-access) (web research and the network for
+record of the scheduled run it is doing, short timed pauses (`wait`, up to
+`agent.max_wait_minutes_without_approval` minutes per task), the file tools,
+and the access tools below. [Internet access](#internet-access) (web research and the network for
 code) is standard too, for every agent and every person, until someone blocks
 it. An agent may read and write the folder of the person its task works for
 and the shared `team/` and `agents/` folders; other folders need a grant or a
@@ -182,8 +183,16 @@ Shell commands and Python in the sandbox (`code:shell`, `code:python`) form
 their own tool set, **Sandboxed code**, which only the Trusted profile gives.
 Sandboxed code reaches only your own folders and the shared `team/` and
 `agents/` folders, and the network only with internet access. Running outside
-the sandbox (`code:unconfined`) and platform administration are in no profile;
-people give them with a grant. Model choice is in the Trusted profile only for
+the sandbox (`code:unconfined`), longer timed task pauses (`fn:long_wait` at
+level `write`, for tasks that need to wait beyond the without-approval limit up
+to `agent.max_wait_minutes_with_approval`, 24 hours max), and platform
+administration are in no starter profile. A person who already holds
+`fn:long_wait` (such as an administrator) approves requests for their own work
+in the Inbox; for a member who does not hold `fn:long_wait`, an administrator
+decides the request in the Inbox, and approving it gives the member the access
+too (no separate grant step is needed). With authorization off, `wait` is included on every role
+and an operator adds `fn:long_wait` to an agent type's `default_tools` when
+that type should have `long_wait`. Model choice is in the Trusted profile only for
 administrators. The profile's credential lookup (`cli:sealbox` and
 `procedure:credentials` at read) is given only to people who may give it
 themselves, which today means administrators; a member's Trusted profile leaves
@@ -304,9 +313,12 @@ as "Switch TeamArchitect to deepseek/deepseek-v4.1-flash (images on). Takes
 effect now.": only values that change are named, and it says when the change
 takes effect (now, or after a restart). Approving
 applies that plan once; if the file or the running work changed meanwhile,
-TeamLead must stage it again. Administrators approve these changes; a setting
-that belongs to one person, such as their own delivery target, can also be
-approved by that person. Team skills are the team's own: an administrator can
+TeamLead must stage it again. Administrators approve these changes. A few
+settings are marked so that the person who asked may approve them too (today
+the proactive delivery target and the context-debug dump settings); a plan
+made only of those settings can also be approved by the person who asked. A
+plan that mixes one of them with any other setting waits for an administrator.
+Team skills are the team's own: an administrator can
 let TeamLead install and remove them itself (full access to `fn:team_skills`),
 and then every change sends administrators a notice; without that, you approve
 each change the same way. With authorization off, TeamLead asks for your
@@ -593,13 +605,26 @@ request_access(folder='data/reports/2026', level='read', reason='Summarize the 2
 The request goes through the same steps as a request for a tool (see
 [How agents get access](#how-agents-get-access)). A worker's task gets a
 folder from TeamLead's access the same way as a tool, only a folder inside the
-one TeamLead holds, and TeamLead can block a worker from one in the current
-request with `restrict_access(agent_type=..., folder=..., reason=...)`. People give and
-block folders with `/access` and `assistant_cli access` (examples below).
+one TeamLead holds, and TeamLead can block a worker from a folder or file path
+in the current request with `restrict_access(agent_type=..., folder=..., reason=...)`.
+TeamLead does not pass on a folder that holds a file or folder TeamLead itself
+is blocked from, because the worker would get the blocked path with it; the
+worker then asks with `request_access` and a person decides. If the person
+approves, the worker gets the whole folder for its task, including the path
+TeamLead is blocked from, because that block applies only to TeamLead; with
+**Keep**, TeamLead also keeps the folder for later tasks but still does not
+pass it on while the block is inside it. To keep a file from every agent,
+block it for the `worker` role as well (`--role worker`), or, to keep it
+from people too, for the whole team (`--team`).
+People give and block folders (and block file paths) with `/access` and
+`assistant_cli access` (examples below).
 
 A grant, revocation or block applies to the next file an agent opens. An
-allowed answer is kept for up to 10 seconds per folder, so a grant that ends
-at a set time can still be used for those few seconds.
+allowed answer for a folder is kept for up to 10 seconds per folder (excluding
+any blocked direct children, which are always checked against the access
+service), so a grant that ends at a set time can still be used for those few
+seconds. Access to a single shared file is kept only for that exact file and
+never opens its sibling files or its parent folder.
 
 **Links.** File tools look at where a path really points. A link inside the
 person's folder that points at their own files works; a link that points
@@ -634,8 +659,20 @@ copies it once into `scratch/sent/` of that person's folder, recording the
 copy's fingerprint (SHA-256). Every chat and Web Chat send that copy only while
 it still matches, so the file the person receives is the file that was
 checked; a copy that was changed or replaced by a link afterwards is not sent,
-and Web Chat shows it as no longer available. Copies are deleted with the rest
-of `scratch/` ([Scratch retention](configuration.md#scratch-retention)).
+and Web Chat shows it as no longer available. In Web Chat, every attachment
+response is sandboxed with `nosniff` so attachments cannot run scripts on the
+Web Chat site: PNG, JPEG, GIF, and WebP images open inline, audio and video play
+in the chat and download if opened directly in a new tab, and all other files
+(including SVG and HTML) download as binary attachments. Copies are deleted
+with the rest of `scratch/` ([Scratch retention](configuration.md#scratch-retention)).
+
+After an upgrade, a message an agent sent with the older attachment format can
+arrive without some of its files. The gateway checks every attachment again
+and leaves out a file whose stated kind does not match its media type (for
+example an SVG, HEIC or other non-PNG/JPEG/GIF/WebP image marked as an image, or
+a PNG marked as a document) or whose `content_type` is not a media type (such
+as `png`). The message text still arrives, and the gateway log records each
+left-out file as `outgoing_attachment_skipped`.
 
 With authorization off there are no folder decisions: agents use the task's
 folders and every data folder, read-only where it was registered so.
@@ -773,9 +810,18 @@ works for, checked for every command:
   work are made available read-write where both may write, read-only where
   they may only read, and not at all otherwise. One-time grants do not count
   here, because a command keeps its folders until it ends. The sandbox cannot
-  leave out part of a folder, so a folder with a blocked folder inside it is
-  left out entirely; the command result's sandbox note says so, and file tools
-  still reach the rest.
+  leave out part of a folder, so a folder with a blocked folder or file inside
+  it is left out entirely; the command result's sandbox note says so, and file
+  tools still reach the rest. This holds for a block on a single file too: a
+  block on one file in a person's own folder or in `team/` keeps that whole
+  folder out of every shell and Python command the block applies to, even
+  when it is the folder commands start in, and for as long as the block
+  exists, including after the file itself is deleted. To give code the folder
+  back, remove the block with `/access unblock <block id>` (`/access list`
+  shows its id). Code mounts are folders only, and the sandbox
+  never mounts a folder whose path contains a symbolic link or that the runtime
+  itself cannot open; those are skipped with a sandbox note and a warning log
+  (and any link appearing after planning is refused before the command starts).
 - **Network.** Commands can open network connections when the agent and its
   person hold [internet access](#internet-access), which everyone has until
   someone blocks it. The level on `code:shell` or `code:python` has nothing to
@@ -850,6 +896,14 @@ checks the following, whether authorization is on or off:
 4. **For web requests, the web API tool that covers the host.** Requests to
    any other host are refused (`access_unlisted_host`). Public pages remain
    available through the web research tools.
+5. **For `gh`, `gog` and installed CLIs, that the argument list can be read.**
+   A list the command parser refuses (for example a combined short flag such
+   as `-abc`, a `--` separator, an option between command words, arguments
+   sent as one string instead of a list, or a `gh api` line with an unknown
+   or repeated option) is refused with `cli_command_line_rejected` before any
+   access decision, even for full access holders. The reply says what to
+   change; there is no access to request, because no grant makes the line
+   readable.
 
 With authorization enabled, the broker then checks that the agent holds the
 needed level for the work of the person it works for, and that the person
@@ -979,8 +1033,8 @@ single-person mode) and that nothing needs to be given or blocked;
 ### Blocking access
 
 A block stops an agent type, one agent, a person, everyone with a role, or the
-whole team from using a tool set, a tool, one of its operations, or a folder,
-whatever grants exist. It applies from the next action, and blocks always win
+whole team from using a tool set, a tool, one of its operations, a folder, or a
+file path, whatever grants exist. It applies from the next action, and blocks always win
 over grants, including standard access such as [internet
 access](#internet-access). An administrator's block is immediate and recorded
 in the access log. Use blocks to stop access now.
@@ -999,6 +1053,10 @@ assistant_cli.py access block --config /data/instance_config.yaml \
 assistant_cli.py access block --config /data/instance_config.yaml \
   --agent-type ResearchComparisonAgent --folder team/finance --reason "Payroll files"
 
+# Block one file while leaving sibling files in the same folder readable.
+assistant_cli.py access block --config /data/instance_config.yaml \
+  --agent-type WebResearchAgent --folder team/finance/payroll.csv --reason "Payroll is private"
+
 # Turn internet access off for everyone in the team (--tool also takes a tool set).
 assistant_cli.py access block --config /data/instance_config.yaml \
   --team --tool internet --reason "Offline week"
@@ -1010,13 +1068,15 @@ assistant_cli.py access unblock grant_4567efgh --config /data/instance_config.ya
 | Option | Meaning |
 | --- | --- |
 | `--agent-type`, `--agent`, `--person`, `--role`, `--team` | Who is blocked: every agent of a type, one agent by id, a person and every agent working for them, everyone holding a role (such as `worker` or `member`), or the whole team (exactly one) |
-| `--tool`, `--operation`, `--folder` | What is blocked: a tool id or tool set id (such as `internet`), one operation as `tool#operation`, or a folder below `team/`, `agents/` or `data/<name>/` (exactly one) |
+| `--tool`, `--operation`, `--folder` | What is blocked: a tool id or tool set id (such as `internet`), one operation as `tool#operation`, or a folder or file path below `team/`, `agents/` or `data/<name>/` (exactly one) |
 | `--reason` | Why; required, and shown wherever the block is listed |
 | `--hours` | End the block after this many hours; without it the block lasts until removed |
 | `--replace <block id>` | Replace a block on a removed operation with a block on a current operation of the same tool, for the same subject. Keeps the old expiry; cannot be combined with `--hours` |
 
 In chat, `/access block <who> <target> --reason "why" [--hours 24]` names who
-as `agent-type:<Type>`, `agent:<id>`, `user:<id>`, `role:<name>` or `team`.
+as `agent-type:<Type>`, `agent:<id>`, `user:<id>`, `role:<name>` or `team`,
+and accepts a tool, tool set, operation, folder, or file path (for example
+`/access block agent-type:WebResearchAgent team/finance/payroll.csv --reason "Payroll is private"`).
 
 Who may block and unblock:
 
@@ -1030,10 +1090,18 @@ Who may block and unblock:
 - `revoke` does not remove blocks; use `unblock`.
 - An agent that is blocked is told so when it tries the tool, and asking for
   access is refused, because no grant can override a block.
-- A folder block covers everything inside the folder, including the standard
-  `team/` and `agents/` access. Shell and Python commands then do not get the
-  folder that contains the blocked one at all (see
-  [Shell and Python code](#shell-and-python-code)).
+- A block on a folder covers everything inside the folder, including the
+  standard `team/` and `agents/` access. A block on a file path stops file
+  tools from reading, writing, moving, or inspecting that file (including
+  before the file is created), while sibling files stay accessible and the
+  blocked file's name and size still show in its folder's listing. Shell and
+  Python commands then do not get the folder that contains the blocked folder
+  or file at all (see [Shell and Python code](#shell-and-python-code)). Blocks
+  match the exact spelling of a path.
+- Access given on a file path does not open that file. Grants made with
+  `/access grant` or `assistant_cli access grant --folder`, and approved
+  requests that name a file, count only for folders, so give the folder that
+  holds the file.
 
 TeamLead's `restrict_access` creates the same kind of block on a worker, but
 only for the request TeamLead is working on: it counts in that request, ends

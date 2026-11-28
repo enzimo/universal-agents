@@ -35,7 +35,7 @@ from strands.models.model import Model as _StrandsModel
 
 from custom_agents import access_runtime
 from custom_agents.access_workflows import workflow_service_for
-from custom_agents.task_human_interaction_blockers import get_human_interaction_blocker, setup_answer_held
+from custom_agents.task_human_interaction_blockers import get_human_interaction_blocker, answer_held
 from custom_agents import tool_setup_run_runtime
 from custom_agents.runtime_recovery import recover_runtime_after_restart
 from custom_agents.task_manager import TaskManager
@@ -125,7 +125,7 @@ async def test_repos_in_github_with_access_and_sign_in_missing(tmp_path: Path, m
     # The record stays, marked, until the paused turn really resumes: the
     # answer waits for the task's lane (test_setup_run_resume_wait).
     blocker = get_human_interaction_blocker(lead.task_manager, "task-lead")
-    assert blocker["run_id"] == run.run_id and setup_answer_held(blocker, lead.id)
+    assert blocker["run_id"] == run.run_id and answer_held(blocker, lead.id)
     tool_call.response = answer["response"]
     result = call(lead, [GITHUB], tool_call, purpose="list the repos you can access in GitHub")
     assert result["status"] == "ready"
@@ -454,7 +454,7 @@ async def test_a_restart_while_the_answer_waits_for_its_lane_resumes_the_task_wi
     await pause_turn(lead, raised.interrupt)
     [page] = sent_pages(lead)
     await gateway_result(lead, page, "completed", account_label="exampleuser")
-    assert setup_answer_held(get_human_interaction_blocker(lead.task_manager, "task-lead"), lead.id)
+    assert answer_held(get_human_interaction_blocker(lead.task_manager, "task-lead"), lead.id)
     await asyncio.wait_for(lead._pending_work_task, 2)  # the busy lane never ran the answer
 
     agent = _restarted(lead, tmp_path)
@@ -734,7 +734,9 @@ async def test_a_result_whose_first_handling_failed_continues_the_task_when_disp
     elif failing_step == "workflow_step":
         monkeypatch.setattr(run_runtime, "record_setup_result", _failing_once(run_runtime.record_setup_result, error))
     elif failing_step == "history":
-        monkeypatch.setattr(run_runtime, "_history", _async_failing_once(run_runtime._history, error))
+        monkeypatch.setattr(
+            run_runtime, "append_wait_history", _async_failing_once(run_runtime.append_wait_history, error)
+        )
     else:
         monkeypatch.setattr(run_runtime, "advance", _async_failing_once(run_runtime.advance, error))
 
@@ -824,6 +826,7 @@ async def test_recovery_and_a_copy_of_a_result_whose_handling_failed_resume_the_
 ) -> None:
     """Setup-run recovery advances the run before the copy arrives; the copy still finishes its steps, without a second resume."""
 
+    from custom_agents import paused_wait_resume
     from custom_agents import tool_setup_run_runtime as run_runtime
 
     lead, github = await _github_page_after_google(tmp_path, monkeypatch)
@@ -836,8 +839,8 @@ async def test_recovery_and_a_copy_of_a_result_whose_handling_failed_resume_the_
     assert the_run(lead).status == "waiting", "the result was saved, its advance lost"
     assert _page_on_its_step(lead, github.setup_request_id)[1] != "completed"
     wakes = []
-    real_wake = run_runtime.schedule_pending_work
-    monkeypatch.setattr(run_runtime, "schedule_pending_work", lambda agent: (wakes.append(1), real_wake(agent))[1])
+    real_wake = paused_wait_resume.schedule_pending_work
+    monkeypatch.setattr(paused_wait_resume, "schedule_pending_work", lambda agent: (wakes.append(1), real_wake(agent))[1])
     monkeypatch.setattr(run_runtime, "RECENT_RUN_SECONDS", -1.0)
 
     assert await run_runtime.resume_ended_setup_runs(lead) == 1

@@ -38,6 +38,10 @@ Use this skill before calling the Universal Agents `shell` tool.
   child process tree on timeout or cancellation.
 - Do not start a persistent server directly. Use a bounded health probe,
   purpose-built harness, or separately supervised service.
+- Do not use `sleep` in shell to wait for an external process (such as a
+  redeploy, build, or cooldown); use the `wait` tool (or request
+  `fn:long_wait` for waits beyond the team's without-approval limit) so the
+  task pauses cleanly without holding a sandbox process or worker slot.
 
 ## RTK Behavior
 
@@ -75,8 +79,9 @@ Use this skill before calling the Universal Agents `shell` tool.
   and the shared `agents/` folder, plus any folder you were given, read-only
   where you may only read. It also gets a private temporary `HOME`/`TMPDIR`
   that is deleted after the command, and reads operating-system and
-  interpreter files. A folder with a blocked subfolder inside it is left out
-  entirely; the result's sandbox note says so.
+  interpreter files. A folder with a blocked folder or file inside it, a folder
+  whose path contains a symbolic link, or a path that is not a folder the
+  runtime can open is left out entirely; the result's sandbox note says so.
 - The network is open: every agent has internet access (`fn:internet`) unless
   a person blocked it for the agent type, the agent, themselves or the team.
   With a block, TCP connections and listening sockets fail with a permission

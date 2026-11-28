@@ -993,7 +993,9 @@ Five repairs keep work from getting stuck in the first place:
   a run another step is working on, or saved in the last 30 seconds, to the
   next pass, so its warnings (`event=tool_setup_run_recovered`) name only
   real lost wake-ups. An agent that drains for another message contract does
-  this too, as it resumes its decided access waits: these are tasks it
+  this too, as it resumes its decided access waits and due timed waits
+  (`timed_wait_runtime.resume_due_timed_waits`; once a pool worker winds down,
+  its wind-down loop resumes timed waits instead): these are tasks it
   already holds, the recovery takes over nothing and starts no agent, and a
   resumed task already ran, so even a draining pool worker starts it.
 - A task that ends with delegated work still running stops it
@@ -1039,12 +1041,22 @@ the worker winds down (`custom_agents/lease_loss_wind_down.py`):
    manager escalation, an access workflow's unfinished steps) with its own
    status, `held_back`, so such a task is
    handed back, and the next worker is not told the held-back answer was sent.
-3. It keeps tasks that already started and now wait on a person or subtask,
-   because replies are addressed to this worker's id. They may finish until
-   `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30 minutes)
-   after the lease was lost; then they fail with an explanation to the requester,
-   their pending subtasks are asked to stop, and an access request they were
-   waiting on is withdrawn so the reviewer is not left with an open item.
+3. It keeps tasks that already started and now wait on a person or a subtask,
+   because their replies live on this worker, and timed waits whose `resume_at`
+   falls before the deadline, because their paused turns live here and can
+   resume and finish. They may finish until
+   `agent.schedule_workers.lease_loss_wait_timeout_seconds` (default 30
+   minutes) after the wind-down started. Only the wind-down loop resumes due
+   timed waits meanwhile: after a lost lease the scheduler loop has stopped, and
+   during a contract drain the scheduler pass skips them while the agent winds
+   down (`scheduled_runtime._resume_due_timed_waits_step`), so no resume lands
+   between a poll's snapshot and the step that fails what remains. Then they fail with an
+   explanation to the requester, their pending subtasks are asked to stop, and
+   an access request they were waiting on is withdrawn so the reviewer is not
+   left with an open item. A timed wait whose `resume_at` falls after that
+   deadline (and that does not already hold an answer) fails immediately with a
+   message to the requester, clears its wait record, and asks pending subtasks
+   to stop instead of holding the worker open until the timeout.
 4. It exits once it holds no unfinished task. Until then it keeps refreshing its own
    status row and its record says it takes no work, so a starting worker of the same
    type does not adopt its tasks (adoption is decided by launch records).
@@ -1157,7 +1169,10 @@ delivered (a crashed process loses nothing either way). So:
   noted files' write-ahead logs. One flush of a WAL file makes every commit in
   it durable, whichever connection wrote it, so a power loss leaves the state
   the agent had when it last sent something: what a crash at that moment
-  leaves, which recovery already handles. One flush runs at a time, on a
+  leaves, which recovery already handles. The one exception is a pause whose
+  every interrupt waits locally (an access request, a setup run or a timed
+  wait): it sends nothing, so the pause function flushes once after `WAITING`
+  is saved (see "Timed waits" below). One flush runs at a time, on a
   thread of its own (Strands runs synchronous tools on asyncio's shared pool),
   and a file stays noted until a flush that started after its last commit
   succeeds, so a sender arriving mid-flush waits. A failed flush stops all
@@ -1766,7 +1781,10 @@ or publish after it. The final status write still marks this agent exiting
 after delivery callbacks have settled. A turn in progress at shutdown is
 cancelled; restart recovery queues its task again if
 the agent restarts within `restart_executing_task_grace_seconds` (900 s by
-default) and otherwise fails the task and tells the requester.
+default) and otherwise fails the task and tells the requester. A running task
+that already saved a wait record (an access request, a setup run, or a timed
+wait) returns to `WAITING` instead of being re-queued or failed, because its
+pause was already durable and the pending decision or timer will resume it.
 
 A turn reads the note left for its task's next turn (an access decision, a
 delegation decision, a restart notice) and the requester's partial tool-call
@@ -1815,6 +1833,147 @@ so the worker finishes immediately and the report cannot close the original
 person's request ledger. Ordinary delegated work still answers its requester.
 The limit is fixed in code because a setting would change the team transfer's
 settings format.
+
+### Timed waits (`wait` and `long_wait`)
+
+Any agent task, including a scheduled job run, can pause itself for a fixed
+number of whole minutes and continue in the same task when the timer ends.
+The feature uses two catalog tools (`custom_tools/providers/timed_waits.py`,
+pure rules in `custom_agents/timed_waits.py`, runtime in
+`custom_agents/timed_wait_runtime.py`):
+
+- `wait(minutes, reason)` is catalog tool `fn:wait` in the standard
+  `agent_runtime` tool set at level `read`, so every role holds it without a
+  grant. Wait budgets are tracked **per task** (each delegated subtask has its
+  own budget, and child waits do not count against the parent task's budget):
+  all waits in one task share a cumulative budget bounded by
+  `agent.max_wait_minutes_without_approval` (default `20` minutes).
+- `long_wait(minutes, reason)` is its own catalog tool `fn:long_wait` outside
+  every standard tool set and starter profile at level `write`, bounded by
+  `agent.max_wait_minutes_with_approval` (default `1440` minutes / 24 hours per
+  task, hard ceiling `1440`). Agents reach it only through `find_tools` +
+  `request_access` (or lasting `SubjectKind.SCHEDULE` access on a recurring
+  job). Both limits are team-wide and `operator_only` so agents cannot raise
+  their own wait budget.
+
+Both tools pause the task with a local Strands interrupt (`timed_wait`, listed
+in `task_steering_runtime._LOCAL_WAIT_KINDS` so nothing is sent to a
+requester). Before `ProgressState.WAITING` is saved (the same order access
+requests and `tool_setup_run_runtime.stage_run` use), trusted code writes the
+budget charge (`timed_wait_started` in task history, keyed by
+`access_runtime.step_tool_call_id`) and the `timed_wait` blocker record in
+`TaskRuntimeState.human_interaction_blockers` together in **one atomic
+runtime-state write** (`task_state_transitions.record_blocker_with_history`,
+with full in-memory rollback on error), using `resume_at` UTC as the single
+source of truth. A crash around pausing can therefore neither leave a budget
+charge without its blocker nor leave a `WAITING` task without its wait record.
+Moving the task to `WAITING` releases the worker's main slot so other work can
+run while the timer ticks.
+
+Once the charge, the record and `WAITING` have committed, the pause is flushed
+to disk once. An agent process defers its SQLite flushes until it sends
+something (decision 82, `storage/sqlite_connection.py` "Flushing before
+sending"), and a pause whose every interrupt waits locally (an access request,
+a setup run or a timed wait) sends nothing to a requester, so
+`task_steering_runtime.send_interrupt_request_for_result` flushes once itself,
+through the send barrier (`custom_agents.commit_flushes.flush_local_pause_commits`),
+right after `WAITING` is saved and before the setup run's pages open or the
+scheduler is woken. A pause that also asks a requester needs no separate flush:
+the send barrier flushes before its requester message is published, so a power
+loss leaves the state the agent had at its last send, as for any other work.
+Without the flush, a power cut could roll back the pause and bring the task
+back as an interrupted running turn, re-run from the start or failed as stale
+after `restart_executing_task_grace_seconds`, although it was only waiting
+(a person may decide an access request hours later). The records of all three
+kinds live in deferred stores whose WAL files the one flush makes durable, or
+in stores that flush every commit. A failed flush is logged
+(`event=local_pause_commit_flush_failed` with agent, task and pause kinds), the
+pause stays, and the process sends nothing more, as after any failed flush.
+The resume side needs no flush: if a power cut rolls back a resume, the task is
+still `WAITING` with its overdue record and recovery resumes it again.
+
+Each `scheduled_runtime._scheduler_pass` runs `resume_due_timed_waits` (capping
+its idle sleep to the next resume time and backing off overdue unresumable
+records) through `custom_agents/paused_wait_resume.py` and
+`custom_agents/task_state_transitions.py`:
+
+- **Live paused turn**: when the paused turn is still in memory, the interrupt
+  is answered with the elapsed time and current UTC timestamp (marking the
+  record `answer_held` while it waits for a busy lane, without overwriting
+  another pending answer). When the resumed turn consumes the blocker
+  (`clear_answered_blocker_with_resume_note`), trusted code atomically removes
+  the blocker and records a past-fact `resume_note(record, now=...)` via
+  `TurnStartNotes.with_live_wait_directive` (replacing any earlier live-wait
+  note in the same turn so repeated waits keep at most one stored note, and
+  restoring the blocker unmarked if the save fails so the task stays
+  recoverable). `release_turn_start_notes` releases that note when the turn
+  records its decision; if the worker crashes after clearing the blocker or
+  before recording a decision, restart recovery delivers the note so the next
+  turn knows the wait already ended and never double-charges the budget.
+- **Restart, power loss, or takeover**: `runtime_recovery.recover_runtime_after_restart`
+  clears stale `answer_held` marks (for both same-id restarts and new-id
+  takeovers), keeps not-yet-due waits `WAITING` until `resume_at`, and resumes
+  overdue waits promptly via **one atomic write**
+  (`task_state_transitions.resume_wait_from_note`, committing the past-fact
+  resume note with real elapsed minutes and exact resume time, blocker removal,
+  `timed_wait_ended` + state-change history, `ProgressState.ACCEPTED`, and
+  front-of-queue enqueue together, with clean rollback on readiness or
+  persistence failure). If a worker holding a `WAITING` timed wait dies and no
+  worker of that type is running (such as a pool worker), TeamLead's
+  `orphaned_work_takeover.take_over_orphaned_work` starts a replacement, which
+  adopts the task transactionally via `agent_liveness` /
+  `commit_task_runtime_recovery`, stays alive via `worker_holds_work`, and
+  resumes it at `resume_at`. Once a wait has ended and the resumed turn is
+  actively executing, normal executing-task restart recovery applies: if power
+  is lost during that running turn and the worker comes back after
+  `agent.restart_executing_task_grace_seconds` (900 s by default), recovery
+  fails the task as stale and notifies the requester (operators can raise or
+  unset `restart_executing_task_grace_seconds`).
+- **Recurring schedules**: in a recurring scheduled run (verified
+  scheduler-issued task context), waits that would reach or pass the schedule's
+  next fire time are refused so the next occurrence is not skipped. After a
+  long outage past both `resume_at` and `next_fire_at`, recovery resumes the
+  waiting task first; when the scheduler claims the overdue schedule, an
+  overlapping fire coalesces into the active resumed task (or starts one
+  catch-up run if the resumed task already finished) and `next_fire_at`
+  advances past now without burst-replaying missed occurrences.
+- **Stuck-task checks & wind-down**: `custom_agents/task_wait_reasons.py`
+  treats an active timer as `WaitReason.TIMED_WAIT` (with a 5-minute grace
+  window past `resume_at`) and a held answer as `WaitReason.ANSWER_HELD`, while
+  overdue unheld waits are reported as stuck. During a wind-down (after a lost
+  launch lease, or a pool worker's contract drain; `custom_agents/lease_loss_wind_down.py`),
+  `_wait_for_resumable_tasks`
+  fails any `WAITING` timed wait whose `resume_at` falls after the deadline (or
+  within the final `WIND_DOWN_POLL_SECONDS` poll margin, since the next poll
+  would come too late to resume it, with no held answer and not yet resumed)
+  immediately on entry and on each poll
+  (`timed_wait_runtime.fail_timed_wait_outlasting_deadline`, logging
+  `event=worker_wind_down_timed_wait_outlasts_deadline`), stops pending
+  delegated subtasks, clears its blocker and paused turn, and tells the
+  requester with a dedicated early-shutdown message; it then resumes waits
+  already due. A poll that runs at or after the deadline resumes nothing and
+  fails the remaining waits with the deadline message, which names why the worker wound down. Waits due before the
+  deadline still resume and finish on the winding-down worker, held answers are
+  not failed early, and waits on people (`access_request`, `tool_setup_run`)
+  keep the full timeout. A draining team lead or startup agent does not wind
+  down: it keeps its timed waits, up to 24 hours, until they end. If failing the task raises, it counts as failed only
+  when the task is FAILED in memory or archived as FAILED; a task another agent
+  took over (`custody_loss.custody_moved`) is left to that agent with no
+  message and no subtask stop (`event=timed_wait_wind_down_custody_moved`).
+  Stopping or cancelling a waiting task removes the blocker record and drops
+  the paused turn so nothing resumes later.
+
+Rationale for a paused Strands interrupt plus a saved blocker record:
+
+- **Instead of `sleep` in shell or Python**: sleeping ties up the worker's
+  execution slot and a live sandbox process for the whole wait, requires code
+  execution access, disappears across a restart, and is invisible to status
+  summaries and stuck-task checks.
+- **Instead of creating a one-time schedule**: a one-time schedule starts a
+  separate task that loses the paused turn's conversation and tool context as
+  well as the original run's signed identity and access (including a scheduled
+  job's `SubjectKind.SCHEDULE` grants), and for a recurring job a second run
+  would collide with or be coalesced by the recurring schedule.
 
 ## Authorization and credentials
 
@@ -1941,7 +2100,49 @@ one-link regular file of bounded size, and checks the digest. A link or changed
 bytes swapped in after staging are refused (Web Chat answers "no longer
 available"), so the file delivered is the file that was checked. The Photon
 sidecar reads a path, so it gets a private 0600 copy under `state/` that is
-removed after the call.
+removed after the call. Attachment media types and inline display follow one
+shared policy (`assistant_gateway/attachment_media.py`). The Web Chat page keeps
+its own copy in `chat_attachments.mjs`; a test compares the inline image list
+and runs a shared table of sample media types (malformed, mixed-case,
+whitespace-padded and non-ASCII ones included) through both parsers and kind
+rules, so the page shows a file the way the server sends it. Outgoing
+`notify_user` validation rejects malformed `content_type` strings and rejects
+explicit `kind` values that disagree with the normalized media type (only
+`image/png`, `image/jpeg`, `image/gif`, and `image/webp` have `kind="image"`),
+so an agent cannot label SVG, HTML, or arbitrary bytes as an inline image.
+The gateway runs the same check again on every notification it receives, so a
+notification in the older format (queued during an upgrade, or sent by a worker
+still on older code) arrives without the files this check refuses; each one is
+logged as `event=outgoing_attachment_skipped` and the message text is still
+delivered. No compatibility path keeps them. The older code produced these
+refused shapes: a non-raster image (SVG, HEIC, AVIF, BMP, TIFF) labelled
+`kind: image`, which older code did for every `image/*` type; an explicit
+`application/octet-stream` on a `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp`
+file, which older code called an image by its suffix; any explicit `kind` that
+disagrees with the media type, such as `kind: document` on `image/png`, or
+`kind: audio` on a file whose suffix gives no media type (such as `.caf`); and a
+`content_type` that is not a media type, such as `png`. A `.opus` file with
+`kind: audio` is refused only when it was also sent with an explicit
+`application/octet-stream` type; without a type its suffix gives `audio/opus`.
+Every `/api/web-chat/attachments/{attachment_id}` response sends
+`Content-Security-Policy: sandbox; default-src 'none'`,
+`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`,
+`Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`,
+and a sanitized RFC 5987 `Content-Disposition` derived from the stored
+normalized media type rather than `kind`. Only allowlisted raster images open
+with `Content-Disposition: inline`; non-XML `audio/*` and `video/*` keep their
+normalized `Content-Type` so `<audio>` and `<video>` players inside Web Chat
+play normally, while sending `Content-Disposition: attachment` so opening the
+raw attachment URL in its own tab downloads the file instead of showing a
+sandbox-blocked empty player. Every other attachment type (including
+`image/svg+xml`, `text/html`, `text/javascript`, and `text/css`) is sent with
+`Content-Disposition: attachment` and `Content-Type: application/octet-stream`
+so it cannot execute as a page, script, or stylesheet on the Web Chat origin.
+Workspace image previews (`/api/web-chat/workspace/content`) also send
+`Content-Security-Policy: sandbox; default-src 'none'` alongside `nosniff`.
+PDF previews are sent without that policy only so a PDF opened directly in its
+own tab still shows in the browser's built-in PDF viewer, which needs scripts;
+the in-page preview frame is sandboxed by the page either way.
 
 Published pages (how-tos, articles, apps and work reports from
 `publish_single_page_site`) are deliverables too, so they are written into the
@@ -2165,9 +2366,21 @@ agent's grants for this person's work) and grants each one
 read-write where both may write, read-only where they may only read, or not at
 all; the command also gets read-only skill folders, a private scratch home, and
 read-only system files. Landlock rules only add access, so a folder with a
-blocked folder below it is left out entirely and the result says so, rather
-than exposing the blocked part. Control files, databases, secrets, instance
-configuration, other people's folders, and other processes stay out of reach.
+blocked folder or file below it (or a file block naming the folder itself) is
+left out entirely and the result says so, rather than exposing the blocked
+part. Before mounting, `custom_agents/code_access.py` walks every granted
+folder from its trusted root (`workspaces/` or the registered data folder)
+with `access_control.safe_open.open_directory`: folders reached through a
+symbolic link, non-directories (code mounts are folders only), and folders the
+runtime itself cannot open are skipped with a warning and a sandbox note. As
+independent layers, `custom_tools/code_sandbox.py` (`sandbox_policy`) drops
+symlinked or instance-private task and granted-read roots while passing the
+planned link-free paths unresolved to `custom_tools/code_sandbox_exec.py`,
+which opens every Landlock rule path from `/` component by component with
+`O_NOFOLLOW` and `fstat` and refuses any symbolic link with exit 126 before
+`execvp` (closing the check-then-use race). Control files, databases, secrets,
+instance configuration, other people's folders, and other processes stay out
+of reach.
 TCP connect and listen are open only when the agent and its person hold
 internet access (`fn:internet`, operation `connect`, decision D14). It sits
 with the web research tools in the `internet` tool set, which every role
@@ -2578,15 +2791,42 @@ cannot open or share it, and agent grants on a person's folder are refused.
 An agent working for the recipient uses what was shared with that person at
 the shared level, for file tools and sandbox mounts, through per-decision
 copies of the person's share grants (`AccessService.shared_with`); blocks on
-the agent still apply. In Cedar a file is inside each folder
-up to its root, so a grant or block on a folder covers everything below it.
+the agent still apply. In Cedar a file is inside each folder up to its root, so a grant or block on a
+folder covers everything below it. Every `TargetKind.FOLDER` block also emits a
+forbid link (`block-file:<grant_id>`) targeting `File::<id>` alongside
+`Folder::<id>` (`access_control/entities.py`), and `AccessService._evaluate`
+normalizes those ids back to `block:<grant_id>`, so blocking a file path (via
+`/access block`, `assistant_cli access block --folder`, or `restrict_access`)
+stops file tools from opening that file while siblings remain accessible and
+keeps the containing folder out of sandboxed code (`custom_agents/code_access.py`).
+Blocks match the exact spelling of a path.
 `AccessService.decide_folder` decides each file use (agent side, then person
-side), and `custom_agents/folder_access.py` keeps allowed answers for 10
-seconds per folder, keyed by the access store version, so a crawl or a Python
-environment does not ask for every file while every grant, revocation or block
-still applies to the next file. `request_access`, `restrict_access`, `/access`
-and `assistant_cli access grant|block --folder` accept folders, and a worker's
-task gets a folder from TeamLead's access like a tool.
+side). `AccessService.reusable_folder_allowance` decides when a folder allowance
+covers its direct children and returns the set of blocked direct-child ids
+(skipping the second Cedar check on folder listings when neither side holds a
+one-time grant). `custom_agents/folder_access.py` keeps allowed answers for up
+to 10 seconds, keyed by team, access store version, agent, work/schedule/task,
+person, level, scope (`folder` or `file`), and target id: a folder-level entry
+holds its blocked direct-child exclusions so crawls beside a blocked sibling
+still reuse one answer per folder while blocked files fall through to Cedar,
+whereas a single-file share (or any file-only allowance) is kept only under its
+exact `file` key and never opens siblings or the parent folder. Because the
+access store version is part of every key, every grant, revocation, or block
+applies to the next file. `request_access`, `restrict_access`, `/access`, and
+`assistant_cli access grant|block --folder` accept folders (and blocks accept
+file paths as well), and a worker's task gets a folder from TeamLead's access
+like a tool. A folder-kind access grant on a file path links only
+`Folder::<id>`, so it never opens `File::<id>`; only blocks get the extra file
+link. `AccessService._prepare_hand_down` refuses to hand on a folder when the
+grantor holds a block on a path inside it (`access_control.folders.paths_inside`,
+the rule the sandbox uses), because the worker holds no such block and would
+reach the blocked path through the folder. That refusal is
+`HandDownBlockedInside`; when a person approves a worker's folder request with
+"Keep", `AccessRequests._give_specs` catches it and gives the worker its task
+grant on the reviewer's authority, as "approve for this task only" does, and
+logs `event=approval_worker_grant_by_person` with the block ids. A block added
+after a folder was already handed on to a running task does not take that
+task's grant back; the grant ends with the task.
 
 People share and send files through `assistant_gateway/file_sharing.py`
 (`/share`, `/unshare`, `/shares`, `/send`, and the workspace browser's Share
@@ -2964,9 +3204,28 @@ staged as exact, digest-checked plans and applied with one tool,
 `apply_change` (`access_control/changes.py`, `custom_agents/change_approvals.py`).
 Agents never hold `full` access to platform tools (a standard Cedar guardrail),
 so with authorization on a person approves the exact plan in the Inbox; the
-resumed call then claims the approval once and applies the plan in the agent's
-process. With authorization off the person's conversational agreement applies
-it. One narrow class applies at once instead: a settings plan that only
+resumed call re-checks the stored request's change id, plan digest, owner and
+change kind against a fresh description, claims the approval once and applies
+the plan in the agent's process. When the same change's digest, owner or kind
+no longer matches (for example after an upgrade that tightened who may approve
+it, or if the plan file changed), trusted code uses up the approval and records
+why so a stale approval cannot be reused; a request for a different change id
+is refused without consuming that other change's approval. A request that was
+waiting before such an upgrade can still be decided by the person it named
+then, but nothing applies: the resumed call refuses it and uses up the
+approval. `ChangeApproval` carries the described or approved `plan_digest` in
+all three approval modes (person approval, held access and agreement); the
+owner and kind re-check runs only when a person-approval request resumes. Only
+`RuntimeSettingsService` compares that digest with the plan it reloads and
+refuses when it is missing or differs today; the other change services do not
+yet. For runtime settings (`custom_agents/runtime_settings_service.py`), a
+plan's decision class is the most restrictive class of its changes
+(`operator_only`, then `lead_managed`, then `user_authorized`), `describe` sets
+`owner_person_id` to the requester only when every change in the plan is
+`user_authorized` (mixed plans wait for an administrator), and `load_plan`
+refuses stored plans whose class no longer matches their changes or the
+setting registry. With authorization off the person's conversational agreement
+applies it. One narrow class applies at once instead: a settings plan that only
 switches an agent type's model (provider, model, reasoning, context window
 and input settings; `custom_agents/model_choice.py`) is the `model_choice` change on
 `fn:model_choice`, a tool only administrators hold (Cedar
@@ -6494,7 +6753,19 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   backfill records or repair schemas. The shared memory planner rejects blank
   text after trimming, and schedule planning computes a next run with the store's
   timezone rules. Editable YAML errors show their location without repeating
-  private input. These checks run before the unfinished-import marker is written.
+  private input. The `skills` section (`team_transfer.skills`) restricts unit
+  names to a single folder name and file paths to relative paths inside their
+  skill, and verifies reviewed installs in memory against their attested tree
+  digest without writing or deleting on disk
+  (`custom_agents.skill_repository.build_skill_tree_manifest_from_files`,
+  `custom_agents.skill_installation.verify_managed_skill_attestation_digest`).
+  These checks run before the unfinished-import marker is written. During apply,
+  after the marker is written, each skill is staged and checked in a sibling
+  temporary entry beside its destination and swapped in only when complete. A
+  failure the import catches restores the previous folder and attestation. A
+  process killed mid-import restores nothing and can leave a dot-named staging or
+  backup folder that the skill loader would read; the unfinished-import marker
+  (`team_transfer.runtime_guard`) keeps that instance from starting.
 - **Credentials stay with their owners.** A passphrase-derived key
   authenticates the manifest and encrypts secrets. Operator secrets from
   `team.env` travel encrypted in the file. The other sections are plain,
@@ -7451,13 +7722,16 @@ failed); pool workers run in the team lead's process, so the lead
 drains with them, and what they return waits in the lead's queue for a team lead on the
 installation's contract. The team lead and startup agents have no way to hand a task
 back yet (that comes with `task.handback` and the queued work of protocol 1), so they
-finish what they already admitted. The host's record says `draining` meanwhile; its
+finish what they already admitted, and they have no wind-down deadline: a timed wait they
+hold, a `long_wait` of up to 24 hours included, is kept until it ends and its task
+finishes, so the old process stays until then. The host's record says `draining` meanwhile; its
 agents' sessions are still renewed, so requests about the tasks they hold still reach them.
 Startup counts as held work until recovery finishes, so a drain cannot close controls
 before saved tasks become visible. A draining startup restores its own work and adopts
-no work from gone agents; it still resumes its own tasks whose setup run ended or whose
-access requests were decided meanwhile (`resume_ended_setup_runs`,
-`resume_decided_access_waits`). Pool-worker wind-down waits for recovery too, so it returns
+no work from gone agents; it still resumes its own tasks whose setup run ended,
+whose access requests were decided, or whose timed wait came due meanwhile
+(`resume_ended_setup_runs`, `resume_decided_access_waits`,
+`resume_due_timed_waits`). Pool-worker wind-down waits for recovery too, so it returns
 the complete set of saved tasks. Admission reads the leaf module `contract_drain_state`; drain
 execution can depend on turn and control handlers without creating an import cycle.
 Once no agent is starting or holds an unfinished task or a waiting request, the host closes their sessions

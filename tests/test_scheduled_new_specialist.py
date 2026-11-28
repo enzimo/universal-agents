@@ -149,7 +149,7 @@ def _make_boa_eligible(agent: SimpleNamespace) -> dict:
     service = RuntimeSettingsService(agent)
     current = current_worker_limits(agent).eligible_agent_types
     plan = service.stage([{"path": SCHEDULE_WORKER_ELIGIBILITY_PATH, "value": [*current, BOA], "target_scope": "team"}])
-    return service.apply(plan["change_id"], agreement())
+    return service.apply(plan["change_id"], agreement(plan["plan_digest"]))
 
 
 def _schedule(agent: SimpleNamespace, config: GatewayInstanceConfig, schedule_id: str) -> ScheduledMessage:
@@ -198,7 +198,7 @@ def test_saved_worker_rules_apply_without_a_restart(tmp_path, monkeypatch, start
         "path": "agent.schedule_worker_rules.claim_wait_seconds", "value": 42,
         "target_scope": "agent_type", "target_agent_type": BOA,
     }])
-    assert service.apply(plan["change_id"], agreement())["status"] == "applied"
+    assert service.apply(plan["change_id"], agreement(plan["plan_digest"]))["status"] == "applied"
 
     assert effective_worker_rules(lead, BOA, {}).claim_wait_seconds == 42
 

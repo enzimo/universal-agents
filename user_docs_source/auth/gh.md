@@ -99,7 +99,18 @@ command, and each short option and its value are separate arguments
 (`-X GET`, not `-XGET`). File options (`--body-file`/`-F`, `--notes-file`,
 `--input`) accept only `-` with the text sent as standard input, and field
 values must not start with `@`, because both would read files on the broker
-host. `gh api` accepts only GET and POST for now.
+host. For `gh api`, the broker parses options in order: only documented `gh api`
+options are accepted (flags added in newer `gh` versions are refused until added
+to the table), and `-X`/`--method` may be given at most once with a non-empty
+method. Plain `GET` requests (including `-f`/`-F` query parameters) and `HEAD`
+requests without fields or `--input` to non-GraphQL endpoints require read
+access; GraphQL requests, requests with `--input`, `HEAD` requests with fields,
+and all other HTTP methods (including implicit `POST` from `-f`/`-F`/`--input`
+without `-X`) require full access. The broker allows only `GET` and `POST` for
+`gh api` for now.
+A line the broker cannot parse is refused with `cli_command_line_rejected`
+before the access check, even for full access holders; see
+[Tool access and account links](../permissions.md#tool-access-and-account-links).
 
 ## Logout
 

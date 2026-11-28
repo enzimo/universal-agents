@@ -55,15 +55,17 @@ def test_previous_release_sections_read_and_validate_with_current_record_models(
         allowed = {fixtures[name]["schema_version"]}
         if name == "schedules":
             allowed.update({4, 5})
-        # Settings versions 6 to 13 have real export/import cases in
+        # Settings versions 6 to 17 have real export/import cases in
         # test_team_transfer_settings, including keep-forever output retention, the
         # retired presence setting (8 and main's 9), version 8 keeping the skill
         # semantic review off, for 9 both main's semantic-review choice and this
         # branch's pre-release shape, for every one the retired concurrency key, for
         # 11 the queue settings taking their defaults, for 12 the api_request_user_agent
-        # default, and for 13 the SSH network guardrail settings taking their defaults.
+        # default, for 13 the SSH network guardrail settings taking their defaults, for
+        # 15 the blob settings taking their defaults, for 16 the timed-wait limits
+        # taking their defaults, and for 17 the agent capture notice taking its default.
         if name == "settings":
-            allowed.update((6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
+            allowed.update((6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
         assert version in allowed, f"the conversion step from {name} version {version} has no supported export case"
         assert target == sections[name].schema_version
     for name, raw in fixtures.items():
@@ -180,7 +182,7 @@ def test_an_unsupported_export_is_refused_before_anything_is_written(
     source_sections, expected_problem = {
         "0.8.5": (
             (SettingsAsV085(), PeopleSection(), AccessAsV085()),
-            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 and 17.",
+            "This file's settings section is version 3, but this version of Universal Agents reads versions 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 and 18.",
         ),
         "0.9.0": (
             (SettingsSection(), PeopleSection(), AccessSection(), KnowledgeAsV090()),

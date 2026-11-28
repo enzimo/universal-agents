@@ -412,6 +412,20 @@
           "default": 20000,
           "title": "Max Tool Result Tokens Per Call"
         },
+        "max_wait_minutes_with_approval": {
+          "default": 1440,
+          "maximum": 1440,
+          "minimum": 1,
+          "title": "Max Wait Minutes With Approval",
+          "type": "integer"
+        },
+        "max_wait_minutes_without_approval": {
+          "default": 20,
+          "maximum": 1440,
+          "minimum": 1,
+          "title": "Max Wait Minutes Without Approval",
+          "type": "integer"
+        },
         "memory": {
           "additionalProperties": true,
           "title": "Memory",
@@ -3821,7 +3835,7 @@
         },
         "lease_loss_wait_timeout_seconds": {
           "default": 1800.0,
-          "description": "After a worker loses its launch lease, how long it keeps tasks that wait on a person or subtask before failing them and exiting.",
+          "description": "After a worker loses its launch lease, or a pool worker drains for another message contract, how long it keeps tasks that wait on a person, a subtask or a timed wait that ends within this time; a timed wait that ends later fails at once. Tasks still waiting when the time is up fail, and the worker exits once it holds none.",
           "maximum": 86400,
           "minimum": 60,
           "title": "Lease Loss Wait Timeout Seconds",

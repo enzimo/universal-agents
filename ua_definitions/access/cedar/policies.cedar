@@ -120,5 +120,9 @@ permit (principal in ?principal, action in Action::"delegation.full", resource i
 permit (principal in ?principal, action == Action::"credential.use", resource in ?resource);
 
 // A block (restriction or emergency stop) denies whatever grants exist.
+// Note: AccessService.reusable_folder_allowance and the cache equivalence
+// matrix (tests/test_folder_access_cache.py) rely on blocks naming a direct
+// child being the only forbid rule that can deny a file whose parent folder is
+// allowed. Mirror any new forbid rule or folder/file link there.
 @id("tpl:block")
 forbid (principal in ?principal, action, resource in ?resource);

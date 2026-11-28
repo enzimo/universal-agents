@@ -17,6 +17,7 @@ from assistant_gateway.application.website_application import (
     GatewayWorkspaceFileDownload,
     WebsiteGatewayApplication,
 )
+from assistant_gateway.attachment_media import ATTACHMENT_SANDBOX_CSP
 from assistant_gateway.interactive_apps.website_support import (
     LOGGER,
     _WORKSPACE_HTML_PREVIEW_CSP,
@@ -25,7 +26,7 @@ from .operations import WebsiteWorkspaceHandlersOperations
 from .workspace_download import (
     DOWNLOAD_CHUNK_BYTES,
     accepts_html_navigation,
-    build_attachment_disposition,
+    build_content_disposition,
     download_security_headers,
     parse_byte_range,
     safe_download_content_type,
@@ -223,6 +224,13 @@ class WebsiteWorkspaceHandlers:
                 charset="utf-8",
                 headers=headers,
             )
+        if content.preview_kind == "image":
+            # Sandbox raw image previews on the Web Chat origin. PDFs are left
+            # without the sandbox policy only so a PDF opened directly in its own
+            # tab still shows in Chromium's built-in PDF viewer (which needs
+            # scripts); the in-page preview frame is sandboxed by
+            # workspace_browser.js either way.
+            headers["Content-Security-Policy"] = ATTACHMENT_SANDBOX_CSP
         return web.Response(
             body=content.content,
             content_type=content.content_type,
@@ -454,7 +462,7 @@ class WebsiteWorkspaceHandlers:
         headers = {
             **download_security_headers(),
             "Accept-Ranges": "bytes",
-            "Content-Disposition": build_attachment_disposition(download.name),
+            "Content-Disposition": build_content_disposition(download.name),
         }
         if range_result.status == "satisfiable" and range_result.byte_range is not None:
             start = range_result.byte_range.start

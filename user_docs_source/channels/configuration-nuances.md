@@ -61,7 +61,7 @@ the assistant.
 | Channel | Direct identity | Group identity | Mention behavior | Proactive target |
 | --- | --- | --- | --- | --- |
 | Telegram | Numeric `user_id`; private `chat_id` is often the same number | Group/supergroup `chat_id`; forum topics may have `thread_id` | BotFather group privacy affects whether ordinary mentions reach the bot; configured mention mode filters group text | `delivery.default_target.chat_id`; optional topic `thread_id` |
-| Discord | Numeric Discord user id | Channel id plus optional thread id | Guild channels use configured channel allowlists and mention/open policy; slash commands are synced separately | Channel id; optional thread id |
+| Discord | Numeric Discord user id | Channel id plus optional thread id | Guild channels use configured channel allowlists and mention/open policy; slash commands obey `allowed_user_ids` and `allowed_channel_ids` with the same rule as text and voice messages (registered users pass in a bot DM; disallowed commands receive an ephemeral refusal) | Channel id; optional thread id |
 | WhatsApp | Twilio sender identity, usually `whatsapp:+15551234567` | Not a native group adapter path here | No native mention handling in this adapter | Twilio recipient address |
 | Signal | `sourceUuid` when available, otherwise E.164 phone number | Signal group id | Configured `mention_markers` are required in mention mode | Direct sender id or group id |
 | Photon/iMessage | Photon `sender.id` when available, otherwise emitted iMessage phone/space id | Photon group/space `chat_id` | Text markers such as `Nova`, `@Nova`, or `nova:`; iMessage native mentions are not used by the adapter | Exact logged Photon `chat_id` |

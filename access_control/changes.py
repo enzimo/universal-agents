@@ -14,8 +14,19 @@ platform changes. Instead:
    administrator-only ones, such as a model choice for an administrator's
    work, ``custom_agents.model_choice``); otherwise a person reviews the
    exact effect in the Inbox;
-3. after approval, trusted code in the agent's process re-checks the digest,
-   claims the approval once, and applies the plan (``ChangeApproval``).
+3. after approval, trusted code in the agent's process re-checks the stored
+   request's change id, plan digest, owner and change kind against a fresh
+   description, claims the approval once, and applies the plan
+   (``ChangeApproval``). When the same change's digest, owner or kind no
+   longer matches (for example after an upgrade that tightened who may
+   approve it, or if the plan file changed), trusted code uses up the
+   approval and records why so a stale approval cannot be retried or reused.
+   A request that was already waiting before such an upgrade can still be
+   decided by the person it named then; nothing applies, because the resumed
+   call refuses it. If a request belongs to a different change id, it is
+   refused without using up that other change's approval. The owner and kind
+   re-check runs only on this person-approval resume; every mode (person
+   approval, held access, agreement) passes the plan digest to ``apply``.
 
 With authorization off there is no review: the person's conversational
 agreement applies the change (decision D8).
@@ -41,6 +52,11 @@ class ChangeApproval:
     # The approver's note from the Inbox, returned to the agent with the result.
     # Not part of ``to_record``: configuration keeps who approved, not why.
     note: str = ""
+    # The exact staged plan digest that was described or approved. Today only
+    # RuntimeSettingsService checks it on apply, so a runtime settings plan
+    # swapped after describe/approval cannot apply; other services: follow-up.
+    # Not part of ``to_record``: saved receipts keep plan_digest on their own.
+    plan_digest: str | None = None
 
     def to_record(self) -> ChangeApprovalRecordV1:
         """The approval as saved with the configuration it created."""
@@ -71,6 +87,12 @@ class ChangeAdapter(Protocol):
 
     def apply(self, agent: Any, change_id: str, approval: ChangeApproval) -> dict[str, Any]:
         """Apply the plan; only trusted code with an approval calls this.
+
+        ``approval.plan_digest`` is the exact plan digest that was described or
+        approved (in person approval, held access, and agreement). Today only
+        ``RuntimeSettingsService`` compares it with the plan it reloads and
+        refuses when it is missing or differs; the other change services do
+        not check it yet (a follow-up).
 
         An adapter may also define ``async after_apply(agent, result)`` for
         follow-up work that must not undo the change (refreshing running

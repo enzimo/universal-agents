@@ -4860,10 +4860,23 @@ def test_github_provider_maps_bitwarden_login_alias_to_credential_login() -> Non
         (["api", "repos/owner/repo/contents/x", "-F", "content=@/etc/passwd"], "cli_local_file_rejected"),
         (["workflow", "run", "wf.yml", "-F", "secret=@/data/team.env"], "cli_local_file_rejected"),
         (["api", "--hostname", "evil.example", "user"], "cli_flag_blocked"),
+        (["api", "--token", "secret", "repos/o/r"], "cli_flag_blocked"),
         # Attached short forms used to bypass the method limit and the @file block.
         (["api", "-XDELETE", "repos/owner/repo/issues/1"], "cli_command_line_rejected"),
         (["api", "repos/o/r/contents/x", "-Fk=@/data/team.env"], "cli_command_line_rejected"),
         (["api", "--", "user"], "cli_command_line_rejected"),
+        # Repeated method flags, empty methods, unknown flags, and missing values are refused.
+        (["api", "repos/o/r", "-X", "GET", "-X", "DELETE"], "cli_command_line_rejected"),
+        (["api", "repos/o/r", "--method=GET", "--method=DELETE"], "cli_command_line_rejected"),
+        (["api", "graphql", "-X", "GET", "-X", "POST", "-f", "query=mutation{x}"], "cli_command_line_rejected"),
+        (["api", "repos/o/r", "--method=", "-f", "title=x"], "cli_command_line_rejected"),
+        (["api", "repos/o/r", "--unknown-flag"], "cli_command_line_rejected"),
+        (["api", "repos/o/r", "--template"], "cli_command_line_rejected"),
+        (["api", "http://[x]/repos/o/r"], "cli_command_line_rejected"),
+        (["api", "https://[::1/graphql", "-X", "GET"], "cli_command_line_rejected"),
+        # Value flags consume method-like tokens, so the real non-GET/POST method is blocked.
+        (["api", "repos/o/r/issues", "--template", "--method=GET", "-X", "DELETE"], "cli_command_blocked"),
+        (["api", "repos/o/r", "-X", "HEAD"], "cli_command_blocked"),
     ],
 )
 def test_github_gh_exec_blocks_credential_config_and_local_file_paths(
@@ -4888,6 +4901,40 @@ def test_github_gh_exec_blocks_credential_config_and_local_file_paths(
 
     assert result.status == "error"
     assert result.content["error_code"] == error_code, result.error
+
+
+def test_check_command_line_shares_gh_api_level_and_method_parser() -> None:
+    from custom_messages.contracts.access_v2 import AccessLevel
+    from secure_tool_broker.cli_passthrough import (
+        REASON_COMMAND_LINE_REJECTED,
+        CommandRefused,
+        check_command_line,
+    )
+
+    read_checked = check_command_line(
+        "gh",
+        ["api", "-X", "GET", "search/issues", "-f", "q=repo:o/r is:open"],
+        instance_root=None,
+        person_id=TEST_CANONICAL_USER_ID,
+    )
+    assert read_checked.level is AccessLevel.READ
+
+    hidden_post = check_command_line(
+        "gh",
+        ["api", "repos/o/r/issues", "--template", "--method=GET", "-f", "title=x"],
+        instance_root=None,
+        person_id=TEST_CANONICAL_USER_ID,
+    )
+    assert hidden_post.level is AccessLevel.FULL
+
+    with pytest.raises(CommandRefused) as caught:
+        check_command_line(
+            "gh",
+            ["api", "repos/o/r", "-X", "GET", "-X", "DELETE"],
+            instance_root=None,
+            person_id=TEST_CANONICAL_USER_ID,
+        )
+    assert caught.value.reason_code == REASON_COMMAND_LINE_REJECTED
 
 
 def test_github_gh_exec_rejects_shell_string_argv(

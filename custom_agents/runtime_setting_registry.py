@@ -83,10 +83,10 @@ class RuntimeSettingDefinition:
             ],
             "decision_class": self.decision_class.value,
             "requires_agreement": self.agreement_required,
-            "requires_authorization": self.decision_class
-            == SettingDecisionClass.USER_AUTHORIZED,
-            "requires_authenticated_authorization_when_enabled": (
-                self.decision_class == SettingDecisionClass.USER_AUTHORIZED
+            "approver_when_authorization_enabled": (
+                "requester_or_administrator"
+                if self.decision_class == SettingDecisionClass.USER_AUTHORIZED
+                else "administrator"
             ),
             "available_when_authorization_disabled": True,
             "restart_scope": self.restart_scope,
@@ -994,6 +994,10 @@ OPERATOR_ONLY_RUNTIME_SETTINGS: dict[str, str] = {
         "Worker pool ceilings, start rates and controller timings are operator-owned. "
         "TeamArchitect sets each worker type's pool size inside the ceilings with "
         "set_worker_pool_limit, which stores it in the database, not here."
+    ),
+    "agent.max_wait_minutes_*": (
+        "They limit how long a task may pause itself, with and without a person's approval; "
+        "raising them would let tasks wait longer without anyone approving it, so only the operator changes them."
     ),
     "transport.*": "NATS routing and credentials are operator-owned.",
     "gateway.storage.*": "Gateway storage controls persisted sessions and must be changed by an operator.",

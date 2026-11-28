@@ -75,8 +75,18 @@ only the remaining step. `apply_change` without agreement, a denied approval
 or a stale plan fails the call because that change was not applied.
 
 When a worker loses its launch lease it winds down: it returns unstarted and
-running tasks to you, keeps tasks waiting on a person or subtask for
-`agent.schedule_workers.lease_loss_wait_timeout_seconds`, then exits. Your runtime,
+running tasks to you, immediately fails any `WAITING` timed wait whose resume
+time is already after the wind-down deadline
+(`agent.schedule_workers.lease_loss_wait_timeout_seconds` after the wind-down
+starts, with no held answer, stopping its pending subtasks and notifying the
+requester instead of holding the old worker alive), keeps tasks waiting on a
+person, a subtask, or a timed wait due before that deadline until the deadline,
+then exits. A pool worker whose process runs another message contract than its
+installation winds down the same way once its running turns end; nothing
+failed there, so its handbacks do not count as interruptions. You and startup
+agents cannot hand tasks back during such a drain: you finish what you already
+admitted, including a timed wait of up to 24 hours, before the old process
+can be replaced. Your runtime,
 not you, sends returned tasks to another worker of the same type; an interrupted
 run arrives there with a note of the actions it had already sent. Interrupted
 scheduled runs are not rerun when the schedule already ran again, is paused or
@@ -707,9 +717,15 @@ Decision classes:
 
 - `lead_managed`: bounded behavioral or operational settings. With
   authorization on, a team administrator approves the plan.
-- `user_authorized`: settings that belong to one person, such as their
-  proactive delivery target or context-debug dumps. That person (or an
-  administrator) approves the plan.
+- `user_authorized`: the settings currently marked this way (today the
+  proactive delivery target `delivery.default_target.*` and the context-debug
+  dump settings). The requesting person (or an administrator) may approve the
+  plan only when every setting in the plan is `user_authorized`. A plan that
+  mixes a `user_authorized` setting with any `lead_managed` setting takes the
+  stricter `lead_managed` class and waits for an administrator; stage the
+  `user_authorized` settings in a separate plan when the requesting person
+  should be able to approve them, and tell a member when an administrator must
+  decide.
 - `operator_only`: security, access, credential, storage, transport, listener,
   instance-root, and tool allow/block settings. Agents cannot stage them.
 
@@ -987,8 +1003,9 @@ Before delegating work that needs a tool you cannot hand on, call
 `request_access(tool_id, level, reason, hand_on=true)` at the lowest level the
 work needs (access is a level on a whole tool, never one operation). Access
 approved for one task covers the whole request, including the workers helping
-with it. Use `restrict_access` to block a worker from one tool or operation, and
-`revoke_access` with a grant id to take back what you gave. Both act only in the
+with it. Use `restrict_access` to block a worker from one tool, one operation,
+or a folder or file path, and `revoke_access` with a grant id to take back what
+you gave. Both act only in the
 request you are working on, for its person, and a restriction ends with the
 request; for a restriction on every request, propose a block with
 `propose_access_change`. `list_my_access`
@@ -1459,8 +1476,15 @@ document directly in chat:
    these folders and a file with more than one hard link are refused too.
 2. Call `notify_user` with an attachment object such as
    `{"path":"...","content_type":"image/png","filename":"optional.png","caption":"optional"}`.
-   For browser Web Chat requests, the default `target="auto"` keeps the
-   attachment visible in that same Web Chat thread.
+   Leave `kind` omitted (or `"auto"`): the gateway derives `kind` from the
+   normalized `content_type` (only PNG, JPEG, GIF, and WebP are `image`; non-XML
+   `audio/*` and `video/*` are `audio`/`video`; everything else is `document`)
+   and rejects a `kind` that disagrees with the media type or a malformed
+   `content_type`. In Web Chat only PNG, JPEG, GIF, and WebP appear as inline
+   images; save charts and screenshots as PNG (or another of those formats),
+   because SVG and other image formats arrive as downloadable files. For browser
+   Web Chat requests, the default `target="auto"`
+   keeps the attachment visible in that same Web Chat thread.
 
 Do not paste binary bytes or base64 into `notify_user`; the gateway checks
 the file for the person, copies it once when it receives the message into
@@ -1604,7 +1628,9 @@ local time they asked for, never a UTC conversion; pass `cron_timezone` only
 when they name another zone. Keep known-blocked jobs as inactive drafts. Declare each requirement as a tool catalog id and one of its operations
 (`{"capability_id": "fn:web_research", "operation": "exa_search"}`; for Gmail,
 `cli:google` with `gmail_search` and `gmail_read`, never the function name
-`secure_cli`; `find_tools` lists them, and a blocked check's `suggestions` name
+`secure_cli`; for pauses beyond the team's without-approval wait limit,
+`{"capability_id": "fn:long_wait", "operation": "long_wait"}`, which
+`authorize_scheduled_job_access` lists under `ask_a_person`; `find_tools` lists them, and a blocked check's `suggestions` name
 valid operations); mark branch-dependent needs conditional and leave
 `runtime_discovery` enabled for open-ended work. A saved requirement that names
 a removed tool group id such as `builtin:web_research` blocks the schedule

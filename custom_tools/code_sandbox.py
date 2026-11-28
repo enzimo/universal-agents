@@ -65,6 +65,9 @@ REASON_CODE_SANDBOX_UNAVAILABLE = "code_sandbox_unavailable"
 CODE_SANDBOX_UNCONFINED = "unconfined"
 # Landlock can limit TCP from this ABI on (code_sandbox_exec.NETWORK_ABI).
 NETWORK_LANDLOCK_ABI = 4
+# Mirrored from code_sandbox_exec so the runtime can recognize an exec-time symlink refusal.
+SANDBOX_FAILURE_EXIT_CODE = 126
+SANDBOX_LINK_REFUSAL_PREFIX = "code sandbox: refusing path with symbolic link: "
 
 # Operating-system locations code needs to run programs. None of these hold
 # Universal Agents secrets. /proc is readable, but Landlock denies access to
@@ -131,6 +134,7 @@ class SandboxedCommand:
     env: dict[str, str]
     sandbox: str
     scratch_dir: str | None = None
+    policy_paths: frozenset[str] = frozenset()
 
 
 def configured_mode(env: Mapping[str, str] | None = None) -> str:
@@ -315,6 +319,31 @@ def _without_protected_parents(
     return kept
 
 
+def _without_symlink_paths(paths: Sequence[str], *, kind: str) -> list[str]:
+    """Keep planned absolute paths that do not traverse a symbolic link; drop and warn otherwise.
+
+    Keeping the planned path (rather than resolving a link to its target) ensures that
+    if a link appears after ``sandbox_policy``, ``code_sandbox_exec.py`` still walks the
+    planned path with ``O_NOFOLLOW`` and refuses to start the command.
+    """
+
+    kept: list[str] = []
+    for raw in dict.fromkeys(paths):
+        normalized = os.path.normpath(raw)
+        resolved = os.path.realpath(raw)
+        if not os.path.isabs(raw) or ".." in Path(raw).parts or resolved != normalized:
+            logger.warning(
+                "Not granting a sandbox path that traverses a symbolic link. "
+                "event=code_sandbox_path_skipped kind=%s path=%s resolved=%s",
+                kind,
+                normalized,
+                resolved,
+            )
+            continue
+        kept.append(normalized)
+    return kept
+
+
 def sandbox_policy(
     *,
     task_roots: Sequence[str],
@@ -334,29 +363,43 @@ def sandbox_policy(
     ``granted_read_roots`` are the folders the agent and its person may only
     read; they may hold a writable granted folder (read on ``data/reports``,
     write on ``data/reports/2026``), so only the instance's own protected
-    locations are checked for them, not the task's folders.
+    locations are checked for them, not the task's folders. Both ``task_roots``
+    and ``granted_read_roots`` are checked independently for symbolic links and
+    instance-private locations before they reach the Landlock launcher.
     """
 
-    roots = [os.path.realpath(root) for root in task_roots]
-    protected = _protected_roots(env, roots)
     instance_protected = _protected_roots(env, [])
-    granted_read = [os.path.realpath(root) for root in granted_read_roots]
     layout = _instance_layout(env)
+    roots = _without_protected_parents(
+        _without_symlink_paths(task_roots, kind="task_link"),
+        instance_protected,
+        kind="task",
+        layout=layout,
+    )
+    protected = _protected_roots(env, roots)
+    granted_read = _without_protected_parents(
+        _without_symlink_paths(granted_read_roots, kind="granted_read_link"),
+        instance_protected,
+        kind="granted_read",
+        layout=layout,
+    )
     interpreter = sorted({os.path.realpath(p) for p in (sys.base_prefix, sys.prefix, sys.exec_prefix)})
-    read = list(SYSTEM_READ_PATHS) + interpreter + _search_path_dirs(env)
+    system_read = [os.path.realpath(path) for path in SYSTEM_READ_PATHS]
+    read = system_read + interpreter + _search_path_dirs(env)
     read += _configured_paths(env, ENV_CODE_SANDBOX_EXTRA_READ_PATHS)
     write = [os.path.realpath(scratch_dir)] + _configured_paths(env, ENV_CODE_SANDBOX_EXTRA_WRITE_PATHS)
     skills = [os.path.realpath(root) for root in read_only_roots]
+    device = list(dict.fromkeys(os.path.realpath(path) for path in DEVICE_PATHS))
     return {
         # Skill folders sit inside the instance, so they skip the instance-private
         # check applied to operator paths, but never a protected-parent check.
         "read": _without_protected_parents(read, protected, kind="read", layout=layout)
         + _without_protected_parents(skills, protected, kind="skill")
-        + _without_protected_parents(granted_read, instance_protected, kind="granted_read"),
+        + granted_read,
         # The task's folders are granted; only their parents are protected.
         "write": roots
         + _without_protected_parents(write, protected, kind="write", layout=layout),
-        "device": list(DEVICE_PATHS),
+        "device": device,
         "network": bool(network),
     }
 
@@ -473,11 +516,16 @@ def prepare_sandboxed_command(
         if owned:
             shutil.rmtree(scratch_dir, ignore_errors=True)
         raise
+    policy_paths = frozenset(
+        path.replace("\r", "\\r").replace("\n", "\\n")
+        for path in (*policy["read"], *policy["write"], *policy["device"])
+    )
     return SandboxedCommand(
         argv=wrapped,
         env=child_env,
         sandbox=CODE_SANDBOX_KIND_LANDLOCK,
         scratch_dir=scratch_dir if owned else None,
+        policy_paths=policy_paths,
     )
 
 
@@ -486,6 +534,26 @@ def release_sandboxed_command(command: SandboxedCommand) -> None:
 
     if command.scratch_dir:
         shutil.rmtree(command.scratch_dir, ignore_errors=True)
+
+
+def sandbox_link_refusal_path(command: SandboxedCommand, exit_code: int, stderr: str) -> str | None:
+    """Return a policy rule path reported as a symbolic link refusal on exit 126, or None.
+
+    Only paths that were actually handed to the Landlock launcher in ``command.policy_paths``
+    are accepted, so arbitrary text written to stderr by the command cannot inject log entries
+    or trigger a false refusal note for an unmounted path.
+    """
+
+    if command.sandbox != CODE_SANDBOX_KIND_LANDLOCK or exit_code != SANDBOX_FAILURE_EXIT_CODE:
+        return None
+    if not command.policy_paths:
+        return None
+    for line in stderr.split("\n"):
+        if line.startswith(SANDBOX_LINK_REFUSAL_PREFIX):
+            candidate = line[len(SANDBOX_LINK_REFUSAL_PREFIX) :]
+            if candidate in command.policy_paths:
+                return candidate
+    return None
 
 
 def sandbox_denial_note(command: SandboxedCommand, stderr: str) -> str | None:
@@ -521,6 +589,8 @@ __all__ = [
     "ENV_CODE_SANDBOX_EXTRA_WRITE_PATHS",
     "ENV_CODE_SANDBOX_MODE",
     "REASON_CODE_SANDBOX_UNAVAILABLE",
+    "SANDBOX_FAILURE_EXIT_CODE",
+    "SANDBOX_LINK_REFUSAL_PREFIX",
     "SandboxedCommand",
     "code_sandbox_status",
     "configured_mode",
@@ -529,5 +599,6 @@ __all__ = [
     "prepare_sandboxed_command",
     "release_sandboxed_command",
     "sandbox_denial_note",
+    "sandbox_link_refusal_path",
     "sandbox_policy",
 ]

@@ -8,10 +8,15 @@ command it asks here:
   grants for this person's work (decision D13) and the folders other people
   shared with the person (decision D15) are each mounted read-write when both
   the agent and the person it works for may write there, read-only when they
-  may only read, and not at all otherwise. Landlock rules only ever add access, so a folder with a block
-  somewhere below it is not mounted at all (the command result says so)
-  rather than mounted with the blocked part exposed. One-time grants never
-  count: a mount lasts the whole command.
+  may only read, and not at all otherwise. Landlock rules only ever add access,
+  so a folder with a blocked folder or file below it (or a file block naming
+  the folder itself) is not mounted at all (the command result says so) rather
+  than mounted with the blocked part exposed. Before mounting, each folder's
+  path is walked component by component from its trusted root without
+  following symbolic links (``access_control.safe_open``): folders reached
+  through a symbolic link, non-directories (code mounts are folders only), and
+  folders the runtime cannot open are skipped with a log entry and a sandbox
+  note. One-time grants never count: a mount lasts the whole command.
 - **Network.** Code may open TCP connections only when the agent and its
   person hold internet access (``fn:internet``, decision D14). It is standard
   for every role, so the network is open unless a block closes it; full
@@ -58,6 +63,14 @@ from access_control.folders import (
 from access_control.decisions import AccessService
 from access_control.entities import AgentPrincipal, PersonPrincipal
 from access_control.identity import IdentityRejected
+from access_control.safe_open import (
+    REASON_LINK,
+    REASON_NOT_DIRECTORY,
+    REASON_NOT_FOUND,
+    REASON_ROOT_UNAVAILABLE,
+    UnsafePath,
+    open_directory,
+)
 from access_control.standard_grants import INTERNET_TOOL_ID
 from custom_agents.access_runtime import (
     REASON_ACCESS_DENIED,
@@ -118,14 +131,124 @@ class CodeAccess:
     notes: tuple[str, ...] = field(default=())
 
 
-def _without_authorization(scope: WorkspaceScope, data_folders: tuple[DataFolder, ...], unconfined: bool) -> CodeAccess:
+def _directory_problem(base: Path, parts: tuple[str, ...]) -> str | None:
+    """Verify ``base/parts`` is a link-free folder (or not yet created); return the UnsafePath reason otherwise."""
+
+    try:
+        descriptor = open_directory(base, parts)
+    except UnsafePath as exc:
+        if exc.reason == REASON_NOT_FOUND or (
+            exc.reason == REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError)
+        ):
+            return None
+        return exc.reason
+    os.close(descriptor)
+    return None
+
+
+def _folder_skip_note(
+    folder_id: str,
+    path: Path,
+    reason: str,
+    *,
+    agent_id: str | None,
+    task_id: str | None,
+) -> str:
+    """Log why a folder is left out of the code sandbox and return the plain note for the agent."""
+
+    if reason == REASON_LINK:
+        logger.warning(
+            "Skipping a folder from the code sandbox because its path contains a symbolic link. "
+            "event=code_access_folder_link_skipped agent_id=%s task_id=%s folder_id=%s path=%s",
+            agent_id,
+            task_id,
+            folder_id,
+            path,
+        )
+        return (
+            f"{folder_id}/ is not available to code because its path contains a symbolic link; "
+            "the sandbox never mounts a folder reached through a link."
+        )
+    if reason == REASON_NOT_DIRECTORY:
+        logger.info(
+            "Skipping a path from the code sandbox because it is not a folder. "
+            "event=code_access_folder_not_directory_skipped agent_id=%s task_id=%s folder_id=%s path=%s",
+            agent_id,
+            task_id,
+            folder_id,
+            path,
+        )
+        return (
+            f"{folder_id} is not a folder, so it is not mounted in the code sandbox; "
+            "file tools still reach it."
+        )
+    logger.warning(
+        "Skipping a folder from the code sandbox because its path could not be verified safely. "
+        "event=code_access_folder_unsafe_skipped agent_id=%s task_id=%s folder_id=%s path=%s reason=%s",
+        agent_id,
+        task_id,
+        folder_id,
+        path,
+        reason,
+    )
+    return f"{folder_id}/ is not available to code because its path could not be verified as a safe folder."
+
+
+def _workspace_root_parts(root: Path, workspaces_dir: Path, *, agent_id: str | None) -> tuple[str, ...] | None:
+    """Return ``root``'s parts below ``workspaces_dir`` without following links, or None with a warning."""
+
+    workspaces_raw = Path(os.path.normpath(workspaces_dir))
+    root_raw = Path(os.path.normpath(root))
+    try:
+        return root_raw.relative_to(workspaces_raw).parts
+    except ValueError:
+        logger.warning(
+            "Skipping a workspace root outside workspaces/ from the code sandbox. "
+            "event=code_access_root_outside_workspaces agent_id=%s root=%s workspaces_dir=%s",
+            agent_id,
+            root,
+            workspaces_dir,
+        )
+        return None
+
+
+def _without_authorization(
+    scope: WorkspaceScope,
+    data_folders: tuple[DataFolder, ...],
+    unconfined: bool,
+    *,
+    agent_id: str | None = None,
+) -> CodeAccess:
     if unconfined:
         raise CodeAccessRefused(UNCONFINED_WITH_AUTHORIZATION_OFF, reason_code=REASON_UNCONFINED_UNAVAILABLE)
-    return CodeAccess(
-        read_write=(*scope.roots, *(folder.path for folder in data_folders if folder.writable)),
-        read_only=tuple(folder.path for folder in data_folders if not folder.writable),
-        network=True,
-    )
+    workspaces = Path(os.path.realpath(scope.workspaces_dir))
+    read_write: list[Path] = []
+    read_only: list[Path] = []
+    notes: list[str] = []
+    for root in scope.roots:
+        parts = _workspace_root_parts(root, scope.workspaces_dir, agent_id=agent_id)
+        if parts is None:
+            continue
+        canonical = workspaces.joinpath(*parts)
+        problem = _directory_problem(workspaces, parts)
+        if problem is not None:
+            notes.append(
+                _folder_skip_note("/".join(parts), canonical, problem, agent_id=agent_id, task_id=None)
+            )
+            continue
+        read_write.append(canonical)
+    for folder in data_folders:
+        canonical = Path(os.path.realpath(folder.path))
+        problem = _directory_problem(canonical, ())
+        if problem is not None:
+            notes.append(
+                _folder_skip_note(
+                    f"{FOLDER_ROOT_DATA}/{folder.name}", canonical, problem, agent_id=agent_id, task_id=None
+                )
+            )
+            continue
+        (read_write if folder.writable else read_only).append(canonical)
+    return CodeAccess(tuple(read_write), tuple(read_only), network=True, notes=tuple(notes))
 
 
 # How many embedded_commands() blocks are open. Process-wide rather than a
@@ -251,14 +374,30 @@ class _Planner:
         return None
 
 
+def _scope_root_folder_id(
+    root: Path, scope: WorkspaceScope, roots: FolderRoots, *, agent_id: str | None
+) -> str | None:
+    """Resolve a workspace root to its folder id without following a symlink at the root itself."""
+
+    parts = _workspace_root_parts(root, scope.workspaces_dir, agent_id=agent_id)
+    if parts is None:
+        return None
+    return roots.folder_id_of(roots.workspaces_dir.joinpath(*parts))
+
+
 def _candidate_folders(
-    scope: WorkspaceScope, roots: FolderRoots, data_folders: tuple[DataFolder, ...], agent_grants: list[GrantV1]
+    scope: WorkspaceScope,
+    roots: FolderRoots,
+    data_folders: tuple[DataFolder, ...],
+    agent_grants: list[GrantV1],
+    *,
+    agent_id: str | None = None,
 ) -> list[str]:
     """The task's folders, the data folders, and the folders in the agent's lasting grants."""
 
     candidates: dict[str, None] = {}
     for root in scope.roots:
-        folder_id = roots.folder_id_of(Path(os.path.realpath(root)))
+        folder_id = _scope_root_folder_id(root, scope, roots, agent_id=agent_id)
         if folder_id:
             candidates[folder_id] = None
     for folder in data_folders:
@@ -269,8 +408,21 @@ def _candidate_folders(
     return list(candidates)
 
 
-def _blocked_inside(folder_id: str, blocked: list[str]) -> list[str]:
-    return sorted(block for block in blocked if block != folder_id and covers(folder_id, block))
+def _block_note(folder_id: str, blocked: list[TargetRefV1]) -> str | None:
+    """Why a block keeps ``folder_id`` out of the sandbox, or None when no inner or exact file block matches."""
+
+    if any(target.kind is TargetKind.FILE and target.id == folder_id for target in blocked):
+        return (
+            f"{folder_id}/ is not available to code because {folder_id} is blocked; "
+            "file tools still enforce the block."
+        )
+    inner = sorted({target.id for target in blocked if target.id != folder_id and covers(folder_id, target.id)})
+    if not inner:
+        return None
+    return (
+        f"{folder_id}/ is not available to code because {', '.join(inner)} inside it is blocked; "
+        "the sandbox cannot leave out part of a folder. File tools still reach the rest."
+    )
 
 
 def _planner(agent: Any) -> _Planner:
@@ -287,6 +439,38 @@ def _planner(agent: Any) -> _Planner:
     return _Planner(access.service, principal, person, principal.work_id)
 
 
+def _plan_candidate_folder(
+    folder_id: str,
+    roots: FolderRoots,
+    planner: _Planner,
+    blocked: list[TargetRefV1],
+) -> tuple[AccessLevel, Path] | str | None:
+    """Decide whether to mount ``folder_id`` (returning level and path), skip it with a note, or omit it."""
+
+    try:
+        base, parts = roots.root_and_parts(folder_id)
+    except FolderIdError:
+        return None  # a grant on a data folder the operator no longer registers
+    data = roots.data_folder(folder_id)
+    level = planner.level(folder_id, writable_root=data is None or data.writable)
+    if level is None:
+        return None
+    block_reason = _block_note(folder_id, blocked)
+    if block_reason is not None:
+        return block_reason
+    path = base.joinpath(*parts)
+    problem = _directory_problem(base, parts)
+    if problem is not None:
+        return _folder_skip_note(
+            folder_id,
+            path,
+            problem,
+            agent_id=planner.principal.agent_id,
+            task_id=planner.task_id,
+        )
+    return level, path
+
+
 def code_access(
     agent: Any,
     scope: WorkspaceScope,
@@ -298,34 +482,27 @@ def code_access(
     """What the agent's next command may reach; raises ``CodeAccessRefused``."""
 
     if not authorization_enabled(getattr(agent, "authorization_config", None)):
-        return _without_authorization(scope, data_folders, unconfined)
+        return _without_authorization(scope, data_folders, unconfined, agent_id=getattr(agent, "id", None))
     planner = _planner(agent)
     if unconfined:
         return planner.unconfined()
     roots = FolderRoots(Path(os.path.realpath(scope.workspaces_dir)), data_folders)
     agent_grants, person_grants = planner.grants()
     blocked = [
-        grant.target.id
+        grant.target
         for grant in (*agent_grants, *person_grants)
-        if grant.kind is GrantKind.BLOCK and grant.target.kind is TargetKind.FOLDER
+        if grant.kind is GrantKind.BLOCK and grant.target.kind in {TargetKind.FOLDER, TargetKind.FILE}
     ]
     mounts: dict[AccessLevel, list[Path]] = {AccessLevel.WRITE: [], AccessLevel.READ: []}
     notes: list[str] = []
-    for folder_id in _candidate_folders(scope, roots, data_folders, agent_grants):
-        try:
-            path = roots.path_of(folder_id)
-        except FolderIdError:
-            continue  # a grant on a data folder the operator no longer registers
-        inner = _blocked_inside(folder_id, blocked)
-        if inner:
-            notes.append(
-                f"{folder_id}/ is not available to code because {', '.join(inner)} inside it is blocked; "
-                "the sandbox cannot leave out part of a folder. File tools still reach the rest."
-            )
-            continue
-        data = roots.data_folder(folder_id)
-        level = planner.level(folder_id, writable_root=data is None or data.writable)
-        if level is not None:
+    for folder_id in _candidate_folders(
+        scope, roots, data_folders, agent_grants, agent_id=planner.principal.agent_id
+    ):
+        outcome = _plan_candidate_folder(folder_id, roots, planner, blocked)
+        if isinstance(outcome, str):
+            notes.append(outcome)
+        elif outcome is not None:
+            level, path = outcome
             mounts[level].append(path)
     planned = CodeAccess(
         tuple(mounts[AccessLevel.WRITE]), tuple(mounts[AccessLevel.READ]), planner.network(), notes=tuple(notes)
