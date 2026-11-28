@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from strands import tool
 
-from assistant_gateway.attachments import validate_user_notification_attachments
+from assistant_gateway.attachments import (
+    coerce_attachment_items,
+    validate_user_notification_attachments,
+)
 from custom_tools.workspace_scope import current_workspace_scope
 from custom_messages.contracts.runtime_v1 import MEM_REVIEW_AGENT_TYPE
 from custom_agents.instance_delivery_context import default_notification_gateway_context
@@ -15,7 +18,7 @@ from custom_agents.memory_plugins.config import memory_notification_delivery_tar
 from custom_agents.schedule_management import (
     is_system_managed_schedule,
 )
-from custom_messages.contracts.delivery_v1 import UserNotification
+from custom_messages.contracts.delivery_v1 import UserNotification, UserNotificationAttachment
 from custom_messages.contracts.envelope_v1 import (
     GATEWAY_MANAGER_CONTROL_TYPES,
     SCHEDULED_RUN_CONTEXT_TYPES,
@@ -300,44 +303,28 @@ def _notify_user_gateway_context(
     return _default_context(config, active_context, person_id)
 
 
-def _raw_attachment_items(raw_attachments: Any) -> List[Any]:
-    if raw_attachments in (None, "", []):
-        return []
-    if isinstance(raw_attachments, str):
-        rendered = raw_attachments.strip()
-        if not rendered:
-            return []
-        if rendered.startswith("[") or rendered.startswith("{"):
-            try:
-                raw_attachments = json.loads(rendered)
-            except json.JSONDecodeError:
-                return []
-        else:
-            return [rendered]
-    if isinstance(raw_attachments, (list, tuple)):
-        return list(raw_attachments)
-    return [raw_attachments]
-
-
 def _precheck_attachment_access(agent: Any, raw_attachments: Any) -> List[str]:
     """Run agent-side ``file_access`` decisions before gateway attachment validation.
 
+    Uses ``coerce_attachment_items`` and the same payload extraction as
+    ``validate_user_notification_attachments`` so both sides stay in step.
     Refuses blocked or unauthorized paths before gateway-side spelling or file
     checks can reveal on-disk names. Location errors outside the workspace fall
     through to gateway validation so its outside-folder messages stay intact;
     accepted attachments are still checked again by ``_attachment_access_errors``.
     """
 
+    items, coerce_error = coerce_attachment_items(raw_attachments)
+    if coerce_error:
+        return [coerce_error]
     errors: List[str] = []
-    for index, raw in enumerate(_raw_attachment_items(raw_attachments)):
-        if isinstance(raw, str):
-            raw_path = raw.strip()
-        elif isinstance(raw, Mapping):
-            raw_path = str(raw.get("path") or "").strip()
-        elif hasattr(raw, "path"):
-            raw_path = str(getattr(raw, "path") or "").strip()
-        else:
+    for index, raw in enumerate(items):
+        payload = raw.model_dump() if isinstance(raw, UserNotificationAttachment) else raw
+        if isinstance(payload, str):
+            payload = {"path": payload}
+        if not isinstance(payload, Mapping):
             continue
+        raw_path = str(payload.get("path") or "").strip()
         if not raw_path:
             continue
         try:

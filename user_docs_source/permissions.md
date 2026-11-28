@@ -600,9 +600,9 @@ existing file, creating or applying the grant is refused at once and names the
 containing folder to grant instead (or `/share` for a person's own file).
 `request_access` refuses blocks and private person folders before checking the
 disk; for already-registered data folders, `request_access` and
-`propose_access_change` still check when asked whether the named path is an
-existing file (even if the requester does not yet have read access to that data
-folder).
+`propose_access_change` still check on-disk spelling (up to the first mismatched
+component) and whether the named path is an existing file when asked, even if
+the requester does not yet have read access to that data folder.
 
 **Standard access.** Every agent and every person holds `write` on `team/` and
 `agents/` without a grant. An agent may also use the folder of the person its

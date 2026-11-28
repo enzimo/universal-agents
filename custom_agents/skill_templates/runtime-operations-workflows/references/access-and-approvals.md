@@ -211,9 +211,11 @@ operator).
   refuse a folder grant whose path names an existing file and tell you to grant
   the containing folder instead (or `/share` for a person's own file). Blocks
   and private person folders are refused before disk checks, while
-  `request_access` and `propose_access_change` check registered data folders on
-  disk when asked (even without prior read access to the folder). Blocks on
-  file paths and `/share` single-file shares remain allowed.
+  `request_access` and `propose_access_change` still check registered data
+  folders on disk when asked—revealing an existing path's on-disk spelling up to
+  its first mismatched component and whether a path is an existing file—even
+  without prior read access to the folder. Blocks on file paths and `/share`
+  single-file shares remain allowed.
 
 ## Platform changes
 

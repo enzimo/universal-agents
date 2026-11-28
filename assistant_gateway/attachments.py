@@ -157,7 +157,8 @@ def _is_sensitive_path(path: Path) -> bool:
     return sensitive_reason(path) is not None
 
 
-def _coerce_attachment_items(raw_attachments: Any) -> tuple[list[Any], str | None]:
+def coerce_attachment_items(raw_attachments: Any) -> tuple[list[Any], str | None]:
+    """Normalize ``notify_user`` attachment inputs into raw items or a parse error."""
     if raw_attachments in (None, "", []):
         return [], None
     if isinstance(raw_attachments, str):
@@ -285,7 +286,7 @@ def validate_user_notification_attachments(
     person_id: str | None,
 ) -> tuple[list[UserNotificationAttachment], list[str]]:
     """Validate attachments for a message to ``person_id`` (None: no person)."""
-    items, error = _coerce_attachment_items(raw_attachments)
+    items, error = coerce_attachment_items(raw_attachments)
     if error:
         return [], [error]
     if not items:

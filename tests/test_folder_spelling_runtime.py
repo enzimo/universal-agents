@@ -610,4 +610,38 @@ def test_notify_user_runs_agent_file_access_before_gateway_validation(
     assert "team/finance" in parent_res["attachment_errors"][0]
     assert "team/finance/payroll.csv" not in parent_res["attachment_errors"][0]
     assert "finance" not in sim.open_dir_calls
+
+    # 4. Shared coercion covers JSON strings, UserNotificationAttachment models, and invalid JSON.
+    import json
+    from custom_messages.contracts.delivery_v1 import UserNotificationAttachment
+
+    sim.stat_calls.clear()
+    json_res = notify_user._tool_func(
+        message="Here is the file.",
+        attachments=json.dumps({"path": str(finance_dir / "PAYROLL.csv")}),  # type: ignore[arg-type]
+    )
+    assert json_res["status"] == "error"
+    assert "cannot be sent" in json_res["attachment_errors"][0]
+    assert "payroll.csv" not in json_res["attachment_errors"][0]
+    assert sim.stat_calls == []
+
+    sim.stat_calls.clear()
+    model_res = notify_user._tool_func(
+        message="Here is the file.",
+        attachments=UserNotificationAttachment(path=str(reports_dir / "Q1.csv")),  # type: ignore[arg-type]
+    )
+    assert model_res["status"] == "error"
+    assert "cannot be sent" in model_res["attachment_errors"][0]
+    assert "data/reports/q1.csv" not in model_res["attachment_errors"][0]
+    assert sim.stat_calls == []
+
+    sim.stat_calls.clear()
+    bad_json_res = notify_user._tool_func(
+        message="Here is the file.",
+        attachments="[{not-valid-json",  # type: ignore[arg-type]
+    )
+    assert bad_json_res["status"] == "error"
+    assert "must be a list, path string, or JSON object/list" in bad_json_res["attachment_errors"][0]
+    assert sim.stat_calls == []
+
     agent.team_comms.send_message.assert_not_awaited()

@@ -2857,9 +2857,11 @@ and `AccessRequests.submit` refuses `users/…` targets and agent/person blocks
 before any disk check. However, because `request_access` (`AccessRequests.submit`)
 and `propose_access_change` (`ProposalCompiler.compile`) check already-registered
 data folders when asked, an unblocked requester without read access to a
-registered data folder can still tell whether a path there is an existing file
-(refused immediately) versus missing (waits for review); newly proposed data
-folders are skipped until `ProposalApplier` runs after administrator approval.
+registered data folder can still learn both the on-disk spelling of an existing
+path (up to its first mismatched component) and whether a path there is an
+existing file (refused immediately) versus missing (waits for review); newly
+proposed data folders are skipped until `ProposalApplier` runs after
+administrator approval.
 Misspelled existing targets are refused with the disk's exact spelling up to the
 first mismatched component at every grant, block, restriction, request, proposal,
 and share creation site. `AccessService._prepare_hand_down` refuses to hand on a folder when the
