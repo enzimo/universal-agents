@@ -37,6 +37,26 @@ Direct Signal sessions bind to `sourceUuid` when available, otherwise the E.164
 source phone number. Rejected sender logs include `newuser_target=...` for admin
 onboarding.
 
+## Attachments
+
+Inbound Signal attachments are fetched only by attachment id from
+`signal-cli-rest-api` (without following HTTP redirects) or decoded from inline
+base64. Host-path keys (`path`, `localPath`, `storedFilename`,
+`stored_filename`) are ignored and never read from disk. Entries without an
+attachment id or inline base64 data (including bare strings or path-only
+objects), invalid attachment ids, and filenames containing path separators or
+absolute paths are refused.
+
+Attachment sizes are checked against the configured upload limit before reading
+or decoding bytes. Attachments are downloaded and saved one at a time, and an
+attachment id repeated within one message is downloaded only once. If any
+attachment in a message is refused or fails to download, the files already
+saved for that message are deleted, so none of its attachments are kept. A
+slash command sent with attachments is refused before anything is downloaded.
+Unexpected `signal-cli-rest-api` download errors reply with a fixed
+`Attachment download failed.` message; the gateway warning log records the
+attachment id, its position in the message and the error type.
+
 ## Proactive Delivery
 
 If Signal should receive proactive agent messages:

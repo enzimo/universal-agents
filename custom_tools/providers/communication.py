@@ -353,8 +353,16 @@ def notify_user(
             {"path": "screenshots/site.png",
              "filename": "site.png",
              "content_type": "image/png",
-             "caption": "Screenshot",
-             "kind": "image"}. Only path is required. Relative paths start in
+             "caption": "Screenshot"}. Only path is required. Attachment kind is
+             derived from the file's media type (only PNG, JPEG, GIF, and WebP
+             are kind "image"; non-XML audio/* and video/* are "audio"/"video";
+             other types including SVG and HEIC are "document"). In Web Chat
+             only PNG, JPEG, GIF, and WebP appear inline as images; save charts
+             and screenshots as PNG (or another of those formats), because SVG
+             and other image formats arrive as downloadable files. Leave kind out,
+             or set content_type when the filename suffix is unknown; a kind
+             that disagrees with the resolved content_type is rejected. Relative
+             paths start in
              this task's folder; files must be in the person's folder or the
              shared team/ and agents/ folders. The message stores file
              references, not binary bytes.

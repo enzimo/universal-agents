@@ -317,6 +317,19 @@ def test_blocks_are_added_and_removed_as_the_signed_in_person(harness: Harness) 
     assert harness.agents.service.blocks_on(WORKER, SCHEDULES) == ()
 
 
+def test_a_block_on_a_file_path_is_shown_as_a_path_not_a_folder(harness: Harness) -> None:
+    created = asyncio.run(
+        harness.map.block(
+            "owner-1",
+            AccessBlockInput(subject_kind="agent_type", subject="WebResearchAgent", tool_id="team/finance/payroll.csv",
+                             operation="", reason="Payroll stays private", hours=None),
+        )
+    )
+    assert created["message"].startswith("WebResearchAgent is blocked from the path team/finance/payroll.csv.")
+    [shown] = holder(harness.view("owner-1"), "agent_type:WebResearchAgent")["blocks"]
+    assert (shown["target_name"], shown["target_kind_words"]) == ("the path team/finance/payroll.csv", "path")
+
+
 def test_removing_access_also_ends_what_was_handed_on_from_it(harness: Harness) -> None:
     [starter] = [
         row

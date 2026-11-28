@@ -1784,8 +1784,13 @@ sandboxed command can:
 - use any extra paths you list outside the instance root.
 
 Landlock can only add access, never take part of a folder away, so a folder
-with a blocked folder inside it is left out of the command entirely; the
-command result's sandbox note says so, and file tools still reach the rest.
+with a blocked folder or file inside it is left out of the command entirely;
+the command result's sandbox note says so, and file tools still reach the rest.
+Code mounts are folders only, and the sandbox never mounts a folder reached
+through a symbolic link or a folder the runtime itself cannot open: each mount
+is verified from its trusted root without following links during planning,
+checked again when building the policy, and walked component by component with
+`O_NOFOLLOW` by the Landlock launcher before starting the command.
 
 It cannot read `team.env`, the instance configuration, control files,
 credential files, databases, runtime records, other people's folders, or other
@@ -1794,7 +1799,8 @@ processes' memory and environment. The runtime sets `SKILLS_DIR` to
 Environment variables that name a path outside these areas (for example a
 `GIT_CONFIG_GLOBAL` in your home directory) are removed for the command.
 Commands may create links in the folders they can write (Python environments
-need them); file tools, attachments and the gateway never follow those links.
+need them); file tools, attachments, the gateway, and subsequent sandbox mounts
+never follow those links.
 
 **Network.** A command can open TCP connections and listen on a port when the
 agent and its person hold [internet access](permissions.md#internet-access),

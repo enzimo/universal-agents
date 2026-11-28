@@ -2100,7 +2100,49 @@ one-link regular file of bounded size, and checks the digest. A link or changed
 bytes swapped in after staging are refused (Web Chat answers "no longer
 available"), so the file delivered is the file that was checked. The Photon
 sidecar reads a path, so it gets a private 0600 copy under `state/` that is
-removed after the call.
+removed after the call. Attachment media types and inline display follow one
+shared policy (`assistant_gateway/attachment_media.py`). The Web Chat page keeps
+its own copy in `chat_attachments.mjs`; a test compares the inline image list
+and runs a shared table of sample media types (malformed, mixed-case,
+whitespace-padded and non-ASCII ones included) through both parsers and kind
+rules, so the page shows a file the way the server sends it. Outgoing
+`notify_user` validation rejects malformed `content_type` strings and rejects
+explicit `kind` values that disagree with the normalized media type (only
+`image/png`, `image/jpeg`, `image/gif`, and `image/webp` have `kind="image"`),
+so an agent cannot label SVG, HTML, or arbitrary bytes as an inline image.
+The gateway runs the same check again on every notification it receives, so a
+notification in the older format (queued during an upgrade, or sent by a worker
+still on older code) arrives without the files this check refuses; each one is
+logged as `event=outgoing_attachment_skipped` and the message text is still
+delivered. No compatibility path keeps them. The older code produced these
+refused shapes: a non-raster image (SVG, HEIC, AVIF, BMP, TIFF) labelled
+`kind: image`, which older code did for every `image/*` type; an explicit
+`application/octet-stream` on a `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp`
+file, which older code called an image by its suffix; any explicit `kind` that
+disagrees with the media type, such as `kind: document` on `image/png`, or
+`kind: audio` on a file whose suffix gives no media type (such as `.caf`); and a
+`content_type` that is not a media type, such as `png`. A `.opus` file with
+`kind: audio` is refused only when it was also sent with an explicit
+`application/octet-stream` type; without a type its suffix gives `audio/opus`.
+Every `/api/web-chat/attachments/{attachment_id}` response sends
+`Content-Security-Policy: sandbox; default-src 'none'`,
+`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`,
+`Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`,
+and a sanitized RFC 5987 `Content-Disposition` derived from the stored
+normalized media type rather than `kind`. Only allowlisted raster images open
+with `Content-Disposition: inline`; non-XML `audio/*` and `video/*` keep their
+normalized `Content-Type` so `<audio>` and `<video>` players inside Web Chat
+play normally, while sending `Content-Disposition: attachment` so opening the
+raw attachment URL in its own tab downloads the file instead of showing a
+sandbox-blocked empty player. Every other attachment type (including
+`image/svg+xml`, `text/html`, `text/javascript`, and `text/css`) is sent with
+`Content-Disposition: attachment` and `Content-Type: application/octet-stream`
+so it cannot execute as a page, script, or stylesheet on the Web Chat origin.
+Workspace image previews (`/api/web-chat/workspace/content`) also send
+`Content-Security-Policy: sandbox; default-src 'none'` alongside `nosniff`.
+PDF previews are sent without that policy only so a PDF opened directly in its
+own tab still shows in the browser's built-in PDF viewer, which needs scripts;
+the in-page preview frame is sandboxed by the page either way.
 
 Published pages (how-tos, articles, apps and work reports from
 `publish_single_page_site`) are deliverables too, so they are written into the
@@ -2324,9 +2366,21 @@ agent's grants for this person's work) and grants each one
 read-write where both may write, read-only where they may only read, or not at
 all; the command also gets read-only skill folders, a private scratch home, and
 read-only system files. Landlock rules only add access, so a folder with a
-blocked folder below it is left out entirely and the result says so, rather
-than exposing the blocked part. Control files, databases, secrets, instance
-configuration, other people's folders, and other processes stay out of reach.
+blocked folder or file below it (or a file block naming the folder itself) is
+left out entirely and the result says so, rather than exposing the blocked
+part. Before mounting, `custom_agents/code_access.py` walks every granted
+folder from its trusted root (`workspaces/` or the registered data folder)
+with `access_control.safe_open.open_directory`: folders reached through a
+symbolic link, non-directories (code mounts are folders only), and folders the
+runtime itself cannot open are skipped with a warning and a sandbox note. As
+independent layers, `custom_tools/code_sandbox.py` (`sandbox_policy`) drops
+symlinked or instance-private task and granted-read roots while passing the
+planned link-free paths unresolved to `custom_tools/code_sandbox_exec.py`,
+which opens every Landlock rule path from `/` component by component with
+`O_NOFOLLOW` and `fstat` and refuses any symbolic link with exit 126 before
+`execvp` (closing the check-then-use race). Control files, databases, secrets,
+instance configuration, other people's folders, and other processes stay out
+of reach.
 TCP connect and listen are open only when the agent and its person hold
 internet access (`fn:internet`, operation `connect`, decision D14). It sits
 with the web research tools in the `internet` tool set, which every role
@@ -2737,15 +2791,42 @@ cannot open or share it, and agent grants on a person's folder are refused.
 An agent working for the recipient uses what was shared with that person at
 the shared level, for file tools and sandbox mounts, through per-decision
 copies of the person's share grants (`AccessService.shared_with`); blocks on
-the agent still apply. In Cedar a file is inside each folder
-up to its root, so a grant or block on a folder covers everything below it.
+the agent still apply. In Cedar a file is inside each folder up to its root, so a grant or block on a
+folder covers everything below it. Every `TargetKind.FOLDER` block also emits a
+forbid link (`block-file:<grant_id>`) targeting `File::<id>` alongside
+`Folder::<id>` (`access_control/entities.py`), and `AccessService._evaluate`
+normalizes those ids back to `block:<grant_id>`, so blocking a file path (via
+`/access block`, `assistant_cli access block --folder`, or `restrict_access`)
+stops file tools from opening that file while siblings remain accessible and
+keeps the containing folder out of sandboxed code (`custom_agents/code_access.py`).
+Blocks match the exact spelling of a path.
 `AccessService.decide_folder` decides each file use (agent side, then person
-side), and `custom_agents/folder_access.py` keeps allowed answers for 10
-seconds per folder, keyed by the access store version, so a crawl or a Python
-environment does not ask for every file while every grant, revocation or block
-still applies to the next file. `request_access`, `restrict_access`, `/access`
-and `assistant_cli access grant|block --folder` accept folders, and a worker's
-task gets a folder from TeamLead's access like a tool.
+side). `AccessService.reusable_folder_allowance` decides when a folder allowance
+covers its direct children and returns the set of blocked direct-child ids
+(skipping the second Cedar check on folder listings when neither side holds a
+one-time grant). `custom_agents/folder_access.py` keeps allowed answers for up
+to 10 seconds, keyed by team, access store version, agent, work/schedule/task,
+person, level, scope (`folder` or `file`), and target id: a folder-level entry
+holds its blocked direct-child exclusions so crawls beside a blocked sibling
+still reuse one answer per folder while blocked files fall through to Cedar,
+whereas a single-file share (or any file-only allowance) is kept only under its
+exact `file` key and never opens siblings or the parent folder. Because the
+access store version is part of every key, every grant, revocation, or block
+applies to the next file. `request_access`, `restrict_access`, `/access`, and
+`assistant_cli access grant|block --folder` accept folders (and blocks accept
+file paths as well), and a worker's task gets a folder from TeamLead's access
+like a tool. A folder-kind access grant on a file path links only
+`Folder::<id>`, so it never opens `File::<id>`; only blocks get the extra file
+link. `AccessService._prepare_hand_down` refuses to hand on a folder when the
+grantor holds a block on a path inside it (`access_control.folders.paths_inside`,
+the rule the sandbox uses), because the worker holds no such block and would
+reach the blocked path through the folder. That refusal is
+`HandDownBlockedInside`; when a person approves a worker's folder request with
+"Keep", `AccessRequests._give_specs` catches it and gives the worker its task
+grant on the reviewer's authority, as "approve for this task only" does, and
+logs `event=approval_worker_grant_by_person` with the block ids. A block added
+after a folder was already handed on to a running task does not take that
+task's grant back; the grant ends with the task.
 
 People share and send files through `assistant_gateway/file_sharing.py`
 (`/share`, `/unshare`, `/shares`, `/send`, and the workspace browser's Share
@@ -3123,9 +3204,28 @@ staged as exact, digest-checked plans and applied with one tool,
 `apply_change` (`access_control/changes.py`, `custom_agents/change_approvals.py`).
 Agents never hold `full` access to platform tools (a standard Cedar guardrail),
 so with authorization on a person approves the exact plan in the Inbox; the
-resumed call then claims the approval once and applies the plan in the agent's
-process. With authorization off the person's conversational agreement applies
-it. One narrow class applies at once instead: a settings plan that only
+resumed call re-checks the stored request's change id, plan digest, owner and
+change kind against a fresh description, claims the approval once and applies
+the plan in the agent's process. When the same change's digest, owner or kind
+no longer matches (for example after an upgrade that tightened who may approve
+it, or if the plan file changed), trusted code uses up the approval and records
+why so a stale approval cannot be reused; a request for a different change id
+is refused without consuming that other change's approval. A request that was
+waiting before such an upgrade can still be decided by the person it named
+then, but nothing applies: the resumed call refuses it and uses up the
+approval. `ChangeApproval` carries the described or approved `plan_digest` in
+all three approval modes (person approval, held access and agreement); the
+owner and kind re-check runs only when a person-approval request resumes. Only
+`RuntimeSettingsService` compares that digest with the plan it reloads and
+refuses when it is missing or differs today; the other change services do not
+yet. For runtime settings (`custom_agents/runtime_settings_service.py`), a
+plan's decision class is the most restrictive class of its changes
+(`operator_only`, then `lead_managed`, then `user_authorized`), `describe` sets
+`owner_person_id` to the requester only when every change in the plan is
+`user_authorized` (mixed plans wait for an administrator), and `load_plan`
+refuses stored plans whose class no longer matches their changes or the
+setting registry. With authorization off the person's conversational agreement
+applies it. One narrow class applies at once instead: a settings plan that only
 switches an agent type's model (provider, model, reasoning, context window
 and input settings; `custom_agents/model_choice.py`) is the `model_choice` change on
 `fn:model_choice`, a tool only administrators hold (Cedar
@@ -6544,7 +6644,19 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   backfill records or repair schemas. The shared memory planner rejects blank
   text after trimming, and schedule planning computes a next run with the store's
   timezone rules. Editable YAML errors show their location without repeating
-  private input. These checks run before the unfinished-import marker is written.
+  private input. The `skills` section (`team_transfer.skills`) restricts unit
+  names to a single folder name and file paths to relative paths inside their
+  skill, and verifies reviewed installs in memory against their attested tree
+  digest without writing or deleting on disk
+  (`custom_agents.skill_repository.build_skill_tree_manifest_from_files`,
+  `custom_agents.skill_installation.verify_managed_skill_attestation_digest`).
+  These checks run before the unfinished-import marker is written. During apply,
+  after the marker is written, each skill is staged and checked in a sibling
+  temporary entry beside its destination and swapped in only when complete. A
+  failure the import catches restores the previous folder and attestation. A
+  process killed mid-import restores nothing and can leave a dot-named staging or
+  backup folder that the skill loader would read; the unfinished-import marker
+  (`team_transfer.runtime_guard`) keeps that instance from starting.
 - **Credentials stay with their owners.** A passphrase-derived key
   authenticates the manifest and encrypts secrets. Operator secrets from
   `team.env` travel encrypted in the file. The other sections are plain,

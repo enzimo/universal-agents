@@ -1,8 +1,11 @@
 # Access levels for gh passthrough commands (cli:github).
-# Commands not listed require full access. `api` is classified by its HTTP
-# method in access_catalog (GET/HEAD read; anything else full, because a POST
-# may be a GraphQL mutation). Blocked commands and flags are refused by the
-# broker whatever access is held.
+# Commands not listed require full access. `api` is classified by
+# access_catalog.cli_tables.parse_gh_api: plain GET (including -f/-F query
+# fields) and body-less HEAD calls to non-GraphQL endpoints are read; GraphQL
+# calls, calls with --input, HEAD calls with fields, and all other HTTP methods
+# (including implicit POST) require full. Unknown flags, repeated -X/--method
+# flags, and empty methods are refused. Blocked commands and flags are refused
+# by the broker whatever access is held.
 cli: gh
 commands:
   status: read

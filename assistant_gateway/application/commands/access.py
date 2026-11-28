@@ -51,10 +51,10 @@ ACCESS_HELP_TEXT = "\n".join(
         "add --everyone, which a worker type may also hold.",
         "- /access revoke <grant id> - remove all of that agent's access to that tool, and everything handed "
         "down from it.",
-        "- /access block <who> <tool|tool#operation|tool set|folder> --reason \"why\" "
+        "- /access block <who> <tool|tool#operation|tool set|folder|file path> --reason \"why\" "
         "[--hours 24 | --replace <stale block id>] - stop "
-        "an agent type, agent, person, role or the whole team from using a tool, one operation, a tool set "
-        "or a folder, whatever grants exist. It applies from the next action. Internet access is on for "
+        "an agent type, agent, person, role or the whole team from using a tool, one operation, a tool set, "
+        "a folder or a file path, whatever grants exist. It applies from the next action. Internet access is on for "
         "everyone; /access block team internet --reason \"...\" turns it off. --replace swaps a block on a "
         "removed operation for a current operation of the same tool and subject in one step, keeping its expiry.",
         "- /access unblock <block id> - remove a block (the person who added it, or an owner or administrator).",
@@ -231,7 +231,7 @@ def parse_block(words: list[str]) -> AccessBlockInput:
     if len(positional) != 2 or not flags.get("--reason", "").strip() or set(flags) - {"--reason", "--hours", "--replace"}:
         raise AccessCommandUsageError(
             "Usage: /access block <agent-type:Type|agent:id|user:id|role:name|team> "
-            '<tool|tool#operation|tool set|folder> --reason "why" [--hours 24 | --replace <stale block id>]'
+            '<tool|tool#operation|tool set|folder|file path> --reason "why" [--hours 24 | --replace <stale block id>]'
         )
     subject, target = positional
     return AccessBlockInput(

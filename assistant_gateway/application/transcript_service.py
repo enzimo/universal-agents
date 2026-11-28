@@ -6,7 +6,6 @@ import base64
 import hashlib
 import json
 import logging
-import mimetypes
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -21,6 +20,10 @@ from assistant_gateway.application.response_models import GatewayResponse
 from assistant_gateway.application.transient_presentation import (
     SECURE_CREDENTIAL_COLLECTION_READY_TEXT,
     TOOL_SETUP_READY_TEXT,
+)
+from assistant_gateway.attachment_media import (
+    attachment_kind_for_content_type,
+    resolve_attachment_content_type,
 )
 from assistant_gateway.domain.message_types import (
     ACCESS_REVIEW_MESSAGE_TYPE,
@@ -820,14 +823,11 @@ class GatewayTranscriptService:
                 continue
             attachment_id = self._ids.new_transcript_attachment_id()
             filename = str(attachment.filename or path.name)
-            content_type = str(
-                attachment.content_type
-                or mimetypes.guess_type(filename)[0]
-                or "application/octet-stream"
+            content_type = resolve_attachment_content_type(
+                attachment.content_type,
+                filename=filename,
             )
-            kind = str(attachment.kind or "auto")
-            if kind == "auto":
-                kind = self._kind_for_content_type(content_type)
+            kind = attachment_kind_for_content_type(content_type)
             size_bytes = int(attachment.size_bytes or 0)
             prepared.append(
                 _PreparedNotificationAttachment(
@@ -870,14 +870,6 @@ class GatewayTranscriptService:
                 local_path=attachment.local_path,
                 owner_canonical_user_id=owner,
             )
-
-    @staticmethod
-    def _kind_for_content_type(content_type: str) -> str:
-        normalized = content_type.lower()
-        for kind in ("image", "audio", "video"):
-            if normalized.startswith(f"{kind}/"):
-                return kind
-        return "document"
 
     @staticmethod
     def _encode_payload(payload: dict[str, object]) -> str:

@@ -309,7 +309,7 @@ def summarize_grant(requests: Any, grant: GrantV1) -> str:
 
     from access_control.requests import LEVEL_WORDS
 
-    target = f"{requests.target_name(grant.target)} ({grant.target.id})"
+    target = f"{requests.target_name(grant.target, for_block=grant.kind is GrantKind.BLOCK)} ({grant.target.id})"
     by = subject_words(grant.granted_by)
     state = "" if grant.status is GrantStatus.ACTIVE else f" [{grant.status.value}]"
     if grant.kind is GrantKind.BLOCK:

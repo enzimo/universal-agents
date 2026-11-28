@@ -72,6 +72,11 @@ PROCEDURE_HANDLERS_FILE = (
 )
 INSTALLED_PROCEDURE_PREFIX = "installed_permission."
 UNREGISTERED_FUNCTION_TOOL = "fn:unregistered"
+# Operation name used when a CLI passthrough argument list fails parsing. The
+# private Rust classifier uses the same name, so it stays as it is. A listed
+# command (or command group) may also be called "unparsed", so the resolution's
+# ``command_line_rejected`` flag, not this name, marks a parse failure.
+UNPARSED_COMMAND_OPERATION = "command:unparsed"
 # The one secure_cli action of an installed CLI: run a checked argument list.
 INSTALLED_CLI_ACTION = "exec"
 UNLISTED_WEB_TOOL = "http:unlisted"
@@ -732,10 +737,11 @@ class ToolCatalog:
             except ValueError as exc:
                 return OperationResolutionV1(
                     tool_id=binding.tool_id,
-                    operation="command:unparsed",
+                    operation=UNPARSED_COMMAND_OPERATION,
                     level=AccessLevel.FULL,
                     source=ClassificationSource.UNREVIEWED,
                     detail=str(exc)[:500],
+                    command_line_rejected=True,
                 )
             return self.resolve_command_line(binding.tool_id, table, argv)
         assert binding.level is not None
@@ -747,15 +753,16 @@ class ToolCatalog:
         policy = self.cli_policies.get(table) or load_cli_policy(table)
         try:
             parsed = parse_command_line(list(argv), policy.table)
+            level = classify_passthrough(policy, parsed)
         except CommandLineRejected as exc:
             return OperationResolutionV1(
                 tool_id=tool_id,
-                operation="command:unparsed",
+                operation=UNPARSED_COMMAND_OPERATION,
                 level=AccessLevel.FULL,
                 source=ClassificationSource.UNREVIEWED,
                 detail=str(exc)[:500],
+                command_line_rejected=True,
             )
-        level = classify_passthrough(policy, parsed)
         known = policy.table.level_for(parsed.command_path) is not None or parsed.command_path == ("api",)
         return OperationResolutionV1(
             tool_id=tool_id,
@@ -960,6 +967,7 @@ __all__ = [
     "MCP_SERVERS_TOOL_SET",
     "ToolCatalog",
     "UNLISTED_WEB_TOOL",
+    "UNPARSED_COMMAND_OPERATION",
     "UNREGISTERED_FUNCTION_TOOL",
     "builtin_tool_ids",
     "change_operation",

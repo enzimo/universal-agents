@@ -17,8 +17,9 @@ and the broker runs exactly the list it checked:
   did not know about could consume a command word;
 - ``--`` separators are refused.
 
-Flags after the command path are free-form; blocked flags are checked by the
-broker on every token regardless of position.
+Flags after the command path are free-form except where a command has its own
+parser (such as ``gh api`` in ``access_catalog.cli_tables``); blocked flags
+are checked by the broker on every token regardless of position.
 """
 
 from __future__ import annotations
@@ -95,27 +96,6 @@ class ParsedCommandLine:
     @property
     def dotted_path(self) -> str:
         return ".".join(self.command_path)
-
-    def flag_values(self, *names: str) -> list[str | None]:
-        """Values of the named flags: attached ``--x=v`` or the following token."""
-
-        values: list[str | None] = []
-        wanted = set(names)
-        for index, token in enumerate(self.argv):
-            name, attached = split_flag(token)
-            if name is None or name not in wanted:
-                continue
-            if attached is not None:
-                values.append(attached)
-            elif index + 1 < len(self.argv):
-                values.append(self.argv[index + 1])
-            else:
-                values.append(None)
-        return values
-
-    def has_flag(self, *names: str) -> bool:
-        wanted = set(names)
-        return any(name in wanted for name, _ in self.flags)
 
 
 def split_flag(token: str) -> tuple[str | None, str | None]:

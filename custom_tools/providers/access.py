@@ -138,7 +138,8 @@ def _grant_view(requests: AccessRequests, grant: GrantV1) -> dict[str, Any]:
     return {
         "grant_id": grant.grant_id,
         "target": grant.target.id,
-        "name": requests.target_name(grant.target),
+        # A block on a folder target may name one file, so restrictions say "the path <id>".
+        "name": requests.target_name(grant.target, for_block=grant.kind is GrantKind.BLOCK),
         "level": grant.level.value,
         "lifetime": grant.lifetime.value,
         "expires_at_utc": grant.expires_at_utc,
@@ -318,7 +319,7 @@ def _active_meta(agent: Any) -> tuple[str | None, Any]:
 
 @tool
 def restrict_access(agent_type: str, reason: str, tool_id: str = "", folder: str = "", operation: str = "") -> str:
-    """Block a worker from a tool, one operation, or a folder you could have given it, in this request.
+    """Block a worker from a tool, one operation, or a folder or file path you could have given it, in this request.
 
     The restriction counts only in the request you are working on and ends
     with it; the person's other requests and other people's work are not
@@ -342,7 +343,10 @@ def restrict_access(agent_type: str, reason: str, tool_id: str = "", folder: str
             {
                 "status": "restricted",
                 "grant_id": block.grant_id,
-                "message": f"{agent_type} can no longer use {requests.target_name(block.target)} in this request.",
+                "message": (
+                    f"{agent_type} can no longer use "
+                    f"{requests.target_name(block.target, for_block=True)} in this request."
+                ),
             }
         )
 

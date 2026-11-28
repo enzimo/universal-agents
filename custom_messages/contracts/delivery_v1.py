@@ -80,7 +80,11 @@ class UserNotificationAttachment(BaseModel):
     )
     kind: Literal["auto", "image", "document", "audio", "video"] = Field(
         default="auto",
-        description="Attachment kind. Use auto unless the content type is ambiguous.",
+        description=(
+            "Attachment kind derived from content_type (inline raster images are image, "
+            "non-XML audio/video are audio/video, everything else is document). Leave as auto "
+            "or match the resolved content_type; mismatches are rejected."
+        ),
     )
     size_bytes: Optional[int] = Field(
         default=None, description="Resolved file size in bytes."

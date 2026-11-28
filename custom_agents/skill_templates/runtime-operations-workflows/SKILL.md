@@ -717,9 +717,15 @@ Decision classes:
 
 - `lead_managed`: bounded behavioral or operational settings. With
   authorization on, a team administrator approves the plan.
-- `user_authorized`: settings that belong to one person, such as their
-  proactive delivery target or context-debug dumps. That person (or an
-  administrator) approves the plan.
+- `user_authorized`: the settings currently marked this way (today the
+  proactive delivery target `delivery.default_target.*` and the context-debug
+  dump settings). The requesting person (or an administrator) may approve the
+  plan only when every setting in the plan is `user_authorized`. A plan that
+  mixes a `user_authorized` setting with any `lead_managed` setting takes the
+  stricter `lead_managed` class and waits for an administrator; stage the
+  `user_authorized` settings in a separate plan when the requesting person
+  should be able to approve them, and tell a member when an administrator must
+  decide.
 - `operator_only`: security, access, credential, storage, transport, listener,
   instance-root, and tool allow/block settings. Agents cannot stage them.
 
@@ -997,8 +1003,9 @@ Before delegating work that needs a tool you cannot hand on, call
 `request_access(tool_id, level, reason, hand_on=true)` at the lowest level the
 work needs (access is a level on a whole tool, never one operation). Access
 approved for one task covers the whole request, including the workers helping
-with it. Use `restrict_access` to block a worker from one tool or operation, and
-`revoke_access` with a grant id to take back what you gave. Both act only in the
+with it. Use `restrict_access` to block a worker from one tool, one operation,
+or a folder or file path, and `revoke_access` with a grant id to take back what
+you gave. Both act only in the
 request you are working on, for its person, and a restriction ends with the
 request; for a restriction on every request, propose a block with
 `propose_access_change`. `list_my_access`
@@ -1469,8 +1476,15 @@ document directly in chat:
    these folders and a file with more than one hard link are refused too.
 2. Call `notify_user` with an attachment object such as
    `{"path":"...","content_type":"image/png","filename":"optional.png","caption":"optional"}`.
-   For browser Web Chat requests, the default `target="auto"` keeps the
-   attachment visible in that same Web Chat thread.
+   Leave `kind` omitted (or `"auto"`): the gateway derives `kind` from the
+   normalized `content_type` (only PNG, JPEG, GIF, and WebP are `image`; non-XML
+   `audio/*` and `video/*` are `audio`/`video`; everything else is `document`)
+   and rejects a `kind` that disagrees with the media type or a malformed
+   `content_type`. In Web Chat only PNG, JPEG, GIF, and WebP appear as inline
+   images; save charts and screenshots as PNG (or another of those formats),
+   because SVG and other image formats arrive as downloadable files. For browser
+   Web Chat requests, the default `target="auto"`
+   keeps the attachment visible in that same Web Chat thread.
 
 Do not paste binary bytes or base64 into `notify_user`; the gateway checks
 the file for the person, copies it once when it receives the message into
