@@ -6416,7 +6416,19 @@ finish-import | export-requested`; guide: `user_docs_source/team-transfer.md`).
   backfill records or repair schemas. The shared memory planner rejects blank
   text after trimming, and schedule planning computes a next run with the store's
   timezone rules. Editable YAML errors show their location without repeating
-  private input. These checks run before the unfinished-import marker is written.
+  private input. The `skills` section (`team_transfer.skills`) restricts unit
+  names to a single folder name and file paths to relative paths inside their
+  skill, and verifies reviewed installs in memory against their attested tree
+  digest without writing or deleting on disk
+  (`custom_agents.skill_repository.build_skill_tree_manifest_from_files`,
+  `custom_agents.skill_installation.verify_managed_skill_attestation_digest`).
+  These checks run before the unfinished-import marker is written. During apply,
+  after the marker is written, each skill is staged and checked in a sibling
+  temporary entry beside its destination and swapped in only when complete. A
+  failure the import catches restores the previous folder and attestation. A
+  process killed mid-import restores nothing and can leave a dot-named staging or
+  backup folder that the skill loader would read; the unfinished-import marker
+  (`team_transfer.runtime_guard`) keeps that instance from starting.
 - **Credentials stay with their owners.** A passphrase-derived key
   authenticates the manifest and encrypts secrets. Operator secrets from
   `team.env` travel encrypted in the file. The other sections are plain,

@@ -1222,6 +1222,39 @@ class SkillInstallationService:
         )
 
 
+def _expected_attestation_digest(
+    *,
+    skill_name: str,
+    attestation: Mapping[str, Any],
+) -> str:
+    if not isinstance(attestation, Mapping):
+        raise PermissionError("Managed skill attestation is unreadable.")
+    if attestation.get("skill_name") != skill_name:
+        raise PermissionError("Managed skill attestation targets another skill.")
+    return verify_sha256(
+        str(attestation.get("tree_sha256") or ""), field_name="tree_sha256"
+    )
+
+
+def verify_managed_skill_attestation_digest(
+    *,
+    skill_name: str,
+    attestation: Mapping[str, Any],
+    tree_sha256: str,
+) -> str:
+    """Verify an attested ``skill_name`` and ``tree_sha256`` without touching disk."""
+
+    expected = _expected_attestation_digest(
+        skill_name=skill_name, attestation=attestation
+    )
+    actual = verify_sha256(tree_sha256, field_name="tree_sha256")
+    if actual != expected:
+        raise PermissionError(
+            "Managed skill contents changed after their reviewed installation."
+        )
+    return actual
+
+
 def verify_managed_skill_attestation_paths(
     *,
     skill_path: Path,
@@ -1247,18 +1280,17 @@ def verify_managed_skill_attestation_paths(
         attestation = json.loads(attestation_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise PermissionError("Managed skill attestation is unreadable.") from exc
-    if (
-        attestation.get("skill_name") != resolved.name
-        or Path(str(attestation.get("installed_path") or "")).resolve() != resolved
-    ):
+    if not isinstance(attestation, Mapping):
+        raise PermissionError("Managed skill attestation is unreadable.")
+    if Path(str(attestation.get("installed_path") or "")).resolve() != resolved:
         raise PermissionError("Managed skill attestation targets another skill.")
-    expected = verify_sha256(attestation.get("tree_sha256"), field_name="tree_sha256")
+    _expected_attestation_digest(skill_name=resolved.name, attestation=attestation)
     actual = build_skill_tree_manifest(resolved).tree_sha256
-    if actual != expected:
-        raise PermissionError(
-            "Managed skill contents changed after their reviewed installation."
-        )
-    return actual
+    return verify_managed_skill_attestation_digest(
+        skill_name=resolved.name,
+        attestation=attestation,
+        tree_sha256=actual,
+    )
 
 
 def verify_managed_skill_attestation(agent: Any, skill_path: Path) -> Optional[str]:
@@ -1291,5 +1323,6 @@ __all__ = [
     "managed_skill_directory_for_runtime_config",
     "resolve_skill_installation_paths",
     "verify_managed_skill_attestation",
+    "verify_managed_skill_attestation_digest",
     "verify_managed_skill_attestation_paths",
 ]
