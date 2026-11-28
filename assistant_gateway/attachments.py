@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from access_control import safe_open
+from access_control.folders import PathSpellingError, check_exact_spelling
 from access_control.safe_open import UnsafePath
 from access_control.sensitive_paths import sensitive_reason
 from assistant_gateway.attachment_media import (
@@ -201,6 +202,19 @@ OUTSIDE_SOURCES = (
 )
 
 
+def _check_located_spelling(located: tuple[Path, tuple[str, ...]], scope: WorkspaceScope) -> None:
+    """Verify exact on-disk spelling from ``workspaces/`` for workspace paths, or from the data-folder root."""
+
+    root, parts = located
+    real_workspaces = Path(os.path.realpath(scope.workspaces_dir))
+    try:
+        rel_root = root.relative_to(real_workspaces).parts
+    except ValueError:
+        check_exact_spelling(root, parts)
+        return
+    check_exact_spelling(real_workspaces, (*rel_root, *parts))
+
+
 def _checked_path(
     resolved: Path, *, scope: WorkspaceScope, extra: Iterable[_Source] = ()
 ) -> tuple[str | None, int | None]:
@@ -211,6 +225,10 @@ def _checked_path(
         return OUTSIDE_SOURCES, None
     if _is_sensitive_path(resolved):
         return "is sensitive and cannot be attached", None
+    try:
+        _check_located_spelling(located, scope)
+    except PathSpellingError as exc:
+        return str(exc), None
     try:
         entry = safe_open.entry_status(*located)
     except UnsafePath as exc:
@@ -378,7 +396,18 @@ def stage_user_notification_attachments(
         folder_parts = (*sent_parts, new_id("outgoing"))
         destination_parts = (*folder_parts, name if name not in {"", ".", ".."} else "attachment")
         try:
+            _check_located_spelling(located, scope)
             copied, digest = _copy_with_digest(located, scope.workspaces_dir, destination_parts)
+        except PathSpellingError as exc:
+            logger.warning(
+                "An attachment was not copied for delivery. event=outgoing_attachment_refused "
+                "person_id=%s path=%s reason=%s",
+                person_id,
+                resolved,
+                exc.reason_code,
+            )
+            errors.append(f"{resolved} cannot be attached: {exc}")
+            continue
         except UnsafePath as exc:
             _remove_partial_copy(scope.workspaces_dir, folder_parts, destination_parts[-1])
             logger.warning(

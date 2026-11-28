@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from access_control import safe_open
+from access_control.folders import PathSpellingError, check_exact_spelling
 from access_control.safe_open import UnsafePath
 from runtime_settings.instance_layout import InstanceLayout, WorkspaceScope
 
@@ -47,6 +48,19 @@ class _Located:
     display: Path
 
 
+def _check_spelling(root: Path, parts: tuple[str, ...], scope: WorkspaceScope) -> None:
+    """Verify exact on-disk spelling from ``workspaces/`` when under it, or from ``root``."""
+
+    real_root = Path(os.path.realpath(root))
+    real_workspaces = Path(os.path.realpath(scope.workspaces_dir))
+    try:
+        rel_root = real_root.relative_to(real_workspaces).parts
+    except ValueError:
+        check_exact_spelling(real_root, parts, display_prefix=root.name)
+        return
+    check_exact_spelling(real_workspaces, (*rel_root, *parts))
+
+
 def _locate(raw: str, scope: WorkspaceScope) -> _Located:
     text = str(raw or "").strip()
     if not text:
@@ -57,7 +71,12 @@ def _locate(raw: str, scope: WorkspaceScope) -> _Located:
     normalized = Path(os.path.normpath(candidate))
     for root in scope.roots:
         if normalized == root or root in normalized.parents:
-            return _Located(root, normalized.relative_to(root).parts, normalized)
+            parts = normalized.relative_to(root).parts
+            try:
+                _check_spelling(root, parts, scope)
+            except PathSpellingError as exc:
+                raise TaskFileRejected(str(exc)) from exc
+            return _Located(root, parts, normalized)
     raise TaskFileRejected(
         f"Local files must be in this task's folders ({scope.home} or the shared team/ "
         f"and agents/ folders): {normalized}"

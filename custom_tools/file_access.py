@@ -37,7 +37,13 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from access_control import safe_open
-from access_control.folders import FolderRoots
+from access_control.folders import (
+    PATH_SPELLING_MISMATCH,
+    PATH_SPELLING_UNVERIFIABLE,
+    FolderRoots,
+    PathSpellingError,
+    check_folder_id_spelling,
+)
 from access_control.safe_open import UnsafePath
 from custom_tools.path_policy import (
     PathPolicyError,
@@ -121,18 +127,39 @@ def locate(
     scope = current_workspace_scope(agent)
     real = ensure_allowed_path(str(raw), for_write=for_write, agent=agent)
     root, task_folder = _root_of(real, scope, agent)
-    _decide(real, scope, for_write=for_write, agent=agent, is_file=is_file)
+    roots = FolderRoots(Path(os.path.realpath(scope.workspaces_dir)), configured_data_folders(agent))
+    target_id = roots.folder_id_of(real)
+    # Decide authority first so unauthorized callers never learn whether a file
+    # exists or its on-disk spelling; then always verify exact on-disk spelling
+    # so kept-answer cache hits cannot bypass it.
+    _decide(real, target_id, for_write=for_write, agent=agent, is_file=is_file)
+    if target_id is not None:
+        _check_spelling(roots, target_id)
     return FileLocation(root, real.relative_to(root).parts, task_folder)
 
 
-def _decide(real: Path, scope: WorkspaceScope, *, for_write: bool, agent: Any, is_file: bool | None) -> None:
+def _check_spelling(roots: FolderRoots, target_id: str) -> None:
+    try:
+        check_folder_id_spelling(roots, target_id)
+    except PathSpellingError as exc:
+        logger.warning(
+            "A file path was refused because its on-disk spelling did not match or could not be verified. "
+            "event=file_access_spelling_refused reason_code=%s target_id=%s disk_spelling=%s",
+            exc.reason_code,
+            target_id,
+            exc.disk or None,
+        )
+        raise PathPolicyError(str(exc), reason_code=exc.reason_code) from exc
+
+
+def _decide(
+    real: Path, target_id: str | None, *, for_write: bool, agent: Any, is_file: bool | None
+) -> None:
     """Ask the access service about a path in a registered folder root.
 
     The read-only skill folders are judged by the folder rules alone.
     """
 
-    roots = FolderRoots(Path(os.path.realpath(scope.workspaces_dir)), configured_data_folders(agent))
-    target_id = roots.folder_id_of(real)
     if target_id is None or agent is None:
         return
     if is_file is None:
@@ -336,6 +363,8 @@ __all__ = [
     "LINK_NOT_FOLLOWED",
     "NOT_A_FOLDER",
     "NOT_A_REGULAR_FILE",
+    "PATH_SPELLING_MISMATCH",
+    "PATH_SPELLING_UNVERIFIABLE",
     "PathPolicyError",
     "SEVERAL_HARD_LINKS",
     "UNSAFE_PATH",

@@ -58,6 +58,9 @@ from access_control.folders import (
     DataFolder,
     FolderIdError,
     FolderRoots,
+    PathSpellingError,
+    check_exact_spelling,
+    check_folder_id_spelling,
     covers,
 )
 from access_control.decisions import AccessService
@@ -194,6 +197,39 @@ def _folder_skip_note(
     return f"{folder_id}/ is not available to code because its path could not be verified as a safe folder."
 
 
+def _folder_spelling_skip_note(
+    folder_id: str,
+    exc: PathSpellingError,
+    *,
+    agent_id: str | None,
+    task_id: str | None,
+) -> str:
+    """Log why a folder is omitted for on-disk spelling mismatch/unverifiability and return a plain note."""
+
+    if exc.disk:
+        logger.warning(
+            "Skipping a folder from the code sandbox because its stored spelling does not match disk. "
+            "event=code_access_folder_spelling_skipped agent_id=%s task_id=%s folder_id=%s disk_spelling=%s",
+            agent_id,
+            task_id,
+            folder_id,
+            exc.disk,
+        )
+        return (
+            f"{folder_id}/ is not available to code because its stored spelling does not match "
+            f"the exact folder name on disk ({exc.disk})."
+        )
+    logger.warning(
+        "Skipping a folder from the code sandbox because its on-disk spelling could not be verified. "
+        "event=code_access_folder_spelling_skipped agent_id=%s task_id=%s folder_id=%s reason=%s",
+        agent_id,
+        task_id,
+        folder_id,
+        exc.reason_code,
+    )
+    return f"{folder_id}/ is not available to code because its exact on-disk spelling could not be verified."
+
+
 def _workspace_root_parts(root: Path, workspaces_dir: Path, *, agent_id: str | None) -> tuple[str, ...] | None:
     """Return ``root``'s parts below ``workspaces_dir`` without following links, or None with a warning."""
 
@@ -235,6 +271,11 @@ def _without_authorization(
             notes.append(
                 _folder_skip_note("/".join(parts), canonical, problem, agent_id=agent_id, task_id=None)
             )
+            continue
+        try:
+            check_exact_spelling(workspaces, parts)
+        except PathSpellingError as exc:
+            notes.append(_folder_spelling_skip_note("/".join(parts), exc, agent_id=agent_id, task_id=None))
             continue
         read_write.append(canonical)
     for folder in data_folders:
@@ -465,6 +506,15 @@ def _plan_candidate_folder(
             folder_id,
             path,
             problem,
+            agent_id=planner.principal.agent_id,
+            task_id=planner.task_id,
+        )
+    try:
+        check_folder_id_spelling(roots, folder_id)
+    except PathSpellingError as exc:
+        return _folder_spelling_skip_note(
+            folder_id,
+            exc,
             agent_id=planner.principal.agent_id,
             task_id=planner.task_id,
         )
