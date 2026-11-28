@@ -40,6 +40,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from secure_tool_broker.access_gate import (
     REASON_ACCESS_DENIED,
+    REASON_COMMAND_LINE_REJECTED,
     REASON_IDENTITY_REJECTED,
     REASON_UNLISTED_HOST,
     BrokerAccessGate,
@@ -746,3 +747,177 @@ def test_sign_in_tool_skips_outdated_team_fallback_link_instead_of_blocking_sign
     )
     allowed = gate.check(MANAGER, resolution, agent_context("user-1"))
     assert allowed.allowed and allowed.account_link == matching
+
+
+@needs_cedar
+def test_gh_api_access_gate_enforces_read_full_and_refuses_unparsed_commands(enabled_gate) -> None:
+    gate, service = enabled_gate
+    owner_context = agent_context(roles=("owner",))
+
+    service.grant_by_person(OWNER, grant(AGENT_TYPE, "cli:github", AccessLevel.READ))
+
+    def check(target_gate: BrokerAccessGate, argv: list[str]):
+        return target_gate.check_broker_action(MANAGER, "github", "gh.exec", {"argv": argv}, owner_context)
+
+    for read_argv in (
+        ["api", "repos/o/r"],
+        ["api", "repos/o/r", "--jq", ".name"],
+        ["api", "repos/o/r", "-H", "Accept: application/vnd.github+json"],
+        ["api", "repos/o/r", "--paginate"],
+        ["api", "-X", "GET", "search/issues", "-f", "q=repo:o/r is:open"],
+    ):
+        allowed = check(gate, read_argv)
+        assert allowed.allowed, (read_argv, allowed.message)
+        assert allowed.resolution is not None and allowed.resolution.level is AccessLevel.READ
+
+    for full_only_argv in (
+        ["api", "repos/o/r/issues", "--template", "--method=GET", "-f", "title=x"],
+        ["api", "repos/o/r/issues", "--jq", "--method=GET", "-f", "title=x"],
+        ["api", "repos/o/r", "-X", "GET", "--input", "-"],
+        ["api", "repos/o/r", "-X", "HEAD", "-f", "a=b"],
+        ["api", "graphql", "-X", "GET"],
+        ["api", "//graphql?query=x", "-X", "GET"],
+        ["api", "graphql", "-f", "query=mutation{x}"],
+    ):
+        denied = check(gate, full_only_argv)
+        assert not denied.allowed, full_only_argv
+        assert denied.reason_code == REASON_ACCESS_DENIED, full_only_argv
+        assert denied.resolution is not None and denied.resolution.level is AccessLevel.FULL
+
+    rejected_argvs = (
+        ["api", "repos/o/r", "-X", "GET", "-X", "DELETE"],
+        ["api", "repos/o/r", "--method=GET", "--method=DELETE"],
+        ["api", "graphql", "-X", "GET", "-X", "POST", "-f", "query=mutation{x}"],
+        ["api", "repos/o/r", "--method=", "-f", "title=x"],
+        ["api", "repos/o/r", "--unknown-flag"],
+    )
+    for rejected_argv in rejected_argvs:
+        refused = check(gate, rejected_argv)
+        assert not refused.allowed, rejected_argv
+        assert refused.reason_code == REASON_COMMAND_LINE_REJECTED, rejected_argv
+        assert refused.message and refused.next_step == ""
+
+    # Even a full holder and an open gate (authorization off) refuse unparsed command lines.
+    service.grant_by_person(OWNER, grant(AGENT_TYPE, "cli:github", AccessLevel.FULL))
+    unrestricted = open_gate()
+    for target_gate in (gate, unrestricted):
+        for rejected_argv in rejected_argvs:
+            refused = check(target_gate, rejected_argv)
+            assert not refused.allowed, rejected_argv
+            assert refused.reason_code == REASON_COMMAND_LINE_REJECTED, rejected_argv
+            assert refused.message and refused.next_step == ""
+
+
+@needs_cedar
+@pytest.mark.asyncio
+async def test_broker_http_refuses_unparsed_gh_api_without_running_subprocess(
+    monkeypatch, enabled_gate
+) -> None:
+    gate, service_access = enabled_gate
+    service_access.grant_by_person(OWNER, grant(AGENT_TYPE, "cli:github", AccessLevel.FULL))
+
+    def fake_run(_command, **_kwargs):
+        raise AssertionError("refused gh api command must not invoke subprocess")
+
+    monkeypatch.setattr("secure_tool_broker.executors.shutil.which", lambda _name: "/usr/local/bin/gh")
+    monkeypatch.setattr("secure_tool_broker.executors.subprocess.run", fake_run)
+
+    refused_lines = (
+        (["api", "repos/o/r", "-X", "GET", "-X", "DELETE"], "only be specified once"),
+        # An endpoint address urlsplit cannot read is refused, not answered with HTTP 500.
+        (["api", "http://[x]/repos/o/r"], "not a valid address"),
+    )
+    for target_gate in (gate, open_gate()):
+        broker = SecureToolBrokerService(token=BROKER_ROOT, access_gate=target_gate)
+        for argv, reason in refused_lines:
+            body = {
+                "provider": "github",
+                "action": "gh.exec",
+                "params": {"argv": argv},
+                "reason": "probe a refused gh api line",
+                "context": agent_context(roles=("owner",), task_id="task-1"),
+            }
+            async with TestClient(TestServer(broker.build_app())) as client:
+                response = await client.post("/v1/tools/github", headers=caller_headers(), json=body)
+                payload = json.loads(await response.text())
+            assert response.status == 403, argv
+            assert payload["reason_code"] == REASON_COMMAND_LINE_REJECTED, argv
+            assert reason in payload["error"], argv
+            assert "next_step" not in payload, argv
+
+
+def test_gate_refuses_unparsable_gog_lines_before_the_access_decision(enabled_gate) -> None:
+    gate, _service = enabled_gate
+    context = agent_context(roles=("owner",))
+    argv = ["gmail", "-abc"]  # a combined short flag the command-table parser refuses
+
+    for target_gate in (gate, open_gate()):
+        refused = target_gate.check_broker_action(MANAGER, "google", "gog.exec", {"argv": argv}, context)
+        assert not refused.allowed
+        assert refused.reason_code == REASON_COMMAND_LINE_REJECTED
+        assert "combined short flags" in refused.message and refused.next_step == ""
+
+
+def test_installed_cli_command_named_unparsed_is_not_mistaken_for_a_parse_failure(tmp_path) -> None:
+    from access_catalog.catalog import UNPARSED_COMMAND_OPERATION
+    from access_catalog.instance_tools import write_instance_tool
+    from custom_messages.contracts.access_v2 import ClassificationSource, ProposedCliToolV1
+    from custom_messages.contracts.cli_tool_v1 import InstalledCliV1
+
+    write_instance_tool(
+        tmp_path,
+        ProposedCliToolV1(
+            tool_id="cli:demo",
+            display_name="Demo CLI",
+            installed_cli=InstalledCliV1(
+                binary_path="team/tools/demo/demo", sha256="a" * 64, commands={"unparsed": "read"}
+            ),
+        ),
+    )
+    gate = open_gate(instance_root=tmp_path)
+    context = agent_context(roles=("owner",))
+
+    listed = gate.check_broker_action(MANAGER, "demo", "exec", {"argv": ["unparsed"]}, context)
+    assert listed.resolution is not None
+    assert listed.resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert not listed.resolution.command_line_rejected
+    assert listed.resolution.source is ClassificationSource.TRUSTED
+    assert listed.resolution.level is AccessLevel.READ
+    assert listed.allowed, (listed.reason_code, listed.message)
+
+    # A line the parser refuses on the same CLI is flagged and refused.
+    broken = gate.check_broker_action(MANAGER, "demo", "exec", {"argv": ["unparsed", "--"]}, context)
+    assert broken.resolution is not None and broken.resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert broken.resolution.command_line_rejected
+    assert not broken.allowed and broken.reason_code == REASON_COMMAND_LINE_REJECTED
+
+
+def test_bare_unparsed_command_group_is_decided_not_refused_as_a_parse_failure(tmp_path) -> None:
+    from access_catalog.catalog import UNPARSED_COMMAND_OPERATION
+    from access_catalog.instance_tools import write_instance_tool
+    from custom_messages.contracts.access_v2 import ClassificationSource, ProposedCliToolV1
+    from custom_messages.contracts.cli_tool_v1 import InstalledCliV1
+
+    write_instance_tool(
+        tmp_path,
+        ProposedCliToolV1(
+            tool_id="cli:demo",
+            display_name="Demo CLI",
+            installed_cli=InstalledCliV1(
+                binary_path="team/tools/demo/demo", sha256="a" * 64, commands={"unparsed.list": "read"}
+            ),
+        ),
+    )
+    gate = open_gate(instance_root=tmp_path)
+    context = agent_context(roles=("owner",))
+
+    # "unparsed" is only a group here: the bare word parses, is not listed and
+    # needs full, but it is not a parse failure, so the gate does not refuse it.
+    group = gate.check_broker_action(MANAGER, "demo", "exec", {"argv": ["unparsed"]}, context)
+    assert group.resolution is not None
+    assert group.resolution.operation == UNPARSED_COMMAND_OPERATION
+    assert not group.resolution.command_line_rejected
+    assert group.resolution.source is ClassificationSource.UNREVIEWED
+    assert group.resolution.level is AccessLevel.FULL
+    assert group.reason_code != REASON_COMMAND_LINE_REJECTED
+    assert group.allowed, (group.reason_code, group.message)

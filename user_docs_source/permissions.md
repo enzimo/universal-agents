@@ -868,6 +868,14 @@ checks the following, whether authorization is on or off:
 4. **For web requests, the web API tool that covers the host.** Requests to
    any other host are refused (`access_unlisted_host`). Public pages remain
    available through the web research tools.
+5. **For `gh`, `gog` and installed CLIs, that the argument list can be read.**
+   A list the command parser refuses (for example a combined short flag such
+   as `-abc`, a `--` separator, an option between command words, arguments
+   sent as one string instead of a list, or a `gh api` line with an unknown
+   or repeated option) is refused with `cli_command_line_rejected` before any
+   access decision, even for full access holders. The reply says what to
+   change; there is no access to request, because no grant makes the line
+   readable.
 
 With authorization enabled, the broker then checks that the agent holds the
 needed level for the work of the person it works for, and that the person

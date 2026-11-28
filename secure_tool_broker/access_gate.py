@@ -12,7 +12,8 @@ For each request it:
    the ones the request claims to act for; identity is enforced in both
    authorization modes (plan section 11);
 3. resolves the operation and level from the current tool catalog;
-4. refuses requests to hosts no web API tool (``http:*``) covers, in both modes;
+4. refuses requests to hosts no web API tool (``http:*``) covers and
+   unparsed CLI command lines (``command_line_rejected``), in both modes;
 5. when authorization is enabled, asks the access service for the agent side
    and the person side (``access_control.decisions``);
 6. for a tool that uses a linked credential, finds the account link: the
@@ -37,7 +38,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from access_catalog.catalog import UNLISTED_WEB_TOOL, CatalogSource, ToolCatalog, mcp_tool_id
+from access_catalog.catalog import (
+    UNLISTED_WEB_TOOL,
+    CatalogSource,
+    ToolCatalog,
+    mcp_tool_id,
+)
 from access_control.account_sharing import TeamAccountSharing, fixed_sharing, fixed_sharing_text
 from access_control.caller_tokens import BrokerCaller
 from access_control.cedar import CedarAccessClient
@@ -59,6 +65,7 @@ from custom_messages.contracts.access_v2 import (
     injections_match,
 )
 from secure_tool_broker.account_links import ACCESS_STORE_MISSING_NEXT_STEP, ACCESS_STORE_MISSING_TEXT
+from secure_tool_broker.cli_passthrough import REASON_COMMAND_LINE_REJECTED
 from secure_tool_broker.tool_setup_tracking import note_gate_link_missing, note_link_missing
 from secure_tools.auth_methods import tool_sign_in
 from secure_tools.chat_commands import link_command
@@ -221,6 +228,13 @@ class BrokerAccessGate:
                     "Ask TeamLead to propose a web API tool for this service, "
                     "or use the web research tools for public pages."
                 ),
+                resolution=resolution,
+            )
+        if resolution.command_line_rejected:
+            return self._refuse(
+                REASON_COMMAND_LINE_REJECTED,
+                resolution.detail or "The command line could not be parsed.",
+                context,
                 resolution=resolution,
             )
         person_id = person.person_id if person else None
@@ -541,6 +555,7 @@ __all__ = [
     "GateResult",
     "outdated_link_next_step",
     "REASON_ACCESS_DENIED",
+    "REASON_COMMAND_LINE_REJECTED",
     "REASON_IDENTITY_REJECTED",
     "REASON_UNLISTED_HOST",
 ]
