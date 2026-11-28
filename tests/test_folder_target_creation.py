@@ -1076,3 +1076,165 @@ def test_gateway_startup_reports_folder_target_problems_and_logs_failures(
     with caplog.at_level(logging.ERROR, logger="assistant_gateway.gateway"):
         asyncio.run(gateway_module._report_folder_target_problems(_Inbox(None), TEAM))  # type: ignore[arg-type]
     assert any("event=folder_target_problem_check_failed" in rec.getMessage() for rec in caplog.records)
+
+
+def test_startup_notices_tailor_advice_for_file_shares_restrictions_and_subjects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C13: startup notices tailor advice for FILE shares, person folder shares, task-bound restrictions, and unsupported subject kinds."""
+
+    layout, storage, _reports = _setup_instance(tmp_path)
+    sim = SimulatedFS(case_insensitive=True, unicode_normalizing=True)
+    install_simulated_fs(monkeypatch, sim, patch_safe_open=True)
+
+    store = AccessRepository(storage)
+    now = datetime.now(timezone.utc)
+    by_admin = SubjectRefV1(kind=SubjectKind.USER, id=ADMIN.person_id)
+
+    # 1. Misspelled FILE-kind single-file share in users/alice/notes/Report.txt.
+    file_share = store.create(
+        GrantV1(
+            grant_id="share-misspelled-file",
+            team_id=TEAM,
+            kind=GrantKind.ACCESS,
+            subject=SubjectRefV1(kind=SubjectKind.USER, id=BOB.person_id),
+            target=TargetRefV1(kind=TargetKind.FILE, id="users/alice/notes/Report.txt"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=ALICE.person_id),
+            created_at_utc=now,
+        )
+    )
+    # 2. Misspelled FOLDER-kind share in users/alice/Notes.
+    folder_share = store.create(
+        GrantV1(
+            grant_id="share-misspelled-folder",
+            team_id=TEAM,
+            kind=GrantKind.ACCESS,
+            subject=SubjectRefV1(kind=SubjectKind.USER, id=BOB.person_id),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="users/alice/Notes"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=SubjectRefV1(kind=SubjectKind.USER, id=ALICE.person_id),
+            created_at_utc=now,
+        )
+    )
+    # 3. Misspelled request-bound restriction (task_id + for_person_id set).
+    restriction = store.create(
+        GrantV1(
+            grant_id="restrict-misspelled-task",
+            team_id=TEAM,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, "WebResearchAgent")),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance/PAYROLL.csv"),
+            level=AccessLevel.FULL,
+            lifetime=GrantLifetime.TASK,
+            task_id="work-task-1",
+            for_person_id=ALICE.person_id,
+            granted_by=SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, "TeamArchitect")),
+            reason="Keep worker out for this request",
+            created_at_utc=now,
+        )
+    )
+    # 4. Misspelled lasting block for a SCHEDULE subject (not accepted by parse_subject).
+    sched_block = store.create(
+        GrantV1(
+            grant_id="block-misspelled-schedule",
+            team_id=TEAM,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.SCHEDULE, id=f"{TEAM}/sched-daily"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/Finance"),
+            level=AccessLevel.FULL,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=by_admin,
+            reason="Keep schedule out",
+            created_at_utc=now,
+        )
+    )
+    # 5. Misspelled lasting block for an AGENT subject (accepted by parse_subject).
+    agent_block = store.create(
+        GrantV1(
+            grant_id="block-misspelled-agent",
+            team_id=TEAM,
+            kind=GrantKind.BLOCK,
+            subject=SubjectRefV1(kind=SubjectKind.AGENT, id="agent-42"),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/Finance"),
+            level=AccessLevel.FULL,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=by_admin,
+            reason="Keep agent out",
+            created_at_utc=now,
+        )
+    )
+
+    roots = FolderRoots.for_layout(layout, DataFolderRegistry(store, TEAM).usable(protected_locations(layout.root)))
+    reported = folders.report_folder_target_problems(roots, store, TEAM, now=now)
+    assert set(reported) == {
+        file_share.grant_id,
+        folder_share.grant_id,
+        restriction.grant_id,
+        sched_block.grant_id,
+        agent_block.grant_id,
+    }
+
+    page = store.notice_page(TEAM, person_id=ADMIN.person_id, roles=("admin",), unread_only=False, offset=0, limit=20)
+    by_grant = {n.grant_id: n for n, _r in page.notices}
+
+    file_notice = by_grant[file_share.grant_id]
+    assert "code mounts" not in file_notice.summary
+    assert "and grant" not in file_notice.summary
+    assert f"/access revoke {file_share.grant_id}" in file_notice.summary
+    assert "users/alice/notes/report.txt" in file_notice.summary
+    assert "/share" in file_notice.summary
+
+    folder_share_notice = by_grant[folder_share.grant_id]
+    assert "and grant" not in folder_share_notice.summary
+    assert f"/access revoke {folder_share.grant_id}" in folder_share_notice.summary
+    assert "users/alice/notes" in folder_share_notice.summary
+    assert "/share" in folder_share_notice.summary
+
+    restrict_notice = by_grant[restriction.grant_id]
+    assert "/access block" not in restrict_notice.summary
+    assert "ends with that request" in restrict_notice.summary
+    assert "team/finance/payroll.csv" in restrict_notice.summary
+
+    sched_notice = by_grant[sched_block.grant_id]
+    assert "/access block" not in sched_notice.summary
+    assert "scheduled job sched-daily" in sched_notice.summary
+    assert f"/access unblock {sched_block.grant_id}" in sched_notice.summary
+
+    agent_notice = by_grant[agent_block.grant_id]
+    assert "/access block agent:agent-42 team/finance --reason" in agent_notice.summary
+    assert f"/access unblock {agent_block.grant_id}" in agent_notice.summary
+
+
+def test_roots_with_data_folders_and_gateway_folder_roots_reuse_shared_helpers(tmp_path: Path) -> None:
+    """C14: roots_with_data_folders merges extra data folders without duplicates and GatewayAccessRequestsSource delegates to folder_roots_provider."""
+
+    from access_control.data_folders import roots_with_data_folders
+
+    layout, storage, _reports = _setup_instance(tmp_path)
+    source = _gateway_source(layout, storage)
+    try:
+        roots = source.folder_roots()
+        assert roots is not None
+        assert roots.data_folder("data/reports/q1.csv") is not None
+
+        extra_dir = tmp_path / "extra_data"
+        extra_dir.mkdir()
+        extended = roots_with_data_folders(
+            roots,
+            [
+                ProposedDataFolderV1(name="reports", path=str(extra_dir), writable=False),
+                ProposedDataFolderV1(name="extra", path=str(extra_dir), writable=False),
+                ProposedDataFolderV1(name="extra", path=str(extra_dir), writable=True),
+            ],
+        )
+        names = [folder.name for folder in extended.data_folders]
+        assert names == ["reports", "extra"]
+        assert extended.data_folder("data/extra/file.txt") is not None
+        assert extended.data_folder("data/extra/file.txt").writable is False  # type: ignore[union-attr]
+        # Existing 'reports' entry keeps its original path rather than being overwritten.
+        assert extended.data_folder("data/reports/q1.csv") == roots.data_folder("data/reports/q1.csv")
+    finally:
+        source.close()

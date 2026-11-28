@@ -46,7 +46,6 @@ of the access plan is the design; the rules here are:
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -77,7 +76,12 @@ from access_catalog.instance_tools import (
     write_instance_tool,
 )
 from access_control.cli_binaries import Downloader, fetch_https, workspaces_root
-from access_control.data_folders import DataFolderRegistry, protected_locations, registration_problem
+from access_control.data_folders import (
+    DataFolderRegistry,
+    folder_roots_provider,
+    registration_problem,
+    roots_with_data_folders,
+)
 from access_control.decision_effects import EffectJournal, OwnedFile, RemovedFile, ReplacedFile
 from access_control.proposal_clis import cli_rows, install_programs
 from access_control.proposal_errors import ProposalRefused
@@ -97,7 +101,6 @@ from access_control.entities import PersonPrincipal, agent_type_id
 from access_control.folders import (
     FOLDER_ROOT_DATA,
     FOLDER_ROOT_USERS,
-    DataFolder,
     FolderGrantOnFileError,
     FolderIdError,
     FolderRoots,
@@ -500,23 +503,24 @@ class ProposalCompiler:
         if self.folder_roots is not None:
             base = self.folder_roots()
         elif self.instance_root is not None:
-            from runtime_settings.instance_layout import InstanceLayout
+            if self.data_folders is not None:
+                provider = folder_roots_provider(
+                    self.instance_root,
+                    self.data_folders.store,
+                    self.team_id,
+                    protected=self.protected,
+                )
+                assert provider is not None
+                base = provider()
+            else:
+                from runtime_settings.instance_layout import InstanceLayout
 
-            layout = InstanceLayout.at(self.instance_root)
-            guarded = self.protected or protected_locations(layout.root)
-            usable = self.data_folders.usable(guarded) if self.data_folders is not None else ()
-            base = FolderRoots.for_layout(layout, usable)
+                base = FolderRoots.for_layout(InstanceLayout.at(self.instance_root))
         else:
             return None
         if not self.include_proposed_data_folders or not proposal.data_folders:
             return base
-        existing_names = {folder.name for folder in base.data_folders}
-        extra = tuple(
-            DataFolder(folder.name, Path(os.path.realpath(Path(folder.path).expanduser())), folder.writable)
-            for folder in proposal.data_folders
-            if folder.name not in existing_names
-        )
-        return FolderRoots(base.workspaces_dir, (*base.data_folders, *extra))
+        return roots_with_data_folders(base, proposal.data_folders)
 
     def _check_folder_disk_target(
         self,
@@ -1574,7 +1578,7 @@ class ProposalApplier:
             if refusal:
                 raise HandDownRefused(refusal)
         folders = self._folders(reviewer, now, proposal)
-        self._check_stored_folder_targets(proposal, grants)
+        self._check_stored_folder_targets(folders, grants)
         # Removing access removes its whole entry (access_control.grant_entries),
         # as Remove on the Access page does.
         revoke_ids: list[str] = []
@@ -1743,24 +1747,23 @@ class ProposalApplier:
             lifetime=GrantLifetime.UNTIL_REVOKED,
         ).model_copy(update={"reason": reason[:2000]})
 
-    def _check_stored_folder_targets(self, proposal: AccessProposalV1, grants: list[GrantV1]) -> None:
+    def _check_stored_folder_targets(
+        self, folders: Iterable[DataFolderRecordV1], grants: list[GrantV1]
+    ) -> None:
         """Re-check folder/file grants and blocks against effective FolderRoots right before apply_together."""
 
         folder_grants = [grant for grant in grants if grant.target.kind in {TargetKind.FOLDER, TargetKind.FILE}]
         if not folder_grants:
             return
-        from runtime_settings.instance_layout import InstanceLayout
-
-        layout = InstanceLayout.at(self.instance_root)
-        guarded = self.protected or protected_locations(layout.root)
-        usable = self.data_folders().usable(guarded)
-        existing_names = {folder.name for folder in usable}
-        extra = tuple(
-            DataFolder(folder.name, Path(os.path.realpath(Path(folder.path).expanduser())), folder.writable)
-            for folder in proposal.data_folders
-            if folder.name not in existing_names
+        registry = self.data_folders()
+        provider = folder_roots_provider(
+            self.instance_root,
+            registry.store,
+            registry.team_id,
+            protected=self.protected,
         )
-        roots = FolderRoots.for_layout(layout, (*usable, *extra))
+        assert provider is not None
+        roots = roots_with_data_folders(provider(), folders)
         for grant in folder_grants:
             try:
                 check_folder_target(roots, grant.target.id, for_block=grant.kind is GrantKind.BLOCK)

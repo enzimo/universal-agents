@@ -30,10 +30,8 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 from dataclasses import dataclass, replace
 from functools import lru_cache, partial
-from pathlib import Path
 from typing import Any, Mapping, cast
 
 from strands.hooks import BeforeToolCallEvent, HookRegistry
@@ -41,9 +39,8 @@ from strands.tools.structured_output.structured_output_tool import StructuredOut
 
 from access_catalog.catalog import CatalogSource, ToolCatalog
 from access_control.cedar import CedarAccessClient
-from access_control.data_folders import DataFolderRegistry, folder_roots_provider, protected_locations
+from access_control.data_folders import folder_roots_provider
 from access_control.decisions import AccessService, HandDownRefused
-from access_control.folders import FolderRoots
 from access_control.entities import (
     AGENT_ROLE_SYSTEM,
     AGENT_ROLE_TEAM_LEAD,
@@ -538,28 +535,9 @@ def runtime_requests(agent: Any) -> AccessRequests:
     # Reading the catalog reloads it when instance tools or MCP servers changed
     # (an install, a discovery), so requests and hand-downs name current tools.
     _ = access.catalog
-    service = access.service
-    if service.folder_roots is None:
-        raw_ws = (
-            str(getattr(agent, "workspace_dir", "") or "").strip()
-            or str(os.getenv("AGENT_WORKSPACE_DIR") or "").strip()
-            or str(os.getenv("WORKSPACE_DIR") or "").strip()
-        )
-        if raw_ws:
-            ws_dir = Path(os.path.realpath(Path(raw_ws).expanduser()))
-            guarded = protected_locations(
-                None,
-                instance_config=str(os.getenv("TEAM_INSTANCE_CONFIG") or "").strip() or None,
-                broker_credentials=str(os.getenv("SECURE_TOOL_BROKER_CREDENTIALS_DIR") or "").strip() or None,
-            )
-            registry = DataFolderRegistry(service.store, service.team_id)
-            service = replace(
-                service,
-                folder_roots=lambda: FolderRoots(ws_dir, registry.usable(guarded)),
-            )
     return AccessRequests(
-        service=service,
-        inbox=StoredAccessInbox(service.store),
+        service=access.service,
+        inbox=StoredAccessInbox(access.service.store),
         lead_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
         watcher=WorkflowRequestWatcher(
             lambda: workflow_service_for(agent),

@@ -194,12 +194,22 @@ operator).
   a proposal); agents still need access to each one when access control is on.
 - A block on a folder or file path stops file tools from opening it and keeps
   the containing folder out of sandboxed code; sibling files stay readable and
-  the blocked file's name still appears in its parent folder's listing. Blocks
-  match the exact spelling of a path. A folder holding a path TeamLead is
-  blocked from is not passed on to workers; the worker asks with
-  `request_access` and a person decides.
-- Access given on a file path does not open the file; ask for or give the
-  folder that holds it.
+  the blocked file's name still appears in its parent folder's listing. Every
+  existing path component below a registered root must match its exact on-disk
+  spelling (letter case and Unicode form) across file tools, requests,
+  proposals, grants, blocks and shares: misspellings are refused with the
+  disk's exact spelling, and stored misspelled folder grants are skipped for
+  code mounts. Paths that do not exist yet are accepted as typed (so a block
+  added for a future path will not cover a file created later under a different
+  spelling; gateway startup alerts administrators in the Inbox about stored
+  mismatches or legacy file-path grants without deleting stored rows). A folder
+  holding a path TeamLead is blocked from is not passed on to workers; the
+  worker asks with `request_access` and a person decides.
+- Folder grants only open folders: `request_access`, `propose_access_change`,
+  `/access grant`, `assistant_cli access grant`, and approval apply steps
+  refuse a folder grant whose path names an existing file and tell you to grant
+  the containing folder instead (or `/share` for a person's own file). Blocks
+  on file paths and `/share` single-file shares remain allowed.
 
 ## Platform changes
 

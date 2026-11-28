@@ -941,17 +941,21 @@ class FolderTargetProblem:
     suggested_folder: str | None = None
 
 
-def _grant_subject_text(subject: SubjectRefV1) -> str:
+def _grant_subject_text(subject: SubjectRefV1) -> str | None:
+    """Format ``subject`` for ``/access`` commands (matching ``parse_subject``), or None if unsupported."""
+
     short = subject.id.split("/", 1)[-1]
     if subject.kind is SubjectKind.AGENT_TYPE:
         return f"agent-type:{short}"
+    if subject.kind is SubjectKind.AGENT:
+        return f"agent:{subject.id}"
     if subject.kind is SubjectKind.ROLE:
         return f"role:{short}"
     if subject.kind is SubjectKind.TEAM:
         return "team"
     if subject.kind is SubjectKind.USER:
         return f"user:{subject.id}"
-    return f"{subject.kind.value}:{subject.id}"
+    return None
 
 
 def _grant_subject_name(subject: SubjectRefV1) -> str:
@@ -959,6 +963,8 @@ def _grant_subject_name(subject: SubjectRefV1) -> str:
         return "everyone in the team"
     if subject.kind is SubjectKind.ROLE:
         return f"everyone with the {subject.id.split('/', 1)[-1]} role"
+    if subject.kind is SubjectKind.SCHEDULE:
+        return f"scheduled job {subject.id.split('/', 1)[-1]}"
     return subject.id.split("/", 1)[-1] if subject.kind is SubjectKind.AGENT_TYPE else subject.id
 
 
@@ -1016,27 +1022,108 @@ def folder_target_problems(
     return found
 
 
+def _block_problem_notice_text(problem: FolderTargetProblem, who: str) -> tuple[str, str]:
+    grant = problem.grant
+    if grant.task_id or grant.for_person_id:
+        title = f"A stored restriction on {grant.target.id} does not match the path on disk"[:400]
+        if problem.disk_spelling:
+            summary = (
+                f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+                f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this "
+                f"restriction does not stop access to '{problem.disk_spelling}'. It is bound to one request and "
+                "ends with that request."
+            )
+        else:
+            summary = (
+                f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling "
+                f"could not be verified ({problem.detail}). It is bound to one request and ends with that request."
+            )
+        return title, summary
+
+    title = f"A stored block on {grant.target.id} does not match the path on disk"[:400]
+    if problem.disk_spelling:
+        subject_text = _grant_subject_text(grant.subject)
+        if subject_text is not None:
+            replacement = (
+                f'Add a replacement block with `/access block {subject_text} {problem.disk_spelling} --reason "..."` '
+                f"and then remove the old one with `/access unblock {grant.grant_id}`."
+            )
+        else:
+            replacement = (
+                f"Add a replacement block for {who} on '{problem.disk_spelling}' and then remove the old one "
+                f"with `/access unblock {grant.grant_id}`."
+            )
+        summary = (
+            f"Block {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+            f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this block "
+            f"does not stop access to '{problem.disk_spelling}'. {replacement}"
+        )
+    else:
+        summary = (
+            f"Block {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
+            f"not be verified ({problem.detail}). Check the path and replace the block if needed."
+        )
+    return title, summary
+
+
+def _grant_spelling_notice_text(problem: FolderTargetProblem, who: str) -> tuple[str, str]:
+    grant = problem.grant
+    is_file_share = grant.target.kind is TargetKind.FILE
+    is_person_share = grant.subject.kind is SubjectKind.USER and is_person_folder(grant.target.id)
+    if is_file_share:
+        title = f"A stored file share on {grant.target.id} does not match the path on disk"[:400]
+        if problem.disk_spelling:
+            summary = (
+                f"File share {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+                f"'{problem.disk_spelling}'. It no longer matches on-disk paths. Remove the old share with "
+                f"`/access revoke {grant.grant_id}`; the file's owner must share '{problem.disk_spelling}' "
+                "again with `/share` or Share in the workspace browser."
+            )
+        else:
+            summary = (
+                f"File share {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling "
+                f"could not be verified ({problem.detail})."
+            )
+        return title, summary
+
+    if is_person_share:
+        title = f"A stored folder share on {grant.target.id} does not match the path on disk"[:400]
+        if problem.disk_spelling:
+            summary = (
+                f"Folder share {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+                f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
+                f"Remove the old share with `/access revoke {grant.grant_id}`; the folder's owner must share "
+                f"'{problem.disk_spelling}' again with `/share` or Share in the workspace browser."
+            )
+        else:
+            summary = (
+                f"Folder share {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling "
+                f"could not be verified ({problem.detail})."
+            )
+        return title, summary
+
+    title = f"A stored folder grant on {grant.target.id} does not match the path on disk"[:400]
+    if problem.disk_spelling:
+        summary = (
+            f"Grant {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+            f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
+            f"Remove it with `/access revoke {grant.grant_id}` and grant '{problem.disk_spelling}' instead."
+        )
+    else:
+        summary = (
+            f"Grant {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
+            f"not be verified ({problem.detail})."
+        )
+    return title, summary
+
+
 def folder_target_problem_notice(problem: FolderTargetProblem, *, now: datetime) -> AccessNoticeV1:
     """The administrators' Inbox notice for one stored file-path grant or misspelled grant/block."""
 
     grant = problem.grant
     who = _grant_subject_name(grant.subject)
-    subject = _grant_subject_text(grant.subject)
     if grant.kind is GrantKind.BLOCK:
-        title = f"A stored block on {grant.target.id} does not match the path on disk"[:400]
-        if problem.disk_spelling:
-            summary = (
-                f"Block {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
-                f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this block "
-                f"does not stop access to '{problem.disk_spelling}'. Add a replacement block with "
-                f"`/access block {subject} {problem.disk_spelling} --reason \"...\"` and then remove the old one "
-                f"with `/access unblock {grant.grant_id}`."
-            )
-        else:
-            summary = (
-                f"Block {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
-                f"not be verified ({problem.detail}). Check the path and replace the block if needed."
-            )
+        title, summary = _block_problem_notice_text(problem, who)
     elif problem.problem == "file_target":
         title = f"A stored folder grant on {grant.target.id} targets a file and has no effect"[:400]
         summary = (
@@ -1045,18 +1132,7 @@ def folder_target_problem_notice(problem: FolderTargetProblem, *, now: datetime)
             f"`/access revoke {grant.grant_id}`."
         )
     else:
-        title = f"A stored folder grant on {grant.target.id} does not match the path on disk"[:400]
-        if problem.disk_spelling:
-            summary = (
-                f"Grant {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
-                f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
-                f"Remove it with `/access revoke {grant.grant_id}` and grant '{problem.disk_spelling}' instead."
-            )
-        else:
-            summary = (
-                f"Grant {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
-                f"not be verified ({problem.detail})."
-            )
+        title, summary = _grant_spelling_notice_text(problem, who)
     return AccessNoticeV1(
         notice_id=f"{FOLDER_TARGET_PROBLEM_NOTICE_PREFIX}:{grant.grant_id}"[:120],
         team_id=grant.team_id,

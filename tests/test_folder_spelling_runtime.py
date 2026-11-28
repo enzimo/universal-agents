@@ -452,3 +452,40 @@ def test_gateway_attachments_and_broker_task_files_refuse_misspelled_paths(
         assert Path(staged_out).name == "NewExport.txt"
     finally:
         stage.cleanup()
+
+
+def test_file_access_locate_checks_spelling_on_backslash_filename_without_folder_id_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """file_access.locate uses check_spelling_below so POSIX filenames containing '\\' do not raise FolderIdError."""
+
+    layout = InstanceLayout.at(tmp_path / "inst")
+    layout.person_dir("alice").mkdir(parents=True, exist_ok=True)
+    weird = layout.person_dir("alice") / "bad\\name.txt"
+    weird.write_text("hi", encoding="utf-8")
+
+    agent = SimpleNamespace(
+        id="agent-backslash",
+        named_agent_type="WebResearchAgent",
+        team_id=TEAM,
+        is_team_lead=False,
+        access_role="worker",
+        instance_root=str(layout.root),
+        workspace_dir=str(layout.workspaces_dir),
+        authorization_config={"enabled": False},
+        task_manager=SimpleNamespace(current_task_id="t-1", get_task_info=lambda _tid: None, storage_settings=None),
+    )
+    sim = SimulatedFS(case_insensitive=True, unicode_normalizing=True)
+    install_simulated_fs(monkeypatch, sim, patch_safe_open=True)
+    monkeypatch.setattr(
+        "custom_agents.access_runtime.verified_person_id",
+        lambda _agent: "alice",
+    )
+
+    loc = file_access.locate(weird, agent=agent)
+    assert loc.parts == ("bad\\name.txt",)
+
+    with pytest.raises(PathPolicyError) as exc_info:
+        file_access.locate(layout.person_dir("alice") / "BAD\\name.txt", agent=agent)
+    assert exc_info.value.reason_code == PATH_SPELLING_MISMATCH
+    assert repr("users/alice/bad\\name.txt") in str(exc_info.value)

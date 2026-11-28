@@ -201,11 +201,13 @@ class GatewayAccessRequestsSource:
     def folder_roots(self) -> FolderRoots | None:
         """Current folder roots for this instance, or None when no instance root is set."""
 
-        if not self._settings.instance_root:
-            return None
-        layout = InstanceLayout.at(self._settings.instance_root)
-        guarded = tuple(self._settings.protected_locations) or protected_locations(layout.root)
-        return FolderRoots.for_layout(layout, self.data_folders().usable(guarded))
+        provider = folder_roots_provider(
+            self._settings.instance_root,
+            AccessRepository(self._settings.storage_settings),
+            self._settings.team_id,
+            protected=self._settings.protected_locations,
+        )
+        return provider() if provider is not None else None
 
     @property
     def catalogs(self) -> CatalogSource:

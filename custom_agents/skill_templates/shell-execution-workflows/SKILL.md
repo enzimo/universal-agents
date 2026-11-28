@@ -80,7 +80,8 @@ Use this skill before calling the Universal Agents `shell` tool.
   where you may only read. It also gets a private temporary `HOME`/`TMPDIR`
   that is deleted after the command, and reads operating-system and
   interpreter files. A folder with a blocked folder or file inside it, a folder
-  whose path contains a symbolic link, or a path that is not a folder the
+  whose path contains a symbolic link, a folder whose stored spelling does not
+  match the path on disk, or a path that is not a folder the
   runtime can open is left out entirely; the result's sandbox note says so.
 - The network is open: every agent has internet access (`fn:internet`) unless
   a person blocked it for the agent type, the agent, themselves or the team.

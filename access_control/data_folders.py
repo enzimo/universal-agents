@@ -33,6 +33,7 @@ from access_control.sensitive_paths import sensitive_reason
 from custom_messages.contracts.access_v2 import (
     DATA_FOLDER_NAME_PATTERN,
     DataFolderRecordV1,
+    ProposedDataFolderV1,
     SubjectKind,
     SubjectRefV1,
 )
@@ -212,10 +213,35 @@ def folder_roots_provider(
     return lambda: FolderRoots.for_layout(layout, registry.usable(guarded))
 
 
+def roots_with_data_folders(
+    base: FolderRoots,
+    records: Iterable[DataFolder | DataFolderRecordV1 | ProposedDataFolderV1],
+) -> FolderRoots:
+    """Return ``base`` extended with any data-folder records whose names are not already present."""
+
+    seen = {folder.name for folder in base.data_folders}
+    extra: list[DataFolder] = []
+    for record in records:
+        if record.name in seen:
+            continue
+        seen.add(record.name)
+        extra.append(
+            DataFolder(
+                record.name,
+                Path(os.path.realpath(Path(record.path).expanduser())),
+                record.writable,
+            )
+        )
+    if not extra:
+        return base
+    return FolderRoots(base.workspaces_dir, (*base.data_folders, *extra))
+
+
 __all__ = [
     "DataFolderRefused",
     "DataFolderRegistry",
     "folder_roots_provider",
     "protected_locations",
     "registration_problem",
+    "roots_with_data_folders",
 ]
