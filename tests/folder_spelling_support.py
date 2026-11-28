@@ -42,6 +42,8 @@ class SimulatedFS:
         fstat_override: Callable[[int, os.stat_result], os.stat_result] | None = None,
         stat_override: Callable[[str, int, os.stat_result], os.stat_result] | None = None,
         case_insensitive_for_fd: Callable[[int], bool] | None = None,
+        on_list: Callable[[int], None] | None = None,
+        on_open_dir: Callable[[str, int], None] | None = None,
     ) -> None:
         self.case_insensitive = case_insensitive
         self.unicode_normalizing = unicode_normalizing
@@ -50,6 +52,8 @@ class SimulatedFS:
         self._fstat_override = fstat_override
         self._stat_override = stat_override
         self._case_insensitive_for_fd = case_insensitive_for_fd
+        self._on_list = on_list
+        self._on_open_dir = on_open_dir
         self.stat_calls: list[str] = []
         self.open_dir_calls: list[str] = []
         self.fstat_calls = 0
@@ -80,6 +84,8 @@ class SimulatedFS:
 
     def open_dir(self, name: str, dir_fd: int) -> int:
         self.open_dir_calls.append(name)
+        if self._on_open_dir is not None:
+            self._on_open_dir(name, dir_fd)
         real_name = self._resolve_real_name(name, dir_fd)
         if real_name is None:
             raise FileNotFoundError(name)
@@ -106,6 +112,8 @@ class SimulatedFS:
 
     def list_entries(self, dir_fd: int) -> list[tuple[str, int | None]]:
         self.list_calls += 1
+        if self._on_list is not None:
+            self._on_list(dir_fd)
         with os.scandir(dir_fd) as entries:
             return [(entry.name, entry.inode()) for entry in entries]
 
@@ -137,6 +145,48 @@ def fake_stat_with_dev(info: os.stat_result, st_dev: int) -> os.stat_result:
             "st_ctime_ns": info.st_ctime_ns,
         },
     )
+
+
+class _CaseInsensitiveOsProxy:
+    """Proxy for ``os`` inside ``access_control.safe_open`` to reproduce CI lookup on ext4."""
+
+    def __init__(self, sim: SimulatedFS) -> None:
+        self._sim = sim
+
+    def open(self, path: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        target = os.fspath(path)
+        if dir_fd is not None and isinstance(target, str):
+            resolved = self._sim._resolve_real_name(target, dir_fd)
+            if resolved is not None:
+                target = resolved
+        return os.open(target, flags, mode, dir_fd=dir_fd)
+
+    def stat(
+        self, path: str | os.PathLike[str], *, dir_fd: int | None = None, follow_symlinks: bool = True
+    ) -> os.stat_result:
+        target = os.fspath(path)
+        if dir_fd is not None and isinstance(target, str):
+            resolved = self._sim._resolve_real_name(target, dir_fd)
+            if resolved is not None:
+                target = resolved
+        return os.stat(target, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(os, name)
+
+
+def install_simulated_fs(
+    monkeypatch: object,
+    sim: SimulatedFS,
+    *,
+    patch_safe_open: bool = False,
+) -> None:
+    """Install ``sim`` as ``access_control.folders._ACTIVE_FS`` (and optionally for ``safe_open``)."""
+
+    folders.clear_spelling_cache()
+    monkeypatch.setattr(folders, "_ACTIVE_FS", sim.as_spelling_fs())  # type: ignore[attr-defined]
+    if patch_safe_open:
+        monkeypatch.setattr(safe_open, "os", _CaseInsensitiveOsProxy(sim))  # type: ignore[attr-defined]
 
 
 class CountingPosixFS:

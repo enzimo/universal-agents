@@ -23,6 +23,8 @@ entity of each folder up to its root (``access_control.entities``).
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import stat
 import threading
@@ -32,6 +34,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NoReturn
 
 from access_control import safe_open
 from runtime_settings.instance_layout import (
@@ -41,6 +44,8 @@ from runtime_settings.instance_layout import (
     InstanceLayout,
     person_folder_name,
 )
+
+logger = logging.getLogger(__name__)
 
 FOLDER_ROOT_TEAM = TEAM_DIRNAME
 FOLDER_ROOT_AGENTS = AGENTS_DIRNAME
@@ -52,13 +57,16 @@ STANDARD_SHARED_FOLDERS = (FOLDER_ROOT_TEAM, FOLDER_ROOT_AGENTS)
 # the owner policy never matches it (no User has this id).
 _OTHER_PERSON_OWNER_PREFIX = "folder-owner:"
 
+PATH_SPELLING_MISMATCH = "path_spelling_mismatch"
+PATH_SPELLING_UNVERIFIABLE = "path_spelling_unverifiable"
+
 
 class FolderIdError(ValueError):
     """A folder id is malformed or names no registered root."""
 
 
 class PathSpellingError(FolderIdError):
-    """An existing path component was spelled differently from its on-disk name."""
+    """An existing path component differed from disk or could not be verified."""
 
     def __init__(
         self,
@@ -67,11 +75,35 @@ class PathSpellingError(FolderIdError):
         typed: str,
         disk: str,
         unicode_only: bool = False,
+        reason_code: str = PATH_SPELLING_MISMATCH,
+        errno_value: int | None = None,
     ) -> None:
         super().__init__(message)
         self.typed = typed
         self.disk = disk
         self.unicode_only = unicode_only
+        self.reason_code = reason_code
+        self.errno_value = errno_value
+
+
+class PathSpellingUnverifiableError(PathSpellingError):
+    """On-disk spelling could not be verified (for example, unreadable folder or I/O error)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        typed: str,
+        errno_value: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            typed=typed,
+            disk="",
+            unicode_only=False,
+            reason_code=PATH_SPELLING_UNVERIFIABLE,
+            errno_value=errno_value,
+        )
 
 
 class FolderGrantOnFileError(FolderIdError):
@@ -288,19 +320,14 @@ _POSIX_FS = _SpellingFS(
 _ACTIVE_FS: _SpellingFS = _POSIX_FS
 
 _SPELLING_CACHE_LOCK = threading.Lock()
-# Keyed by fstat(parent_dir_fd).st_dev (the filesystem doing the lookup).
-_fs_case_insensitive: dict[int, bool] = {}
-_fs_unicode_normalizing: dict[int, bool] = {}
 # Keyed by (st_dev, st_ino, st_mtime_ns, st_ctime_ns) of the parent directory.
 _dir_names_cache: OrderedDict[tuple[int, int, int, int], frozenset[str]] = OrderedDict()
 
 
 def clear_spelling_cache() -> None:
-    """Reset the per-device sensitivity and directory-name caches."""
+    """Reset the bounded exact-match directory-name cache."""
 
     with _SPELLING_CACHE_LOCK:
-        _fs_case_insensitive.clear()
-        _fs_unicode_normalizing.clear()
         _dir_names_cache.clear()
 
 
@@ -309,8 +336,7 @@ def _ascii_swapcase(name: str) -> str | None:
 
     Using ``str.swapcase`` would expand non-ASCII characters such as ``ß`` ->
     ``SS`` or ``ﬁ`` -> ``FI`` into names that do not exist even on
-    case-insensitive APFS/NTFS, which would wrongly cache the device as
-    case-sensitive.
+    case-insensitive APFS/NTFS, which would miss the case-insensitive match.
     """
 
     chars: list[str] = []
@@ -339,115 +365,51 @@ def _unicode_alt_form(name: str) -> str | None:
     return None
 
 
-def _is_stable_negative(
+def _probe_same_entry(
     fs: _SpellingFS,
     current: int,
-    part: str,
-    dir_info: os.stat_result,
+    alt: str,
     entry_info: os.stat_result,
-) -> tuple[bool, bool]:
-    """Verify neither ``current`` nor ``part`` changed during a negative probe.
+) -> bool:
+    """Whether ``alt`` inside ``current`` resolves to the same inode as ``entry_info``."""
 
-    Returns ``(stable, entry_still_exists)``. Prevents a concurrent deletion or
-    rename between the initial stat and the alternate-name probe from caching a
-    case-insensitive filesystem as case-sensitive.
-    """
-
-    try:
-        after_dir = fs.fstat_dir(current)
-    except OSError:
-        return False, True
-    try:
-        after_entry = fs.stat_entry(part, current)
-    except FileNotFoundError:
-        return False, False
-    except OSError:
-        return False, True
-    dir_unchanged = (after_dir.st_mtime_ns, after_dir.st_ctime_ns) == (
-        dir_info.st_mtime_ns,
-        dir_info.st_ctime_ns,
-    )
-    entry_unchanged = (after_entry.st_dev, after_entry.st_ino) == (
-        entry_info.st_dev,
-        entry_info.st_ino,
-    )
-    return dir_unchanged and entry_unchanged, True
-
-
-def _probe_device_property(
-    fs: _SpellingFS,
-    current: int,
-    part: str,
-    dir_info: os.stat_result,
-    entry_info: os.stat_result,
-    *,
-    cache: dict[int, bool],
-    alt: str | None,
-    unknown_must_list: bool,
-) -> tuple[bool, bool]:
-    """Return ``(must_list, entry_still_exists)`` for one sensitivity property."""
-
-    dir_dev = dir_info.st_dev
-    with _SPELLING_CACHE_LOCK:
-        cached = cache.get(dir_dev)
-    if cached is not None:
-        return cached, True
-    if alt is None:
-        return unknown_must_list, True
     try:
         other = fs.stat_entry(alt, current)
     except FileNotFoundError:
-        other = None
-    except OSError:
-        return True, True
-    if other is not None and (other.st_dev, other.st_ino) == (entry_info.st_dev, entry_info.st_ino):
-        # Guard against two hard links (e.g. 'a' and 'A') on a case-sensitive
-        # filesystem: only cache True for directories or single-link files.
-        if stat.S_ISDIR(entry_info.st_mode) or entry_info.st_nlink == 1:
-            with _SPELLING_CACHE_LOCK:
-                cache[dir_dev] = True
-        return True, True
-    stable, still_exists = _is_stable_negative(fs, current, part, dir_info, entry_info)
-    if not still_exists:
-        return False, False
-    if stable:
-        with _SPELLING_CACHE_LOCK:
-            cache[dir_dev] = False
-        return False, True
-    return True, True
+        return False
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            return True
+        raise
+    return (other.st_dev, other.st_ino) == (entry_info.st_dev, entry_info.st_ino)
 
 
 def _needs_directory_listing(
     fs: _SpellingFS,
     current: int,
     part: str,
-    dir_info: os.stat_result,
     entry_info: os.stat_result,
-) -> tuple[bool, bool]:
-    """Whether ``current`` must be listed to verify ``part``'s exact spelling."""
+) -> bool:
+    """Whether ``current`` must be listed to verify ``part``'s exact spelling.
 
-    case_list, exists = _probe_device_property(
-        fs,
-        current,
-        part,
-        dir_info,
-        entry_info,
-        cache=_fs_case_insensitive,
-        alt=_ascii_swapcase(part),
-        unknown_must_list=not part.isascii(),
-    )
-    if not exists or case_list or part.isascii():
-        return case_list, exists
-    return _probe_device_property(
-        fs,
-        current,
-        part,
-        dir_info,
-        entry_info,
-        cache=_fs_unicode_normalizing,
-        alt=_unicode_alt_form(part),
-        unknown_must_list=False,
-    )
+    Decides per parent directory rather than caching per device, because ext4
+    and f2fs casefold (``chattr +F``), NTFS and WSL/Docker Desktop ``drvfs``
+    allow case-sensitive and case-insensitive directories on the same ``st_dev``.
+    """
+
+    swapped = _ascii_swapcase(part)
+    if swapped is not None:
+        if _probe_same_entry(fs, current, swapped, entry_info):
+            return True
+    elif not part.isascii():
+        # Non-ASCII names with no ASCII letters cannot be case-probed via ASCII
+        # swap; list the directory directly rather than guessing.
+        return True
+    if not part.isascii():
+        unicode_alt = _unicode_alt_form(part)
+        if unicode_alt is not None and _probe_same_entry(fs, current, unicode_alt, entry_info):
+            return True
+    return False
 
 
 def _lookup_cached_names(dir_key: tuple[int, int, int, int]) -> frozenset[str] | None:
@@ -614,16 +576,13 @@ def _check_component_spelling(
     means the component does not exist on disk.
     """
 
-    dir_info = fs.fstat_dir(current)
     try:
         entry_info = fs.stat_entry(part, current)
     except FileNotFoundError:
         return None, None, False
-    must_list, exists = _needs_directory_listing(fs, current, part, dir_info, entry_info)
-    if not exists:
-        return None, None, False
-    if not must_list:
+    if not _needs_directory_listing(fs, current, part, entry_info):
         return part, entry_info, False
+    dir_info = fs.fstat_dir(current)
     disk_name, exists = _resolve_disk_name(fs, current, part, dir_info, entry_info)
     if not exists or disk_name is None:
         return None, None, False
@@ -641,11 +600,9 @@ def _raise_spelling_mismatch(
 ) -> None:
     typed_display = _format_display_path(display_prefix, parts)
     if unresolved_churn:
-        raise PathSpellingError(
+        raise PathSpellingUnverifiableError(
             f"Path {typed_display!r} could not be verified against an exact on-disk name because the folder changed while checking it.",
             typed=typed_display,
-            disk="",
-            unicode_only=False,
         )
     disk_display = _format_display_path(display_prefix, disk_parts)
     unicode_only = unicodedata.normalize("NFC", typed_display) == unicodedata.normalize("NFC", disk_display)
@@ -660,6 +617,50 @@ def _raise_spelling_mismatch(
             f"Use the exact on-disk spelling {disk_display!r}."
         )
     raise PathSpellingError(message, typed=typed_display, disk=disk_display, unicode_only=unicode_only)
+
+
+def _raise_spelling_unverifiable(
+    display_prefix: str | None,
+    parts: tuple[str, ...],
+    exc: OSError,
+) -> NoReturn:
+    typed_display = _format_display_path(display_prefix, parts)
+    err_no = (
+        exc.__cause__.errno
+        if isinstance(exc, safe_open.UnsafePath) and isinstance(exc.__cause__, OSError)
+        else exc.errno
+    )
+    logger.warning(
+        "Could not verify the exact on-disk spelling of a path. "
+        "event=path_spelling_unverifiable path=%s errno=%s",
+        typed_display,
+        err_no,
+    )
+    raise PathSpellingUnverifiableError(
+        f"Could not verify the exact on-disk spelling of {typed_display!r}.",
+        typed=typed_display,
+        errno_value=err_no,
+    ) from exc
+
+
+_STOP_WALK_ERRNOS = frozenset({errno.ENOENT, errno.ELOOP, errno.ENOTDIR})
+
+
+def _open_next_dir(
+    active_fs: _SpellingFS,
+    current: int,
+    disk_name: str,
+    *,
+    had_mismatch: bool,
+) -> int | None:
+    """Open the next directory component without following links, or return None to stop."""
+
+    try:
+        return active_fs.open_dir(disk_name, current)
+    except OSError as exc:
+        if had_mismatch or exc.errno in _STOP_WALK_ERRNOS:
+            return None
+        raise
 
 
 def _walk_exact_spelling(
@@ -683,15 +684,13 @@ def _walk_exact_spelling(
                 unresolved_churn = True
                 disk_parts.extend(parts[index:])
                 break
-            if disk_name != part:
-                had_mismatch = True
+            had_mismatch = had_mismatch or disk_name != part
             disk_parts.append(disk_name)
             if index + 1 >= len(parts) or not stat.S_ISDIR(entry_info.st_mode):
                 disk_parts.extend(parts[index + 1 :])
                 break
-            try:
-                following = active_fs.open_dir(disk_name, current)
-            except OSError:
+            following = _open_next_dir(active_fs, current, disk_name, had_mismatch=had_mismatch)
+            if following is None:
                 disk_parts.extend(parts[index + 1 :])
                 break
             active_fs.close_fd(current)
@@ -714,7 +713,10 @@ def check_exact_spelling(
     links (matching ``access_control.safe_open``). Stops as soon as a component
     does not exist on disk so newly created files and future targets are
     accepted as typed. Raises ``PathSpellingError`` when any existing component
-    differs in letter case or Unicode normalization from its directory entry.
+    differs in letter case or Unicode normalization from its directory entry,
+    or ``PathSpellingUnverifiableError`` (a ``PathSpellingError`` subclass) when
+    an ``OSError`` prevents verifying spelling, failing closed without leaking
+    host paths.
     """
 
     if not parts:
@@ -727,9 +729,16 @@ def check_exact_spelling(
     except safe_open.UnsafePath as exc:
         if exc.reason == safe_open.REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError):
             return
-        raise
+        _raise_spelling_unverifiable(display_prefix, parts, exc)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return
+        _raise_spelling_unverifiable(display_prefix, parts, exc)
 
-    disk_parts, had_mismatch, unresolved_churn = _walk_exact_spelling(active_fs, current, parts)
+    try:
+        disk_parts, had_mismatch, unresolved_churn = _walk_exact_spelling(active_fs, current, parts)
+    except OSError as exc:
+        _raise_spelling_unverifiable(display_prefix, parts, exc)
     if had_mismatch:
         _raise_spelling_mismatch(display_prefix, parts, disk_parts, unresolved_churn=unresolved_churn)
 
@@ -780,7 +789,7 @@ def _unsafe_path_refusal(canonical: str, exc: safe_open.UnsafePath) -> str | Non
         return f"Folder grants only open folders, not a path inside a file: '{canonical}'."
     if exc.reason == safe_open.REASON_LINK:
         return f"Folder grants only open real folders, not symbolic links: '{canonical}'."
-    return f"Folder grants only open accessible folders: '{canonical}' could not be checked ({exc})."
+    return f"Folder grants only open accessible folders: '{canonical}' could not be checked."
 
 
 def _non_directory_refusal(canonical: str, mode: int) -> str:
@@ -890,7 +899,10 @@ __all__ = [
     "FolderGrantOnFileError",
     "FolderIdError",
     "FolderRoots",
+    "PATH_SPELLING_MISMATCH",
+    "PATH_SPELLING_UNVERIFIABLE",
     "PathSpellingError",
+    "PathSpellingUnverifiableError",
     "STANDARD_SHARED_FOLDERS",
     "check_exact_spelling",
     "check_folder_id_spelling",

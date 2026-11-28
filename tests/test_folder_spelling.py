@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
 import time
 import unicodedata
@@ -9,13 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from access_control import folders
 from access_control.folders import (
+    PATH_SPELLING_MISMATCH,
+    PATH_SPELLING_UNVERIFIABLE,
     DataFolder,
     FolderGrantOnFileError,
     FolderIdError,
     FolderRoots,
     PathSpellingError,
+    PathSpellingUnverifiableError,
     check_exact_spelling,
     check_folder_id_spelling,
     check_folder_target,
@@ -141,8 +145,8 @@ def test_non_ascii_first_component_does_not_poison_case_probe_cache(tmp_path: Pa
         assert exc_info.value.disk == f"data/share/{special}/payroll.csv"
 
 
-def test_non_ascii_name_without_ascii_letters_lists_when_device_unknown(tmp_path: Path) -> None:
-    """C02: when a non-ASCII component has no ASCII letters, 'unknown means list' applies."""
+def test_non_ascii_name_without_ascii_letters_lists_directly(tmp_path: Path) -> None:
+    """C02: when a non-ASCII component has no ASCII letters, the directory is listed directly."""
 
     data_dir = tmp_path / "share"
     data_dir.mkdir()
@@ -153,12 +157,12 @@ def test_non_ascii_name_without_ascii_letters_lists_when_device_unknown(tmp_path
     with pytest.raises(PathSpellingError) as exc_info:
         check_exact_spelling(data_dir, ("ÄÖÜ",), display_prefix="data/share", fs=fs)
     assert exc_info.value.disk == "data/share/äöü"
+    assert exc_info.value.reason_code == PATH_SPELLING_MISMATCH
     assert sim.list_calls == 1
-    assert folders._fs_case_insensitive == {}
 
 
-def test_concurrent_deletion_during_case_probe_leaves_cache_unset(tmp_path: Path) -> None:
-    """C02: deleting an entry between stat(part) and stat(swapped) must not cache False."""
+def test_concurrent_deletion_during_case_probe_does_not_affect_later_checks(tmp_path: Path) -> None:
+    """C02/C09: deleting an entry mid-probe never turns off checks for subsequent calls."""
 
     workspaces = tmp_path / "workspaces"
     team = workspaces / "team"
@@ -175,21 +179,20 @@ def test_concurrent_deletion_during_case_probe_leaves_cache_unset(tmp_path: Path
             deleted = True
             ephemeral.unlink()
 
-    # Probe fails because the entry disappeared mid-probe; device must remain uncached.
+    # Entry disappears mid-probe; no device-wide negative state is cached.
     sim_race = SimulatedFS(case_insensitive=True, on_stat=delete_on_probe)
     check_exact_spelling(team, ("ephemeral.txt",), display_prefix="team", fs=sim_race.as_spelling_fs())
     assert deleted is True
-    assert folders._fs_case_insensitive == {}
 
-    # Next check on the same device probes fresh and still catches misspellings.
+    # Next check in the same directory probes fresh and still catches misspellings.
     sim_after = SimulatedFS(case_insensitive=True)
     with pytest.raises(PathSpellingError) as exc_info:
         check_exact_spelling(team, ("Secret.txt",), display_prefix="team", fs=sim_after.as_spelling_fs())
     assert exc_info.value.disk == "team/secret.txt"
 
 
-def test_mount_point_entry_does_not_cache_mounted_device_as_case_sensitive(tmp_path: Path) -> None:
-    """C02: sensitivity is keyed on fstat(parent_dir).st_dev, not the child mount-point's st_dev."""
+def test_mount_point_entry_refuses_misspelling_inside_mounted_case_insensitive_share(tmp_path: Path) -> None:
+    """C02: a case-sensitive parent never suppresses checking inside a mounted case-insensitive child."""
 
     workspaces = tmp_path / "workspaces"
     mounted = workspaces / "team" / "mounted"
@@ -213,7 +216,7 @@ def test_mount_point_entry_does_not_cache_mounted_device_as_case_sensitive(tmp_p
         return info
 
     def is_ci_for_fd(dir_fd: int) -> bool:
-        return dir_fd in mounted_fds
+        return os.fstat(dir_fd).st_ino == mounted_ino or dir_fd in mounted_fds
 
     sim = SimulatedFS(
         case_insensitive=False,
@@ -223,12 +226,107 @@ def test_mount_point_entry_does_not_cache_mounted_device_as_case_sensitive(tmp_p
     )
     roots = FolderRoots(workspaces_dir=workspaces)
 
-    # First walk reaches mounted (child st_dev=20_002) from case-sensitive team (dir st_dev=10_001).
     with pytest.raises(PathSpellingError) as exc_info:
         check_folder_id_spelling(roots, "team/mounted/Secret.txt", fs=sim.as_spelling_fs())
     assert exc_info.value.disk == "team/mounted/secret.txt"
-    assert folders._fs_case_insensitive.get(parent_dev) is False
-    assert folders._fs_case_insensitive.get(mounted_dev) is True
+
+
+def test_mixed_per_directory_case_sensitivity_on_one_device(tmp_path: Path) -> None:
+    """C09: case-sensitive ancestors on the same st_dev must not disable checks in a case-insensitive child."""
+
+    roots, workspaces, _data_dir = _make_roots(tmp_path)
+    (workspaces / "team" / "other").mkdir(parents=True)
+    (workspaces / "team" / "other" / "ok.txt").write_text("ok\n", encoding="utf-8")
+
+    team_ino = os.stat(workspaces / "team").st_ino
+    finance_ino = os.stat(workspaces / "team" / "finance").st_ino
+
+    # Case 1: workspaces/ and team/ are case-sensitive, only team/finance/ is case-insensitive (same st_dev).
+    sim_leaf_ci = SimulatedFS(
+        case_insensitive=False,
+        case_insensitive_for_fd=lambda fd: os.fstat(fd).st_ino == finance_ino,
+    )
+    fs_leaf_ci = sim_leaf_ci.as_spelling_fs()
+
+    # Cold cache: refuses team/finance/PAYROLL.csv even though 'team' and 'finance' were probed case-sensitive.
+    with pytest.raises(PathSpellingError) as cold_err:
+        check_folder_id_spelling(roots, "team/finance/PAYROLL.csv", fs=fs_leaf_ci)
+    assert cold_err.value.disk == "team/finance/payroll.csv"
+    assert cold_err.value.reason_code == PATH_SPELLING_MISMATCH
+    assert "PAYROLL.csv" in sim_leaf_ci.stat_calls
+    assert sim_leaf_ci.list_calls >= 1
+
+    # After warming up in a case-sensitive sibling folder on the same device, still refuses.
+    check_folder_id_spelling(roots, "team/other/ok.txt", fs=fs_leaf_ci)
+    with pytest.raises(PathSpellingError) as warm_err:
+        check_folder_id_spelling(roots, "team/finance/PAYROLL.csv", fs=fs_leaf_ci)
+    assert warm_err.value.disk == "team/finance/payroll.csv"
+
+    # Case 2: workspaces/ is case-sensitive, team/ and team/finance/ are case-insensitive (same st_dev).
+    clear_spelling_cache()
+    sim_team_ci = SimulatedFS(
+        case_insensitive=False,
+        case_insensitive_for_fd=lambda fd: os.fstat(fd).st_ino in {team_ino, finance_ino},
+    )
+    fs_team_ci = sim_team_ci.as_spelling_fs()
+    check_folder_id_spelling(roots, "team/other/ok.txt", fs=fs_team_ci)
+    with pytest.raises(PathSpellingError) as dir_err:
+        check_folder_id_spelling(roots, "team/FINANCE/payroll.csv", fs=fs_team_ci)
+    assert dir_err.value.disk == "team/finance/payroll.csv"
+    with pytest.raises(PathSpellingError) as file_err:
+        check_folder_id_spelling(roots, "team/finance/PAYROLL.csv", fs=fs_team_ci)
+    assert file_err.value.disk == "team/finance/payroll.csv"
+
+
+def test_oserror_during_spelling_check_raises_typed_unverifiable_error_without_host_path(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """C10: PermissionError on list_entries or open_dir and EIO on stat_entry fail closed with a typed error."""
+
+    roots, workspaces, data_dir = _make_roots(tmp_path)
+    finance_ino = os.stat(workspaces / "team" / "finance").st_ino
+
+    # Traverse-only (x without r) case-insensitive folder: list_entries raises PermissionError.
+    def deny_list(dir_fd: int) -> None:
+        if os.fstat(dir_fd).st_ino == finance_ino:
+            raise PermissionError(errno.EACCES, "Permission denied")
+
+    sim_no_list = SimulatedFS(case_insensitive=True, on_list=deny_list)
+    with caplog.at_level(logging.WARNING, logger="access_control.folders"):
+        with pytest.raises(PathSpellingUnverifiableError) as list_err:
+            check_folder_id_spelling(roots, "team/finance/payroll.csv", fs=sim_no_list.as_spelling_fs())
+    assert isinstance(list_err.value, PathSpellingError)
+    assert isinstance(list_err.value, FolderIdError)
+    assert list_err.value.reason_code == PATH_SPELLING_UNVERIFIABLE
+    assert list_err.value.errno_value == errno.EACCES
+    assert "team/finance/payroll.csv" in str(list_err.value)
+    assert str(workspaces) not in str(list_err.value)
+    assert any("event=path_spelling_unverifiable" in rec.message for rec in caplog.records)
+
+    # Unreadable intermediate folder on open_dir must fail closed, not skip checking children.
+    def deny_open_finance(name: str, _dir_fd: int) -> None:
+        if name.lower() == "finance":
+            raise PermissionError(errno.EACCES, "Permission denied")
+
+    sim_no_open = SimulatedFS(case_insensitive=False, on_open_dir=deny_open_finance)
+    with pytest.raises(PathSpellingUnverifiableError) as open_err:
+        check_folder_id_spelling(roots, "team/finance/payroll.csv", fs=sim_no_open.as_spelling_fs())
+    assert open_err.value.reason_code == PATH_SPELLING_UNVERIFIABLE
+    assert open_err.value.errno_value == errno.EACCES
+    assert str(workspaces) not in str(open_err.value)
+
+    # EIO on a flaky data-folder bind mount fails closed with logical data/<name> id and no host path.
+    def fail_eio(name: str, _dir_fd: int) -> None:
+        if name == "q1.csv":
+            raise OSError(errno.EIO, "Input/output error")
+
+    sim_eio = SimulatedFS(case_insensitive=True, on_stat=fail_eio)
+    with pytest.raises(PathSpellingUnverifiableError) as eio_err:
+        check_folder_target(roots, "data/reports/q1.csv", for_block=False, fs=sim_eio.as_spelling_fs())
+    assert eio_err.value.reason_code == PATH_SPELLING_UNVERIFIABLE
+    assert eio_err.value.errno_value == errno.EIO
+    assert "data/reports/q1.csv" in str(eio_err.value)
+    assert str(data_dir) not in str(eio_err.value)
 
 
 def test_directory_name_cache_avoids_repeated_listings_for_exact_hits_and_relists_on_mismatch(tmp_path: Path) -> None:
@@ -297,12 +395,11 @@ def test_hard_links_on_case_sensitive_fs_do_not_cache_device_as_case_insensitive
     counting = CountingPosixFS()
     fs = counting.as_spelling_fs()
 
-    # First check sees st_nlink == 2: lists once for safety, leaves device uncached.
+    # First check sees hard links 'a' and 'A' share an inode: lists once for safety.
     check_exact_spelling(team, ("a",), display_prefix="team", fs=fs)
     assert counting.list_calls == 1
-    assert folders._fs_case_insensitive == {}
 
-    # Normal single-link file probes and caches False; subsequent calls do zero listings.
+    # Normal single-link file probes without listing; subsequent calls do zero listings.
     check_exact_spelling(team, ("normal.txt",), display_prefix="team", fs=fs)
     lists_before = counting.list_calls
     for _ in range(10):
