@@ -1,5 +1,6 @@
 """Communication support for the trusted Strands tool surface."""
 
+from collections.abc import Mapping
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -299,6 +300,58 @@ def _notify_user_gateway_context(
     return _default_context(config, active_context, person_id)
 
 
+def _raw_attachment_items(raw_attachments: Any) -> List[Any]:
+    if raw_attachments in (None, "", []):
+        return []
+    if isinstance(raw_attachments, str):
+        rendered = raw_attachments.strip()
+        if not rendered:
+            return []
+        if rendered.startswith("[") or rendered.startswith("{"):
+            try:
+                raw_attachments = json.loads(rendered)
+            except json.JSONDecodeError:
+                return []
+        else:
+            return [rendered]
+    if isinstance(raw_attachments, (list, tuple)):
+        return list(raw_attachments)
+    return [raw_attachments]
+
+
+def _precheck_attachment_access(agent: Any, raw_attachments: Any) -> List[str]:
+    """Run agent-side ``file_access`` decisions before gateway attachment validation.
+
+    Refuses blocked or unauthorized paths before gateway-side spelling or file
+    checks can reveal on-disk names. Location errors outside the workspace fall
+    through to gateway validation so its outside-folder messages stay intact;
+    accepted attachments are still checked again by ``_attachment_access_errors``.
+    """
+
+    errors: List[str] = []
+    for index, raw in enumerate(_raw_attachment_items(raw_attachments)):
+        if isinstance(raw, str):
+            raw_path = raw.strip()
+        elif isinstance(raw, Mapping):
+            raw_path = str(raw.get("path") or "").strip()
+        elif hasattr(raw, "path"):
+            raw_path = str(getattr(raw, "path") or "").strip()
+        else:
+            continue
+        if not raw_path:
+            continue
+        try:
+            file_access.status(raw_path, agent=agent)
+        except file_access.PathPolicyError as exc:
+            if exc.reason_code in {
+                file_access.ACCESS_DENIED,
+                file_access.PATH_SPELLING_MISMATCH,
+                file_access.PATH_SPELLING_UNVERIFIABLE,
+            }:
+                errors.append(f"attachments[{index}].path cannot be sent: {exc}")
+    return errors
+
+
 def _attachment_access_errors(agent: Any, attachments: List[Any]) -> List[str]:
     """Why the agent may not send each attachment: the folder rules and, with
     authorization on, the folder decision (custom_tools.file_access), so a block
@@ -461,6 +514,13 @@ def notify_user(
             "channel_name": gateway_context.channel_name,
         }
 
+    attachment_errors = _precheck_attachment_access(agent, attachments)
+    if attachment_errors:
+        return {
+            "status": "error",
+            "error": "One or more attachments are invalid.",
+            "attachment_errors": attachment_errors,
+        }
     validated_attachments, attachment_errors = validate_user_notification_attachments(
         attachments,
         config=config,

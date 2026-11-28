@@ -63,23 +63,29 @@ def test_case_insensitive_spelling_refuses_mismatched_components_and_reports_dis
     check_folder_id_spelling(roots, "team/finance/payroll.csv", fs=fs)
     assert "payroll.csv" in sim.stat_calls
 
-    # Single mismatched component reports exact disk path.
+    # Mismatched ancestor component stops at the first mismatch and reports disk spelling only up to it.
     with pytest.raises(PathSpellingError) as exc_info:
         check_folder_id_spelling(roots, "team/Finance/payroll.csv", fs=fs)
     assert exc_info.value.typed == "team/Finance/payroll.csv"
-    assert exc_info.value.disk == "team/finance/payroll.csv"
+    assert exc_info.value.disk == "team/finance"
     assert exc_info.value.unicode_only is False
-    assert "team/finance/payroll.csv" in str(exc_info.value)
+    assert "team/finance" in str(exc_info.value)
+    assert "team/finance/payroll.csv" not in str(exc_info.value)
 
-    # Multiple mismatched components report the full corrected path.
+    # Multiple mismatched components still stop at the first mismatch without descending below it.
     with pytest.raises(PathSpellingError) as multi:
         check_folder_id_spelling(roots, "team/Finance/PAYROLL.CSV", fs=fs)
-    assert multi.value.disk == "team/finance/payroll.csv"
+    assert multi.value.disk == "team/finance"
 
-    # Misspelled parent with non-existent child still refuses and preserves child spelling.
+    # Misspelled parent with non-existent child still refuses naming only the mismatched parent.
     with pytest.raises(PathSpellingError) as new_in_bad_parent:
         check_folder_id_spelling(roots, "team/Finance/new_file.csv", fs=fs)
-    assert new_in_bad_parent.value.disk == "team/finance/new_file.csv"
+    assert new_in_bad_parent.value.disk == "team/finance"
+
+    # Mismatched leaf inside a correctly spelled parent reports the full leaf disk path.
+    with pytest.raises(PathSpellingError) as leaf_err:
+        check_folder_id_spelling(roots, "team/finance/PAYROLL.CSV", fs=fs)
+    assert leaf_err.value.disk == "team/finance/payroll.csv"
 
     # New file with any spelling inside a correctly spelled folder succeeds.
     check_folder_id_spelling(roots, "team/finance/NewReport.CSV", fs=fs)
@@ -272,7 +278,7 @@ def test_mixed_per_directory_case_sensitivity_on_one_device(tmp_path: Path) -> N
     check_folder_id_spelling(roots, "team/other/ok.txt", fs=fs_team_ci)
     with pytest.raises(PathSpellingError) as dir_err:
         check_folder_id_spelling(roots, "team/FINANCE/payroll.csv", fs=fs_team_ci)
-    assert dir_err.value.disk == "team/finance/payroll.csv"
+    assert dir_err.value.disk == "team/finance"
     with pytest.raises(PathSpellingError) as file_err:
         check_folder_id_spelling(roots, "team/finance/PAYROLL.csv", fs=fs_team_ci)
     assert file_err.value.disk == "team/finance/payroll.csv"
@@ -413,18 +419,22 @@ def test_folder_grant_file_refusal_and_check_folder_target(tmp_path: Path) -> No
     # Regular files under shared/data roots name the containing folder to grant instead.
     msg = folder_grant_file_refusal(roots, "team/finance/payroll.csv")
     assert msg is not None
-    assert "team/finance/payroll.csv" in msg and "team/finance" in msg
+    assert "team/finance/payroll.csv" in msg
+    assert "Grant the folder 'team/finance' instead." in msg
 
     msg_agents = folder_grant_file_refusal(roots, "agents/run/log.txt")
-    assert msg_agents is not None and "agents/run" in msg_agents
+    assert msg_agents is not None
+    assert "Grant the folder 'agents/run' instead." in msg_agents
 
     msg_data = folder_grant_file_refusal(roots, "data/reports/q1.csv")
-    assert msg_data is not None and "data/reports" in msg_data
+    assert msg_data is not None
+    assert "Grant the folder 'data/reports' instead." in msg_data
     assert str(data_dir) not in msg_data
 
     # Regular file in a person's folder tells caller its owner shares it.
     msg_user = folder_grant_file_refusal(roots, "users/alice/secret.pdf")
-    assert msg_user is not None and "/share" in msg_user
+    assert msg_user is not None
+    assert "shared by its owner with /share or Share in the workspace browser." in msg_user
 
     # Existing directories and non-existent paths are allowed.
     assert folder_grant_file_refusal(roots, "team/finance") is None
@@ -455,7 +465,7 @@ def test_folder_grant_file_refusal_and_check_folder_target(tmp_path: Path) -> No
     sim = SimulatedFS(case_insensitive=True)
     with pytest.raises(PathSpellingError) as block_err:
         check_folder_target(roots, "team/Finance/payroll.csv", for_block=True, fs=sim.as_spelling_fs())
-    assert block_err.value.disk == "team/finance/payroll.csv"
+    assert block_err.value.disk == "team/finance"
 
     # Malformed ids still raise FolderIdError.
     with pytest.raises(FolderIdError):
@@ -479,6 +489,120 @@ def test_exact_spelling_never_follows_symlinks(tmp_path: Path) -> None:
     # Misspelled symlink name itself is still caught without following it.
     with pytest.raises(PathSpellingError) as exc_info:
         check_folder_id_spelling(roots, "team/Escape/Target.txt", fs=sim.as_spelling_fs())
-    assert exc_info.value.disk == "team/escape/Target.txt"
+    assert exc_info.value.disk == "team/escape"
     assert "escape" not in sim.open_dir_calls
+
+
+def test_spelling_walk_stops_at_first_mismatch_and_never_opens_below(tmp_path: Path) -> None:
+    """F2 (SEC-1): the walk stops at the first mismatched component and never opens or stats deeper names."""
+
+    workspaces = tmp_path / "workspaces"
+    (workspaces / "team" / "secret" / "plans").mkdir(parents=True)
+    (workspaces / "team" / "secret" / "plans" / "x.txt").write_text("top-secret\n", encoding="utf-8")
+    nfc_dir = unicodedata.normalize("NFC", "café")
+    nfd_dir = unicodedata.normalize("NFD", "café")
+    (workspaces / "team" / nfc_dir / "sub").mkdir(parents=True)
+    (workspaces / "team" / nfc_dir / "sub" / "note.txt").write_text("accent\n", encoding="utf-8")
+    roots = FolderRoots(workspaces_dir=workspaces)
+
+    for probe in ("team/Secret/plans/x.txt", "team/Secret/plans/X.TXT", "team/Secret/plans/missing.txt"):
+        clear_spelling_cache()
+        sim = SimulatedFS(case_insensitive=True)
+        with pytest.raises(PathSpellingError) as exc_info:
+            check_folder_id_spelling(roots, probe, fs=sim.as_spelling_fs())
+        assert exc_info.value.disk == "team/secret"
+        assert exc_info.value.unicode_only is False
+        assert "team/secret/plans" not in str(exc_info.value)
+        assert "secret" not in sim.open_dir_calls
+        assert "Secret" not in sim.open_dir_calls
+        assert "plans" not in sim.stat_calls
+        assert "x.txt" not in sim.stat_calls
+        assert "X.TXT" not in sim.stat_calls
+
+    # Unicode-only mismatch on an ancestor component still sets unicode_only=True and stops before opening it.
+    clear_spelling_cache()
+    sim_uni = SimulatedFS(case_insensitive=False, unicode_normalizing=True)
+    with pytest.raises(PathSpellingError) as uni_err:
+        check_folder_id_spelling(roots, f"team/{nfd_dir}/sub/note.txt", fs=sim_uni.as_spelling_fs())
+    assert uni_err.value.disk == f"team/{nfc_dir}"
+    assert uni_err.value.unicode_only is True
+    assert "Unicode normalization" in str(uni_err.value)
+    assert nfc_dir not in sim_uni.open_dir_calls
+    assert "sub" not in sim_uni.stat_calls
+
+
+def test_per_name_inode_filesystem_still_lists_and_refuses_misspellings(tmp_path: Path) -> None:
+    """F3: filesystems with synthetic per-name inodes (sshfs without use_ino, CIFS noserverino) still refuse misspellings."""
+
+    roots, workspaces, _data_dir = _make_roots(tmp_path)
+    nfc_name = unicodedata.normalize("NFC", "café.txt")
+    nfd_name = unicodedata.normalize("NFD", "café.txt")
+    (workspaces / "team" / "finance" / nfc_name).write_text("accent\n", encoding="utf-8")
+
+    # Mode 1: deterministic per-(dir_ino, name) synthetic inode (each spelling gets its own distinct st_ino).
+    next_ino = 900_000
+    inodes_by_name: dict[tuple[int, str], int] = {}
+
+    def per_name_stat(name: str, dir_fd: int, info: os.stat_result) -> os.stat_result:
+        nonlocal next_ino
+        key = (os.fstat(dir_fd).st_ino, name)
+        if key not in inodes_by_name:
+            next_ino += 1
+            inodes_by_name[key] = next_ino
+        values = list(info)
+        values[1] = inodes_by_name[key]  # stat.ST_INO
+        return os.stat_result(
+            values,
+            {
+                "st_atime_ns": info.st_atime_ns,
+                "st_mtime_ns": info.st_mtime_ns,
+                "st_ctime_ns": info.st_ctime_ns,
+            },
+        )
+
+    sim = SimulatedFS(case_insensitive=True, unicode_normalizing=True, stat_override=per_name_stat)
+    fs = sim.as_spelling_fs()
+
+    # Exact spelling succeeds even when every looked-up spelling has a distinct inode.
+    check_folder_id_spelling(roots, "team/finance/payroll.csv", fs=fs)
+    assert sim.list_calls >= 1
+
+    # Misspelled parent and misspelled leaf are both refused with exact disk spelling.
+    with pytest.raises(PathSpellingError) as dir_err:
+        check_folder_id_spelling(roots, "team/Finance/payroll.csv", fs=fs)
+    assert dir_err.value.disk == "team/finance"
+    assert dir_err.value.reason_code == PATH_SPELLING_MISMATCH
+
+    with pytest.raises(PathSpellingError) as leaf_err:
+        check_folder_id_spelling(roots, "team/finance/PAYROLL.csv", fs=fs)
+    assert leaf_err.value.disk == "team/finance/payroll.csv"
+    assert leaf_err.value.reason_code == PATH_SPELLING_MISMATCH
+
+    with pytest.raises(PathSpellingError) as uni_err:
+        check_folder_id_spelling(roots, f"team/finance/{nfd_name}", fs=fs)
+    assert uni_err.value.disk == f"team/finance/{nfc_name}"
+    assert uni_err.value.unicode_only is True
+
+    # Mode 2: fresh inode on every single stat_entry call also refuses misspellings cleanly.
+    clear_spelling_cache()
+    counter = 1_500_000
+
+    def fresh_stat(_name: str, _dir_fd: int, info: os.stat_result) -> os.stat_result:
+        nonlocal counter
+        counter += 1
+        values = list(info)
+        values[1] = counter  # stat.ST_INO
+        return os.stat_result(
+            values,
+            {
+                "st_atime_ns": info.st_atime_ns,
+                "st_mtime_ns": info.st_mtime_ns,
+                "st_ctime_ns": info.st_ctime_ns,
+            },
+        )
+
+    sim_fresh = SimulatedFS(case_insensitive=True, stat_override=fresh_stat)
+    with pytest.raises(PathSpellingError) as fresh_err:
+        check_folder_id_spelling(roots, "team/finance/PAYROLL.csv", fs=sim_fresh.as_spelling_fs())
+    assert fresh_err.value.disk == "team/finance/payroll.csv"
 

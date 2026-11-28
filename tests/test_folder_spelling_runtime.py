@@ -174,12 +174,17 @@ def test_case_insensitive_and_unicode_block_bypasses_are_refused(
     assert sibling["status"] == "success"
     assert "quarter,Q4" in _text(sibling)
 
-    # Misspelled parent folder is refused with exact disk spelling.
+    # Misspelled parent folder is refused naming only up to the first mismatched component.
+    sim.stat_calls.clear()
+    sim.open_dir_calls.clear()
     bad_dir = file_read(path=str(layout.team_dir / "Finance" / "payroll.csv"))
     assert (bad_dir["status"], bad_dir["reason_code"]) == ("error", PATH_SPELLING_MISMATCH)
-    assert "team/finance/payroll.csv" in _text(bad_dir)
+    assert "team/finance" in _text(bad_dir)
+    assert "team/finance/payroll.csv" not in _text(bad_dir)
     assert "salary,100000" not in _text(bad_dir)
     assert "Finance" in sim.stat_calls
+    assert "payroll.csv" not in sim.stat_calls
+    assert "finance" not in sim.open_dir_calls
 
     # Misspelled file name inside warmed folder cache is still refused (kept answers never bypass).
     bad_file = file_read(path=str(finance_dir / "PAYROLL.csv"))
@@ -227,7 +232,8 @@ def test_new_file_write_in_exact_folder_succeeds_while_misspelled_folder_is_refu
 
     bad_parent = file_write(path=str(layout.team_dir / "Finance" / "Other.CSV"), content="no\n")
     assert (bad_parent["status"], bad_parent["reason_code"]) == ("error", PATH_SPELLING_MISMATCH)
-    assert "team/finance/Other.CSV" in _text(bad_parent)
+    assert "team/finance" in _text(bad_parent)
+    assert "team/finance/Other.CSV" not in _text(bad_parent)
     assert not (finance_dir / "Other.CSV").exists()
 
 
@@ -408,12 +414,18 @@ def test_gateway_attachments_and_broker_task_files_refuse_misspelled_paths(
 
     config = SimpleNamespace(workspace_path=layout.workspaces_dir, instance_root_path=layout.root)
 
-    # Gateway attachment validation refuses misspelled existing path with exact disk spelling.
+    # Gateway attachment validation refuses misspelled existing path with exact disk spelling up to first mismatch.
     bad_path = str(layout.team_dir / "Finance" / "team.pdf")
     accepted, errors = validate_user_notification_attachments([bad_path], config=config, person_id="alice")
     assert accepted == []
     assert len(errors) == 1
-    assert "team/finance/team.pdf" in errors[0]
+    assert "team/finance" in errors[0]
+
+    bad_leaf = str(finance_dir / "TEAM.PDF")
+    leaf_accepted, leaf_errors = validate_user_notification_attachments([bad_leaf], config=config, person_id="alice")
+    assert leaf_accepted == []
+    assert len(leaf_errors) == 1
+    assert "team/finance/team.pdf" in leaf_errors[0]
 
     # Gateway attachment staging also refuses misspelled paths if handed directly.
     staged, stage_errors = stage_user_notification_attachments(
@@ -430,7 +442,7 @@ def test_gateway_attachments_and_broker_task_files_refuse_misspelled_paths(
     )
     assert staged == []
     assert len(stage_errors) == 1
-    assert "team/finance/team.pdf" in stage_errors[0]
+    assert "team/finance" in stage_errors[0]
 
     # Exact spelling succeeds for gateway attachments.
     ok_path = str(finance_dir / "team.pdf")
@@ -442,7 +454,7 @@ def test_gateway_attachments_and_broker_task_files_refuse_misspelled_paths(
     try:
         with pytest.raises(TaskFileRejected, match="users/alice/report.pdf"):
             stage.input_file("REPORT.PDF")
-        with pytest.raises(TaskFileRejected, match="team/finance/out.txt"):
+        with pytest.raises(TaskFileRejected, match="team/finance"):
             stage.output_file(str(layout.team_dir / "Finance" / "out.txt"))
         with pytest.raises(TaskFileRejected, match="team/finance"):
             stage.output_path(str(layout.team_dir / "FINANCE"))
@@ -489,3 +501,113 @@ def test_file_access_locate_checks_spelling_on_backslash_filename_without_folder
         file_access.locate(layout.person_dir("alice") / "BAD\\name.txt", agent=agent)
     assert exc_info.value.reason_code == PATH_SPELLING_MISMATCH
     assert repr("users/alice/bad\\name.txt") in str(exc_info.value)
+
+
+def test_misspelled_path_into_blocked_folder_reveals_nothing_below_first_mismatch(
+    layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2 (SEC-1): reading a misspelled path inside a blocked folder reveals nothing below the first mismatch."""
+
+    secret_plans = layout.team_dir / "secret" / "plans"
+    secret_plans.mkdir(parents=True, exist_ok=True)
+    (secret_plans / "x.txt").write_text("top-secret\n", encoding="utf-8")
+
+    agent = _make_agent(layout, "alice")
+    _store_grant(agent, target_id="team/secret", kind=GrantKind.BLOCK, level=AccessLevel.FULL)
+    set_agent_ref(agent)
+
+    sim = SimulatedFS(case_insensitive=True, unicode_normalizing=True)
+    install_simulated_fs(monkeypatch, sim, patch_safe_open=True)
+
+    for probe_parts in (("Secret", "plans", "x.txt"), ("Secret", "plans", "X.TXT"), ("Secret", "plans", "missing.txt")):
+        sim.stat_calls.clear()
+        sim.open_dir_calls.clear()
+        res = file_read(path=str(layout.team_dir.joinpath(*probe_parts)))
+        assert (res["status"], res["reason_code"]) == ("error", PATH_SPELLING_MISMATCH)
+        body = _text(res)
+        assert "team/secret" in body
+        assert "team/secret/plans" not in body
+        assert "top-secret" not in body
+        assert "secret" not in sim.open_dir_calls
+        assert "Secret" not in sim.open_dir_calls
+        assert "plans" not in sim.stat_calls
+        assert "x.txt" not in sim.stat_calls
+        assert "X.TXT" not in sim.stat_calls
+
+
+def test_notify_user_runs_agent_file_access_before_gateway_validation(
+    layout: InstanceLayout, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6 (SEC-3): notify_user refuses blocked or unauthorized attachments via file_access before gateway spelling checks."""
+
+    from unittest.mock import AsyncMock
+
+    from assistant_gateway.config import GatewayInstanceConfig
+    from custom_tools.providers.communication import notify_user
+
+    finance_dir = layout.team_dir / "finance"
+    finance_dir.mkdir(parents=True, exist_ok=True)
+    (finance_dir / "payroll.csv").write_text("salary,100000\n", encoding="utf-8")
+
+    reports_dir = layout.root.parent / "notify_reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    (reports_dir / "q1.csv").write_text("rev,10\n", encoding="utf-8")
+
+    gw_cfg = GatewayInstanceConfig.create(
+        instance_name="notify-test",
+        instance_root=str(layout.root),
+        team_id=TEAM,
+        timezone="UTC",
+    )
+    gw_cfg.delivery.default_target.channel_name = "cli"
+    gw_cfg.user.canonical_user_id = "alice"
+    gw_cfg.manager.manager_agent_id = "manager_1"
+    cfg_path = gw_cfg.save(layout.root / "instance_config.yaml")
+
+    agent = _make_agent(layout, "alice")
+    agent.instance_config_path = str(cfg_path)
+    agent.team_comms = SimpleNamespace(send_message=AsyncMock())
+    store_data_folder(agent.task_manager.storage_settings, "reports", reports_dir, team_id=TEAM)
+    _store_grant(agent, target_id="team/finance", kind=GrantKind.BLOCK, level=AccessLevel.FULL)
+    set_agent_ref(agent)
+
+    sim = SimulatedFS(case_insensitive=True, unicode_normalizing=True)
+    install_simulated_fs(monkeypatch, sim, patch_safe_open=True)
+
+    # 1. Misspelled file inside a blocked folder -> refused by agent-side access decision with 0 disk stats.
+    sim.stat_calls.clear()
+    blocked_res = notify_user._tool_func(
+        message="Here is the file.",
+        attachments=[{"path": str(finance_dir / "PAYROLL.csv")}],
+    )
+    assert blocked_res["status"] == "error"
+    assert len(blocked_res["attachment_errors"]) == 1
+    assert "cannot be sent" in blocked_res["attachment_errors"][0]
+    assert "payroll.csv" not in blocked_res["attachment_errors"][0]
+    assert sim.stat_calls == []
+
+    # 2. Misspelled file inside an ungranted registered data folder -> refused by agent-side access decision with 0 disk stats.
+    sim.stat_calls.clear()
+    data_res = notify_user._tool_func(
+        message="Here is the report.",
+        attachments=[{"path": str(reports_dir / "Q1.csv")}],
+    )
+    assert data_res["status"] == "error"
+    assert len(data_res["attachment_errors"]) == 1
+    assert "cannot be sent" in data_res["attachment_errors"][0]
+    assert "data/reports/q1.csv" not in data_res["attachment_errors"][0]
+    assert sim.stat_calls == []
+
+    # 3. Misspelled parent into blocked folder -> stops at first mismatch (team/finance) without revealing payroll.csv.
+    sim.stat_calls.clear()
+    sim.open_dir_calls.clear()
+    parent_res = notify_user._tool_func(
+        message="Here is the file.",
+        attachments=[{"path": str(layout.team_dir / "Finance" / "payroll.csv")}],
+    )
+    assert parent_res["status"] == "error"
+    assert len(parent_res["attachment_errors"]) == 1
+    assert "team/finance" in parent_res["attachment_errors"][0]
+    assert "team/finance/payroll.csv" not in parent_res["attachment_errors"][0]
+    assert "finance" not in sim.open_dir_calls
+    agent.team_comms.send_message.assert_not_awaited()

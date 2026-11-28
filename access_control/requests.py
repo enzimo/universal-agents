@@ -451,10 +451,8 @@ class AccessRequests:
         lifetime: GrantLifetime,
         task_id: str | None,
         hours: int | None,
-        *,
-        check_disk: bool = True,
     ) -> datetime | None:
-        """Validate what is asked for; returns the expiry for access until a time."""
+        """Validate what is asked for (without touching disk); returns expiry for access until a time."""
 
         # Access is a level on a whole tool (owner's decision 2026-09-30):
         # operation names are fragile (sending mail is both gmail_send and
@@ -487,8 +485,6 @@ class AccessRequests:
             raise ValueError("Access for one task can only be asked for while working on a task.")
         if lifetime is GrantLifetime.UNTIL and not (hours and 1 <= hours <= MAX_REQUEST_HOURS):
             raise ValueError(f"Access for a limited time needs hours between 1 and {MAX_REQUEST_HOURS}.")
-        if check_disk:
-            self.service.check_folder_target(target, for_block=False)
         return self.service.clock() + timedelta(hours=hours) if lifetime is GrantLifetime.UNTIL and hours else None
 
     def submit(
@@ -515,8 +511,11 @@ class AccessRequests:
 
         work_id = requester.work_id
         expires_at = self._check_request(target, lifetime, work_id, hours)
-        name = self.target_name(target)
+        # Refuse agent and person blocks before any disk check so blocked agents
+        # cannot probe which files exist or their spelling inside a blocked folder.
         self._refuse_when_blocked(requester, person, target, work_id)
+        self.service.check_folder_target(target, for_block=False)
+        name = self.target_name(target)
         person_id = person.person_id if person else None
         # hand_on: only the team lead asks for access its workers' tasks can draw on.
         hand_on = hand_on and requester.agent_type == self.lead_agent_type
@@ -936,14 +935,34 @@ class AccessRequests:
     def _decide_in_one_transaction(self, request_id: str, decided: "Decided") -> AccessRequestV1:
         """Store the decision's grants and its outcome together (see ``decide``)."""
 
+        target_kind: TargetKind | None = None
+        target_id = ""
         try:
             with self.service.store.decision_transaction(request_id, at=decided.at) as request:
+                target_kind = request.target.kind
+                target_id = request.target.id
                 finished = self._outcome(request, decided)
                 self.service.store.finish_request(finished)
         except DecisionInProgress as exc:
             raise HandDownRefused(DECIDING_NOW) from exc
         except AccessStoreConflict as exc:
             raise HandDownRefused(str(exc)) from exc
+        except HandDownRefused as exc:
+            event = (
+                "access_decision_folder_target_refused"
+                if target_kind in {TargetKind.FOLDER, TargetKind.FILE}
+                else "access_decision_refused"
+            )
+            logger.warning(
+                "An access decision was refused; nothing was changed. event=%s "
+                "request_id=%s by=%s target=%s reason=%s",
+                event,
+                request_id,
+                decided.reviewer.person_id,
+                target_id,
+                exc,
+            )
+            raise
         except Exception as exc:
             # A lost PostgreSQL commit answer may hide an outcome that was stored.
             stored = None
@@ -1387,7 +1406,7 @@ class AccessRequests:
         access of their own (``AccessService.worker_lasting_refusal``).
         """
 
-        expires_at = self._check_request(target, lifetime, task_id, hours, check_disk=False)
+        expires_at = self._check_request(target, lifetime, task_id, hours)
         recipient_name = self.subject_name(recipient)
         grant = self.service.hand_down(
             grantor,

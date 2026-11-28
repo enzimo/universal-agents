@@ -216,7 +216,7 @@ def test_gateway_access_grant_refuses_existing_file_and_allows_folder_and_block(
             )
         )
         assert reply.startswith("Not done:")
-        assert "team/finance" in reply
+        assert "Grant the folder 'team/finance' instead." in reply
         assert not source.requests().service.store.list_team(TEAM)
 
         # Seed a legacy file-path grant directly; /access grant must still refuse rather than say Already given.
@@ -242,7 +242,7 @@ def test_gateway_access_grant_refuses_existing_file_and_allows_folder_and_block(
         )
         assert legacy_reply.startswith("Not done:")
         assert "Already given" not in legacy_reply
-        assert "team/finance" in legacy_reply
+        assert "Grant the folder 'team/finance' instead." in legacy_reply
 
         # Owner trying to create a FOLDER grant on their own file gets the /share message.
         owner_file_reply = asyncio.run(
@@ -252,7 +252,7 @@ def test_gateway_access_grant_refuses_existing_file_and_allows_folder_and_block(
             )
         )
         assert owner_file_reply.startswith("Not done:")
-        assert "/share" in owner_file_reply
+        assert "shared by its owner with /share or Share in the workspace browser." in owner_file_reply
 
         # Grant on the containing folder itself succeeds.
         folder_reply = asyncio.run(
@@ -309,7 +309,7 @@ def test_operator_cli_access_grant_refuses_existing_file_and_allows_folder_and_b
         )
         with pytest.raises(HandDownRefused) as exc_info:
             assistant_cli._access_grant(file_args, SimpleNamespace(), service)
-        assert "data/reports" in str(exc_info.value)
+        assert "Grant the folder 'data/reports' instead." in str(exc_info.value)
         assert not service.store.list_team(TEAM)
 
         folder_args = Namespace(**{**vars(file_args), "folder": "data/reports"})
@@ -329,8 +329,10 @@ def test_operator_cli_access_grant_refuses_existing_file_and_allows_folder_and_b
         service.cedar.close()
 
 
-def test_request_access_refuses_existing_file_and_apply_time_rollback(tmp_path: Path) -> None:
-    """S1: request_access refuses existing files immediately and fails closed on apply if a path becomes a file."""
+def test_request_access_refuses_existing_file_and_apply_time_rollback(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """S1/F5/F8: request_access refuses existing files immediately and fails closed on apply with WARNING (not ERROR)."""
 
     layout, storage, reports_dir = _setup_instance(tmp_path)
     agent = _make_agent(layout, storage, person=ADMIN, agent_type="WebResearchAgent", task_id="task-req-1")
@@ -348,7 +350,7 @@ def test_request_access_refuses_existing_file_and_apply_time_rollback(tmp_path: 
             )
         )
         assert res["status"] == "refused"
-        assert "team/finance" in res["reason"]
+        assert "Grant the folder 'team/finance' instead." in res["reason"]
         assert not service.store.list_requests(TEAM, status=AccessRequestStatus.WAITING)
 
         # Request on a path that does not exist yet enters WAITING.
@@ -367,9 +369,17 @@ def test_request_access_refuses_existing_file_and_apply_time_rollback(tmp_path: 
 
         # Before approval, the path becomes a file on disk.
         (reports_dir / "future_item").write_text("became a file\n", encoding="utf-8")
-        with pytest.raises(HandDownRefused) as exc_info:
-            requests.decide(req_id, ADMIN, AccessReviewChoice.APPROVE)
-        assert "data/reports" in str(exc_info.value)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="access_control.requests"):
+            with pytest.raises(HandDownRefused) as exc_info:
+                requests.decide(req_id, ADMIN, AccessReviewChoice.APPROVE)
+        assert "Grant the folder 'data/reports' instead." in str(exc_info.value)
+        # F8: logged at WARNING with a folder-target event, never at ERROR as access_decision_failed.
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("event=access_decision_folder_target_refused" in r.getMessage() and req_id in r.getMessage() for r in warnings)
+        assert errors == []
+        assert "event=access_decision_failed" not in caplog.text
         # Nothing stored; request remains WAITING.
         assert not service.store.list_team(TEAM)
         stored_req = service.store.get_request(req_id)
@@ -422,7 +432,7 @@ def test_propose_access_change_refuses_existing_file_c04_no_oracle_and_apply_rol
         )
         with pytest.raises(ProposalRefused) as exc_info:
             compiler.compile(file_proposal, person=ADMIN, task_id="work-p1")
-        assert "team/finance" in str(exc_info.value)
+        assert "Grant the folder 'team/finance' instead." in str(exc_info.value)
 
         # Block on existing file is allowed in a proposal.
         block_proposal = AccessProposalV1(
@@ -492,7 +502,7 @@ def test_propose_access_change_refuses_existing_file_c04_no_oracle_and_apply_rol
         assert req is not None
         with pytest.raises(HandDownRefused) as apply_exc:
             source.requests().decide(req.request_id, ADMIN, AccessReviewChoice.APPROVE_ALL)
-        assert "data/newext" in str(apply_exc.value)
+        assert "Grant the folder 'data/newext' instead." in str(apply_exc.value)
         # Neither the data folder nor the grant was stored.
         assert all(rec.name != "newext" for rec in source.data_folders().records())
         assert not service.store.list_team(TEAM)
@@ -539,7 +549,7 @@ def test_propose_access_change_refuses_existing_file_c04_no_oracle_and_apply_rol
         (reports_dir / "soon_file").write_text("file appeared\n", encoding="utf-8")
         with pytest.raises(HandDownRefused) as fut_exc:
             source.requests().decide(fut_req.request_id, ADMIN, AccessReviewChoice.APPROVE_ALL)
-        assert "data/reports" in str(fut_exc.value)
+        assert "Grant the folder 'data/reports' instead." in str(fut_exc.value)
         assert not service.store.list_team(TEAM)
     finally:
         source.close()
@@ -657,7 +667,11 @@ def test_misspelled_grant_block_and_share_are_refused_with_disk_spelling(
         )
         with pytest.raises(FileSharingRefused) as share_exc:
             sharing.share("alice", "Notes/Report.txt", "bob", "read")
-        assert "users/alice/notes/report.txt" in str(share_exc.value)
+        assert "users/alice/notes" in str(share_exc.value)
+
+        with pytest.raises(FileSharingRefused) as share_leaf_exc:
+            sharing.share("alice", "notes/Report.txt", "bob", "read")
+        assert "users/alice/notes/report.txt" in str(share_leaf_exc.value)
 
         share_grant = sharing.share("alice", "notes/report.txt", "bob", "read")
         assert share_grant.target.kind is TargetKind.FILE
@@ -844,7 +858,7 @@ def test_approve_pending_reports_file_refusal_to_approver_and_authority_error_to
         # Authorized approver gets the actual file-path refusal naming data/reports.
         with pytest.raises(HandDownRefused) as approver_exc:
             service.approve_pending(ADMIN, pending.grant_id)
-        assert "data/reports" in str(approver_exc.value)
+        assert "Grant the folder 'data/reports' instead." in str(approver_exc.value)
         assert "Only the target's approver" not in str(approver_exc.value)
     finally:
         source.close()
@@ -1022,7 +1036,7 @@ def test_check_spelling_below_anchors_under_workspaces_and_uses_explicit_prefix_
 
     with pytest.raises(PathSpellingError) as ws_exc:
         folders.check_spelling_below(layout.workspaces_dir, layout.workspaces_dir / "team", ("Finance", "payroll.csv"))
-    assert ws_exc.value.disk == "team/finance/payroll.csv"
+    assert ws_exc.value.disk == "team/finance"
 
     with pytest.raises(PathSpellingError) as data_exc:
         folders.check_spelling_below(layout.workspaces_dir, reports_dir, ("Q1.csv",), display_prefix="data/reports")
@@ -1238,3 +1252,237 @@ def test_roots_with_data_folders_and_gateway_folder_roots_reuse_shared_helpers(t
         assert extended.data_folder("data/reports/q1.csv") == roots.data_folder("data/reports/q1.csv")
     finally:
         source.close()
+
+
+def test_request_access_refuses_agent_and_person_blocks_before_disk_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1: blocked agents and blocked people get identical block refusals before any disk check."""
+
+    layout, storage, _reports = _setup_instance(tmp_path)
+    sim = SimulatedFS(case_insensitive=True, unicode_normalizing=True)
+    install_simulated_fs(monkeypatch, sim, patch_safe_open=True)
+
+    source = _gateway_source(layout, storage)
+    try:
+        requests = source.requests()
+        worker = AgentPrincipal("w-blk-1", "WebResearchAgent", AGENT_ROLE_WORKER, TEAM, work_id="work-blk-1")
+
+        # 1. Agent-type block on team/finance -> existing file, missing file, and misspelled file all get the block refusal, 0 disk stats.
+        requests.block(
+            ADMIN,
+            subject=worker.type_subject(),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance"),
+            reason="Finance is restricted",
+        )
+        sim.stat_calls.clear()
+        agent_reasons: list[str] = []
+        for target_id in ("team/finance/payroll.csv", "team/finance/nothere.csv", "team/finance/PAYROLL.csv"):
+            with pytest.raises(HandDownRefused) as exc_info:
+                requests.submit(
+                    requester=worker,
+                    person=ALICE,
+                    target=TargetRefV1(kind=TargetKind.FOLDER, id=target_id),
+                    level=AccessLevel.READ,
+                    reason="check finance",
+                    task_id="t-blk-1",
+                )
+            msg = str(exc_info.value)
+            assert "is blocked from" in msg
+            assert "cannot override a block" in msg
+            assert "not the file" not in msg
+            assert "does not match" not in msg
+            agent_reasons.append(msg)
+        assert sim.stat_calls == []
+        # Existing and missing files produce the same block-refusal shape (only echoing the requested path).
+        assert agent_reasons[0].replace("team/finance/payroll.csv", "<P>") == agent_reasons[1].replace(
+            "team/finance/nothere.csv", "<P>"
+        )
+
+        # 2. Person block on ALICE for team/finance -> unblocked agent working for ALICE gets the person block refusal, 0 disk stats.
+        other_worker = AgentPrincipal("w-blk-2", "CodeAgent", AGENT_ROLE_WORKER, TEAM, work_id="work-blk-2")
+        requests.block(
+            ADMIN,
+            subject=SubjectRefV1(kind=SubjectKind.USER, id=ALICE.person_id),
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance"),
+            reason="Alice restricted from finance",
+        )
+        sim.stat_calls.clear()
+        for target_id in ("team/finance/payroll.csv", "team/finance/nothere.csv", "team/finance/PAYROLL.csv"):
+            with pytest.raises(HandDownRefused) as exc_info:
+                requests.submit(
+                    requester=other_worker,
+                    person=ALICE,
+                    target=TargetRefV1(kind=TargetKind.FOLDER, id=target_id),
+                    level=AccessLevel.READ,
+                    reason="check finance",
+                    task_id="t-blk-2",
+                )
+            msg = str(exc_info.value)
+            assert "The person this task works for is blocked from" in msg
+            assert "not the file" not in msg
+            assert "does not match" not in msg
+        assert sim.stat_calls == []
+    finally:
+        source.close()
+
+
+def test_startup_report_logs_unverifiable_without_hiding_later_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F4: transient unverifiable results are logged without storing a notice, so a later confirmed mismatch is stored."""
+
+    import errno
+
+    layout, storage, _reports = _setup_instance(tmp_path)
+    (layout.workspaces_dir / "team" / "finance" / "sub").mkdir(parents=True, exist_ok=True)
+
+    store = AccessRepository(storage)
+    now = datetime.now(timezone.utc)
+    lead_sub = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, "TeamArchitect"))
+    by_admin = SubjectRefV1(kind=SubjectKind.USER, id=ADMIN.person_id)
+
+    b_case = store.create(
+        GrantV1(
+            grant_id="block-eio-then-case",
+            team_id=TEAM,
+            kind=GrantKind.BLOCK,
+            subject=lead_sub,
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance/PAYROLL.csv"),
+            level=AccessLevel.FULL,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=by_admin,
+            reason="block payroll",
+            created_at_utc=now,
+        )
+    )
+    g_case = store.create(
+        GrantV1(
+            grant_id="grant-eio-then-case",
+            team_id=TEAM,
+            kind=GrantKind.ACCESS,
+            subject=lead_sub,
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/Finance"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=by_admin,
+            created_at_utc=now,
+        )
+    )
+    g_prefix = store.create(
+        GrantV1(
+            grant_id="grant-prefix-mismatch",
+            team_id=TEAM,
+            kind=GrantKind.ACCESS,
+            subject=lead_sub,
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/Finance/sub"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=by_admin,
+            created_at_utc=now,
+        )
+    )
+
+    roots = FolderRoots.for_layout(layout, DataFolderRegistry(store, TEAM).usable(protected_locations(layout.root)))
+
+    # Startup 1: transient I/O error makes all targets unverifiable -> logged, 0 notices stored.
+    def transient_eio(_name: str, _dir_fd: int) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    sim_eio = SimulatedFS(case_insensitive=True, on_stat=transient_eio)
+    install_simulated_fs(monkeypatch, sim_eio)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="access_control.folders"):
+        first_reported = folders.report_folder_target_problems(roots, store, TEAM, now=now)
+    assert first_reported == []
+    assert "event=folder_target_unverifiable" in caplog.text
+    assert "event=misspelled_folder_block_found" not in caplog.text
+    assert "event=ineffective_folder_grant_found" not in caplog.text
+    page_after_eio = store.notice_page(TEAM, person_id=ADMIN.person_id, roles=("admin",), unread_only=False, offset=0, limit=20)
+    assert [n for n, _r in page_after_eio.notices if n.kind is AccessNoticeKind.FOLDER_TARGET_PROBLEM] == []
+
+    # Direct notice check: unverifiable notice uses distinct wording and problem-kind-scoped notice_id.
+    unverifiable_problem = folders.FolderTargetProblem(
+        grant=b_case,
+        problem="unverifiable",
+        detail="Could not verify the exact on-disk spelling of 'team/finance/PAYROLL.csv'.",
+    )
+    unverifiable_notice = folders.folder_target_problem_notice(unverifiable_problem, now=now)
+    assert unverifiable_notice.title.startswith("Could not check")
+    assert "does not match" not in unverifiable_notice.title
+    assert ":unverifiable:" in unverifiable_notice.notice_id
+
+    # Startup 2: disk healthy -> real mismatches are found and stored as actionable notices.
+    sim_ok = SimulatedFS(case_insensitive=True, unicode_normalizing=True)
+    install_simulated_fs(monkeypatch, sim_ok, patch_safe_open=True)
+    second_reported = folders.report_folder_target_problems(roots, store, TEAM, now=now)
+    assert set(second_reported) == {b_case.grant_id, g_case.grant_id, g_prefix.grant_id}
+    page_after_ok = store.notice_page(TEAM, person_id=ADMIN.person_id, roles=("admin",), unread_only=False, offset=0, limit=20)
+    by_grant = {n.grant_id: n for n, _r in page_after_ok.notices if n.kind is AccessNoticeKind.FOLDER_TARGET_PROBLEM}
+    assert ":spelling:" in by_grant[b_case.grant_id].notice_id
+    assert "does not match the path on disk" in by_grant[b_case.grant_id].title
+    # Prefix-mismatched grant on team/Finance/sub must not suggest over-granting 'team/finance'.
+    assert "grant 'team/finance' instead" not in by_grant[g_prefix.grant_id].summary
+    assert "starts with 'team/finance'" in by_grant[g_prefix.grant_id].summary
+
+
+def test_startup_report_handles_store_error_per_item_and_logs_grant_id(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F7: a store error on one notice logs the grant id and continues reporting the rest."""
+
+    layout, storage, _reports = _setup_instance(tmp_path)
+    store = AccessRepository(storage)
+    now = datetime.now(timezone.utc)
+    lead_sub = SubjectRefV1(kind=SubjectKind.AGENT_TYPE, id=agent_type_id(TEAM, "TeamArchitect"))
+    by_admin = SubjectRefV1(kind=SubjectKind.USER, id=ADMIN.person_id)
+
+    g_fail = store.create(
+        GrantV1(
+            grant_id="grant-store-fail-1",
+            team_id=TEAM,
+            kind=GrantKind.ACCESS,
+            subject=lead_sub,
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="team/finance/payroll.csv"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=by_admin,
+            created_at_utc=now,
+        )
+    )
+    g_ok = store.create(
+        GrantV1(
+            grant_id="grant-store-ok-2",
+            team_id=TEAM,
+            kind=GrantKind.ACCESS,
+            subject=lead_sub,
+            target=TargetRefV1(kind=TargetKind.FOLDER, id="data/reports/q1.csv"),
+            level=AccessLevel.READ,
+            lifetime=GrantLifetime.UNTIL_REVOKED,
+            granted_by=by_admin,
+            created_at_utc=now,
+        )
+    )
+
+    class _FlakyStore:
+        def for_status(self, team_id: str, statuses: Any) -> Any:
+            return store.for_status(team_id, statuses)
+
+        def create_notice_if_absent(self, notice: Any) -> bool:
+            if notice.grant_id == g_fail.grant_id:
+                raise RuntimeError("database is locked")
+            return store.create_notice_if_absent(notice)
+
+    roots = FolderRoots.for_layout(layout, DataFolderRegistry(store, TEAM).usable(protected_locations(layout.root)))
+    with caplog.at_level(logging.WARNING, logger="access_control.folders"):
+        reported = folders.report_folder_target_problems(roots, _FlakyStore(), TEAM, now=now)
+
+    assert reported == [g_ok.grant_id]
+    assert any(
+        r.levelno == logging.ERROR
+        and "event=folder_target_problem_notice_failed" in r.getMessage()
+        and g_fail.grant_id in r.getMessage()
+        for r in caplog.records
+    )
+    page = store.notice_page(TEAM, person_id=ADMIN.person_id, roles=("admin",), unread_only=False, offset=0, limit=20)
+    assert [n.grant_id for n, _r in page.notices if n.kind is AccessNoticeKind.FOLDER_TARGET_PROBLEM] == [g_ok.grant_id]

@@ -590,13 +590,19 @@ folder by where it sits, never by its path on the host: `team/…`, `agents/…`
 inside it. Reading a file needs `read`, and creating or changing one needs
 `write`. Existing paths must use the exact spelling on disk (letter case and
 Unicode normalization) across file tools, shares, grants, blocks, requests and
-proposals: a mismatch is refused with the disk's exact spelling, so an agent
-cannot sidestep a block on macOS, Windows or Docker Desktop bind mounts. New
-files being created and paths that do not exist yet are accepted as typed.
-Folder grants (`request_access`, `propose_access_change`, `/access grant` and
+proposals: a mismatch is refused with the disk's exact spelling up to the first
+mismatched component (without inspecting deeper paths), so an agent cannot
+sidestep a block on macOS, Windows or Docker Desktop bind mounts. New files
+being created and paths that do not exist yet are accepted as typed. Folder
+grants (`request_access`, `propose_access_change`, `/access grant` and
 `assistant_cli access grant --folder`) only open folders; if a path names an
 existing file, creating or applying the grant is refused at once and names the
 containing folder to grant instead (or `/share` for a person's own file).
+`request_access` refuses blocks and private person folders before checking the
+disk; for already-registered data folders, `request_access` and
+`propose_access_change` still check when asked whether the named path is an
+existing file (even if the requester does not yet have read access to that data
+folder).
 
 **Standard access.** Every agent and every person holds `write` on `team/` and
 `agents/` without a grant. An agent may also use the folder of the person its
@@ -1118,8 +1124,10 @@ Who may block and unblock:
   typed; if a file is later created under a different letter case or Unicode
   form, the old block will not match that file. At gateway startup, Universal
   Agents checks active stored grants and blocks without changing or deleting
-  them, logs warnings, and sends administrators an Inbox notice for any legacy
-  file-path grant or stored path whose spelling no longer matches disk.
+  them, logs warnings, and sends administrators an Inbox notice for any
+  confirmed legacy file-path grant or stored path whose spelling no longer
+  matches disk (targets that cannot be checked due to a temporary I/O error are
+  logged and checked again on the next start).
 - Folder grants cannot target an existing file: `/access grant`,
   `assistant_cli access grant --folder`, `request_access`,
   `propose_access_change` and approval apply steps refuse a folder grant whose

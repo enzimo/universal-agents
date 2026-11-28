@@ -2803,10 +2803,13 @@ Every existing path component below a registered root must match the disk's
 exact spelling (letter case and Unicode normalization) whenever files are
 accessed or access targets are created (`access_control.folders.check_exact_spelling`,
 `check_spelling_below`, `check_folder_id_spelling`, walking one `dir_fd` at a
-time with `O_NOFOLLOW` and probing per parent directory so case-sensitive
-filesystems never list directories per call): `custom_tools/file_access.py`
+time with `O_NOFOLLOW`, stopping at the first mismatched component without
+opening anything below it, and probing per parent directory so case-sensitive
+filesystems do not list directories for ordinary ASCII-letter names, while
+names with no ASCII letters list the parent directly): `custom_tools/file_access.py`
 runs the check after the access decision (so unauthorized callers get no
-existence or filename oracle), `assistant_gateway/attachments.py` and
+existence or filename oracle), `notify_user` runs the agent-side `file_access`
+decision before gateway attachment validation, `assistant_gateway/attachments.py` and
 `secure_tool_broker/task_files.py` run it on their located paths (note that
 broker-staged CLI task files check location and spelling only), and
 `custom_agents/code_access.py` skips stored folder grants whose spelling no
@@ -2817,9 +2820,12 @@ later created under a different letter case or Unicode form, the old block
 will not match that file. At gateway startup,
 `access_control.folders.report_folder_target_problems` inspects active stored
 folder/file grants and blocks without modifying or deleting them, logging
-structured warnings and storing deterministic administrators' Inbox notices
-(`AccessNoticeKind.FOLDER_TARGET_PROBLEM`) for any legacy file-path grant,
-misspelled grant/share, or misspelled block.
+structured warnings and storing problem-kind-scoped deterministic
+administrators' Inbox notices (`AccessNoticeKind.FOLDER_TARGET_PROBLEM`) for
+confirmed legacy file-path grants, misspelled grants/shares, or misspelled
+blocks (targets that cannot be verified due to a transient I/O error are logged
+and checked again at the next start without storing a notice, and store errors
+are handled per item).
 `AccessService.decide_folder` decides each file use (agent side, then person
 side). `AccessService.reusable_folder_allowance` decides when a folder allowance
 covers its direct children and returns the set of blocked direct-child ids
@@ -2840,15 +2846,23 @@ path links only `Folder::<id>`, so it never opens `File::<id>` (only blocks get
 the extra file link); creating or applying a `TargetKind.FOLDER` access grant
 on an existing file path is therefore refused at creation and apply time
 (`access_control.folders.check_folder_target` across `AccessService.grant_refusal`,
-`_prepare_hand_down`, `approve_pending`, `AccessRequests._check_request`,
+`_prepare_hand_down`, `approve_pending`, `AccessRequests.submit`,
 `GatewayAccessCommands.grant`, `assistant_cli._access_grant`, `ProposalCompiler`,
-and `ProposalApplier`, after authority checks pass), naming the containing
-folder to grant instead (or `/share` for a person's own file), while blocks on
-file paths and `TargetKind.FILE` single-file shares remain allowed. Misspelled
-existing targets are refused with the disk's exact spelling at every grant,
-block, restriction, request, proposal, and share creation site (skipping newly
-proposed data folders until `ProposalApplier` runs after administrator
-approval). `AccessService._prepare_hand_down` refuses to hand on a folder when the
+and `ProposalApplier`), naming the containing folder to grant instead (or
+`/share` for a person's own file), while blocks on file paths and
+`TargetKind.FILE` single-file shares remain allowed. `AccessService.grant_refusal`,
+`_prepare_hand_down`, `approve_pending`, `GatewayAccessCommands.grant`, and
+`assistant_cli._access_grant` run disk checks only after authority checks pass,
+and `AccessRequests.submit` refuses `users/…` targets and agent/person blocks
+before any disk check. However, because `request_access` (`AccessRequests.submit`)
+and `propose_access_change` (`ProposalCompiler.compile`) check already-registered
+data folders when asked, an unblocked requester without read access to a
+registered data folder can still tell whether a path there is an existing file
+(refused immediately) versus missing (waits for review); newly proposed data
+folders are skipped until `ProposalApplier` runs after administrator approval.
+Misspelled existing targets are refused with the disk's exact spelling up to the
+first mismatched component at every grant, block, restriction, request, proposal,
+and share creation site. `AccessService._prepare_hand_down` refuses to hand on a folder when the
 grantor holds a block on a path inside it (`access_control.folders.paths_inside`,
 the rule the sandbox uses), because the worker holds no such block and would
 reach the blocked path through the folder. That refusal is

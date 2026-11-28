@@ -377,31 +377,29 @@ def _unicode_alt_form(name: str) -> str | None:
     return None
 
 
-def _probe_same_entry(
-    fs: _SpellingFS,
-    current: int,
-    alt: str,
-    entry_info: os.stat_result,
-) -> bool:
-    """Whether ``alt`` inside ``current`` resolves to the same inode as ``entry_info``."""
+def _probe_variant_exists(fs: _SpellingFS, current: int, alt: str) -> bool:
+    """Whether ``alt`` exists inside ``current`` regardless of its inode.
+
+    Network filesystems such as sshfs without ``use_ino`` or CIFS with
+    ``noserverino`` synthesize a fresh inode per looked-up name, so two
+    spellings of the same entry can report different ``st_ino`` values.
+    Listing whenever the variant name exists handles those mounts safely while
+    keeping zero listings for ordinary names on case-sensitive ext4 (where
+    ``alt`` raises ``FileNotFoundError``).
+    """
 
     try:
-        other = fs.stat_entry(alt, current)
+        fs.stat_entry(alt, current)
     except FileNotFoundError:
         return False
     except OSError as exc:
         if exc.errno == errno.ENAMETOOLONG:
             return True
         raise
-    return (other.st_dev, other.st_ino) == (entry_info.st_dev, entry_info.st_ino)
+    return True
 
 
-def _needs_directory_listing(
-    fs: _SpellingFS,
-    current: int,
-    part: str,
-    entry_info: os.stat_result,
-) -> bool:
+def _needs_directory_listing(fs: _SpellingFS, current: int, part: str) -> bool:
     """Whether ``current`` must be listed to verify ``part``'s exact spelling.
 
     Decides per parent directory rather than caching per device, because ext4
@@ -411,7 +409,7 @@ def _needs_directory_listing(
 
     swapped = _ascii_swapcase(part)
     if swapped is not None:
-        if _probe_same_entry(fs, current, swapped, entry_info):
+        if _probe_variant_exists(fs, current, swapped):
             return True
     elif not part.isascii():
         # Non-ASCII names with no ASCII letters cannot be case-probed via ASCII
@@ -419,7 +417,7 @@ def _needs_directory_listing(
         return True
     if not part.isascii():
         unicode_alt = _unicode_alt_form(part)
-        if unicode_alt is not None and _probe_same_entry(fs, current, unicode_alt, entry_info):
+        if unicode_alt is not None and _probe_variant_exists(fs, current, unicode_alt):
             return True
     return False
 
@@ -592,7 +590,7 @@ def _check_component_spelling(
         entry_info = fs.stat_entry(part, current)
     except FileNotFoundError:
         return None, None, False
-    if not _needs_directory_listing(fs, current, part, entry_info):
+    if not _needs_directory_listing(fs, current, part):
         return part, entry_info, False
     dir_info = fs.fstat_dir(current)
     disk_name, exists = _resolve_disk_name(fs, current, part, dir_info, entry_info)
@@ -617,15 +615,17 @@ def _raise_spelling_mismatch(
             typed=typed_display,
         )
     disk_display = _format_display_path(display_prefix, disk_parts)
-    unicode_only = unicodedata.normalize("NFC", typed_display) == unicodedata.normalize("NFC", disk_display)
-    if unicode_only:
+    typed_prefix = _format_display_path(display_prefix, parts[: len(disk_parts)])
+    unicode_only = unicodedata.normalize("NFC", typed_prefix) == unicodedata.normalize("NFC", disk_display)
+    unicode_note = " (different Unicode normalization)" if unicode_only else ""
+    if len(disk_parts) < len(parts):
         message = (
-            f"Path {typed_display!r} does not match the exact name on disk {disk_display!r} "
-            f"(different Unicode normalization). Use the exact on-disk spelling {disk_display!r}."
+            f"Path component {typed_prefix!r} in {typed_display!r} does not match the exact name on disk "
+            f"{disk_display!r}{unicode_note}. Use the exact on-disk spelling {disk_display!r}."
         )
     else:
         message = (
-            f"Path {typed_display!r} does not match the exact name on disk {disk_display!r}. "
+            f"Path {typed_display!r} does not match the exact name on disk {disk_display!r}{unicode_note}. "
             f"Use the exact on-disk spelling {disk_display!r}."
         )
     raise PathSpellingError(message, typed=typed_display, disk=disk_display, unicode_only=unicode_only)
@@ -662,15 +662,13 @@ def _open_next_dir(
     active_fs: _SpellingFS,
     current: int,
     disk_name: str,
-    *,
-    had_mismatch: bool,
 ) -> int | None:
     """Open the next directory component without following links, or return None to stop."""
 
     try:
         return active_fs.open_dir(disk_name, current)
     except OSError as exc:
-        if had_mismatch or exc.errno in _STOP_WALK_ERRNOS:
+        if exc.errno in _STOP_WALK_ERRNOS:
             return None
         raise
 
@@ -680,7 +678,12 @@ def _walk_exact_spelling(
     current: int,
     parts: tuple[str, ...],
 ) -> tuple[list[str], bool, bool]:
-    """Walk ``parts`` below open root fd ``current`` without following links."""
+    """Walk ``parts`` below open root fd ``current`` without following links.
+
+    Stops immediately at the first mismatched component (reporting the disk
+    spelling only up to and including it and never opening anything below it)
+    so a misspelled path into a blocked folder reveals nothing inside it.
+    """
 
     disk_parts: list[str] = []
     had_mismatch = False
@@ -689,21 +692,19 @@ def _walk_exact_spelling(
         for index, part in enumerate(parts):
             disk_name, entry_info, churn = _check_component_spelling(active_fs, current, part)
             if disk_name is None or entry_info is None:
-                disk_parts.extend(parts[index:])
                 break
             if churn:
                 had_mismatch = True
                 unresolved_churn = True
-                disk_parts.extend(parts[index:])
                 break
-            had_mismatch = had_mismatch or disk_name != part
             disk_parts.append(disk_name)
-            if index + 1 >= len(parts) or not stat.S_ISDIR(entry_info.st_mode):
-                disk_parts.extend(parts[index + 1 :])
+            if disk_name != part:
+                had_mismatch = True
                 break
-            following = _open_next_dir(active_fs, current, disk_name, had_mismatch=had_mismatch)
+            if index + 1 >= len(parts) or not stat.S_ISDIR(entry_info.st_mode):
+                break
+            following = _open_next_dir(active_fs, current, disk_name)
             if following is None:
-                disk_parts.extend(parts[index + 1 :])
                 break
             active_fs.close_fd(current)
             current = following
@@ -1022,97 +1023,150 @@ def folder_target_problems(
     return found
 
 
+def _is_prefix_mismatch(target_id: str, disk_spelling: str) -> bool:
+    """Whether ``disk_spelling`` stopped at an ancestor component of ``target_id``."""
+
+    if not disk_spelling:
+        return False
+    try:
+        canonical = normalize_folder_id(target_id)
+    except FolderIdError:
+        canonical = target_id.strip("/")
+    return disk_spelling.count("/") < canonical.count("/")
+
+
 def _block_problem_notice_text(problem: FolderTargetProblem, who: str) -> tuple[str, str]:
     grant = problem.grant
+    is_prefix = _is_prefix_mismatch(grant.target.id, problem.disk_spelling)
     if grant.task_id or grant.for_person_id:
+        if not problem.disk_spelling:
+            title = f"Could not check a stored restriction on {grant.target.id} against disk"[:400]
+            summary = (
+                f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling "
+                f"could not be checked ({problem.detail}). It is bound to one request and ends with that request."
+            )
+            return title, summary
         title = f"A stored restriction on {grant.target.id} does not match the path on disk"[:400]
-        if problem.disk_spelling:
+        if is_prefix:
+            summary = (
+                f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', whose path on disk starts with "
+                f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this "
+                "restriction does not stop access under the disk spelling. It is bound to one request and ends with "
+                "that request."
+            )
+        else:
             summary = (
                 f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
                 f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this "
                 f"restriction does not stop access to '{problem.disk_spelling}'. It is bound to one request and "
                 "ends with that request."
             )
-        else:
-            summary = (
-                f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling "
-                f"could not be verified ({problem.detail}). It is bound to one request and ends with that request."
-            )
+        return title, summary
+
+    if not problem.disk_spelling:
+        title = f"Could not check a stored block on {grant.target.id} against disk"[:400]
+        summary = (
+            f"Block {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
+            f"not be checked ({problem.detail}). Check the path and replace the block if needed."
+        )
         return title, summary
 
     title = f"A stored block on {grant.target.id} does not match the path on disk"[:400]
-    if problem.disk_spelling:
-        subject_text = _grant_subject_text(grant.subject)
-        if subject_text is not None:
-            replacement = (
-                f'Add a replacement block with `/access block {subject_text} {problem.disk_spelling} --reason "..."` '
-                f"and then remove the old one with `/access unblock {grant.grant_id}`."
-            )
-        else:
-            replacement = (
-                f"Add a replacement block for {who} on '{problem.disk_spelling}' and then remove the old one "
-                f"with `/access unblock {grant.grant_id}`."
-            )
+    if is_prefix:
         summary = (
-            f"Block {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+            f"Block {grant.grant_id} for {who} names '{grant.target.id}', whose path on disk starts with "
             f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this block "
-            f"does not stop access to '{problem.disk_spelling}'. {replacement}"
+            f"does not stop access under '{problem.disk_spelling}'. Check the exact on-disk path under "
+            f"'{problem.disk_spelling}', add a replacement block on that exact path, and then remove the old "
+            f"one with `/access unblock {grant.grant_id}`."
+        )
+        return title, summary
+
+    subject_text = _grant_subject_text(grant.subject)
+    if subject_text is not None:
+        replacement = (
+            f'Add a replacement block with `/access block {subject_text} {problem.disk_spelling} --reason "..."` '
+            f"and then remove the old one with `/access unblock {grant.grant_id}`."
+        )
+    else:
+        replacement = (
+            f"Add a replacement block for {who} on '{problem.disk_spelling}' and then remove the old one "
+            f"with `/access unblock {grant.grant_id}`."
+        )
+    summary = (
+        f"Block {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+        f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this block "
+        f"does not stop access to '{problem.disk_spelling}'. {replacement}"
+    )
+    return title, summary
+
+
+def _share_spelling_notice_text(
+    problem: FolderTargetProblem,
+    who: str,
+    *,
+    kind_label: str,
+    owner_noun: str,
+    mentions_code_mounts: bool,
+) -> tuple[str, str]:
+    grant = problem.grant
+    if not problem.disk_spelling:
+        title = f"Could not check a stored {kind_label} on {grant.target.id} against disk"[:400]
+        summary = (
+            f"{kind_label.capitalize()} {grant.grant_id} for {who} names '{grant.target.id}', whose exact "
+            f"on-disk spelling could not be checked ({problem.detail})."
+        )
+        return title, summary
+    title = f"A stored {kind_label} on {grant.target.id} does not match the path on disk"[:400]
+    code_note = " and is skipped for code mounts" if mentions_code_mounts else ""
+    if _is_prefix_mismatch(grant.target.id, problem.disk_spelling):
+        summary = (
+            f"{kind_label.capitalize()} {grant.grant_id} for {who} names '{grant.target.id}', whose path on "
+            f"disk starts with '{problem.disk_spelling}'. It no longer matches on-disk paths{code_note}. "
+            f"Remove the old share with `/access revoke {grant.grant_id}`; the {owner_noun}'s owner must share "
+            f"the exact on-disk path under '{problem.disk_spelling}' again with `/share` or Share in the "
+            "workspace browser."
         )
     else:
         summary = (
-            f"Block {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
-            f"not be verified ({problem.detail}). Check the path and replace the block if needed."
+            f"{kind_label.capitalize()} {grant.grant_id} for {who} names '{grant.target.id}', while the path "
+            f"on disk is '{problem.disk_spelling}'. It no longer matches on-disk paths{code_note}. Remove the "
+            f"old share with `/access revoke {grant.grant_id}`; the {owner_noun}'s owner must share "
+            f"'{problem.disk_spelling}' again with `/share` or Share in the workspace browser."
         )
     return title, summary
 
 
 def _grant_spelling_notice_text(problem: FolderTargetProblem, who: str) -> tuple[str, str]:
     grant = problem.grant
-    is_file_share = grant.target.kind is TargetKind.FILE
-    is_person_share = grant.subject.kind is SubjectKind.USER and is_person_folder(grant.target.id)
-    if is_file_share:
-        title = f"A stored file share on {grant.target.id} does not match the path on disk"[:400]
-        if problem.disk_spelling:
-            summary = (
-                f"File share {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
-                f"'{problem.disk_spelling}'. It no longer matches on-disk paths. Remove the old share with "
-                f"`/access revoke {grant.grant_id}`; the file's owner must share '{problem.disk_spelling}' "
-                "again with `/share` or Share in the workspace browser."
-            )
-        else:
-            summary = (
-                f"File share {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling "
-                f"could not be verified ({problem.detail})."
-            )
+    if grant.target.kind is TargetKind.FILE:
+        return _share_spelling_notice_text(
+            problem, who, kind_label="file share", owner_noun="file", mentions_code_mounts=False
+        )
+    if grant.subject.kind is SubjectKind.USER and is_person_folder(grant.target.id):
+        return _share_spelling_notice_text(
+            problem, who, kind_label="folder share", owner_noun="folder", mentions_code_mounts=True
+        )
+    if not problem.disk_spelling:
+        title = f"Could not check a stored folder grant on {grant.target.id} against disk"[:400]
+        summary = (
+            f"Grant {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
+            f"not be checked ({problem.detail})."
+        )
         return title, summary
-
-    if is_person_share:
-        title = f"A stored folder share on {grant.target.id} does not match the path on disk"[:400]
-        if problem.disk_spelling:
-            summary = (
-                f"Folder share {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
-                f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
-                f"Remove the old share with `/access revoke {grant.grant_id}`; the folder's owner must share "
-                f"'{problem.disk_spelling}' again with `/share` or Share in the workspace browser."
-            )
-        else:
-            summary = (
-                f"Folder share {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling "
-                f"could not be verified ({problem.detail})."
-            )
-        return title, summary
-
     title = f"A stored folder grant on {grant.target.id} does not match the path on disk"[:400]
-    if problem.disk_spelling:
+    if _is_prefix_mismatch(grant.target.id, problem.disk_spelling):
+        summary = (
+            f"Grant {grant.grant_id} for {who} names '{grant.target.id}', whose path on disk starts with "
+            f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
+            f"Remove it with `/access revoke {grant.grant_id}` and grant the exact on-disk path under "
+            f"'{problem.disk_spelling}' instead."
+        )
+    else:
         summary = (
             f"Grant {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
             f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
             f"Remove it with `/access revoke {grant.grant_id}` and grant '{problem.disk_spelling}' instead."
-        )
-    else:
-        summary = (
-            f"Grant {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
-            f"not be verified ({problem.detail})."
         )
     return title, summary
 
@@ -1134,7 +1188,7 @@ def folder_target_problem_notice(problem: FolderTargetProblem, *, now: datetime)
     else:
         title, summary = _grant_spelling_notice_text(problem, who)
     return AccessNoticeV1(
-        notice_id=f"{FOLDER_TARGET_PROBLEM_NOTICE_PREFIX}:{grant.grant_id}"[:120],
+        notice_id=f"{FOLDER_TARGET_PROBLEM_NOTICE_PREFIX}:{problem.problem}:{grant.grant_id}"[:120],
         team_id=grant.team_id,
         kind=AccessNoticeKind.FOLDER_TARGET_PROBLEM,
         recipient_roles=(PERSON_ROLE_ADMIN,),
@@ -1153,16 +1207,31 @@ def report_folder_target_problems(
     now: datetime | None = None,
     fs: _SpellingFS | None = None,
 ) -> list[str]:
-    """Log structured warnings and store one admin notice per legacy file-path or misspelled grant/block.
+    """Log structured warnings and store one admin notice per confirmed legacy file-path or misspelled grant/block.
 
-    Never deletes or rewrites stored grants or blocks. Returns the grant ids
-    for which a new notice was stored (notice ids are deterministic per grant).
+    Unverifiable results (such as a transient I/O error at startup) are logged
+    and checked again on the next start rather than storing a notice that could
+    hide a later confirmed problem. Store errors while saving one notice are
+    logged with its grant id without stopping the remaining checks. Never
+    deletes or rewrites stored grants or blocks.
     """
 
     moment = now or datetime.now(timezone.utc)
     reported: list[str] = []
     for item in folder_target_problems(roots, store.for_status(team_id, (GrantStatus.ACTIVE,)), now=moment, fs=fs):
         grant = item.grant
+        if item.problem == "unverifiable":
+            logger.warning(
+                "Could not verify a stored folder target against disk; will check again at the next start. "
+                "event=folder_target_unverifiable grant_id=%s kind=%s subject=%s:%s target=%s detail=%s",
+                grant.grant_id,
+                grant.kind.value,
+                grant.subject.kind.value,
+                grant.subject.id,
+                grant.target.id,
+                item.detail,
+            )
+            continue
         if grant.kind is GrantKind.BLOCK:
             logger.warning(
                 "A stored block does not match the exact on-disk path spelling and will not protect it. "
@@ -1186,7 +1255,19 @@ def report_folder_target_problems(
                 item.disk_spelling,
                 item.suggested_folder or "",
             )
-        if store.create_notice_if_absent(folder_target_problem_notice(item, now=moment)):
+        try:
+            created = store.create_notice_if_absent(folder_target_problem_notice(item, now=moment))
+        except Exception:
+            logger.error(
+                "Could not store the administrator notice for a stored folder target problem. "
+                "event=folder_target_problem_notice_failed grant_id=%s target=%s problem=%s",
+                grant.grant_id,
+                grant.target.id,
+                item.problem,
+                exc_info=True,
+            )
+            continue
+        if created:
             reported.append(grant.grant_id)
     return reported
 

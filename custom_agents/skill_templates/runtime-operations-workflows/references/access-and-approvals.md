@@ -198,18 +198,22 @@ operator).
   existing path component below a registered root must match its exact on-disk
   spelling (letter case and Unicode form) across file tools, requests,
   proposals, grants, blocks and shares: misspellings are refused with the
-  disk's exact spelling, and stored misspelled folder grants are skipped for
-  code mounts. Paths that do not exist yet are accepted as typed (so a block
-  added for a future path will not cover a file created later under a different
-  spelling; gateway startup alerts administrators in the Inbox about stored
-  mismatches or legacy file-path grants without deleting stored rows). A folder
-  holding a path TeamLead is blocked from is not passed on to workers; the
-  worker asks with `request_access` and a person decides.
+  disk's exact spelling up to the first mismatched component, and stored
+  misspelled folder grants are skipped for code mounts. Paths that do not exist
+  yet are accepted as typed (so a block added for a future path will not cover
+  a file created later under a different spelling; gateway startup alerts
+  administrators in the Inbox about confirmed stored mismatches or legacy
+  file-path grants without deleting stored rows). A folder holding a path
+  TeamLead is blocked from is not passed on to workers; the worker asks with
+  `request_access` and a person decides.
 - Folder grants only open folders: `request_access`, `propose_access_change`,
   `/access grant`, `assistant_cli access grant`, and approval apply steps
   refuse a folder grant whose path names an existing file and tell you to grant
   the containing folder instead (or `/share` for a person's own file). Blocks
-  on file paths and `/share` single-file shares remain allowed.
+  and private person folders are refused before disk checks, while
+  `request_access` and `propose_access_change` check registered data folders on
+  disk when asked (even without prior read access to the folder). Blocks on
+  file paths and `/share` single-file shares remain allowed.
 
 ## Platform changes
 
