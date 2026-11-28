@@ -706,6 +706,7 @@ security_layer:
     openshell_binding_ttl_seconds: 900            # Lifetime of a lease that exposes a linked account to the OpenShell sandbox.
     collection_session_ttl_seconds: 900           # Secure broker form session lifetime.
     secret_cache_ttl_seconds: 300                 # In-memory broker cache TTL for resolved catalog secrets; 0 disables.
+    notify_on_agent_capture: true                 # Send the person one Inbox notice when an agent stores a temporary credential via credential.capture_file.
   sealbox:                                  # Independent encrypted service used through its public API/CLI contract.
     enabled: true                                 # Configure Sealbox as a broker credential source.
     manage_service: true                          # Start sealbox-server during headless launch.

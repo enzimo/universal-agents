@@ -132,7 +132,8 @@ class SettingsSection:
     # 16: agent.blob_retention_days and transport.queues.max_bytes.blobs joined it.
     # 17: agent.max_wait_minutes_without_approval and agent.max_wait_minutes_with_approval joined it, and
     # agent.schedule_workers.lease_loss_wait_timeout_seconds's description names timed waits and the contract drain.
-    schema_version: ClassVar[int] = 17
+    # 18: security_layer.credential_catalog.notify_on_agent_capture joined it.
+    schema_version: ClassVar[int] = 18
     encrypted: ClassVar[bool] = False
     after_start: ClassVar[bool] = False
     record_model: ClassVar[type[BaseModel]] = SettingV1
@@ -829,10 +830,12 @@ __all__ = [
 # version 16. Because their ordering rule is a model validator on ``agent``, an invalid pair
 # (or a conflict with the destination's existing limit on an existing-instance import) blames
 # location ``("agent",)`` and refuses every carried ``agent.*`` setting together.
+# V18 added security_layer.credential_catalog.notify_on_agent_capture; an older export has none,
+# so the new instance takes its default (true) and the same step reads version 17.
 
 
 def _upgraded_settings(records: SectionRecords) -> SectionRecords:
-    """An older export's records as version 17 reads them: retired settings dropped, a replica count as a whole number."""
+    """An older export's records as version 18 reads them: retired settings dropped, a replica count as a whole number."""
 
     retired = {RETIRED_PRESENCE_SETTING, RETIRED_CONCURRENCY_SETTING}
     upgraded: SectionRecords = []
@@ -846,6 +849,6 @@ def _upgraded_settings(records: SectionRecords) -> SectionRecords:
     return upgraded
 
 
-for _source in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16):
+for _source in (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17):
     SECTION_UPGRADES[(SettingsSection.name, _source, SettingsSection.schema_version)] = _upgraded_settings
 TEAM_ID_RENAMES[SettingsSection.name] = _renamed_team_settings

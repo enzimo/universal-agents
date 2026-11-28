@@ -1487,6 +1487,11 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "notify_on_agent_capture": {
+          "default": true,
+          "title": "Notify On Agent Capture",
+          "type": "boolean"
+        },
         "openshell_binding_ttl_seconds": {
           "default": 900,
           "title": "Openshell Binding Ttl Seconds",

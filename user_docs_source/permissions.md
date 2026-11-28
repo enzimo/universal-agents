@@ -1483,6 +1483,14 @@ the link's owner for a personal link, or to team administrators for a team or
 gate link) stating whether the team's shared account now applies or no linked
 account remains, along with the exact `/link` command.
 
+Agents that hold `write` access to `procedure:credentials` (and write access to
+the file's folder) can store a temporary secret they already hold in a task
+file with `credential.capture_file`. Captured credentials always expire
+(5 minutes to 90 days), stay strictly in the task person's own Sealbox scope,
+never replace credentials a person entered or team credentials, delete the
+source file after saving, and send the person one Inbox notice unless the
+operator sets `security_layer.credential_catalog.notify_on_agent_capture: false`.
+
 Operators can list links (including each link's `[account]` or `[gate]`
 purpose) and remove them (including gate links):
 

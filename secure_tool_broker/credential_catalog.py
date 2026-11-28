@@ -12,10 +12,11 @@ import shutil
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -41,12 +42,15 @@ from secure_tool_broker.credential_diagnostics import (
     CREDENTIAL_VALUE_UNAVAILABLE,
 )
 from secure_tool_broker.credential_expiry import (
+    CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY,
     CREDENTIAL_DROPPED_CLEANUP_PENDING,
     CREDENTIAL_EXPIRY_FORM_ONLY,
     CREDENTIAL_EXPIRY_INVALID,
     CREDENTIAL_EXPIRY_SHARED_RECORD,
     CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
+    CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
     CREDENTIAL_REPLACEMENT_FORM_ONLY,
+    CREDENTIAL_ROTATION_USERNAME_REQUIRED,
     CredentialExpiryError,
     format_utc_timestamp,
     is_expired,
@@ -61,6 +65,7 @@ from secure_tool_broker.credential_sources import (
     normalize_credential_source_name,
 )
 from secure_tool_broker.credential_catalog_store import (
+    DROPPED_DELETE_QUEUED_BY_AGENT_CAPTURE,
     DROPPED_DELETE_QUEUED_BY_FORM,
     CredentialCatalogStore,
     CredentialOwnerScope,
@@ -123,12 +128,26 @@ _SECRET_CACHE: dict[
     tuple[str, str, str, str | None, str | None, str | None, str | None, str],
     tuple[str, float, datetime | None],
 ] = {}
-# Per-(scope_kind, owner_id, credential_key) lock serializing writes and janitor
-# deletions in-process so a renewal cannot interleave with an expiry sweep.
+# Lock hierarchy (outer -> inner; never invert):
+#   1. credential_key_lock(scope, credential_key)
+#   2. sealbox_record_locks(scope, normalized_record_keys) in sorted order
+#   3. _scope_catalog_lock(scope) (leaf lock)
 _KEY_LOCKS_GUARD = threading.Lock()
 _KEY_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+@dataclass
+class _RefCountedLock:
+    lock: threading.Lock = dataclass_field(default_factory=threading.Lock)
+    users: int = 0
+
+
+# Per-(scope_kind, owner_id, normalized_sealbox_record_key) locks serializing
+# writers, janitor deletions, and dropped-record cleanup across distinct
+# catalog keys that normalize to the same Sealbox record name. Entries are
+# reference-counted under _KEY_LOCKS_GUARD and removed once no thread holds
+# or waits on them so unique capture record names do not accumulate.
+_SEALBOX_RECORD_LOCKS: dict[tuple[str, str, str], _RefCountedLock] = {}
 # Leaf per-(scope_kind, owner_id) lock serializing cross-key Sealbox alias
-# checks and catalog saves; never held across subprocess calls.
+# checks and catalog saves; never acquire key or record locks while holding it.
 _SCOPE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 
 
@@ -142,6 +161,58 @@ def credential_key_lock(scope: CredentialOwnerScope, credential_key: str) -> thr
             lock = threading.Lock()
             _KEY_LOCKS[lock_key] = lock
         return lock
+
+
+def _normalized_sealbox_record_lock_key(record_key: str) -> str:
+    """Normalize a Sealbox record name so aliased catalog keys share one lock."""
+
+    raw = str(record_key or "").strip()
+    return safe_key_component(raw, fallback=raw or "credential")
+
+
+@contextmanager
+def sealbox_record_locks(scope: CredentialOwnerScope, record_keys: Iterable[str]) -> Iterator[None]:
+    """Acquire per-owner normalized Sealbox record locks in sorted order.
+
+    Must always be acquired outside ``_scope_catalog_lock(scope)`` and (when a
+    key lock is held) inside ``credential_key_lock``. Entries are evicted when
+    their last holder or waiter leaves.
+    """
+
+    normalized = sorted(
+        {
+            _normalized_sealbox_record_lock_key(key)
+            for key in record_keys
+            if str(key or "").strip()
+        }
+    )
+    if not normalized:
+        yield
+        return
+    lock_keys = [(scope.scope_kind, scope.owner_id, norm_key) for norm_key in normalized]
+    entries: list[tuple[tuple[str, str, str], _RefCountedLock]] = []
+    with _KEY_LOCKS_GUARD:
+        for lock_key in lock_keys:
+            entry = _SEALBOX_RECORD_LOCKS.get(lock_key)
+            if entry is None:
+                entry = _RefCountedLock()
+                _SEALBOX_RECORD_LOCKS[lock_key] = entry
+            entry.users += 1
+            entries.append((lock_key, entry))
+    acquired: list[threading.Lock] = []
+    try:
+        for _lock_key, entry in entries:
+            entry.lock.acquire()
+            acquired.append(entry.lock)
+        yield
+    finally:
+        for lock in reversed(acquired):
+            lock.release()
+        with _KEY_LOCKS_GUARD:
+            for lock_key, entry in entries:
+                entry.users -= 1
+                if entry.users <= 0 and _SEALBOX_RECORD_LOCKS.get(lock_key) is entry:
+                    _SEALBOX_RECORD_LOCKS.pop(lock_key, None)
 
 
 def _scope_catalog_lock(scope: CredentialOwnerScope) -> threading.Lock:
@@ -740,6 +811,39 @@ def _credential_sealbox_record_keys(credential: CatalogCredential) -> set[str]:
     return keys
 
 
+def _planned_sealbox_record_keys_by_field(
+    *,
+    credential_key: str,
+    request_payload: Mapping[str, Any],
+    values: Mapping[str, str],
+    field_specs: Mapping[str, Mapping[str, Any]],
+    existing_sealbox_targets: Mapping[str, tuple[str, str]] | None = None,
+) -> dict[str, str]:
+    item_key = _sealbox_catalog_key(credential_key, request_payload)
+    targets = existing_sealbox_targets or {}
+    planned: dict[str, str] = {}
+    username = _first_value_by_kind(values, field_specs, {"username", "email", "login"})
+    password_field = _secret_password_field_name(field_specs)
+    if password_field:
+        if password_field in targets:
+            planned[password_field] = targets[password_field][0]
+        elif username:
+            planned[password_field] = item_key
+        else:
+            planned[password_field] = (
+                f"{item_key}:{safe_key_component(_field_storage_ref(password_field, field_specs.get(password_field, {})))}"
+            )
+    for field_name, spec in field_specs.items():
+        if field_name == password_field or not _field_is_secret(spec):
+            continue
+        if field_name in targets:
+            planned[field_name] = targets[field_name][0]
+            continue
+        field_ref = safe_key_component(_field_storage_ref(field_name, spec), fallback=field_name)
+        planned[field_name] = f"{item_key}:{field_ref}"
+    return planned
+
+
 def _planned_sealbox_record_keys(
     *,
     credential_key: str,
@@ -747,22 +851,14 @@ def _planned_sealbox_record_keys(
     values: Mapping[str, str],
     field_specs: Mapping[str, Mapping[str, Any]],
 ) -> set[str]:
-    item_key = _sealbox_catalog_key(credential_key, request_payload)
-    keys: set[str] = set()
-    username = _first_value_by_kind(values, field_specs, {"username", "email", "login"})
-    password_field = _secret_password_field_name(field_specs)
-    if password_field and username:
-        keys.add(item_key)
-    elif password_field:
-        keys.add(
-            f"{item_key}:{safe_key_component(_field_storage_ref(password_field, field_specs.get(password_field, {})))}"
-        )
-    for field_name, spec in field_specs.items():
-        if field_name == password_field or not _field_is_secret(spec):
-            continue
-        field_ref = safe_key_component(_field_storage_ref(field_name, spec), fallback=field_name)
-        keys.add(f"{item_key}:{field_ref}")
-    return keys
+    return set(
+        _planned_sealbox_record_keys_by_field(
+            credential_key=credential_key,
+            request_payload=request_payload,
+            values=values,
+            field_specs=field_specs,
+        ).values()
+    )
 
 
 def _find_shared_sealbox_record(
@@ -1121,31 +1217,36 @@ def retry_pending_dropped_sealbox_deletes(
     failed_keys: list[str] = []
     for row_scope in scopes:
         scope_initial = [entry for entry in initial if entry.scope == row_scope]
+        locked_item_keys = {entry.item_key for entry in scope_initial}
         pending: list[PendingDroppedSealboxDelete] = scope_initial
         counted_scope = False
         try:
-            with _scope_catalog_lock(row_scope):
-                pending = store.list_pending_dropped_sealbox_deletes(
-                    scope=row_scope,
-                    credential_key=credential_key,
-                )
-                if not pending:
-                    continue
-                scanned += len(pending)
-                counted_scope = True
-                catalog = load_catalog(scope=row_scope)
-                scope_skipped, scope_deleted, scope_failed = _process_pending_dropped_sealbox_entries(
-                    store,
-                    scope=row_scope,
-                    catalog=catalog,
-                    entries=pending,
-                    credential_key=credential_key or pending[0].credential_key,
-                    event_name="credential_dropped_sealbox_retry_failed",
-                )
-                skipped_referenced += scope_skipped
-                deleted += scope_deleted
-                failed += len(scope_failed)
-                failed_keys.extend(scope_failed)
+            # Acquire normalized Sealbox record locks outside _scope_catalog_lock
+            # (key -> record -> scope) so retries serialize with concurrent writers.
+            with sealbox_record_locks(row_scope, locked_item_keys):
+                with _scope_catalog_lock(row_scope):
+                    reloaded = store.list_pending_dropped_sealbox_deletes(
+                        scope=row_scope,
+                        credential_key=credential_key,
+                    )
+                    pending = [entry for entry in reloaded if entry.item_key in locked_item_keys]
+                    if not pending:
+                        continue
+                    scanned += len(pending)
+                    counted_scope = True
+                    catalog = load_catalog(scope=row_scope)
+                    scope_skipped, scope_deleted, scope_failed = _process_pending_dropped_sealbox_entries(
+                        store,
+                        scope=row_scope,
+                        catalog=catalog,
+                        entries=pending,
+                        credential_key=credential_key or pending[0].credential_key,
+                        event_name="credential_dropped_sealbox_retry_failed",
+                    )
+                    skipped_referenced += scope_skipped
+                    deleted += scope_deleted
+                    failed += len(scope_failed)
+                    failed_keys.extend(scope_failed)
         except Exception as exc:  # noqa: BLE001 - isolate one owner's unreadable catalog from other owners
             if not counted_scope:
                 scanned += len(pending)
@@ -1170,8 +1271,9 @@ def retry_pending_dropped_sealbox_deletes(
 
 
 def _rollback_new_sealbox_writes(
-    written_credential: CatalogCredential,
+    written_credential: CatalogCredential | None,
     *,
+    written_refs: Sequence[CatalogSourceRef] | None = None,
     existing_keys: set[str],
     catalog: CredentialCatalog,
     credential_key: str,
@@ -1179,7 +1281,14 @@ def _rollback_new_sealbox_writes(
 ) -> bool:
     """Delete brand-new Sealbox records written by a failed save; return True if any written record remains."""
 
-    written_targets = _sealbox_delete_targets_for_credential(written_credential)
+    if written_credential is not None:
+        written_targets = _sealbox_delete_targets_for_credential(written_credential)
+    elif written_refs:
+        written_targets = _sealbox_delete_targets(
+            [ref for ref in written_refs if normalize_credential_source_name(ref.source) == "sealbox"]
+        )
+    else:
+        written_targets = []
     if not written_targets:
         return False
     other_keys: set[str] = set()
@@ -1402,6 +1511,603 @@ def resolve_credential_write_source(request_payload: Mapping[str, Any]) -> str:
     return write_source
 
 
+CAPTURE_APPROVAL_STATUS = "captured"
+CAPTURE_APPROVAL_SOURCE = "agent_file_capture"
+
+
+def credential_has_non_sealbox_source(credential: CatalogCredential) -> bool:
+    """Return True when any field on ``credential`` references a non-Sealbox source."""
+
+    for field in credential.fields.values():
+        for ref in field.resolution_order:
+            if normalize_credential_source_name(ref.source) != "sealbox":
+                return True
+    return False
+
+
+def is_agent_capture(credential: CatalogCredential | None) -> bool:
+    """Return True when ``credential`` was created by ``credential.capture_file``.
+
+    This is the one test for capture provenance; callers that also need the
+    person add their own check (``is_agent_captured_for_person``).
+    """
+
+    if credential is None or not isinstance(credential.approval, Mapping):
+        return False
+    approval = credential.approval
+    return (
+        _string(approval.get("status")).lower() == CAPTURE_APPROVAL_STATUS
+        and _string(approval.get("source")).lower() == CAPTURE_APPROVAL_SOURCE
+    )
+
+
+def is_agent_captured_for_person(credential: CatalogCredential | None, person_id: str | None) -> bool:
+    """Return True only when ``credential`` was created by ``credential.capture_file`` for ``person_id``."""
+
+    target_person = _string(person_id)
+    if not target_person or credential is None or not is_agent_capture(credential):
+        return False
+    return _string(credential.approval.get("captured_for_person_id")) == target_person
+
+
+def _is_droppable_agent_capture(
+    existing: CatalogCredential | None,
+    *,
+    scope: CredentialOwnerScope,
+    person_id: str | None,
+) -> bool:
+    """Return True only when ``existing`` is ``person_id``'s own Sealbox-only agent file capture."""
+
+    target_person = _string(person_id)
+    if not target_person or existing is None:
+        return False
+    if scope != CredentialOwnerScope.user(target_person):
+        return False
+    if credential_has_non_sealbox_source(existing):
+        return False
+    return is_agent_captured_for_person(existing, target_person)
+
+
+def _can_drop_stored_records(
+    existing: CatalogCredential | None,
+    *,
+    scope: CredentialOwnerScope,
+    allow_drop_stored_records: bool,
+    allow_drop_captured_for_person: str | None,
+) -> bool:
+    if allow_drop_stored_records:
+        return True
+    return _is_droppable_agent_capture(
+        existing,
+        scope=scope,
+        person_id=allow_drop_captured_for_person,
+    )
+
+
+def _canonical_source_ref_key(ref: CatalogSourceRef) -> tuple[Any, ...]:
+    raw_source = _string(ref.source).lower()
+    source = "env" if raw_source == "env" else normalize_credential_source_name(raw_source)
+    if source == "sealbox":
+        return ("sealbox", _sealbox_record_key(ref) or "", _sealbox_ref_kind(ref))
+    if source == "env":
+        return ("env", _string(ref.env_var), bool(ref.file_fallback))
+    return (
+        source,
+        _string(ref.item_id),
+        _string(ref.item_name),
+        _string(ref.field_ref or "password"),
+        _string(ref.vault),
+        _string(ref.folder),
+    )
+
+
+def _fields_sealbox_record_keys(fields: Mapping[str, CatalogCredentialField]) -> set[str]:
+    keys: set[str] = set()
+    for field in fields.values():
+        for source_ref in field.resolution_order:
+            record_key = _sealbox_record_key(source_ref)
+            if record_key:
+                keys.add(record_key)
+    return keys
+
+
+def _preserved_omitted_secret_fields(
+    existing: CatalogCredential | None,
+    requested_names: set[str],
+) -> dict[str, CatalogCredentialField]:
+    """Return deep copies of existing secret fields omitted from an agent update request."""
+
+    if existing is None:
+        return {}
+    return {
+        field_name: field.model_copy(deep=True)
+        for field_name, field in existing.fields.items()
+        if field.is_secret() and field_name not in requested_names
+    }
+
+
+def _primary_credential_source(credential: CatalogCredential) -> str | None:
+    for field in credential.fields.values():
+        if field.resolution_order:
+            raw_source = _string(field.resolution_order[0].source).lower()
+            return "env" if raw_source == "env" else normalize_credential_source_name(raw_source)
+    return None
+
+
+# Request keys that name a stored record. Agent credential.collect refuses all
+# of them (an existing key rotates on its stored reference, a new key gets a
+# broker-derived name); credential.register_existing_source still accepts
+# item_id/item_name for env and password-manager items it registers.
+AGENT_COLLECT_RECORD_NAME_KEYS = ("item_id", "item_name", "sealbox_key")
+AGENT_REGISTER_RECORD_NAME_KEYS = ("sealbox_key",)
+_PASSWORD_MANAGER_EXCLUDED_SOURCES = frozenset({"env", "sealbox"})
+
+
+def _agent_record_name_refusal(
+    payload: Mapping[str, Any],
+    *,
+    action_name: str,
+    forbidden_keys: tuple[str, ...],
+    field_specs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> ToolResult | None:
+    """Refuse agent-chosen stored record names (``forbidden_keys``) in a request or its field specs."""
+
+    locations: list[tuple[str | None, Mapping[str, Any]]] = [(None, payload)]
+    locations.extend((field_name, spec) for field_name, spec in (field_specs or {}).items())
+    for field_name, mapping in locations:
+        for key_name in forbidden_keys:
+            if not _string(mapping.get(key_name)):
+                continue
+            where = f" on field '{field_name}'" if field_name else ""
+            content: dict[str, Any] = {
+                "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+                "rejected_param": key_name,
+            }
+            if field_name:
+                content["field_ref"] = field_name
+            return ToolResult(
+                status="error",
+                error=(
+                    f"Agent {action_name} cannot choose a stored record name ({key_name}){where}. "
+                    "The broker derives record names for new keys and uses the stored reference "
+                    "when rotating an existing key."
+                ),
+                content=content,
+            )
+    return None
+
+
+def _agent_sealbox_source_refusal(
+    credential_key: str,
+    source_refs_by_field: Mapping[str, CatalogSourceRef],
+) -> ToolResult | None:
+    """Refuse a Sealbox source in agent ``credential.register_existing_source``.
+
+    The broker writes every Sealbox record itself (form saves, captures,
+    generated secrets, sign-ins and model keys), so an agent never has a
+    Sealbox record of its own to register. Registering one would let a later
+    rotation reach a record that belongs to something else, such as the
+    person's stored sign-in. Existing Sealbox-backed fields stay untouched when
+    the agent omits them.
+    """
+
+    for field_name, ref in source_refs_by_field.items():
+        if normalize_credential_source_name(ref.source) != "sealbox":
+            continue
+        return ToolResult(
+            status="error",
+            error=(
+                f"Agent credential.register_existing_source cannot register a Sealbox record for "
+                f"{credential_key} (field '{field_name}'). The broker writes every Sealbox record "
+                "itself; register an environment variable or password-manager item, omit existing "
+                "Sealbox-backed fields to leave them untouched, or ask the person to use the secure "
+                "broker form (secure_credential_collection_request)."
+            ),
+            content={
+                "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+                "credential_key": credential_key,
+                "field_ref": field_name,
+                "rejected_source": "sealbox",
+                "form_creation_action": "secure_credential_collection_request",
+            },
+        )
+    return None
+
+
+def _password_manager_item_identity(ref: CatalogSourceRef) -> tuple[str, str, str] | None:
+    """Return ``(source, item_id, item_name)`` for a password-manager reference, else ``None``."""
+
+    raw_source = _string(ref.source).lower()
+    source = "env" if raw_source == "env" else normalize_credential_source_name(raw_source)
+    if not source or source in _PASSWORD_MANAGER_EXCLUDED_SOURCES:
+        return None
+    item_id = _string(ref.item_id)
+    item_name = _string(ref.item_name)
+    if not item_id and not item_name:
+        return None
+    return (source, item_id, item_name)
+
+
+def _find_shared_password_manager_item(
+    catalog: CredentialCatalog,
+    *,
+    exclude_key: str,
+    refs: Iterable[CatalogSourceRef],
+) -> tuple[str, str] | None:
+    """Return ``(other_key, item_label)`` when another catalog key references one of ``refs``' items.
+
+    Items match on the same source and the same non-empty ``item_id`` or
+    ``item_name``. The check covers the catalog of the save's own owner; an
+    item referenced only by id in one row and only by name in another is not
+    matched.
+    """
+
+    wanted = [identity for ref in refs if (identity := _password_manager_item_identity(ref))]
+    if not wanted:
+        return None
+    for other_key, other in catalog.credentials.items():
+        if other_key == exclude_key:
+            continue
+        for field in other.fields.values():
+            for other_ref in field.resolution_order:
+                other_identity = _password_manager_item_identity(other_ref)
+                if other_identity is None:
+                    continue
+                for source, item_id, item_name in wanted:
+                    if other_identity[0] != source:
+                        continue
+                    if (item_id and item_id == other_identity[1]) or (
+                        item_name and item_name == other_identity[2]
+                    ):
+                        return other_key, item_name or item_id
+    return None
+
+
+def _shared_password_manager_item_result(
+    credential_key: str, other_key: str, item_label: str
+) -> ToolResult:
+    return ToolResult(
+        status="error",
+        error=(
+            f"Agent saves cannot point {credential_key} at password-manager item {item_label!r}, "
+            f"which catalog entry {other_key} already uses. Ask the person to use the secure broker "
+            "form (secure_credential_collection_request) to change either credential."
+        ),
+        content={
+            "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+            "credential_key": credential_key,
+            "conflicting_credential_key": other_key,
+            "form_creation_action": "secure_credential_collection_request",
+        },
+    )
+
+
+def _existing_bitwarden_item_name(existing: CatalogCredential | None) -> str | None:
+    """Return the one Bitwarden item every secret field of ``existing`` references, if any."""
+
+    if existing is None:
+        return None
+    names: set[str] = set()
+    for field in existing.fields.values():
+        if not field.is_secret():
+            continue
+        for ref in field.resolution_order:
+            if normalize_credential_source_name(ref.source) != "bitwarden":
+                return None
+            names.add(_string(ref.item_name))
+    if len(names) != 1:
+        return None
+    name = next(iter(names))
+    return name or None
+
+
+def _agent_captured_key_refusal(
+    credential_key: str, existing: CatalogCredential | None
+) -> ToolResult | None:
+    """Refuse agent ``credential.collect`` over an agent file capture.
+
+    A captured value came from a file the agent held; a generated password
+    cannot stand in for it, and rewriting the row with collect provenance
+    would stop it counting as a capture, so a later ``credential.capture_file``
+    into the key would be refused until it expires.
+    """
+
+    if not is_agent_capture(existing):
+        return None
+    return ToolResult(
+        status="error",
+        error=(
+            f"Credential {credential_key} was stored by credential.capture_file and cannot be "
+            "changed through agent credential.collect. To replace its value, call "
+            "credential.capture_file again with the new file for this key, or ask the person to "
+            "use the secure broker form."
+        ),
+        content={
+            "error_code": CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY,
+            "credential_key": credential_key,
+            "next_step": "credential.capture_file",
+            "form_creation_action": "secure_credential_collection_request",
+        },
+    )
+
+
+def _agent_rotation_username_refusal(
+    credential_key: str,
+    existing_sealbox_targets: Mapping[str, tuple[str, str]],
+    values: Mapping[str, str],
+    field_specs: Mapping[str, Mapping[str, Any]],
+) -> ToolResult | None:
+    """Refuse before any write when a rotated username-and-password record has no username.
+
+    Sealbox stores such a record as one username-and-password pair and refuses
+    an empty username, so without this check a multi-secret rotation could
+    write an earlier secret and then fail on this one.
+    """
+
+    credential_fields = sorted(
+        field_name for field_name, (_key, kind) in existing_sealbox_targets.items() if kind == "credential"
+    )
+    if not credential_fields:
+        return None
+    if _first_value_by_kind(values, field_specs, {"username", "email", "login"}):
+        return None
+    return ToolResult(
+        status="error",
+        error=(
+            f"Rotating {', '.join(credential_fields)} on {credential_key} rewrites a stored "
+            "username-and-password record, so the request must include the credential's username "
+            "field with kind 'username', 'email' or 'login' and its value. Nothing was written."
+        ),
+        content={
+            "error_code": CREDENTIAL_ROTATION_USERNAME_REQUIRED,
+            "credential_key": credential_key,
+            "rotated_fields": credential_fields,
+        },
+    )
+
+
+def _existing_sealbox_rotation_targets(
+    existing: CatalogCredential | None,
+    active_field_specs: Mapping[str, Mapping[str, Any]],
+) -> dict[str, tuple[str, str]]:
+    """Map rotated secret fields on an existing Sealbox key to their exact stored record target.
+
+    Lets agent-callable ``credential.collect`` rotate a secret field on a key
+    whose Sealbox record uses a broker-generated prefix (such as an agent
+    capture or transferred key) without accepting ``item_id`` or
+    ``sealbox_key``, while still letting an explicit mismatched ``field_ref``
+    fall through to layout refusal.
+    """
+
+    if existing is None:
+        return {}
+    targets: dict[str, tuple[str, str]] = {}
+    for field_name, spec in active_field_specs.items():
+        if not is_secret_credential_field(spec):
+            continue
+        if _string(spec.get("value_source")) != "store_generated_secret":
+            continue
+        existing_field = existing.fields.get(field_name)
+        if existing_field is None or not existing_field.is_secret() or not existing_field.resolution_order:
+            continue
+        ref_targets: set[tuple[str, str]] = set()
+        all_sealbox = True
+        for ref in existing_field.resolution_order:
+            if normalize_credential_source_name(ref.source) != "sealbox":
+                all_sealbox = False
+                break
+            record_key = _sealbox_record_key(ref)
+            if not record_key:
+                all_sealbox = False
+                break
+            ref_targets.add((record_key, _sealbox_ref_kind(ref)))
+        if not all_sealbox or len(ref_targets) != 1:
+            continue
+        record_key, item_kind = next(iter(ref_targets))
+        explicit_ref = _string(spec.get("field_ref"))
+        if explicit_ref:
+            if item_kind == "credential":
+                if explicit_ref.lower() != "password":
+                    continue
+            else:
+                expected_suffix = safe_key_component(explicit_ref, fallback=field_name)
+                if record_key != explicit_ref and not record_key.endswith(f":{expected_suffix}"):
+                    continue
+        targets[field_name] = (record_key, item_kind)
+    return targets
+
+
+def _agent_existing_key_layout_refusal(
+    *,
+    action_name: str,
+    credential_key: str,
+    existing: CatalogCredential,
+    request_payload: Mapping[str, Any],
+    field_specs: Mapping[str, Mapping[str, Any]],
+    active_field_specs: Mapping[str, Mapping[str, Any]],
+    allow_secret_rotation: bool,
+    write_source: str | None = None,
+    planned_sealbox_by_field: Mapping[str, str] | None = None,
+    source_refs_by_field: Mapping[str, CatalogSourceRef] | None = None,
+    actual_credential: CatalogCredential | None = None,
+) -> ToolResult | None:
+    """Enforce exact layout preservation when an agent updates an existing key.
+
+    Shared by agent-callable ``credential.collect`` and
+    ``credential.register_existing_source``. Over an existing key:
+    - no field may be added, removed, or reclassified between secret and metadata;
+    - existing non-secret metadata values may change;
+    - every existing secret field either stays untouched (an agent may omit it
+      from the request, or in ``credential.register_existing_source`` repeat
+      its exact stored source references) or, in ``credential.collect`` only,
+      rotates to a store-generated value on its exact stored record reference
+      (never a field whose ``value_source`` is ``existing_source``).
+    Any other change is refused before writing with
+    ``CREDENTIAL_REPLACEMENT_FORM_ONLY`` and the secure-form next step.
+    """
+
+    existing_names = set(existing.fields)
+    existing_metadata_names = {
+        name for name, field in existing.fields.items() if not field.is_secret()
+    }
+    requested_names = set(field_specs)
+    active_names = set(active_field_specs)
+    added = sorted((requested_names | active_names) - existing_names)
+    removed_metadata = sorted(existing_metadata_names - active_names)
+    dropped_requested = sorted((requested_names & existing_names) - active_names)
+    reason: str | None = None
+    if added or removed_metadata:
+        parts: list[str] = []
+        if added:
+            parts.append(f"added field(s): {', '.join(added)}")
+        if removed_metadata:
+            parts.append(
+                f"removed field(s): {', '.join(removed_metadata)}; send every existing "
+                "non-secret field with its value"
+            )
+        reason = "; ".join(parts)
+    elif dropped_requested:
+        reason = (
+            "secret field(s) cannot be cleared with a blank value "
+            f"(omit them to leave them untouched): {', '.join(dropped_requested)}"
+        )
+    else:
+        for field_name, existing_field in existing.fields.items():
+            if field_name not in requested_names:
+                # Existing secret field omitted by the agent: must stay untouched.
+                if actual_credential is not None:
+                    actual_field = actual_credential.fields.get(field_name)
+                    if (
+                        actual_field is None
+                        or not actual_field.is_secret()
+                        or [_canonical_source_ref_key(r) for r in actual_field.resolution_order]
+                        != [_canonical_source_ref_key(r) for r in existing_field.resolution_order]
+                    ):
+                        reason = f"omitted secret field '{field_name}' was not preserved untouched"
+                        break
+                continue
+            spec = active_field_specs[field_name]
+            existing_secret = existing_field.is_secret()
+            new_secret = is_secret_credential_field(spec)
+            if existing_secret != new_secret:
+                reason = f"field '{field_name}' cannot change between secret and non-secret metadata"
+                break
+            if not existing_secret:
+                continue
+            if not allow_secret_rotation:
+                if actual_credential is not None:
+                    actual_field = actual_credential.fields.get(field_name)
+                    new_refs = actual_field.resolution_order if actual_field is not None else []
+                else:
+                    new_ref = (source_refs_by_field or {}).get(field_name)
+                    new_refs = [new_ref] if new_ref is not None else []
+                existing_ref_keys = [_canonical_source_ref_key(r) for r in existing_field.resolution_order]
+                new_ref_keys = [_canonical_source_ref_key(r) for r in new_refs]
+                if not existing_ref_keys or existing_ref_keys != new_ref_keys:
+                    reason = f"secret field '{field_name}' would change its stored source reference"
+                    break
+                continue
+            if _string(spec.get("value_source")) != "store_generated_secret":
+                reason = (
+                    f"secret field '{field_name}' may only stay untouched (by omitting it) "
+                    "or rotate with store_generated_secret"
+                )
+                break
+            if _string(existing_field.value_source) == "existing_source":
+                # A registered source belongs to something else (an env var,
+                # a password-manager item or another record), so the broker
+                # never overwrites it on an agent's request.
+                reason = (
+                    f"secret field '{field_name}' is registered from an existing source the broker "
+                    "does not own, so an agent cannot rotate it"
+                )
+                break
+            existing_sources = {
+                normalize_credential_source_name(ref.source)
+                for ref in existing_field.resolution_order
+            }
+            if not existing_field.resolution_order or existing_sources != {write_source}:
+                reason = f"secret field '{field_name}' would change its stored credential source"
+                break
+            if write_source == "sealbox":
+                existing_records = {
+                    record_key
+                    for ref in existing_field.resolution_order
+                    if (record_key := _sealbox_record_key(ref))
+                }
+                if actual_credential is not None:
+                    actual_field = actual_credential.fields.get(field_name)
+                    new_records = (
+                        {
+                            record_key
+                            for ref in actual_field.resolution_order
+                            if (record_key := _sealbox_record_key(ref))
+                        }
+                        if actual_field is not None
+                        else set()
+                    )
+                else:
+                    planned_key = (planned_sealbox_by_field or {}).get(field_name)
+                    new_records = {planned_key} if planned_key else set()
+                if not new_records or existing_records != new_records:
+                    reason = f"secret field '{field_name}' would change its Sealbox record reference"
+                    break
+            elif write_source == "bitwarden":
+                expected_item_name = _catalog_item_name(credential_key, request_payload)
+                expected_field_ref = _field_storage_ref(field_name, spec)
+                existing_bw_refs = {
+                    (_string(ref.item_name), _string(ref.field_ref))
+                    for ref in existing_field.resolution_order
+                }
+                if existing_bw_refs != {(expected_item_name, expected_field_ref)}:
+                    reason = f"secret field '{field_name}' would change its stored record reference"
+                    break
+    if reason is None:
+        return None
+    if actual_credential is not None:
+        retained_sealbox = _credential_sealbox_record_keys(actual_credential)
+    else:
+        retained_sealbox = _fields_sealbox_record_keys(
+            _preserved_omitted_secret_fields(existing, requested_names)
+        )
+        retained_sealbox |= set((planned_sealbox_by_field or {}).values())
+        for fn, ref in (source_refs_by_field or {}).items():
+            if fn in requested_names and (rk := _sealbox_record_key(ref)):
+                retained_sealbox.add(rk)
+    dropped_keys = _credential_sealbox_record_keys(existing) - retained_sealbox
+    content: dict[str, Any] = {
+        "error_code": CREDENTIAL_REPLACEMENT_FORM_ONLY,
+        "credential_key": credential_key,
+        "form_creation_action": "secure_credential_collection_request",
+        "next_step": (
+            "Ask the person to submit a secure credential form "
+            "(action_type=secure_credential_collection_request) to change, replace, or delete this credential."
+        ),
+    }
+    if dropped_keys:
+        content["dropped_sealbox_records"] = sorted(dropped_keys)
+    if allow_secret_rotation:
+        guidance = (
+            f"Cannot change the layout of existing credential {credential_key} through agent "
+            f"{action_name} ({reason}). An agent may update existing non-secret metadata fields "
+            "(omitting existing secret fields to leave them untouched) or rotate existing secret "
+            "fields with value_source='store_generated_secret', while keeping the exact same field "
+            "names, secret/non-secret status, and stored record references. To add, remove, or "
+            "reclassify fields or replace a secret value, ask the person to submit the secure "
+            "broker form (secure_credential_collection_request)."
+        )
+    else:
+        guidance = (
+            f"Cannot change the layout or stored source references of existing credential "
+            f"{credential_key} through {action_name} ({reason}). An agent may only update existing "
+            "non-secret metadata fields (omitting existing secret fields to leave them untouched) or "
+            "keep the exact same field names, secret/non-secret status, and stored source references. "
+            "To add, remove, or reclassify fields or change a secret's source, ask the person to "
+            "submit the secure broker form (secure_credential_collection_request)."
+        )
+    return ToolResult(status="error", error=guidance, content=content)
+
+
 def collect_credential(
     request_payload: Mapping[str, Any],
     submitted_fields: Mapping[str, str],
@@ -1411,14 +2117,19 @@ def collect_credential(
     expires_at: datetime | str | None = None,
     allow_expiry_change: bool = False,
     allow_drop_stored_records: bool = False,
+    allow_drop_captured_for_person: str | None = None,
+    allow_submitted_secrets: bool = True,
+    overwrite_guard: Callable[[CatalogCredential | None], ToolResult | None] | None = None,
+    approval: Mapping[str, Any] | None = None,
     now: datetime | None = None,
 ) -> ToolResult:
     """Store a credential from trusted form submission or broker-side storage.
 
     ``expires_at`` is accepted only as an explicit keyword argument (never read
-    from ``request_payload``) and only when ``allow_expiry_change=True``
-    (currently set only by the secure form submission handler in ``service.py``;
-    team transfer import writes through ``write_credential_to_source`` and
+    from ``request_payload``) and only when ``allow_expiry_change=True`` (set
+    by the secure form submission handler in ``service.py`` and
+    ``credential.capture_file`` in ``credential_capture.py``; team transfer
+    import writes through ``write_credential_to_source`` and
     ``_save_credential_and_cleanup_dropped`` directly rather than calling
     ``collect_credential``). When ``allow_expiry_change=False`` (the default,
     used by agent-callable ``credential.collect``), overwriting a key that
@@ -1427,14 +2138,40 @@ def collect_credential(
 
     Dropping and deleting Sealbox records referenced by an existing catalog
     entry is permitted only when ``allow_drop_stored_records=True`` (set only
-    by the person's submitted secure form in ``service.py``). The two flags are
-    separate so a caller (including a future broker-side capture path) may set
-    an expiry without gaining the right to drop stored records. Any caller with
-    ``allow_drop_stored_records=False`` — including agent-callable
-    ``credential.collect`` and any caller that sets ``allow_expiry_change=True``
-    without ``allow_drop_stored_records=True`` — is refused with
-    ``credential_replacement_form_only`` before writing anything when the save
-    would drop a stored Sealbox record.
+    by the person's submitted secure form in ``service.py``) or when
+    ``allow_drop_captured_for_person`` names the task person AND the existing
+    catalog entry is that same person's own Sealbox-only ``agent_file_capture``
+    row (never person-entered, team, or external-source credentials).
+
+    When ``allow_submitted_secrets=False`` (set by agent-callable
+    ``credential.collect``), any secret or undeclared field value in
+    ``submitted_fields`` is refused with ``secret_value_in_request_rejected``,
+    agent-chosen record names (``item_id`` / ``item_name`` / ``sealbox_key``)
+    are refused with ``credential_record_name_not_allowed`` (an existing
+    Sealbox or Bitwarden key writes to the record its fields already
+    reference; a new key's Bitwarden item must not already exist, and a
+    Bitwarden item another catalog key uses is refused), any Sealbox record
+    already referenced by another catalog key is refused with
+    ``credential_expiry_shared_record`` (``temporary_only=False``), a row
+    stored by ``credential.capture_file`` is refused with
+    ``credential_captured_key_capture_only``, a rotated username-and-password
+    Sealbox record without a username in the request is refused before any
+    write with ``credential_rotation_username_required``, and when
+    updating an existing key the request must keep that key's exact layout
+    (same field names and secret/non-secret status per field; only existing
+    non-secret metadata values may change, and every existing secret field
+    either stays untouched by omitting it or rotates via
+    ``store_generated_secret`` onto its existing stored record, never a field
+    registered from an existing source; any other
+    change is refused before writing with ``credential_replacement_form_only``).
+    Secrets come only from the person's secure form, account-link forms,
+    ``credential.capture_file``, or store-native generation.
+
+    Inside ``credential_key_lock``, Sealbox writes acquire per-owner normalized
+    record locks (``sealbox_record_locks``) in sorted order before entering
+    ``_scope_catalog_lock`` so catalog keys that normalize to the same Sealbox
+    record cannot race. Any exception after ``write_credential_to_source``
+    (before catalog commit) routes through ``_rollback_new_sealbox_writes``.
     """
 
     try:
@@ -1450,7 +2187,7 @@ def collect_credential(
                     status="error",
                     error=(
                         "Temporary credential expiry can only be changed through the secure "
-                        "broker form or trusted transfer import."
+                        "broker form, trusted transfer import, or credential.capture_file for agent-captured keys."
                     ),
                     content={"error_code": CREDENTIAL_EXPIRY_FORM_ONLY, "credential_key": credential_key},
                 )
@@ -1490,6 +2227,33 @@ def collect_credential(
                     "form_creation_action": "secure_credential_collection_request",
                 },
             )
+        if not allow_submitted_secrets:
+            record_name_refusal = _agent_record_name_refusal(
+                request_payload,
+                action_name="credential.collect",
+                forbidden_keys=AGENT_COLLECT_RECORD_NAME_KEYS,
+                field_specs=field_specs,
+            )
+            if record_name_refusal is not None:
+                return record_name_refusal
+            for submitted_key, submitted_raw in submitted_fields.items():
+                if not _string(submitted_raw):
+                    continue
+                declared_spec = field_specs.get(submitted_key)
+                if declared_spec is None or is_secret_credential_field(declared_spec):
+                    return ToolResult(
+                        status="error",
+                        error=(
+                            f"Secret or undeclared field {submitted_key!r} cannot be submitted through "
+                            "agent credential.collect. Secret values come only from the person's secure "
+                            "broker form, account-link forms, store-native generation "
+                            "(value_source='store_generated_secret'), or credential.capture_file."
+                        ),
+                        content={
+                            "error_code": "secret_value_in_request_rejected",
+                            "field_ref": str(submitted_key),
+                        },
+                    )
         values: dict[str, str] = {}
         secret_fields: dict[str, str] = {}
         public_fields: dict[str, str] = {}
@@ -1552,171 +2316,143 @@ def collect_credential(
             else:
                 public_fields[field_name] = value
         with credential_key_lock(resolved_scope, credential_key):
+            # Peek existing Sealbox records under the leaf scope lock before
+            # taking normalized record locks (key -> record -> scope order).
+            # credential_key_lock keeps this key's row stable until we finish.
             existing_keys: set[str] = set()
+            initial_existing: CatalogCredential | None = None
             with _scope_catalog_lock(resolved_scope):
-                catalog_snapshot = load_catalog(scope=resolved_scope)
-                existing_credential = catalog_snapshot.credentials.get(credential_key)
-                if not allow_expiry_change and existing_credential is not None and existing_credential.expires_at is not None:
-                    lock_now = now if now is not None else datetime.now(timezone.utc)
-                    if is_expired(existing_credential.expires_at, now=lock_now):
-                        return ToolResult(
-                            status="error",
-                            error=(
-                                f"Temporary credential {credential_key} has already expired and cannot be "
-                                "overwritten without the person submitting the secure form."
-                            ),
-                            content={
-                                "error_code": CREDENTIAL_EXPIRED,
-                                "credential_key": credential_key,
-                                "expires_at": existing_credential.expires_at,
-                            },
-                        )
-                    if write_source != "sealbox":
-                        return ToolResult(
-                            status="error",
-                            error=(
-                                "Temporary credentials with an expiry are only supported for Sealbox storage, "
-                                f"not {write_source or '<empty>'}."
-                            ),
-                            content={
-                                "error_code": CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
-                                "write_source": write_source,
-                                "credential_key": credential_key,
-                            },
-                        )
-                    normalized_expires_at = existing_credential.expires_at
-                    ttl_seconds = remaining_ttl_seconds(existing_credential.expires_at, now=lock_now)
-                existing_keys = (
-                    _credential_sealbox_record_keys(existing_credential)
-                    if existing_credential is not None
-                    else set()
-                )
-                planned_keys = (
-                    _planned_sealbox_record_keys(
-                        credential_key=credential_key,
-                        request_payload=request_payload,
-                        values=values,
-                        field_specs=active_field_specs,
-                    )
-                    if write_source == "sealbox"
-                    else set()
-                )
-                dropped_keys = existing_keys - planned_keys
-                if dropped_keys:
-                    if not allow_drop_stored_records:
-                        return _dropped_sealbox_records_form_only_result(credential_key, dropped_keys)
-                    shared_dropped = _find_shared_sealbox_record(
-                        catalog_snapshot,
-                        exclude_key=credential_key,
-                        target_keys=dropped_keys,
-                        temporary_only=False,
-                    )
-                    if shared_dropped is not None:
-                        other_key, record_key = shared_dropped
-                        return ToolResult(
-                            status="error",
-                            error=(
-                                f"Cannot replace {credential_key} because another catalog entry "
-                                f"({other_key}) still references Sealbox record {record_key}."
-                            ),
-                            content={
-                                "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
-                                "credential_key": credential_key,
-                                "conflicting_credential_key": other_key,
-                                "sealbox_record_key": record_key,
-                            },
-                        )
-                if write_source == "sealbox":
-                    pending_conflict = _resolve_pending_dropped_sealbox_conflict(
-                        resolved_scope,
-                        planned_keys,
-                        catalog=catalog_snapshot,
-                        credential_key=credential_key,
-                    )
-                    if pending_conflict is not None:
-                        return _pending_dropped_cleanup_conflict_result(credential_key, pending_conflict)
-                    shared = _find_shared_sealbox_record(
-                        catalog_snapshot,
-                        exclude_key=credential_key,
-                        target_keys=planned_keys,
-                        temporary_only=normalized_expires_at is None,
-                    )
-                    if shared is not None:
-                        other_key, record_key = shared
-                        error_message = (
-                            f"Cannot store an expiry on {credential_key} because another catalog entry "
-                            f"({other_key}) also references the same Sealbox record."
-                            if normalized_expires_at is not None
-                            else f"Cannot store {credential_key} onto a Sealbox record owned by temporary "
-                            f"credential {other_key}."
-                        )
-                        return ToolResult(
-                            status="error",
-                            error=error_message,
-                            content={
-                                "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
-                                "credential_key": credential_key,
-                                "conflicting_credential_key": other_key,
-                                "sealbox_record_key": record_key,
-                            },
-                        )
-            for field_name, field_spec in pending_non_sealbox_generated:
-                generated = generate_password(write_source=write_source, field_spec=field_spec)
-                if isinstance(generated, ToolResult):
-                    return generated
-                values[field_name] = generated
-                secret_fields[field_name] = generated
-            write_result = write_credential_to_source(
-                write_source=write_source,
-                credential_key=credential_key,
-                request_payload=request_payload,
-                values=values,
-                field_specs=active_field_specs,
-                generated_secret_fields=generated_secret_fields,
-                scope=resolved_scope,
-                ttl_seconds=ttl_seconds,
+                initial_catalog = load_catalog(scope=resolved_scope)
+                initial_existing = initial_catalog.credentials.get(credential_key)
+                if initial_existing is not None:
+                    existing_keys = _credential_sealbox_record_keys(initial_existing)
+            if not allow_submitted_secrets and write_source == "bitwarden":
+                # Agents cannot name a Bitwarden item; an existing key keeps
+                # writing to the item its fields already reference.
+                stored_item_name = _existing_bitwarden_item_name(initial_existing)
+                if stored_item_name:
+                    request_payload = {**request_payload, "item_name": stored_item_name}
+            existing_sealbox_targets = (
+                _existing_sealbox_rotation_targets(initial_existing, active_field_specs)
+                if (not allow_submitted_secrets and write_source == "sealbox")
+                else {}
             )
-            if isinstance(write_result, ToolResult):
-                return write_result
-            credential = build_catalog_credential(
-                credential_key=credential_key,
-                request_payload=request_payload,
-                field_specs=active_field_specs,
-                public_fields=public_fields,
-                write_result=write_result,
-                expires_at=normalized_expires_at,
-            )
-            latest_existing: CatalogCredential | None = None
-            post_write_conflict: ToolResult | None = None
-            latest_catalog_for_rollback: CredentialCatalog | None = None
-            save_error: Exception | None = None
-            failed_dropped: list[str] = []
-            with _scope_catalog_lock(resolved_scope):
-                latest_catalog = load_catalog(scope=resolved_scope)
-                latest_catalog_for_rollback = latest_catalog
-                latest_existing = latest_catalog.credentials.get(credential_key)
-                actual_new_keys = _credential_sealbox_record_keys(credential)
-                actual_existing_keys = (
-                    _credential_sealbox_record_keys(latest_existing)
-                    if latest_existing is not None
-                    else set()
+            planned_by_field = (
+                _planned_sealbox_record_keys_by_field(
+                    credential_key=credential_key,
+                    request_payload=request_payload,
+                    values=values,
+                    field_specs=active_field_specs,
+                    existing_sealbox_targets=existing_sealbox_targets,
                 )
-                actual_dropped_keys = actual_existing_keys - actual_new_keys
-                if actual_dropped_keys:
-                    if not allow_drop_stored_records:
-                        post_write_conflict = _dropped_sealbox_records_form_only_result(
-                            credential_key, actual_dropped_keys
+                if write_source == "sealbox"
+                else {}
+            )
+            written_sealbox_keys = set(planned_by_field.values())
+            with sealbox_record_locks(resolved_scope, written_sealbox_keys | existing_keys):
+                preserved_secret_fields: dict[str, CatalogCredentialField] = {}
+                with _scope_catalog_lock(resolved_scope):
+                    catalog_snapshot = load_catalog(scope=resolved_scope)
+                    existing_credential = catalog_snapshot.credentials.get(credential_key)
+                    if overwrite_guard is not None:
+                        guard_refusal = overwrite_guard(existing_credential)
+                        if guard_refusal is not None:
+                            return guard_refusal
+                    if not allow_expiry_change and existing_credential is not None and existing_credential.expires_at is not None:
+                        lock_now = now if now is not None else datetime.now(timezone.utc)
+                        if is_expired(existing_credential.expires_at, now=lock_now):
+                            return ToolResult(
+                                status="error",
+                                error=(
+                                    f"Temporary credential {credential_key} has already expired and cannot be "
+                                    "overwritten without the person submitting the secure form."
+                                ),
+                                content={
+                                    "error_code": CREDENTIAL_EXPIRED,
+                                    "credential_key": credential_key,
+                                    "expires_at": existing_credential.expires_at,
+                                },
+                            )
+                        if write_source != "sealbox":
+                            return ToolResult(
+                                status="error",
+                                error=(
+                                    "Temporary credentials with an expiry are only supported for Sealbox storage, "
+                                    f"not {write_source or '<empty>'}."
+                                ),
+                                content={
+                                    "error_code": CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE,
+                                    "write_source": write_source,
+                                    "credential_key": credential_key,
+                                },
+                            )
+                        normalized_expires_at = existing_credential.expires_at
+                        ttl_seconds = remaining_ttl_seconds(existing_credential.expires_at, now=lock_now)
+                    if not allow_submitted_secrets:
+                        captured_refusal = _agent_captured_key_refusal(credential_key, existing_credential)
+                        if captured_refusal is not None:
+                            return captured_refusal
+                        if write_source == "bitwarden":
+                            shared_item = _find_shared_password_manager_item(
+                                catalog_snapshot,
+                                exclude_key=credential_key,
+                                refs=[
+                                    CatalogSourceRef(
+                                        source="bitwarden",
+                                        item_name=_catalog_item_name(credential_key, request_payload),
+                                    )
+                                ],
+                            )
+                            if shared_item is not None:
+                                return _shared_password_manager_item_result(credential_key, *shared_item)
+                    if not allow_submitted_secrets and existing_credential is not None:
+                        preserved_secret_fields = _preserved_omitted_secret_fields(
+                            existing_credential, set(field_specs)
                         )
-                    else:
+                        layout_refusal = _agent_existing_key_layout_refusal(
+                            action_name="credential.collect",
+                            credential_key=credential_key,
+                            existing=existing_credential,
+                            request_payload=request_payload,
+                            field_specs=field_specs,
+                            active_field_specs=active_field_specs,
+                            allow_secret_rotation=True,
+                            write_source=write_source,
+                            planned_sealbox_by_field=planned_by_field,
+                        )
+                        if layout_refusal is not None:
+                            return layout_refusal
+                        username_refusal = _agent_rotation_username_refusal(
+                            credential_key, existing_sealbox_targets, values, active_field_specs
+                        )
+                        if username_refusal is not None:
+                            return username_refusal
+                    existing_keys = (
+                        _credential_sealbox_record_keys(existing_credential)
+                        if existing_credential is not None
+                        else set()
+                    )
+                    retained_sealbox_keys = written_sealbox_keys | _fields_sealbox_record_keys(
+                        preserved_secret_fields
+                    )
+                    dropped_keys = existing_keys - retained_sealbox_keys
+                    if dropped_keys:
+                        if not _can_drop_stored_records(
+                            existing_credential,
+                            scope=resolved_scope,
+                            allow_drop_stored_records=allow_drop_stored_records,
+                            allow_drop_captured_for_person=allow_drop_captured_for_person,
+                        ):
+                            return _dropped_sealbox_records_form_only_result(credential_key, dropped_keys)
                         shared_dropped = _find_shared_sealbox_record(
-                            latest_catalog,
+                            catalog_snapshot,
                             exclude_key=credential_key,
-                            target_keys=actual_dropped_keys,
+                            target_keys=dropped_keys,
                             temporary_only=False,
                         )
                         if shared_dropped is not None:
                             other_key, record_key = shared_dropped
-                            post_write_conflict = ToolResult(
+                            return ToolResult(
                                 status="error",
                                 error=(
                                     f"Cannot replace {credential_key} because another catalog entry "
@@ -1729,91 +2465,289 @@ def collect_credential(
                                     "sealbox_record_key": record_key,
                                 },
                             )
-                if post_write_conflict is None and write_source == "sealbox":
-                    pending_conflict = _pending_dropped_sealbox_conflict(resolved_scope, actual_new_keys)
-                    if pending_conflict is not None:
-                        post_write_conflict = _pending_dropped_cleanup_conflict_result(
-                            credential_key, pending_conflict
-                        )
-                if post_write_conflict is None and write_source == "sealbox":
-                    shared = _find_shared_sealbox_record(
-                        latest_catalog,
-                        exclude_key=credential_key,
-                        target_keys=actual_new_keys,
-                        temporary_only=normalized_expires_at is None,
-                    )
-                    if shared is not None:
-                        other_key, record_key = shared
-                        error_message = (
-                            f"Cannot store an expiry on {credential_key} because another catalog entry "
-                            f"({other_key}) also references the same Sealbox record."
-                            if normalized_expires_at is not None
-                            else f"Cannot store {credential_key} onto a Sealbox record owned by temporary "
-                            f"credential {other_key}."
-                        )
-                        post_write_conflict = ToolResult(
-                            status="error",
-                            error=error_message,
-                            content={
-                                "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
-                                "credential_key": credential_key,
-                                "conflicting_credential_key": other_key,
-                                "sealbox_record_key": record_key,
-                            },
-                        )
-                if post_write_conflict is None:
-                    dropped_targets = (
-                        _sealbox_delete_targets_for_credential(
-                            latest_existing,
-                            keep_keys=actual_new_keys,
-                        )
-                        if latest_existing is not None
-                        else []
-                    )
-                    try:
-                        _save_catalog_credential(
-                            credential_key,
-                            credential,
-                            scope=resolved_scope,
-                            dropped_sealbox_targets=dropped_targets,
-                        )
-                        _SECRET_CACHE.clear()
-                    except Exception as exc:
-                        save_error = exc
-                    else:
-                        failed_dropped = _delete_and_clear_dropped_targets(
-                            dropped_targets,
-                            scope=resolved_scope,
+                    if write_source == "sealbox" and written_sealbox_keys:
+                        pending_conflict = _resolve_pending_dropped_sealbox_conflict(
+                            resolved_scope,
+                            written_sealbox_keys,
+                            catalog=catalog_snapshot,
                             credential_key=credential_key,
-                            event_name="credential_dropped_sealbox_delete_failed",
                         )
-            if post_write_conflict is not None or save_error is not None:
-                partial_write = False
-                if write_source == "sealbox":
-                    rollback_catalog = latest_catalog_for_rollback or CredentialCatalog()
-                    partial_write = _rollback_new_sealbox_writes(
-                        credential,
-                        existing_keys=existing_keys,
-                        catalog=rollback_catalog,
-                        credential_key=credential_key,
-                        scope=resolved_scope,
-                    )
-                if post_write_conflict is not None:
-                    if partial_write:
-                        post_write_conflict.content = {
-                            **dict(post_write_conflict.content or {}),
-                            "partial_store_write": True,
-                        }
-                    return post_write_conflict
-                assert save_error is not None
-                error_content: dict[str, Any] = {"credential_key": credential_key}
-                if partial_write:
-                    error_content["partial_store_write"] = True
-                return ToolResult(
-                    status="error",
-                    error=f"Credential catalog save failed after writing to {write_source}: {save_error}",
-                    content=error_content,
+                        if pending_conflict is not None:
+                            return _pending_dropped_cleanup_conflict_result(credential_key, pending_conflict)
+                        shared = _find_shared_sealbox_record(
+                            catalog_snapshot,
+                            exclude_key=credential_key,
+                            target_keys=written_sealbox_keys,
+                            temporary_only=(normalized_expires_at is None and allow_submitted_secrets),
+                        )
+                        if shared is not None:
+                            other_key, record_key = shared
+                            if normalized_expires_at is not None:
+                                error_message = (
+                                    f"Cannot store an expiry on {credential_key} because another catalog entry "
+                                    f"({other_key}) also references the same Sealbox record."
+                                )
+                            elif not allow_submitted_secrets:
+                                error_message = (
+                                    f"Cannot store {credential_key} onto a Sealbox record already referenced "
+                                    f"by catalog entry {other_key}."
+                                )
+                            else:
+                                error_message = (
+                                    f"Cannot store {credential_key} onto a Sealbox record owned by temporary "
+                                    f"credential {other_key}."
+                                )
+                            return ToolResult(
+                                status="error",
+                                error=error_message,
+                                content={
+                                    "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
+                                    "credential_key": credential_key,
+                                    "conflicting_credential_key": other_key,
+                                    "sealbox_record_key": record_key,
+                                },
+                            )
+                skip_secret_store_write = (
+                    not allow_submitted_secrets
+                    and existing_credential is not None
+                    and not secret_fields
+                    and not pending_non_sealbox_generated
                 )
+                write_result: CredentialWriteResult
+                if skip_secret_store_write:
+                    existing_source = (
+                        _primary_credential_source(existing_credential)
+                        if existing_credential is not None
+                        else None
+                    )
+                    write_result = CredentialWriteResult(
+                        source=existing_source or write_source,
+                        source_ref_by_field={},
+                    )
+                else:
+                    for field_name, field_spec in pending_non_sealbox_generated:
+                        generated = generate_password(write_source=write_source, field_spec=field_spec)
+                        if isinstance(generated, ToolResult):
+                            return generated
+                        values[field_name] = generated
+                        secret_fields[field_name] = generated
+                    raw_write_result = write_credential_to_source(
+                        write_source=write_source,
+                        credential_key=credential_key,
+                        request_payload=request_payload,
+                        values=values,
+                        field_specs=active_field_specs,
+                        generated_secret_fields=generated_secret_fields,
+                        scope=resolved_scope,
+                        ttl_seconds=ttl_seconds,
+                        existing_sealbox_targets=existing_sealbox_targets,
+                        require_new_bitwarden_item=(
+                            not allow_submitted_secrets and existing_credential is None
+                        ),
+                    )
+                    if isinstance(raw_write_result, ToolResult):
+                        return raw_write_result
+                    write_result = raw_write_result
+                credential: CatalogCredential | None = None
+                latest_existing: CatalogCredential | None = None
+                post_write_conflict: ToolResult | None = None
+                latest_catalog_for_rollback: CredentialCatalog | None = None
+                save_error: Exception | None = None
+                committed = False
+                failed_dropped: list[str] = []
+                # Wrap every post-write step before commit so any failure
+                # (including load_catalog or overwrite_guard exceptions)
+                # rolls back newly written Sealbox records.
+                try:
+                    credential = build_catalog_credential(
+                        credential_key=credential_key,
+                        request_payload=request_payload,
+                        field_specs=active_field_specs,
+                        public_fields=public_fields,
+                        write_result=write_result,
+                        expires_at=normalized_expires_at,
+                        approval=approval,
+                        preserved_fields=preserved_secret_fields,
+                        existing_field_order=(
+                            tuple(existing_credential.fields)
+                            if existing_credential is not None
+                            else None
+                        ),
+                        created_at=(
+                            existing_credential.created_at
+                            if existing_credential is not None
+                            else None
+                        ),
+                    )
+                    with _scope_catalog_lock(resolved_scope):
+                        latest_catalog = load_catalog(scope=resolved_scope)
+                        latest_catalog_for_rollback = latest_catalog
+                        latest_existing = latest_catalog.credentials.get(credential_key)
+                        if overwrite_guard is not None:
+                            guard_refusal = overwrite_guard(latest_existing)
+                            if guard_refusal is not None:
+                                post_write_conflict = guard_refusal
+                        if post_write_conflict is None and not allow_submitted_secrets:
+                            post_write_conflict = _agent_captured_key_refusal(credential_key, latest_existing)
+                        if post_write_conflict is None and not allow_submitted_secrets and latest_existing is not None:
+                            post_write_conflict = _agent_existing_key_layout_refusal(
+                                action_name="credential.collect",
+                                credential_key=credential_key,
+                                existing=latest_existing,
+                                request_payload=request_payload,
+                                field_specs=field_specs,
+                                active_field_specs=active_field_specs,
+                                allow_secret_rotation=True,
+                                write_source=write_source,
+                                planned_sealbox_by_field=planned_by_field,
+                                actual_credential=credential,
+                            )
+                        actual_new_keys = _credential_sealbox_record_keys(credential)
+                        actual_existing_keys = (
+                            _credential_sealbox_record_keys(latest_existing)
+                            if latest_existing is not None
+                            else set()
+                        )
+                        actual_dropped_keys = actual_existing_keys - actual_new_keys
+                        if post_write_conflict is None and actual_dropped_keys:
+                            if not _can_drop_stored_records(
+                                latest_existing,
+                                scope=resolved_scope,
+                                allow_drop_stored_records=allow_drop_stored_records,
+                                allow_drop_captured_for_person=allow_drop_captured_for_person,
+                            ):
+                                post_write_conflict = _dropped_sealbox_records_form_only_result(
+                                    credential_key, actual_dropped_keys
+                                )
+                            else:
+                                shared_dropped = _find_shared_sealbox_record(
+                                    latest_catalog,
+                                    exclude_key=credential_key,
+                                    target_keys=actual_dropped_keys,
+                                    temporary_only=False,
+                                )
+                                if shared_dropped is not None:
+                                    other_key, record_key = shared_dropped
+                                    post_write_conflict = ToolResult(
+                                        status="error",
+                                        error=(
+                                            f"Cannot replace {credential_key} because another catalog entry "
+                                            f"({other_key}) still references Sealbox record {record_key}."
+                                        ),
+                                        content={
+                                            "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
+                                            "credential_key": credential_key,
+                                            "conflicting_credential_key": other_key,
+                                            "sealbox_record_key": record_key,
+                                        },
+                                    )
+                        actual_written_keys = {
+                            written_key
+                            for ref in write_result.source_ref_by_field.values()
+                            if (written_key := _sealbox_record_key(ref))
+                        }
+                        if post_write_conflict is None and write_source == "sealbox" and actual_written_keys:
+                            pending_conflict = _pending_dropped_sealbox_conflict(resolved_scope, actual_written_keys)
+                            if pending_conflict is not None:
+                                post_write_conflict = _pending_dropped_cleanup_conflict_result(
+                                    credential_key, pending_conflict
+                                )
+                        if post_write_conflict is None and write_source == "sealbox" and actual_written_keys:
+                            shared = _find_shared_sealbox_record(
+                                latest_catalog,
+                                exclude_key=credential_key,
+                                target_keys=actual_written_keys,
+                                temporary_only=(normalized_expires_at is None and allow_submitted_secrets),
+                            )
+                            if shared is not None:
+                                other_key, record_key = shared
+                                if normalized_expires_at is not None:
+                                    error_message = (
+                                        f"Cannot store an expiry on {credential_key} because another catalog entry "
+                                        f"({other_key}) also references the same Sealbox record."
+                                    )
+                                elif not allow_submitted_secrets:
+                                    error_message = (
+                                        f"Cannot store {credential_key} onto a Sealbox record already referenced "
+                                        f"by catalog entry {other_key}."
+                                    )
+                                else:
+                                    error_message = (
+                                        f"Cannot store {credential_key} onto a Sealbox record owned by temporary "
+                                        f"credential {other_key}."
+                                    )
+                                post_write_conflict = ToolResult(
+                                    status="error",
+                                    error=error_message,
+                                    content={
+                                        "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
+                                        "credential_key": credential_key,
+                                        "conflicting_credential_key": other_key,
+                                        "sealbox_record_key": record_key,
+                                    },
+                                )
+                        if post_write_conflict is None:
+                            dropped_targets = (
+                                _sealbox_delete_targets_for_credential(
+                                    latest_existing,
+                                    keep_keys=actual_new_keys,
+                                )
+                                if latest_existing is not None
+                                else []
+                            )
+                            queued_by = (
+                                DROPPED_DELETE_QUEUED_BY_FORM
+                                if allow_drop_stored_records
+                                else DROPPED_DELETE_QUEUED_BY_AGENT_CAPTURE
+                            )
+                            _save_catalog_credential(
+                                credential_key,
+                                credential,
+                                scope=resolved_scope,
+                                dropped_sealbox_targets=dropped_targets,
+                                queued_by=queued_by,
+                            )
+                            committed = True
+                            _SECRET_CACHE.clear()
+                            failed_dropped = _delete_and_clear_dropped_targets(
+                                dropped_targets,
+                                scope=resolved_scope,
+                                credential_key=credential_key,
+                                event_name="credential_dropped_sealbox_delete_failed",
+                            )
+                except Exception as exc:  # noqa: BLE001 - roll back Sealbox writes before reporting save failure
+                    if committed:
+                        raise
+                    save_error = exc
+                if post_write_conflict is not None or save_error is not None:
+                    partial_write = False
+                    if write_source == "sealbox":
+                        rollback_catalog = latest_catalog_for_rollback or catalog_snapshot
+                        partial_write = _rollback_new_sealbox_writes(
+                            credential,
+                            written_refs=list(write_result.source_ref_by_field.values()),
+                            existing_keys=existing_keys,
+                            catalog=rollback_catalog,
+                            credential_key=credential_key,
+                            scope=resolved_scope,
+                        )
+                    if post_write_conflict is not None:
+                        if partial_write:
+                            post_write_conflict.content = {
+                                **dict(post_write_conflict.content or {}),
+                                "partial_store_write": True,
+                            }
+                        return post_write_conflict
+                    assert save_error is not None
+                    error_content: dict[str, Any] = {"credential_key": credential_key}
+                    if partial_write:
+                        error_content["partial_store_write"] = True
+                    return ToolResult(
+                        status="error",
+                        error=f"Credential catalog save failed after writing to {write_source}: {save_error}",
+                        content=error_content,
+                    )
+        assert credential is not None
         result_content: dict[str, Any] = {
             "status": "credential_stored",
             "credential_key": credential_key,
@@ -1853,7 +2787,21 @@ def register_existing_source(
                 ),
                 content={"error_code": CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE},
             )
+        top_sealbox_refusal = _agent_record_name_refusal(
+            params,
+            action_name="credential.register_existing_source",
+            forbidden_keys=AGENT_REGISTER_RECORD_NAME_KEYS,
+        )
+        if top_sealbox_refusal is not None:
+            return top_sealbox_refusal
         request_payload = _normalize_existing_source_request_payload(dict(raw_request or params))
+        payload_sealbox_refusal = _agent_record_name_refusal(
+            request_payload,
+            action_name="credential.register_existing_source",
+            forbidden_keys=AGENT_REGISTER_RECORD_NAME_KEYS,
+        )
+        if payload_sealbox_refusal is not None:
+            return payload_sealbox_refusal
         credential_key = _credential_key(request_payload.get("credential_key"))
         precheck_catalog = load_catalog(scope=resolved_scope)
         precheck_existing = precheck_catalog.credentials.get(credential_key)
@@ -1862,7 +2810,8 @@ def register_existing_source(
                 status="error",
                 error=(
                     f"Cannot register an existing source over temporary credential {credential_key}; "
-                    "temporary credentials can only be replaced or cleared through the secure broker form."
+                    "temporary credentials can only be replaced or cleared through the secure broker form "
+                    "(or replaced with credential.capture_file for agent-captured keys)."
                 ),
                 content={
                     "error_code": CREDENTIAL_EXPIRY_FORM_ONLY,
@@ -1890,48 +2839,48 @@ def register_existing_source(
                     },
                 },
             )
-        source_refs_by_field = _normalize_source_refs_by_field(request_payload)
-        requested_sealbox_keys = {
-            record_key
-            for ref in source_refs_by_field.values()
-            if (record_key := _sealbox_record_key(ref))
-        }
-        if precheck_existing is not None:
-            precheck_dropped = _credential_sealbox_record_keys(precheck_existing) - requested_sealbox_keys
-            if precheck_dropped:
-                return _dropped_sealbox_records_form_only_result(credential_key, precheck_dropped)
-        if _pending_dropped_sealbox_conflict(resolved_scope, requested_sealbox_keys) is not None:
-            with _scope_catalog_lock(resolved_scope):
-                precheck_catalog = load_catalog(scope=resolved_scope)
-                pending_conflict = _resolve_pending_dropped_sealbox_conflict(
-                    resolved_scope,
-                    requested_sealbox_keys,
-                    catalog=precheck_catalog,
-                    credential_key=credential_key,
+        field_sealbox_refusal = _agent_record_name_refusal(
+            request_payload,
+            action_name="credential.register_existing_source",
+            forbidden_keys=AGENT_REGISTER_RECORD_NAME_KEYS,
+            field_specs=field_specs,
+        )
+        if field_sealbox_refusal is not None:
+            return field_sealbox_refusal
+        for field_name, field_spec in field_specs.items():
+            if _field_is_secret(field_spec) and _string(field_spec.get("value")):
+                return ToolResult(
+                    status="error",
+                    error=(
+                        f"Secret field {field_name} included a value in the request payload. "
+                        "Submit secret values through the broker form or credential.capture_file only."
+                    ),
+                    content={"error_code": "secret_value_in_request_rejected", "field_ref": field_name},
                 )
-            if pending_conflict is not None:
-                return _pending_dropped_cleanup_conflict_result(credential_key, pending_conflict)
-        shared_temp = _find_shared_sealbox_record(
+        source_refs_by_field = _normalize_source_refs_by_field(request_payload)
+        sealbox_source_refusal = _agent_sealbox_source_refusal(credential_key, source_refs_by_field)
+        if sealbox_source_refusal is not None:
+            return sealbox_source_refusal
+        if precheck_existing is not None:
+            layout_refusal = _agent_existing_key_layout_refusal(
+                action_name="credential.register_existing_source",
+                credential_key=credential_key,
+                existing=precheck_existing,
+                request_payload=request_payload,
+                field_specs=field_specs,
+                active_field_specs=field_specs,
+                allow_secret_rotation=False,
+                source_refs_by_field=source_refs_by_field,
+            )
+            if layout_refusal is not None:
+                return layout_refusal
+        shared_item = _find_shared_password_manager_item(
             precheck_catalog,
             exclude_key=credential_key,
-            target_keys=requested_sealbox_keys,
-            temporary_only=True,
+            refs=source_refs_by_field.values(),
         )
-        if shared_temp is not None:
-            other_key, record_key = shared_temp
-            return ToolResult(
-                status="error",
-                error=(
-                    f"Cannot register {credential_key} against a Sealbox record owned by temporary "
-                    f"credential {other_key}."
-                ),
-                content={
-                    "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
-                    "credential_key": credential_key,
-                    "conflicting_credential_key": other_key,
-                    "sealbox_record_key": record_key,
-                },
-            )
+        if shared_item is not None:
+            return _shared_password_manager_item_result(credential_key, *shared_item)
         public_fields: dict[str, str] = {}
         catalog_fields: dict[str, CatalogCredentialField] = {}
         missing_fields: list[str] = []
@@ -1980,81 +2929,108 @@ def register_existing_source(
                 content={"status": "credential_unavailable", "missing_fields": sorted(missing_fields)},
             )
         with credential_key_lock(resolved_scope, credential_key):
+            existing_sealbox_keys: set[str] = set()
             with _scope_catalog_lock(resolved_scope):
-                catalog = load_catalog(scope=resolved_scope)
-                existing_credential = catalog.credentials.get(credential_key)
-                if existing_credential is not None and existing_credential.expires_at is not None:
-                    return ToolResult(
-                        status="error",
-                        error=(
-                            f"Cannot register an existing source over temporary credential {credential_key}; "
-                            "temporary credentials can only be replaced or cleared through the secure broker form."
+                peek_catalog = load_catalog(scope=resolved_scope)
+                peek_existing = peek_catalog.credentials.get(credential_key)
+                if peek_existing is not None:
+                    existing_sealbox_keys = _credential_sealbox_record_keys(peek_existing)
+            with sealbox_record_locks(resolved_scope, existing_sealbox_keys):
+                with _scope_catalog_lock(resolved_scope):
+                    catalog = load_catalog(scope=resolved_scope)
+                    existing_credential = catalog.credentials.get(credential_key)
+                    if existing_credential is not None and existing_credential.expires_at is not None:
+                        return ToolResult(
+                            status="error",
+                            error=(
+                                f"Cannot register an existing source over temporary credential {credential_key}; "
+                                "temporary credentials can only be replaced or cleared through the secure broker form "
+                                "(or replaced with credential.capture_file for agent-captured keys)."
+                            ),
+                            content={
+                                "error_code": CREDENTIAL_EXPIRY_FORM_ONLY,
+                                "credential_key": credential_key,
+                                "expires_at": existing_credential.expires_at,
+                            },
+                        )
+                    if existing_credential is not None:
+                        locked_layout_refusal = _agent_existing_key_layout_refusal(
+                            action_name="credential.register_existing_source",
+                            credential_key=credential_key,
+                            existing=existing_credential,
+                            request_payload=request_payload,
+                            field_specs=field_specs,
+                            active_field_specs=field_specs,
+                            allow_secret_rotation=False,
+                            source_refs_by_field=source_refs_by_field,
+                        )
+                        if locked_layout_refusal is not None:
+                            return locked_layout_refusal
+                    locked_shared_item = _find_shared_password_manager_item(
+                        catalog,
+                        exclude_key=credential_key,
+                        refs=source_refs_by_field.values(),
+                    )
+                    if locked_shared_item is not None:
+                        return _shared_password_manager_item_result(credential_key, *locked_shared_item)
+                    if existing_credential is not None:
+                        preserved = _preserved_omitted_secret_fields(
+                            existing_credential, set(field_specs)
+                        )
+                        merged_fields: dict[str, CatalogCredentialField] = {}
+                        for existing_name in existing_credential.fields:
+                            if existing_name in catalog_fields:
+                                merged_fields[existing_name] = catalog_fields[existing_name]
+                            elif existing_name in preserved:
+                                merged_fields[existing_name] = preserved[existing_name]
+                        for fn, fobj in catalog_fields.items():
+                            if fn not in merged_fields:
+                                merged_fields[fn] = fobj
+                    else:
+                        merged_fields = dict(catalog_fields)
+                    now = utc_now_iso()
+                    if context is not None and (
+                        _string(context.named_agent_type) or _string(context.agent_id)
+                    ):
+                        approval_record: dict[str, Any] = {
+                            "status": "registered_by_agent",
+                            "source": "existing_source_registration",
+                            "recorded_by": "agent",
+                            "agent_type": _string(context.named_agent_type or context.agent_id) or "agent",
+                            "for_person_id": _string(context.canonical_user_id),
+                            "recorded_at": now,
+                        }
+                    else:
+                        approval_record = {
+                            "status": "approved",
+                            "approved_by": "user",
+                            "approved_at": now,
+                            "remember": True,
+                            "source": "existing_source_registration",
+                        }
+                    credential = CatalogCredential(
+                        display_name=_string(request_payload.get("display_name"))
+                        or (existing_credential.display_name if existing_credential is not None else credential_key),
+                        purpose=_string(request_payload.get("purpose"))
+                        or (
+                            existing_credential.purpose
+                            if existing_credential is not None
+                            else "Credential registered from an existing broker-local source."
                         ),
-                        content={
-                            "error_code": CREDENTIAL_EXPIRY_FORM_ONLY,
-                            "credential_key": credential_key,
-                            "expires_at": existing_credential.expires_at,
-                        },
+                        created_at=existing_credential.created_at if existing_credential is not None else now,
+                        updated_at=now,
+                        approval=approval_record,
+                        fields=merged_fields,
                     )
-                pending_conflict = _resolve_pending_dropped_sealbox_conflict(
-                    resolved_scope,
-                    requested_sealbox_keys,
-                    catalog=catalog,
-                    credential_key=credential_key,
-                )
-                if pending_conflict is not None:
-                    return _pending_dropped_cleanup_conflict_result(credential_key, pending_conflict)
-                shared_temp = _find_shared_sealbox_record(
-                    catalog,
-                    exclude_key=credential_key,
-                    target_keys=requested_sealbox_keys,
-                    temporary_only=True,
-                )
-                if shared_temp is not None:
-                    other_key, record_key = shared_temp
-                    return ToolResult(
-                        status="error",
-                        error=(
-                            f"Cannot register {credential_key} against a Sealbox record owned by temporary "
-                            f"credential {other_key}."
-                        ),
-                        content={
-                            "error_code": CREDENTIAL_EXPIRY_SHARED_RECORD,
-                            "credential_key": credential_key,
-                            "conflicting_credential_key": other_key,
-                            "sealbox_record_key": record_key,
-                        },
-                    )
-                now = utc_now_iso()
-                credential = CatalogCredential(
-                    display_name=_string(request_payload.get("display_name"))
-                    or (existing_credential.display_name if existing_credential is not None else credential_key),
-                    purpose=_string(request_payload.get("purpose"))
-                    or (
-                        existing_credential.purpose
-                        if existing_credential is not None
-                        else "Credential registered from an existing broker-local source."
-                    ),
-                    created_at=existing_credential.created_at if existing_credential is not None else now,
-                    updated_at=now,
-                    approval={
-                        "status": "approved",
-                        "approved_by": "user",
-                        "approved_at": now,
-                        "remember": True,
-                        "source": "existing_source_registration",
-                    },
-                    fields=catalog_fields,
-                )
-                if existing_credential is not None:
-                    actual_dropped_keys = (
-                        _credential_sealbox_record_keys(existing_credential)
-                        - _credential_sealbox_record_keys(credential)
-                    )
-                    if actual_dropped_keys:
-                        return _dropped_sealbox_records_form_only_result(credential_key, actual_dropped_keys)
-                _save_catalog_credential(credential_key, credential, scope=resolved_scope)
-                _SECRET_CACHE.clear()
+                    if existing_credential is not None:
+                        actual_dropped_keys = (
+                            _credential_sealbox_record_keys(existing_credential)
+                            - _credential_sealbox_record_keys(credential)
+                        )
+                        if actual_dropped_keys:
+                            return _dropped_sealbox_records_form_only_result(credential_key, actual_dropped_keys)
+                    _save_catalog_credential(credential_key, credential, scope=resolved_scope)
+                    _SECRET_CACHE.clear()
         result_content: dict[str, Any] = {
             "status": "credential_stored",
             "credential_key": credential_key,
@@ -2183,6 +3159,8 @@ def write_credential_to_source(
     generated_secret_fields: set[str] | None = None,
     scope: CredentialOwnerScope,
     ttl_seconds: int | None = None,
+    existing_sealbox_targets: Mapping[str, tuple[str, str]] | None = None,
+    require_new_bitwarden_item: bool = False,
 ) -> CredentialWriteResult | ToolResult:
     source = normalize_credential_source_name(write_source)
     if ttl_seconds is not None:
@@ -2211,6 +3189,7 @@ def write_credential_to_source(
             request_payload=request_payload,
             values=values,
             field_specs=field_specs,
+            require_new_item=require_new_bitwarden_item,
         )
     if source == "sealbox":
         return _write_sealbox_credential(
@@ -2221,6 +3200,7 @@ def write_credential_to_source(
             generated_secret_fields=generated_secret_fields or set(),
             scope=scope,
             ttl_seconds=int(ttl_seconds) if ttl_seconds is not None else None,
+            existing_sealbox_targets=existing_sealbox_targets,
         )
     return ToolResult(
         status="error",
@@ -2267,6 +3247,7 @@ def _write_sealbox_credential(
     generated_secret_fields: set[str],
     scope: CredentialOwnerScope,
     ttl_seconds: int | None = None,
+    existing_sealbox_targets: Mapping[str, tuple[str, str]] | None = None,
 ) -> CredentialWriteResult | ToolResult:
     tenant_env = sealbox_tenant_environment(
         scope_kind=scope.scope_kind,
@@ -2276,6 +3257,7 @@ def _write_sealbox_credential(
     if isinstance(tenant_env, ToolResult):
         return tenant_env
     item_key = _sealbox_catalog_key(credential_key, request_payload)
+    targets = existing_sealbox_targets or {}
     # Pre-check every non-generated secret field before the first Sealbox write
     # so a refusal never leaves partial secrets behind.
     for field_name, spec in field_specs.items():
@@ -2290,63 +3272,97 @@ def _write_sealbox_credential(
     refs: dict[str, CatalogSourceRef] = {}
     username = _first_value_by_kind(values, field_specs, {"username", "email", "login"})
     password_field = _secret_password_field_name(field_specs)
-    if password_field and username:
-        result = _sealbox_set_credential(
-            key=item_key,
-            username=username,
-            password=None if password_field in generated_secret_fields else values.get(password_field, ""),
-            field_spec=field_specs.get(password_field, {}),
-            generated=password_field in generated_secret_fields,
-            env=tenant_env,
-            ttl_seconds=ttl_seconds,
-        )
-        if isinstance(result, ToolResult):
-            return result
-        refs[password_field] = CatalogSourceRef(
-            source="sealbox",
-            item_id=item_key,
-            item_name=item_key,
-            field_ref="password",
-        )
-    elif password_field:
-        field_key = f"{item_key}:{safe_key_component(_field_storage_ref(password_field, field_specs.get(password_field, {})))}"
-        result = _sealbox_set_secret_field(
-            key=field_key,
-            value=values.get(password_field, ""),
-            field_spec=field_specs.get(password_field, {}),
-            generated=password_field in generated_secret_fields,
-            env=tenant_env,
-            ttl_seconds=ttl_seconds,
-        )
-        if isinstance(result, ToolResult):
-            return result
-        refs[password_field] = CatalogSourceRef(
-            source="sealbox",
-            item_id=field_key,
-            item_name=field_key,
-            field_ref="value",
-        )
+    if password_field:
+        pw_override = targets.get(password_field)
+        if pw_override is not None:
+            pw_key, pw_kind = pw_override
+            write_as_credential = pw_kind == "credential"
+        else:
+            write_as_credential = bool(username)
+            pw_key = (
+                item_key
+                if write_as_credential
+                else f"{item_key}:{safe_key_component(_field_storage_ref(password_field, field_specs.get(password_field, {})))}"
+            )
+        if write_as_credential:
+            result = _sealbox_set_credential(
+                key=pw_key,
+                username=username or "",
+                password=None if password_field in generated_secret_fields else values.get(password_field, ""),
+                field_spec=field_specs.get(password_field, {}),
+                generated=password_field in generated_secret_fields,
+                env=tenant_env,
+                ttl_seconds=ttl_seconds,
+            )
+            if isinstance(result, ToolResult):
+                return result
+            refs[password_field] = CatalogSourceRef(
+                source="sealbox",
+                item_id=pw_key,
+                item_name=pw_key,
+                field_ref="password",
+            )
+        else:
+            result = _sealbox_set_secret_field(
+                key=pw_key,
+                value=values.get(password_field, ""),
+                field_spec=field_specs.get(password_field, {}),
+                generated=password_field in generated_secret_fields,
+                env=tenant_env,
+                ttl_seconds=ttl_seconds,
+            )
+            if isinstance(result, ToolResult):
+                return result
+            refs[password_field] = CatalogSourceRef(
+                source="sealbox",
+                item_id=pw_key,
+                item_name=pw_key,
+                field_ref="value",
+            )
     for field_name, spec in field_specs.items():
         if field_name == password_field or not _field_is_secret(spec):
             continue
-        field_ref = safe_key_component(_field_storage_ref(field_name, spec), fallback=field_name)
-        field_key = f"{item_key}:{field_ref}"
-        result = _sealbox_set_secret_field(
-            key=field_key,
-            value=values.get(field_name, ""),
-            field_spec=spec,
-            generated=field_name in generated_secret_fields,
-            env=tenant_env,
-            ttl_seconds=ttl_seconds,
-        )
-        if isinstance(result, ToolResult):
-            return result
-        refs[field_name] = CatalogSourceRef(
-            source="sealbox",
-            item_id=field_key,
-            item_name=field_key,
-            field_ref="value",
-        )
+        field_override = targets.get(field_name)
+        if field_override is not None:
+            field_key, field_kind = field_override
+        else:
+            field_ref = safe_key_component(_field_storage_ref(field_name, spec), fallback=field_name)
+            field_key, field_kind = f"{item_key}:{field_ref}", "secret"
+        if field_kind == "credential":
+            result = _sealbox_set_credential(
+                key=field_key,
+                username=username or "",
+                password=None if field_name in generated_secret_fields else values.get(field_name, ""),
+                field_spec=spec,
+                generated=field_name in generated_secret_fields,
+                env=tenant_env,
+                ttl_seconds=ttl_seconds,
+            )
+            if isinstance(result, ToolResult):
+                return result
+            refs[field_name] = CatalogSourceRef(
+                source="sealbox",
+                item_id=field_key,
+                item_name=field_key,
+                field_ref="password",
+            )
+        else:
+            result = _sealbox_set_secret_field(
+                key=field_key,
+                value=values.get(field_name, ""),
+                field_spec=spec,
+                generated=field_name in generated_secret_fields,
+                env=tenant_env,
+                ttl_seconds=ttl_seconds,
+            )
+            if isinstance(result, ToolResult):
+                return result
+            refs[field_name] = CatalogSourceRef(
+                source="sealbox",
+                item_id=field_key,
+                item_name=field_key,
+                field_ref="value",
+            )
     return CredentialWriteResult(source="sealbox", source_ref_by_field=refs, item_id=item_key, item_name=item_key)
 
 
@@ -2431,7 +3447,15 @@ def _write_bitwarden_login_item(
     request_payload: Mapping[str, Any],
     values: Mapping[str, str],
     field_specs: Mapping[str, Mapping[str, Any]],
+    require_new_item: bool = False,
 ) -> CredentialWriteResult | ToolResult:
+    """Create or edit the Bitwarden login item for ``credential_key``.
+
+    ``require_new_item`` (agent ``credential.collect`` of a new key) refuses an
+    item that already exists, because the broker's Bitwarden session is shared
+    and the derived item name of a new key can match another owner's item.
+    """
+
     executable = shutil.which("bw")
     if not executable:
         return ToolResult(status="error", error="Required CLI is not installed or not on PATH: bw")
@@ -2452,6 +3476,27 @@ def _write_bitwarden_login_item(
         if isinstance(parsed, Mapping):
             existing_item = parsed
             item_id = _string(parsed.get("id")) or None
+        if require_new_item:
+            _LOGGER.warning(
+                "Agent credential save refused an existing Bitwarden item. "
+                "event=credential_agent_bitwarden_item_exists credential_key=%s",
+                credential_key,
+            )
+            return ToolResult(
+                status="error",
+                error=(
+                    f"A Bitwarden item named {item_name!r} already exists, so an agent cannot create "
+                    f"{credential_key} there. The item may belong to another saved key or be left over "
+                    "from an earlier save or a deleted key; the person can remove it in Bitwarden. "
+                    "Choose another credential key, or ask the person to use the secure broker form "
+                    "(secure_credential_collection_request)."
+                ),
+                content={
+                    "error_code": CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+                    "credential_key": credential_key,
+                    "form_creation_action": "secure_credential_collection_request",
+                },
+            )
     payload = _bitwarden_login_payload(
         item_name=item_name,
         request_payload=request_payload,
@@ -2643,14 +3688,18 @@ def build_catalog_credential(
     public_fields: Mapping[str, str],
     write_result: CredentialWriteResult,
     expires_at: str | None = None,
+    approval: Mapping[str, Any] | None = None,
+    preserved_fields: Mapping[str, CatalogCredentialField] | None = None,
+    existing_field_order: tuple[str, ...] | None = None,
+    created_at: str | None = None,
 ) -> CatalogCredential:
-    fields: dict[str, CatalogCredentialField] = {}
+    built_fields: dict[str, CatalogCredentialField] = {}
     for field_name, spec in field_specs.items():
         kind = _string(spec.get("kind")) or "custom"
         secret = _field_is_secret(spec)
         if secret:
             source_ref = write_result.source_ref_by_field.get(field_name)
-            fields[field_name] = CatalogCredentialField(
+            built_fields[field_name] = CatalogCredentialField(
                 kind=kind,
                 visibility="secret",
                 value_source=_string(spec.get("value_source")) or "store_generated_or_user_submitted_secret",
@@ -2658,25 +3707,46 @@ def build_catalog_credential(
                 resolution_order=[source_ref] if source_ref else [],
             )
         else:
-            fields[field_name] = CatalogCredentialField(
+            built_fields[field_name] = CatalogCredentialField(
                 kind=kind,
                 visibility=_string(spec.get("visibility")) or "metadata_visible",
                 value_source=_string(spec.get("value_source")) or "user_or_agent_supplied_metadata",
                 value=public_fields.get(field_name) or _string(spec.get("value")) or None,
             )
+    if preserved_fields:
+        fields: dict[str, CatalogCredentialField] = {}
+        ordered_names = list(existing_field_order or ())
+        for name in ordered_names:
+            if name in built_fields:
+                fields[name] = built_fields[name]
+            elif name in preserved_fields:
+                fields[name] = preserved_fields[name].model_copy(deep=True)
+        for name, field_obj in built_fields.items():
+            if name not in fields:
+                fields[name] = field_obj
+        for name, field_obj in preserved_fields.items():
+            if name not in fields:
+                fields[name] = field_obj.model_copy(deep=True)
+    else:
+        fields = built_fields
     now = utc_now_iso()
-    return CatalogCredential(
-        display_name=_string(request_payload.get("display_name")) or credential_key,
-        purpose=_string(request_payload.get("purpose")) or "Credential collected for approved agent workflow.",
-        created_at=now,
-        updated_at=now,
-        expires_at=expires_at,
-        approval={
+    approval_record = (
+        dict(approval)
+        if approval is not None
+        else {
             "status": "approved",
             "approved_by": "user",
             "approved_at": now,
             "remember": True,
-        },
+        }
+    )
+    return CatalogCredential(
+        display_name=_string(request_payload.get("display_name")) or credential_key,
+        purpose=_string(request_payload.get("purpose")) or "Credential collected for approved agent workflow.",
+        created_at=created_at or now,
+        updated_at=now,
+        expires_at=expires_at,
+        approval=approval_record,
         fields=fields,
     )
 
@@ -3035,76 +4105,80 @@ def delete_credential(
                     },
                 )
 
-            if before_delete is not None:
-                # Runs under credential_key_lock after compare-and-delete verification
-                # and before deleting Sealbox records or the catalog row so a hook
-                # failure (e.g. link revocation or notice delivery) leaves the row for retry.
-                hook_result = before_delete()
-                if isinstance(hook_result, ToolResult):
-                    return hook_result
-            elif before_delete_credential is not None and credential is not None:
-                hook_result = before_delete_credential(resolved_scope, credential_key, credential)
-                if isinstance(hook_result, ToolResult):
-                    return hook_result
+            delete_targets = _sealbox_delete_targets(refs) if refs else []
+            with sealbox_record_locks(resolved_scope, [item_key for item_key, _ in delete_targets]):
+                if before_delete is not None:
+                    # Runs under credential_key_lock and sealbox_record_locks after
+                    # compare-and-delete verification and before deleting Sealbox
+                    # records or the catalog row so a hook failure (e.g. link
+                    # revocation or notice delivery) leaves the row for retry.
+                    hook_result = before_delete()
+                    if isinstance(hook_result, ToolResult):
+                        return hook_result
+                elif before_delete_credential is not None and credential is not None:
+                    hook_result = before_delete_credential(resolved_scope, credential_key, credential)
+                    if isinstance(hook_result, ToolResult):
+                        return hook_result
 
-            deleted_refs: list[dict[str, Any]] = []
-            if refs:
-                tenant_env = sealbox_tenant_environment(
-                    scope_kind=resolved_scope.scope_kind,
-                    owner_id=resolved_scope.owner_id,
-                    provision=False,
-                )
-                if isinstance(tenant_env, ToolResult):
-                    return tenant_env
-                for item_key, item_kind in _sealbox_delete_targets(refs):
-                    deleted = delete_sealbox_item(item_key=item_key, item_kind=item_kind, env=tenant_env)
-                    if isinstance(deleted, ToolResult):
-                        return deleted
-                    deleted_ref = {
-                        "source": deleted["source"],
-                        "item_key": deleted["item_key"],
-                        "item_kind": deleted["item_kind"],
-                    }
-                    if deleted.get("already_absent"):
-                        deleted_ref["already_absent"] = True
-                    if deleted.get("delete_command_fallback"):
-                        deleted_ref["delete_command_fallback"] = deleted["delete_command_fallback"]
-                    deleted_refs.append(deleted_ref)
-
-            if removed_catalog_entry:
-                if compare_and_delete:
-                    assert expected_updated_at is not None
-                    deleted_row = store.delete_credential_if_unchanged(
-                        resolved_scope,
-                        credential_key,
-                        expected_updated_at=expected_updated_at,
-                        expected_expires_at=expected_expires_at,
+                deleted_refs: list[dict[str, Any]] = []
+                if delete_targets:
+                    tenant_env = sealbox_tenant_environment(
+                        scope_kind=resolved_scope.scope_kind,
+                        owner_id=resolved_scope.owner_id,
+                        provision=False,
                     )
-                    if not deleted_row:
-                        _SECRET_CACHE.clear()
-                        return ToolResult(
-                            status="success",
-                            content={
-                                "status": "credential_changed",
-                                "deleted": False,
-                                "credential_key": credential_key,
-                                "removed_catalog_entry": False,
-                            },
-                        )
-                else:
-                    _delete_catalog_credential(credential_key, scope=resolved_scope)
-            _SECRET_CACHE.clear()
-            return ToolResult(
-                status="success",
-                content={
-                    "status": "credential_deleted",
-                    "deleted": True,
-                    "credential_key": credential_key,
-                    "removed_catalog_entry": removed_catalog_entry,
-                    "deleted_source_refs": deleted_refs,
-                    "message": f"Credential {credential_key} was deleted.",
-                },
-            )
+                    if isinstance(tenant_env, ToolResult):
+                        return tenant_env
+                    for item_key, item_kind in delete_targets:
+                        deleted = delete_sealbox_item(item_key=item_key, item_kind=item_kind, env=tenant_env)
+                        if isinstance(deleted, ToolResult):
+                            return deleted
+                        deleted_ref = {
+                            "source": deleted["source"],
+                            "item_key": deleted["item_key"],
+                            "item_kind": deleted["item_kind"],
+                        }
+                        if deleted.get("already_absent"):
+                            deleted_ref["already_absent"] = True
+                        if deleted.get("delete_command_fallback"):
+                            deleted_ref["delete_command_fallback"] = deleted["delete_command_fallback"]
+                        deleted_refs.append(deleted_ref)
+
+                if removed_catalog_entry:
+                    with _scope_catalog_lock(resolved_scope):
+                        if compare_and_delete:
+                            assert expected_updated_at is not None
+                            deleted_row = store.delete_credential_if_unchanged(
+                                resolved_scope,
+                                credential_key,
+                                expected_updated_at=expected_updated_at,
+                                expected_expires_at=expected_expires_at,
+                            )
+                            if not deleted_row:
+                                _SECRET_CACHE.clear()
+                                return ToolResult(
+                                    status="success",
+                                    content={
+                                        "status": "credential_changed",
+                                        "deleted": False,
+                                        "credential_key": credential_key,
+                                        "removed_catalog_entry": False,
+                                    },
+                                )
+                        else:
+                            _delete_catalog_credential(credential_key, scope=resolved_scope)
+                _SECRET_CACHE.clear()
+                return ToolResult(
+                    status="success",
+                    content={
+                        "status": "credential_deleted",
+                        "deleted": True,
+                        "credential_key": credential_key,
+                        "removed_catalog_entry": removed_catalog_entry,
+                        "deleted_source_refs": deleted_refs,
+                        "message": f"Credential {credential_key} was deleted.",
+                    },
+                )
     except Exception as exc:
         return ToolResult(status="error", error=f"Credential deletion failed: {exc}")
 
@@ -4075,12 +5149,38 @@ def execute_credential_catalog_action(action: ValidatedAction, context: ToolCont
                     ),
                     content={"error_code": CREDENTIAL_EXPIRY_FORM_ONLY},
                 )
+            top_record_refusal = _agent_record_name_refusal(
+                params,
+                action_name="credential.collect",
+                forbidden_keys=AGENT_COLLECT_RECORD_NAME_KEYS,
+            )
+            if top_record_refusal is not None:
+                return top_record_refusal
             request_payload = dict(raw_request or params)
-            submitted_fields = dict(params.get("submitted_fields") or params.get("fields_values") or {})
+            raw_submitted = params.get("submitted_fields")
+            if raw_submitted is None:
+                raw_submitted = params.get("fields_values")
+            if raw_submitted is not None and not isinstance(raw_submitted, Mapping):
+                return ToolResult(
+                    status="error",
+                    error="submitted_fields must be a mapping of metadata field names to values.",
+                    content={"error_code": "secret_value_in_request_rejected"},
+                )
+            submitted_fields = dict(raw_submitted or {})
+            agent_approval = {
+                "status": "agent_generated",
+                "source": "agent_credential_collect",
+                "recorded_by": "agent",
+                "agent_type": _string(context.named_agent_type or context.agent_id) or "agent",
+                "for_person_id": _string(context.canonical_user_id),
+                "recorded_at": utc_now_iso(),
+            }
             return collect_credential(
                 request_payload,
                 {str(k): str(v) for k, v in submitted_fields.items()},
                 context=context,
+                allow_submitted_secrets=False,
+                approval=agent_approval,
             )
         if action.action == "credential.register_existing_source":
             return register_existing_source(params, context=context)
@@ -4111,6 +5211,11 @@ def execute_credential_catalog_action(action: ValidatedAction, context: ToolCont
             return ToolResult(
                 status="error",
                 error="signup.manual_fallback_session is available through the broker HTTP session API, not secure_cli.",
+            )
+        if action.action == "credential.capture_file":
+            return ToolResult(
+                status="error",
+                error="credential.capture_file runs through the broker executor with the active access gate.",
             )
     except Exception as exc:
         return ToolResult(status="error", error=f"credential_catalog.{action.action} failed: {exc}")

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from access_control import safe_open
+from access_control.folders import FolderRoots
 from access_control.safe_open import UnsafePath
 from runtime_settings.instance_layout import InstanceLayout, WorkspaceScope
 
@@ -41,27 +42,72 @@ class TaskFileRejected(ValueError):
 
 
 @dataclass(frozen=True)
-class _Located:
+class LocatedTaskFile:
     root: Path  # one of the scope roots
     parts: tuple[str, ...]  # components below the root
     display: Path
+    # Folder id derived from the normalized path text only (no filesystem check).
+    # It names the real file only once opened through access_control.safe_open,
+    # so callers must decide folder access first and open only via safe_open,
+    # never via display.
+    folder_id: str
 
 
-def _locate(raw: str, scope: WorkspaceScope) -> _Located:
+def _task_scope(*, instance_root: str | None, person_id: str | None) -> WorkspaceScope:
+    root = str(instance_root or "").strip()
+    if not root:
+        raise TaskFileRejected(
+            "Local files are not available through the broker here: the instance root is unknown."
+        )
+    return InstanceLayout.at(root).scope_for(person_id)
+
+
+def _require_file(located: LocatedTaskFile) -> LocatedTaskFile:
+    if not located.parts:
+        raise TaskFileRejected(f"A task folder is not a file: {located.folder_id}")
+    return located
+
+
+def _locate(raw: str, scope: WorkspaceScope) -> LocatedTaskFile:
     text = str(raw or "").strip()
     if not text:
         raise TaskFileRejected("A local file path is empty.")
+    if "\x00" in text:
+        raise TaskFileRejected("A local file path cannot contain NUL bytes.")
     candidate = Path(text).expanduser()
     if not candidate.is_absolute():
         candidate = scope.home / candidate
     normalized = Path(os.path.normpath(candidate))
+    folder_roots = FolderRoots(scope.workspaces_dir)
     for root in scope.roots:
         if normalized == root or root in normalized.parents:
-            return _Located(root, normalized.relative_to(root).parts, normalized)
+            parts = normalized.relative_to(root).parts
+            folder_id = folder_roots.folder_id_of(normalized)
+            if folder_id is None:
+                break
+            return LocatedTaskFile(root, parts, normalized, folder_id)
     raise TaskFileRejected(
-        f"Local files must be in this task's folders ({scope.home} or the shared team/ "
-        f"and agents/ folders): {normalized}"
+        "Local files must be inside this task's folders (the person's workspace folder "
+        "or the shared team/ and agents/ folders)."
     )
+
+
+def locate_task_file(
+    raw: str,
+    *,
+    instance_root: str | None,
+    person_id: str | None,
+) -> LocatedTaskFile:
+    """Resolve one file path inside the task person's folders from path text only.
+
+    Does not touch the filesystem: ``folder_id`` names the real file only when
+    the caller enforces any folder decision on it and then opens or deletes the
+    file exclusively through ``access_control.safe_open`` using ``root`` and
+    ``parts`` (never ``display``).
+    """
+
+    scope = _task_scope(instance_root=instance_root, person_id=person_id)
+    return _require_file(_locate(raw, scope))
 
 
 @contextmanager
@@ -72,7 +118,7 @@ def _rejected_when_unsafe() -> Iterator[None]:
         raise TaskFileRejected(str(exc)) from exc
 
 
-def _require_folder(located: _Located, parts: tuple[str, ...]) -> None:
+def _require_folder(located: LocatedTaskFile, parts: tuple[str, ...]) -> None:
     """The folder ``root/parts`` must exist now and be reached without links."""
 
     with _rejected_when_unsafe():
@@ -85,17 +131,12 @@ class TaskFileStage:
 
     scope: WorkspaceScope
     temp_dir: Path
-    _outputs: list[tuple[Path, _Located, bool]] = field(default_factory=list)
+    _outputs: list[tuple[Path, LocatedTaskFile, bool]] = field(default_factory=list)
     _counter: int = 0
 
     @classmethod
     def create(cls, *, instance_root: str | None, person_id: str | None) -> "TaskFileStage":
-        root = str(instance_root or "").strip()
-        if not root:
-            raise TaskFileRejected(
-                "Local files are not available through the broker here: the instance root is unknown."
-            )
-        scope = InstanceLayout.at(root).scope_for(person_id)
+        scope = _task_scope(instance_root=instance_root, person_id=person_id)
         temp_dir = Path(tempfile.mkdtemp(prefix="ua-broker-files-"))
         os.chmod(temp_dir, 0o700)
         return cls(scope=scope, temp_dir=temp_dir)
@@ -109,9 +150,7 @@ class TaskFileStage:
     def input_file(self, raw: str) -> str:
         """Copy a file from the task's folders; returns the private copy's path."""
 
-        located = _locate(raw, self.scope)
-        if not located.parts:
-            raise TaskFileRejected(f"A task folder is not a file: {located.display}")
+        located = _require_file(_locate(raw, self.scope))
         target = self._slot() / located.parts[-1]
         with _rejected_when_unsafe():
             safe_open.copy_file(located.root, located.parts, target, max_bytes=MAX_STAGED_FILE_BYTES)
@@ -122,7 +161,7 @@ class TaskFileStage:
 
         located = _locate(raw, self.scope)
         if not located.parts:
-            raise TaskFileRejected(f"Give a file name inside the task folder: {located.display}")
+            raise TaskFileRejected(f"Give a file name inside the task folder: {located.folder_id}")
         _require_folder(located, located.parts[:-1])
         target = self._slot() / located.parts[-1]
         self._outputs.append((target, located, False))
@@ -163,7 +202,7 @@ class TaskFileStage:
         return written
 
     @staticmethod
-    def _write_into(located: _Located, parts: tuple[str, ...], source: Path) -> None:
+    def _write_into(located: LocatedTaskFile, parts: tuple[str, ...], source: Path) -> None:
         """Write a new file, or replace a one-link regular file in one rename; never through a link."""
 
         with _rejected_when_unsafe():
@@ -174,4 +213,10 @@ class TaskFileStage:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
-__all__ = ["MAX_STAGED_FILE_BYTES", "TaskFileRejected", "TaskFileStage"]
+__all__ = [
+    "LocatedTaskFile",
+    "MAX_STAGED_FILE_BYTES",
+    "TaskFileRejected",
+    "TaskFileStage",
+    "locate_task_file",
+]

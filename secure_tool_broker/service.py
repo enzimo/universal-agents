@@ -91,6 +91,7 @@ from secure_tool_broker.defaults import (
     AUTH_PAGE_STATUS_ROUTE,
     DEFAULT_API_REQUEST_USER_AGENT,
     EXECUTION_SSH_ROUTE_PREFIX,
+    credential_max_file_bytes,
     is_decline,
     ONBOARDING_ACCOUNT_KEYS_ROUTE,
     PERSON_CREDENTIAL_DELETION_ROUTE,
@@ -1065,6 +1066,8 @@ class SecureToolBrokerService:
             context,
             team_id=self._access_gate.team_id,
             work_id=gate.work_id,
+            person_roles=gate.person_roles,
+            schedule_id=gate.schedule_id,
             account_link=gate.account_link,
             gate_link=gate.gate_link,
             api_request_user_agent=self._api_request_user_agent,
@@ -1108,7 +1111,9 @@ class SecureToolBrokerService:
                 tool_context=context,
                 session_status="manual_signup_required",
             )
-        result = await asyncio.to_thread(execute_validated_action, validated, context)
+        result = await asyncio.to_thread(
+            execute_validated_action, validated, context, access_gate=self._access_gate
+        )
         # The person's last known tool setup state (access_control.tool_setup_states).
         await asyncio.to_thread(note_broker_result, self._access_gate, validated, context, result)
         body = {"status": result.status, "content": dict(result.content)}
@@ -1432,18 +1437,6 @@ class SecureToolBrokerService:
             return max(60, min(int(raw), 86_400))
         except ValueError:
             return 900
-
-    @staticmethod
-    def _credential_collection_max_file_bytes() -> int:
-        raw = str(
-            os.getenv("SECURE_TOOL_BROKER_CREDENTIAL_COLLECTION_MAX_FILE_BYTES") or ""
-        ).strip()
-        if not raw:
-            return 262_144
-        try:
-            return max(1, min(int(raw), 1_048_576))
-        except ValueError:
-            return 262_144
 
     @staticmethod
     def _credential_field_specs(
@@ -2013,7 +2006,7 @@ class SecureToolBrokerService:
         parsed = parse_credential_collection_submission(
             form,
             request_payload=session.request_payload,
-            max_file_bytes=self._credential_collection_max_file_bytes(),
+            max_file_bytes=credential_max_file_bytes(),
         )
         if parsed.expiry_error is not None:
             self._logger.warning(

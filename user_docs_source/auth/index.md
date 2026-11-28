@@ -124,6 +124,52 @@ Once the expiry time passes:
   and working, and the broker queued the earlier record(s) for automatic
   deletion within 6 hours.
 
+An agent working for you can also save a temporary secret it already holds in a
+file in your workspace (such as an auth file written during a sandbox sign-in or
+a temporary password written to your `scratch/` folder) directly into your
+Sealbox credential store through `credential.capture_file`:
+
+- The broker reads a secret already on disk (such as a sandbox sign-in auth
+  file) directly so its value never passes through a tool parameter or reply.
+  The one owner-accepted exception is a temporary password or token the agent
+  already holds as text: the agent may write it once to your `scratch/` folder
+  with the file tool and capture it immediately with `credential.capture_file`
+  (which deletes the file); agents still never pass secret values in
+  `credential.capture_file`, `credential.collect`, other broker tool
+  parameters, or replies.
+- Agent-captured credentials always expire (between 5 minutes and 3 months
+  ahead) and obey the same immediate expiry checks and 6-hour janitor cleanup as
+  form-entered temporary credentials.
+- The broker deletes the source file right after saving succeeds (leaving it in
+  place if the save is refused, fails, or the file changed after reading, and
+  reporting if it was already gone).
+- An agent can only capture into your own personal credential store, never the
+  team's, and `credential.capture_file` refuses to overwrite a credential you
+  entered yourself, an external-source credential, or a team credential.
+  Agent-callable `credential.collect` and `credential.register_existing_source`
+  also enforce the same rule over existing keys: no field may be added,
+  removed, or changed between secret and metadata, only existing non-secret
+  metadata values may change, and every existing secret field either stays
+  untouched (agents may omit it from the request, or in
+  `credential.register_existing_source` repeat its exact existing environment
+  variable or password-manager reference) or, in `credential.collect` only,
+  rotates to a store-generated value on its existing stored record. Agents
+  cannot rotate a secret that was registered from an existing source, and
+  cannot change a credential an agent captured from a file except by capturing
+  a new file. Agent-callable saves refuse agent-submitted secret values and
+  never let an agent name where a secret is stored: no Sealbox record names
+  (`item_id`, `sealbox_key`), no Bitwarden item names on `credential.collect`,
+  no Sealbox records at all on `credential.register_existing_source`, and no
+  password-manager item or Sealbox record that another saved credential uses.
+  This keeps an agent from overwriting your stored sign-ins or another
+  credential's secret (only your secure forms, account-link forms,
+  `credential.capture_file`, and store-native secret generation can store a
+  secret). Every agent write records agent provenance rather than your
+  approval.
+- You receive one Inbox notice naming the agent type, credential display name,
+  and deletion time (with no secret value). Operators can turn off capture
+  notices with `security_layer.credential_catalog.notify_on_agent_capture: false`.
+
 ## What Is Sent to the Agent
 
 Credential material is submitted directly to the secure broker. The agent sees

@@ -10,6 +10,7 @@ from pydantic import ValidationInfo, BaseModel, Field, field_validator, model_va
 from runtime_settings.code_sandbox_contract import CODE_SANDBOX_MODES, CODE_SANDBOX_REQUIRED
 from default_values import SECURITY_LAYER_DEFAULTS
 from runtime_settings.common import _normalized_optional_string
+from runtime_settings.values import parse_bool_env_value
 
 
 class CodeExecutionSecuritySettings(BaseModel):
@@ -213,6 +214,9 @@ class CredentialCatalogSettings(BaseModel):
     secret_cache_ttl_seconds: int = (
         SECURITY_LAYER_DEFAULTS.credential_catalog_secret_cache_ttl_seconds.value
     )
+    notify_on_agent_capture: bool = (
+        SECURITY_LAYER_DEFAULTS.credential_catalog_notify_on_agent_capture.value
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -286,6 +290,23 @@ class CredentialCatalogSettings(BaseModel):
                 "credential catalog secret cache TTL must be non-negative."
             )
         return parsed
+
+    @field_validator("notify_on_agent_capture", mode="before")
+    @classmethod
+    def _validate_notify_on_agent_capture(cls, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            try:
+                return parse_bool_env_value(
+                    "security_layer.credential_catalog.notify_on_agent_capture",
+                    value,
+                )
+            except ValueError:
+                pass
+        raise ValueError(
+            "security_layer.credential_catalog.notify_on_agent_capture must be a boolean."
+        )
 
 
 # Settings of the single-tenant Sealbox setup and of the one-time takeover of

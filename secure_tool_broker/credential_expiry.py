@@ -16,9 +16,10 @@ from secure_tool_broker.credential_diagnostics import (
     CREDENTIAL_EXPIRED,
 )
 
-# The form requires a chosen deletion time to be at least 5 minutes in the
-# future. Storage paths (transfer import, automated capture, live tests) only
-# require a timestamp strictly in the future so short TTLs remain possible.
+# Both the secure form and agent file capture require a chosen deletion time to
+# be at least 5 minutes in the future. Lower-level storage paths (transfer
+# import, live tests) only require a timestamp strictly in the future so short
+# TTLs remain possible.
 MIN_EXPIRY_LEAD_SECONDS = 300
 
 CUSTOM_EXPIRY_OPTION = "custom"
@@ -34,6 +35,12 @@ EXPIRY_PRESET_SECONDS: dict[str, int] = {
     "90d": 90 * 24 * 60 * 60,
 }
 
+# Owner decision (2026-11-26): agent-captured temporary credentials always
+# expire, at least 5 minutes and at most 90 days (3 months) ahead. Kept
+# independent of the form's preset table so changing form presets never alters
+# the capture limit.
+MAX_CAPTURE_EXPIRY_SECONDS = 90 * 24 * 60 * 60
+
 EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
     ("15m", "In 15 minutes"),
     ("1h", "In 1 hour"),
@@ -47,9 +54,21 @@ EXPIRY_PRESET_OPTIONS: tuple[tuple[str, str], ...] = (
 CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE = "credential_expiry_unsupported_source"
 CREDENTIAL_EXPIRY_FORM_ONLY = "credential_expiry_form_only"
 CREDENTIAL_REPLACEMENT_FORM_ONLY = "credential_replacement_form_only"
+# Agent saves never name a stored record themselves: no Sealbox record name
+# (item_id / sealbox_key), no Sealbox source in register_existing_source (the
+# broker writes every Sealbox record itself), no Bitwarden item_name in
+# credential.collect, and no password-manager item another key references.
+CREDENTIAL_RECORD_NAME_NOT_ALLOWED = "credential_record_name_not_allowed"
+# Agent credential.collect over an agent file capture: only credential.capture_file
+# (or the person's form) replaces a captured value, so the row stays a capture.
+CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY = "credential_captured_key_capture_only"
+# Rotating a username-and-password Sealbox record needs the username in the request.
+CREDENTIAL_ROTATION_USERNAME_REQUIRED = "credential_rotation_username_required"
 CREDENTIAL_EXPIRY_SHARED_RECORD = "credential_expiry_shared_record"
+CREDENTIAL_EXPIRY_REQUIRED = "credential_expiry_required"
 CREDENTIAL_DROPPED_CLEANUP_PENDING = "credential_dropped_cleanup_pending"
 CREDENTIAL_EXPIRY_TOO_SOON = "credential_expiry_too_soon"
+CREDENTIAL_EXPIRY_TOO_FAR = "credential_expiry_too_far"
 CREDENTIAL_EXPIRY_INVALID = "credential_expiry_invalid"
 
 # IANA offsets span UTC-12 to UTC+14; allow +-14h (840 minutes).
@@ -201,6 +220,59 @@ def validate_form_expiry(
     return parsed
 
 
+def capture_expiry_window(*, now: datetime | None = None) -> tuple[str, str, str]:
+    """Return ``(broker_now_utc, earliest_expires_at, latest_expires_at)`` as whole-second UTC strings.
+
+    ``earliest_expires_at`` rounds up across any sub-second fraction on ``now``
+    so passing ``earliest_expires_at`` back into ``validate_capture_expiry`` at
+    that exact instant is always accepted; ``latest_expires_at`` rounds down so
+    it is likewise always accepted.
+    """
+
+    current = _utc_now(now)
+    floor_now = current.replace(microsecond=0)
+    ceil_now = floor_now + timedelta(seconds=1) if current.microsecond else floor_now
+    broker_now = format_utc_timestamp(floor_now)
+    earliest = format_utc_timestamp(ceil_now + timedelta(seconds=MIN_EXPIRY_LEAD_SECONDS))
+    latest = format_utc_timestamp(floor_now + timedelta(seconds=MAX_CAPTURE_EXPIRY_SECONDS))
+    return broker_now, earliest, latest
+
+
+def validate_capture_expiry(
+    expires_at: datetime | str | None,
+    *,
+    now: datetime | None = None,
+) -> datetime:
+    """Validate a required expiry timestamp for agent file capture (5 minutes to 90 days, whole-second UTC)."""
+
+    current = _utc_now(now)
+    broker_now, earliest, latest = capture_expiry_window(now=current)
+    window_note = (
+        f"Broker UTC time is {broker_now}; accepted expires_at range at this instant is "
+        f"{earliest} to {latest} (the earliest time moves with the clock, so pick a time "
+        "several minutes ahead)."
+    )
+    if expires_at is None or (isinstance(expires_at, str) and not expires_at.strip()):
+        raise CredentialExpiryError(
+            CREDENTIAL_EXPIRY_REQUIRED,
+            "An expiry timestamp (expires_at) is required for captured credentials "
+            f"(5 minutes to 90 days from now). {window_note}",
+        )
+    try:
+        parsed = validate_form_expiry(expires_at, now=current, min_lead_seconds=MIN_EXPIRY_LEAD_SECONDS)
+    except CredentialExpiryError as exc:
+        if exc.code == CREDENTIAL_EXPIRY_TOO_SOON:
+            raise CredentialExpiryError(CREDENTIAL_EXPIRY_TOO_SOON, f"{exc.message} {window_note}") from exc
+        raise
+    remaining = (parsed - current).total_seconds()
+    if remaining > MAX_CAPTURE_EXPIRY_SECONDS:
+        raise CredentialExpiryError(
+            CREDENTIAL_EXPIRY_TOO_FAR,
+            f"Captured credentials can expire at most 90 days (3 months) from now. {window_note}",
+        )
+    return parsed
+
+
 def _parse_local_datetime(value: str | None) -> datetime:
     text = str(value or "").strip()
     if not text:
@@ -333,25 +405,33 @@ def format_expiry_label(expires_at: datetime | str) -> str:
 
 __all__ = [
     "ACCOUNT_LINK_CREDENTIAL_EXPIRED",
+    "CREDENTIAL_CAPTURED_KEY_CAPTURE_ONLY",
     "CREDENTIAL_DROPPED_CLEANUP_PENDING",
     "CREDENTIAL_EXPIRED",
     "CREDENTIAL_EXPIRY_FORM_ONLY",
     "CREDENTIAL_EXPIRY_INVALID",
+    "CREDENTIAL_EXPIRY_REQUIRED",
     "CREDENTIAL_EXPIRY_SHARED_RECORD",
+    "CREDENTIAL_EXPIRY_TOO_FAR",
     "CREDENTIAL_EXPIRY_TOO_SOON",
     "CREDENTIAL_EXPIRY_UNSUPPORTED_SOURCE",
+    "CREDENTIAL_RECORD_NAME_NOT_ALLOWED",
     "CREDENTIAL_REPLACEMENT_FORM_ONLY",
+    "CREDENTIAL_ROTATION_USERNAME_REQUIRED",
     "CUSTOM_EXPIRY_OPTION",
     "CredentialExpiryError",
     "EXPIRY_PRESET_OPTIONS",
     "EXPIRY_PRESET_SECONDS",
+    "MAX_CAPTURE_EXPIRY_SECONDS",
     "MIN_EXPIRY_LEAD_SECONDS",
+    "capture_expiry_window",
     "format_expiry_label",
     "format_utc_timestamp",
     "is_expired",
     "parse_utc_timestamp",
     "remaining_ttl_seconds",
     "resolve_form_expiry",
+    "validate_capture_expiry",
     "validate_form_expiry",
     "validate_storage_expiry",
 ]

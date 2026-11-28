@@ -28,10 +28,12 @@ _SCOPE_KINDS = {"user", "team", "system"}
 _LOCK_WAIT_MS = 10_000
 DROPPED_DELETE_QUEUED_BY_FORM = "form"
 DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT = "transfer_import"
+DROPPED_DELETE_QUEUED_BY_AGENT_CAPTURE = "agent_capture"
 VALID_DROPPED_DELETE_QUEUED_BY = frozenset(
     {
         DROPPED_DELETE_QUEUED_BY_FORM,
         DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT,
+        DROPPED_DELETE_QUEUED_BY_AGENT_CAPTURE,
     }
 )
 
@@ -848,6 +850,7 @@ __all__ = [
     "CredentialCatalogReadError",
     "CredentialCatalogStore",
     "CredentialOwnerScope",
+    "DROPPED_DELETE_QUEUED_BY_AGENT_CAPTURE",
     "DROPPED_DELETE_QUEUED_BY_FORM",
     "DROPPED_DELETE_QUEUED_BY_TRANSFER_IMPORT",
     "PendingDroppedSealboxDelete",

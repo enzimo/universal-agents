@@ -25,6 +25,7 @@ from secure_tool_broker.defaults import (
     DEFAULT_CREDENTIAL_STATE_NAMESPACE,
     DEFAULT_CREDENTIAL_STATE_SOURCE,
     DEFAULT_INTERNAL_BASE_URL,
+    DEFAULT_NOTIFY_ON_AGENT_CAPTURE,
     DEFAULT_SEALBOX_API_VERSION,
     DEFAULT_SEALBOX_AUTO_INITIALIZE,
     DEFAULT_SEALBOX_BIND_HOST,
@@ -1922,6 +1923,11 @@ class SecurityLayerDefaultValues:
     credential_catalog_secret_cache_ttl_seconds: DefaultValue[int] = default_value(
         300,
         "In-memory broker cache TTL for resolved catalog secrets used in consecutive broker actions.",
+        onboarding_overridable=False,
+    )
+    credential_catalog_notify_on_agent_capture: DefaultValue[bool] = default_value(
+        DEFAULT_NOTIFY_ON_AGENT_CAPTURE,
+        "Whether the broker sends the person an Inbox notice when an agent stores a temporary credential via credential.capture_file.",
         onboarding_overridable=False,
     )
 

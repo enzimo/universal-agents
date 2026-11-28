@@ -33,9 +33,11 @@ class ToolContext:
     principal_type: str | None = None
     named_agent_type: str | None = None
     invocation_id: str | None = None
-    # Verified request id (signed context id) and account link chosen by the
-    # broker's access gate, never by request fields.
+    # Verified request id (signed context id), person roles, scheduled job id,
+    # and account links chosen by the broker's access gate, never by request fields.
     work_id: str | None = None
+    person_roles: tuple[str, ...] = ()
+    schedule_id: str | None = None
     account_link: AccountLinkV1 | None = None
     gate_link: AccountLinkV1 | None = None
     # Configured by the operator (security_layer.api_request_user_agent); never by the request.

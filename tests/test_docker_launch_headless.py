@@ -726,6 +726,7 @@ def test_build_instance_env_defaults_sets_broker_credentials_dir(
         (config.instance_root_path / "credential_template_overrides.yaml").resolve()
     )
     assert env_defaults["SECURE_TOOL_BROKER_SECRET_CACHE_TTL_SECONDS"] == "300"
+    assert env_defaults["SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE"] == "true"
     # File tools reach only registered folders, so the launcher no longer
     # passes deny lists or a workspace switch to agent processes.
     assert "TOOL_DENY_PATHS" not in env_defaults

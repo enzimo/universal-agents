@@ -252,7 +252,29 @@ class CredentialCatalogProvider(DeclaredProvider):
     actions = {
         "credential.collect": ActionSpec(
             "credential.collect",
-            "Broker-owned create/update in the current user's catalog after values arrive from a secure broker form or store generation; does not create a user-facing form. Owner selection comes from trusted context. Defaults to write_source=sealbox, stores username/password pairs with sealbox-cli credential set, stores custom secret fields with sealbox-cli secret set, and records only catalog metadata/source refs.",
+            "Broker-owned create/update in the current user's catalog for store-generated secrets and non-secret "
+            "metadata; does not create a user-facing form and refuses agent-submitted secret values, agent-chosen "
+            "record names (item_id/item_name/sealbox_key), records already referenced by another catalog key, and "
+            "keys stored by credential.capture_file (capture a new file instead). Updating an existing key must "
+            "keep its exact field names, secret/non-secret status, and stored record references: omit existing "
+            "secret fields to leave them untouched while updating existing non-secret metadata, or pass "
+            "value_source='store_generated_secret' to rotate a secret field the broker stored (never one registered "
+            "from an existing source; include the username field when rotating a username-and-password record); "
+            "adding, removing, or reclassifying fields or replacing a secret requires the person's secure broker form. "
+            "Owner selection comes from trusted context. Defaults to write_source=sealbox, stores "
+            "username/password pairs with sealbox-cli credential set, stores custom secret fields with "
+            "sealbox-cli secret set, and records only catalog metadata/source refs.",
+        ),
+        "credential.capture_file": ActionSpec(
+            "credential.capture_file",
+            "Capture a secret from a task file into the current verified person's Sealbox-backed temporary "
+            "credential catalog without passing the secret in parameters or returning it. Requires path, "
+            "credential_key, display_name, purpose, and expires_at (UTC, 5 minutes to 90 days ahead); optional "
+            "field_name (default secret). Never replaces a person-entered, external-source, or team credential, "
+            "respects folder access, deletes the source file after commit (reporting source_file_deleted, "
+            "source_file_status, source_file_changed_after_read, and source_file_already_gone), and reports "
+            "notice_status ('sent', 'off', or 'failed') beside notice_sent. Error capture_access_gate_required "
+            "is a broker fault to stop and report; capture_folder_check_unavailable is transient and worth one retry.",
         ),
         "credential.get_metadata": ActionSpec(
             "credential.get_metadata",
@@ -260,7 +282,12 @@ class CredentialCatalogProvider(DeclaredProvider):
         ),
         "credential.register_existing_source": ActionSpec(
             "credential.register_existing_source",
-            "Register an existing broker-local env or *_FILE credential source without returning the secret value.",
+            "Register a new credential key against an existing broker-local env, *_FILE, or password-manager source "
+            "without returning the secret value; refuses every Sealbox source (the broker writes Sealbox records "
+            "itself), sealbox_key, and password-manager items another catalog key uses. Over an existing key, only "
+            "existing non-secret metadata may change (omit existing secret fields to keep them untouched, or pass "
+            "their exact existing env or password-manager references); layout or source changes require the "
+            "person's secure broker form.",
         ),
         "credential.bind_for_openshell": ActionSpec(
             "credential.bind_for_openshell",
@@ -310,6 +337,8 @@ class CredentialCatalogProvider(DeclaredProvider):
     action_aliases = {
         "credential_collect": "credential.collect",
         "collect": "credential.collect",
+        "credential_capture_file": "credential.capture_file",
+        "capture_file": "credential.capture_file",
         "credential_metadata": "credential.get_metadata",
         "credential_get_metadata": "credential.get_metadata",
         "register_existing_source": "credential.register_existing_source",

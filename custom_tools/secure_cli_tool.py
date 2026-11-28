@@ -190,18 +190,18 @@ def _secure_cli_impl(
             f"secure_cli broker returned HTTP {exc.code}: {detail[:2000]}",
         )
     except URLError as exc:
-        if is_hub_write(validated.provider, validated.action):
+        if _is_outcome_unknown_write(validated.provider, validated.action):
             return _unknown_write_result()
         return _tool_result("error", f"secure_cli broker request failed: {exc}")
     except Exception as exc:
-        if is_hub_write(validated.provider, validated.action):
+        if _is_outcome_unknown_write(validated.provider, validated.action):
             return _unknown_write_result()
         return _tool_result("error", f"secure_cli error: {exc}")
 
     try:
         payload = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
-        if is_hub_write(validated.provider, validated.action):
+        if _is_outcome_unknown_write(validated.provider, validated.action):
             return _unknown_write_result()
         return _tool_result(
             "error", f"secure_cli broker returned non-JSON output: {raw[:2000]}"
@@ -212,6 +212,17 @@ def _secure_cli_impl(
         return _tool_result("error", message, payload=payload)
     return _tool_result(
         "success", "secure_cli broker action completed.", payload=payload
+    )
+
+
+_OUTCOME_UNKNOWN_CREDENTIAL_CATALOG_WRITES = frozenset(
+    {"credential.capture_file", "credential.collect"}
+)
+
+
+def _is_outcome_unknown_write(provider: str, action: str) -> bool:
+    return is_hub_write(provider, action) or (
+        provider == "credential_catalog" and action in _OUTCOME_UNKNOWN_CREDENTIAL_CATALOG_WRITES
     )
 
 

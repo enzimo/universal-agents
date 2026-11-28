@@ -560,6 +560,73 @@ def test_live_sealbox_credential_state_backend(
     assert bob_resolved == "ghp_bob_secret"
 
 
+def test_live_agent_saves_cannot_register_or_rotate_a_persons_sealbox_sign_in(
+    live_sealbox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C28: an agent cannot reach the person's stored sign-in record through register_existing_source
+    and a later credential.collect rotation; both steps are refused and the sign-in is unchanged."""
+
+    from secure_tool_broker.credential_expiry import (
+        CREDENTIAL_RECORD_NAME_NOT_ALLOWED,
+        CREDENTIAL_REPLACEMENT_FORM_ONLY,
+    )
+    from secure_tools.providers import ValidatedAction
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_MODE", "credential_source")
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_SOURCE", "sealbox")
+    person = "live-c28-alice"
+    stored = write_credential_state("github.token", "gho_person_sign_in_token", owner_id=person)
+    assert stored.status == "success", stored
+    sign_in_record = stored.content["credential_state_item_key"]
+    context = ToolContext(
+        agent_id="agent-1",
+        named_agent_type="ResearchAgent",
+        canonical_user_id=person,
+        principal_type="user",
+        team_id="live-c28-team",
+        person_roles=("member",),
+        work_id="ctx-1",
+    )
+
+    def act(action: str, params: dict) -> object:
+        return credential_catalog.execute_credential_catalog_action(
+            ValidatedAction(provider="credential_catalog", action=action, params=params), context
+        )
+
+    rotate_request = {"request": {
+        "credential_key": "gh_alias", "display_name": "gh_alias", "purpose": "rotate", "store_target": "sealbox",
+        "fields": [{"name": "token", "kind": "token", "visibility": "secret", "value_source": "store_generated_secret"}],
+    }}
+    registered = act(
+        "credential.register_existing_source",
+        {"credential_key": "gh_alias", "field_name": "token", "source": "sealbox",
+         "item_id": sign_in_record, "field_ref": "value"},
+    )
+    assert registered.status == "error"
+    assert registered.content["error_code"] == CREDENTIAL_RECORD_NAME_NOT_ALLOWED
+    scope = CredentialOwnerScope.user(person)
+    assert "gh_alias" not in credential_catalog.load_catalog(scope=scope).credentials
+
+    # A row registered against the sign-in record before this rule cannot be rotated either.
+    credential_catalog._save_catalog_credential(
+        "gh_alias",
+        credential_catalog.CatalogCredential(
+            display_name="gh_alias",
+            purpose="registered before Sealbox registration was refused",
+            fields={"token": credential_catalog.CatalogCredentialField(
+                kind="token", visibility="secret", value_source="existing_source",
+                resolution_order=[credential_catalog.CatalogSourceRef(
+                    source="sealbox", item_id=sign_in_record, item_name=sign_in_record, field_ref="value")],
+            )},
+        ),
+        scope=scope,
+    )
+    rotated = act("credential.collect", rotate_request)
+    assert rotated.status == "error"
+    assert rotated.content["error_code"] == CREDENTIAL_REPLACEMENT_FORM_ONLY
+    assert read_credential_state("github.token", owner_id=person) == "gho_person_sign_in_token"
+
+
 def _model_key_state(monkeypatch):
     monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_MODE", "credential_source")
     monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_STATE_BACKEND_SOURCE", "sealbox")
@@ -1587,3 +1654,286 @@ def test_live_sealbox_temporary_credential_expiry_overwrite_fallback_and_janitor
     assert len(notices) == 1
     assert notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
     assert "/link http:live_demo_api" in notices[0].summary
+
+
+@pytest.mark.asyncio
+async def test_live_sealbox_capture_file_account_link_expiry_and_janitor(
+    live_sealbox,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B6: live sealbox-server/sealbox-cli captures a file, reads via account link, expires, and janitor cleans up."""
+
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from access_catalog.catalog import CatalogSource
+    from access_control.account_sharing import TeamAccountSharing
+    from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccessNoticeKind,
+        AccountLinkStatus,
+        AccountLinkV1,
+        AccountMode,
+        AccountSharing,
+        ClassificationSource,
+        LinkOwnerKind,
+        LinkPurpose,
+        OperationResolutionV1,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+    from runtime_settings.instance_layout import InstanceLayout
+    from secure_tool_broker import janitor
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_capture import NOTICE_STATUS_SENT
+    from secure_tool_broker.credential_diagnostics import CREDENTIAL_EXPIRED
+    from secure_tool_broker.credential_expiry import format_utc_timestamp
+    from secure_tool_broker.defaults import ENV_NOTIFY_ON_AGENT_CAPTURE
+    from secure_tool_broker.sealbox_cli import first_json_value
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import (
+        TEST_TEAM,
+        agent_context,
+        caller_headers,
+        context_verify_keys,
+    )
+
+    layout = InstanceLayout(tmp_path / "instance")
+    person_id = "live-capture-alice"
+    scratch_dir = layout.person_dir(person_id) / "scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    secret_value = "live-captured-secret-token-xyz"
+    source_file = scratch_dir / "service_token.txt"
+    source_file.write_text(f"{secret_value}\n", encoding="utf-8")
+
+    monkeypatch.setenv("TEAM_INSTANCE_ROOT", str(layout.root))
+    monkeypatch.setenv("SECURE_TOOL_BROKER_DEFAULT_CREDENTIAL_WRITE_SOURCE", "sealbox")
+    monkeypatch.setenv("TEAM_INSTANCE_NAME", "live-capture-cred")
+    monkeypatch.delenv(ENV_NOTIFY_ON_AGENT_CAPTURE, raising=False)
+    credential_catalog._SECRET_CACHE.clear()
+
+    team_id = TEST_TEAM
+    scope = CredentialOwnerScope.user(person_id)
+
+    access_store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    capture_tool = ToolDefinitionV1(
+        tool_id="http:live_capture_api",
+        kind=ToolKind.HTTP,
+        display_name="Live Capture API",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("capture.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization",
+                field="api_token",
+                template="Bearer {value}",
+            ),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    custom_catalog = dataclasses.replace(
+        base_catalog,
+        tools={**base_catalog.tools, capture_tool.tool_id: capture_tool},
+    )
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=team_id,
+        access=None,
+        links=access_store,
+    )
+    TeamAccountSharing(access_store, team_id).choose_tool(
+        capture_tool, AccountSharing.PRIVATE, by="admin-1"
+    )
+
+    expiry = (datetime.now(timezone.utc) + timedelta(minutes=6)).replace(microsecond=0)
+    expiry_iso = format_utc_timestamp(expiry)
+
+    # 1. Capture the file through the real broker HTTP route.
+    service = SecureToolBrokerService(token=BROKER_ROOT, access_gate=gate)
+    async with TestClient(TestServer(service.build_app())) as client:
+        response = await client.post(
+            "/v1/tools/credential_catalog",
+            headers=caller_headers(),
+            json={
+                "provider": "credential_catalog",
+                "action": "credential.capture_file",
+                "params": {
+                    "path": "scratch/service_token.txt",
+                    "credential_key": "live_captured_api",
+                    "display_name": "Live Capture API",
+                    "purpose": "Temporary API token captured from workspace file",
+                    "field_name": "api_token",
+                    "expires_at": expiry_iso,
+                },
+                "context": agent_context(person_id, named_agent_type="ResearchAgent"),
+            },
+        )
+        body = await response.json()
+
+    assert response.status == 200, body
+    assert body["status"] == "success", body
+    content = body["content"]
+    assert content["status"] == "credential_captured"
+    assert content["credential_key"] == "live_captured_api"
+    assert content["field_name"] == "api_token"
+    assert content["expires_at"] == expiry_iso
+    assert content["source_file_deleted"] is True
+    assert content["notice_sent"] is True
+    assert content["notice_status"] == NOTICE_STATUS_SENT
+    assert not source_file.exists()
+    assert secret_value not in json.dumps(body, sort_keys=True)
+    assert secret_value.encode("utf-8") not in (tmp_path / "credential_catalog.db").read_bytes()
+
+    # Confirm the capture notice was stored without any secret.
+    capture_notices = [n for n, _read in access_store.notices_for(team_id, person_id=person_id, roles=())]
+    assert len(capture_notices) == 1
+    assert capture_notices[0].kind is AccessNoticeKind.CREDENTIAL_CAPTURED
+    assert "ResearchAgent" in capture_notices[0].summary
+    assert "Live Capture API" in capture_notices[0].summary
+    assert secret_value not in capture_notices[0].summary
+
+    # Confirm the secret exists in live Sealbox with a real TTL under a fresh capture record name.
+    alice_tenant_env = live_sealbox["tenant_env"](person_id)
+    captured_row = credential_catalog.load_catalog(scope=scope).credentials["live_captured_api"]
+    sealbox_key = captured_row.fields["api_token"].resolution_order[0].item_id
+    assert sealbox_key is not None
+    assert sealbox_key.startswith("agent-capture:live_captured_api:")
+    assert sealbox_key.endswith(":api_token")
+    direct_before = first_json_value(
+        _run_cli(
+            live_sealbox["cli"],
+            ["secret", "get", sealbox_key, "--output", "json"],
+            env=alice_tenant_env,
+        ).stdout
+    )
+    assert isinstance(direct_before, dict)
+    assert direct_before["value"] == secret_value
+    sealbox_expires_at = int(direct_before["expires_at"])
+    expected_expiry_ts = int(expiry.timestamp())
+    assert expected_expiry_ts <= sealbox_expires_at <= expected_expiry_ts + 10
+
+    # 2. Link the captured credential to the web API tool and send a real broker API request
+    # through credential_catalog.api_request to a local echo server to verify live header injection.
+    access_store.create_link(
+        AccountLinkV1(
+            link_id="link-live-capture",
+            team_id=team_id,
+            tool_id="http:live_capture_api",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=person_id,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="live_captured_api",
+            injections=capture_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=person_id),
+            created_at_utc=datetime.now(timezone.utc),
+        )
+    )
+    usable_link, expired_link = gate.resolve_account_link("http:live_capture_api", person_id)
+    assert usable_link is not None and usable_link.link_id == "link-live-capture"
+    assert expired_link is None
+    gate_res = gate._with_account(
+        OperationResolutionV1(
+            tool_id="http:live_capture_api",
+            operation="GET /v1/status",
+            level=AccessLevel.READ,
+            source=ClassificationSource.TRUSTED,
+        ),
+        person_id,
+        {},
+    )
+    assert gate_res.allowed is True
+    assert gate_res.account_link is not None
+    received_auth: list[str] = []
+
+    class CaptureEchoHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            received_auth.append(self.headers.get("Authorization", ""))
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    echo = ThreadingHTTPServer(("127.0.0.1", 0), CaptureEchoHandler)
+    thread = threading.Thread(target=echo.serve_forever, daemon=True)
+    thread.start()
+    try:
+        api_context = ToolContext(
+            canonical_user_id=person_id,
+            principal_type="user",
+            account_link=gate_res.account_link,
+        )
+        api_result = credential_catalog.api_request(
+            {"method": "GET", "url": f"http://127.0.0.1:{echo.server_address[1]}/v1/status"},
+            context=api_context,
+        )
+        assert api_result.status == "success", api_result
+        assert secret_value not in json.dumps(api_result.content or {}, sort_keys=True)
+    finally:
+        echo.shutdown()
+        echo.server_close()
+        thread.join(timeout=3)
+    assert received_auth == [f"Bearer {secret_value}"]
+
+    # 3. Past expiry: immediate read and link checks refuse before the janitor runs.
+    after_expiry = expiry + timedelta(seconds=2)
+    meta_after = credential_catalog.get_credential_metadata("live_captured_api", scope=scope, now=after_expiry)
+    assert meta_after.status == "error"
+    assert meta_after.content["error_code"] == CREDENTIAL_EXPIRED
+
+    resolved_after = credential_catalog.resolve_secret_field(
+        "live_captured_api", "api_token", scope=scope, now=after_expiry
+    )
+    assert hasattr(resolved_after, "status") and resolved_after.status == "error"
+    assert resolved_after.content["error_code"] == CREDENTIAL_EXPIRED
+
+    usable_after, expired_after = gate.resolve_account_link(
+        "http:live_capture_api", person_id, now=after_expiry
+    )
+    assert usable_after is None
+    assert expired_after is not None and expired_after.link_id == "link-live-capture"
+
+    # 4. Run the real janitor and confirm catalog entry, live Sealbox secret, and link are all gone.
+    report = janitor.run_janitor_once(gate, tool_setup_recheck_days=0, now=after_expiry)
+    assert report.job_errors == ()
+    assert report.credentials.deleted == 1
+    assert report.credentials.links_revoked == 1
+    assert report.credentials.notices_sent == 1
+    assert report.credentials.failed == 0
+
+    assert "live_captured_api" not in credential_catalog.load_catalog(scope=scope).credentials
+    missing = _run_cli_raw(
+        live_sealbox["cli"],
+        ["secret", "get", sealbox_key],
+        env=alice_tenant_env,
+    )
+    assert missing.returncode != 0
+
+    expected_actor = SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(team_id, AGENT_ROLE_SYSTEM))
+    revoked = access_store.get_link("link-live-capture")
+    assert revoked is not None
+    assert revoked.status is AccountLinkStatus.REVOKED
+    assert revoked.revoked_by == expected_actor
+
+    all_notices = [n for n, _read in access_store.notices_for(team_id, person_id=person_id, roles=())]
+    assert len(all_notices) == 2
+    assert {n.kind for n in all_notices} == {
+        AccessNoticeKind.CREDENTIAL_CAPTURED,
+        AccessNoticeKind.CREDENTIAL_EXPIRED,
+    }
+    expired_notice = next(n for n in all_notices if n.kind is AccessNoticeKind.CREDENTIAL_EXPIRED)
+    assert "/link http:live_capture_api" in expired_notice.summary

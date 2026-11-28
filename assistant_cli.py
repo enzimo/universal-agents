@@ -4251,6 +4251,12 @@ async def _run_secure_tool_broker_service(
                 "SECURE_TOOL_BROKER_SECRET_CACHE_TTL_SECONDS",
                 str(config.security_layer.credential_catalog.secret_cache_ttl_seconds),
             )
+            os.environ.setdefault(
+                "SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE",
+                "true"
+                if config.security_layer.credential_catalog.notify_on_agent_capture
+                else "false",
+            )
         materialize_secret_file_envs()
         internal_base_url = resolve_secure_tool_broker_internal_base_url(
             config.security_layer.broker_internal_base_url

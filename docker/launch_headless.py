@@ -676,6 +676,11 @@ def build_instance_env_defaults(
         env_defaults["SECURE_TOOL_BROKER_SECRET_CACHE_TTL_SECONDS"] = str(
             config.security_layer.credential_catalog.secret_cache_ttl_seconds
         )
+        env_defaults["SECURE_TOOL_BROKER_NOTIFY_ON_AGENT_CAPTURE"] = (
+            "true"
+            if config.security_layer.credential_catalog.notify_on_agent_capture
+            else "false"
+        )
     if config.llm.provider:
         env_defaults["LLM_PROVIDER"] = config.llm.provider
     if config.llm.model_id:

@@ -321,6 +321,84 @@ When a workflow needs a new named credential:
 - Saving a new value without automatic deletion over a temporary credential
   through the secure form clears its expiry; direct agent `credential.collect`
   or `credential.register_existing_source` calls cannot set or clear an expiry.
+  Both agent-callable saves (`credential.collect` and
+  `credential.register_existing_source`) enforce the same rule over an existing
+  key: field names and secret/non-secret status per field must stay identical
+  (no field added, removed, or reclassified; adding a field always requires the
+  person's secure form), only values of existing non-secret metadata fields may
+  change, and every existing secret field either stays untouched (omit it from
+  the request, or in `credential.register_existing_source` pass its exact
+  current env or password-manager reference) or, in `credential.collect` only,
+  rotates to a store-generated value (`value_source="store_generated_secret"`)
+  on its existing stored record. You cannot rotate a field registered from an
+  existing source; when rotating a username-and-password record, send the
+  username field with kind `username`, `email` or `login` (otherwise
+  `credential_rotation_username_required`, nothing written). You never name
+  where a secret is stored (`credential_record_name_not_allowed`): agent
+  `credential.collect` refuses `item_id`, `item_name` and `sealbox_key` (an
+  existing key rotates on the record it already uses; a new key's Bitwarden
+  item must not already exist), and `credential.register_existing_source`
+  refuses `sealbox_key`, every Sealbox source and any password-manager item
+  another key uses. Agent `credential.collect` also refuses secret values and
+  refuses keys stored by `credential.capture_file`
+  (`credential_captured_key_capture_only`: capture a new file into the key
+  instead); `credential.register_existing_source` refuses inline secret
+  values; both refuse Sealbox records already referenced by another catalog
+  key; and every agent write records agent provenance rather than person
+  approval.
+- **Capturing a secret you already hold (`credential.capture_file`)**: when you
+  already hold a temporary secret in a file (for example an auth file a sign-in
+  wrote in the sandbox), store it in the verified person's Sealbox credential
+  store with `secure_cli(provider="credential_catalog",
+  action="credential.capture_file", params=...)` so its bytes never pass
+  through a tool parameter or reply. **One narrow exception (owner-accepted)**:
+  if you already hold a temporary password or token as text, you may write it
+  once to a file inside the person's `scratch/` folder with the file tool and
+  capture it immediately with `credential.capture_file` (the broker then
+  deletes that file). For every other tool and parameter — including
+  `credential.capture_file`, `credential.collect`, other `secure_cli` calls,
+  and your reply — never pass a secret value in a tool parameter or message.
+  - Required `params`: `path` (regular UTF-8 file in the person's folder or
+    shared `team/` / `agents/`, no symbolic links; relative paths start in the
+    person's folder), `credential_key` (already in normalized form: ASCII
+    letters, digits, `.`, `_`, or `-`, starting and ending with a letter or
+    digit, no surrounding spaces), `display_name`, `purpose`, and `expires_at`
+    (required timezone-aware UTC ISO-8601 timestamp, 5 minutes to 90 days
+    ahead; because the 5-minute floor moves with the clock, pick a time
+    comfortably past it). Optional `field_name` (same normalized rule) defaults
+    to `"secret"` (pass the specific field name an account link expects, such
+    as `token` or `api_token`).
+  - `credential.capture_file` works only for a verified person's task (never
+    system work, never team scope) and refuses to replace a credential the
+    person entered, an external-source key, or a team key. Capturing a
+    credential does not link it to a tool; when a tool needs it, TeamArchitect
+    requests an account link afterwards (see Tool Setup). After a successful
+    save, the broker deletes the source file (check `source_file_deleted` and
+    `source_file_status`) and sends the person one Inbox notice unless the
+    operator turned it off (check `notice_status`: `sent`, `off`, or `failed`
+    beside `notice_sent`).
+  - **Checking the post-capture file state and timeouts**:
+    - If `credential.capture_file` or `credential.collect` returns
+      `outcome_unknown` (for example after a client timeout or connection drop),
+      do not retry blindly — call `credential_catalog` action
+      `credential.get_metadata` for `credential_key` first to check whether the
+      save already succeeded before retrying.
+    - If `source_file_changed_after_read` is `true` (`source_file_status` is
+      `"changed_after_read"`), the source file was rewritten after the broker
+      read it (for example a sign-in tool refreshed it), so the stored value
+      may be stale and the newer file was left in place: **re-capture the
+      updated file instead of deleting it**.
+    - If `source_file_already_gone` is `true` (`source_file_status` is
+      `"already_gone"`), the source file was already removed (for example by a
+      concurrent capture) and nothing remains to delete.
+    - Only when `source_file_status` is `"left_in_place"` (or after a refusal
+      you will not retry and the file still exists) should you delete the
+      secret file you wrote with the file tool so it does not linger in
+      `scratch/`. Treat `capture_access_gate_required` as a broker fault to
+      stop and report; treat `capture_folder_check_unavailable` as a transient
+      check error worth one retry. Tell the person in plain language that the
+      temporary credential was saved and when it will be deleted, without
+      repeating any secret or machine error code.
 
 ## Updating Or Repairing Credentials
 
@@ -338,13 +416,21 @@ When a workflow needs a new named credential:
   `credential_catalog.credential.register_existing_source`; do not scan env
   vars or ask the user to paste the secret.
 - Direct agent saves (`credential.collect` and
-  `credential.register_existing_source`) cannot drop Sealbox records that an
-  existing catalog key already uses (for example changing `item_id`, removing a
-  secret field, or moving a Sealbox-backed key to an environment variable or
-  another source). The broker refuses before writing anything with
-  `credential_replacement_form_only`; return a terminal
+  `credential.register_existing_source`) cannot add, remove, or reclassify
+  fields, change stored source references, or drop Sealbox records on an
+  existing catalog key (for example adding a field, changing a secret field's
+  source, or moving a Sealbox-backed key to an environment variable or another
+  record). To update existing non-secret metadata without rotating secrets,
+  omit the existing secret fields from the request so they stay untouched; to
+  rotate a secret field, pass `value_source="store_generated_secret"` in
+  `credential.collect`. Any other layout or source change is refused before
+  writing with `credential_replacement_form_only`; return a terminal
   `secure_credential_collection_request` action so the person decides through
-  the secure form.
+  the secure form. Agent `credential.collect` also refuses `item_id`,
+  `item_name` and `sealbox_key` and keys stored by `credential.capture_file`,
+  `credential.register_existing_source` refuses Sealbox sources and
+  password-manager items another key uses, and both actions refuse Sealbox
+  records already referenced by another catalog key.
 - When the person saves over an existing key through the secure form using a
   different item or field layout (or moving it to another source), the broker
   permanently deletes every version of the replaced Sealbox records. Confirm
@@ -589,7 +675,8 @@ raw credential in any field.
   returned with `redirect_location`, not followed. The broker returns redacted
   response content.
 - `credential_catalog` actions: `credential.collect`,
-  `credential.get_metadata`, `credential.register_existing_source`,
+  `credential.capture_file`, `credential.get_metadata`,
+  `credential.register_existing_source`,
   `template.list`, `template.get`, `template.render_request`,
   `template.save_approved_variant`, `credential.bind_for_openshell`,
   `credential.release_openshell_binding`, `credential.api_request`,
@@ -599,20 +686,44 @@ raw credential in any field.
     `generic_signup_username_password`, `generic_api_token`,
     `generic_oauth_client_secret`, `generic_service_account_file`,
     `ssh_private_key`, and `ssh_host_bootstrap`.
-    `credential.collect` is the post-form storage action; `signup.prepare` only
-    validates. A user-facing form requires the terminal
+    `credential.collect` is the broker-owned storage action for
+    store-generated secrets and non-secret metadata (refusing agent-submitted
+    secrets, agent-chosen `item_id`/`item_name`/`sealbox_key`, records shared
+    with another catalog key, and keys stored by `credential.capture_file`;
+    over an existing key, omit existing secret fields to leave them untouched
+    while updating existing non-secret metadata, or pass
+    `value_source="store_generated_secret"` to rotate them on their existing
+    stored record, never a field registered from an existing source; adding,
+    removing, or reclassifying fields always requires the person's secure
+    form);
+    `signup.prepare` only validates. A user-facing form requires the terminal
     `secure_credential_collection_request` structured action.
+  - `credential.capture_file` stores a temporary person-scoped Sealbox
+    credential directly from a task file (required `path`, `credential_key`,
+    `display_name`, `purpose`, `expires_at` 5 minutes to 90 days ahead;
+    optional `field_name`, default `secret`), deletes the source file after
+    commit (reporting `source_file_deleted`, `source_file_status`,
+    `source_file_changed_after_read`, and `source_file_already_gone`), and
+    reports `notice_status` (`sent`, `off`, or `failed`). See Temporary
+    Credentials above; report `capture_access_gate_required` as a broker fault
+    and retry `capture_folder_check_unavailable` at most once.
   - New instances default to `write_source="sealbox"`: username/password fields
     become Sealbox credential records, custom secret fields become Sealbox
     secrets, and the catalog retains only source refs.
-  - `credential.register_existing_source` maps a catalog `field_name` to a
-    password-manager source `item_id` or `item_name` and `field_ref`. A spaced
-    manager item name such as `team-nats-agents :: default :: home_assistant`
-    is valid as `item_name`, but do not reuse it as the catalog key. `::` is
-    valid inside a catalog key; ` :: ` with spaces is not.
+  - `credential.register_existing_source` maps a new catalog key's `field_name`
+    to an existing env or password-manager (`item_id` or `item_name` and
+    `field_ref`) source (refusing `sealbox_key`, every Sealbox source, and any
+    password-manager item another catalog key uses). A spaced manager
+    item name such as `team-nats-agents :: default :: home_assistant` is valid
+    as `item_name`, but do not reuse it as the catalog key. `::` is valid
+    inside a catalog key; ` :: ` with spaces is not. Over an existing key, only
+    existing non-secret metadata may change (omit existing secret fields to
+    keep them untouched, or repeat their exact existing env or
+    password-manager references).
   - `credential.collect` and `credential.register_existing_source` refuse with
     `credential_replacement_form_only` if saving over an existing key would
-    drop any Sealbox record it currently uses (use
+    add, remove, or reclassify fields, change a secret's stored source
+    reference, or drop any Sealbox record it currently uses (use
     `secure_credential_collection_request` so the person decides on the form).
     Either action can also return `credential_dropped_cleanup_pending` while a
     replaced Sealbox record is still waiting to be deleted (retried within
