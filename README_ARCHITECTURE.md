@@ -2100,7 +2100,49 @@ one-link regular file of bounded size, and checks the digest. A link or changed
 bytes swapped in after staging are refused (Web Chat answers "no longer
 available"), so the file delivered is the file that was checked. The Photon
 sidecar reads a path, so it gets a private 0600 copy under `state/` that is
-removed after the call.
+removed after the call. Attachment media types and inline display follow one
+shared policy (`assistant_gateway/attachment_media.py`). The Web Chat page keeps
+its own copy in `chat_attachments.mjs`; a test compares the inline image list
+and runs a shared table of sample media types (malformed, mixed-case,
+whitespace-padded and non-ASCII ones included) through both parsers and kind
+rules, so the page shows a file the way the server sends it. Outgoing
+`notify_user` validation rejects malformed `content_type` strings and rejects
+explicit `kind` values that disagree with the normalized media type (only
+`image/png`, `image/jpeg`, `image/gif`, and `image/webp` have `kind="image"`),
+so an agent cannot label SVG, HTML, or arbitrary bytes as an inline image.
+The gateway runs the same check again on every notification it receives, so a
+notification in the older format (queued during an upgrade, or sent by a worker
+still on older code) arrives without the files this check refuses; each one is
+logged as `event=outgoing_attachment_skipped` and the message text is still
+delivered. No compatibility path keeps them. The older code produced these
+refused shapes: a non-raster image (SVG, HEIC, AVIF, BMP, TIFF) labelled
+`kind: image`, which older code did for every `image/*` type; an explicit
+`application/octet-stream` on a `.png`, `.jpg`, `.jpeg`, `.gif` or `.webp`
+file, which older code called an image by its suffix; any explicit `kind` that
+disagrees with the media type, such as `kind: document` on `image/png`, or
+`kind: audio` on a file whose suffix gives no media type (such as `.caf`); and a
+`content_type` that is not a media type, such as `png`. A `.opus` file with
+`kind: audio` is refused only when it was also sent with an explicit
+`application/octet-stream` type; without a type its suffix gives `audio/opus`.
+Every `/api/web-chat/attachments/{attachment_id}` response sends
+`Content-Security-Policy: sandbox; default-src 'none'`,
+`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`,
+`Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`,
+and a sanitized RFC 5987 `Content-Disposition` derived from the stored
+normalized media type rather than `kind`. Only allowlisted raster images open
+with `Content-Disposition: inline`; non-XML `audio/*` and `video/*` keep their
+normalized `Content-Type` so `<audio>` and `<video>` players inside Web Chat
+play normally, while sending `Content-Disposition: attachment` so opening the
+raw attachment URL in its own tab downloads the file instead of showing a
+sandbox-blocked empty player. Every other attachment type (including
+`image/svg+xml`, `text/html`, `text/javascript`, and `text/css`) is sent with
+`Content-Disposition: attachment` and `Content-Type: application/octet-stream`
+so it cannot execute as a page, script, or stylesheet on the Web Chat origin.
+Workspace image previews (`/api/web-chat/workspace/content`) also send
+`Content-Security-Policy: sandbox; default-src 'none'` alongside `nosniff`.
+PDF previews are sent without that policy only so a PDF opened directly in its
+own tab still shows in the browser's built-in PDF viewer, which needs scripts;
+the in-page preview frame is sandboxed by the page either way.
 
 Published pages (how-tos, articles, apps and work reports from
 `publish_single_page_site`) are deliverables too, so they are written into the

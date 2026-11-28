@@ -646,8 +646,20 @@ copies it once into `scratch/sent/` of that person's folder, recording the
 copy's fingerprint (SHA-256). Every chat and Web Chat send that copy only while
 it still matches, so the file the person receives is the file that was
 checked; a copy that was changed or replaced by a link afterwards is not sent,
-and Web Chat shows it as no longer available. Copies are deleted with the rest
-of `scratch/` ([Scratch retention](configuration.md#scratch-retention)).
+and Web Chat shows it as no longer available. In Web Chat, every attachment
+response is sandboxed with `nosniff` so attachments cannot run scripts on the
+Web Chat site: PNG, JPEG, GIF, and WebP images open inline, audio and video play
+in the chat and download if opened directly in a new tab, and all other files
+(including SVG and HTML) download as binary attachments. Copies are deleted
+with the rest of `scratch/` ([Scratch retention](configuration.md#scratch-retention)).
+
+After an upgrade, a message an agent sent with the older attachment format can
+arrive without some of its files. The gateway checks every attachment again
+and leaves out a file whose stated kind does not match its media type (for
+example an SVG, HEIC or other non-PNG/JPEG/GIF/WebP image marked as an image, or
+a PNG marked as a document) or whose `content_type` is not a media type (such
+as `png`). The message text still arrives, and the gateway log records each
+left-out file as `outgoing_attachment_skipped`.
 
 With authorization off there are no folder decisions: agents use the task's
 folders and every data folder, read-only where it was registered so.

@@ -149,6 +149,7 @@ WEB_CHAT_MODULE_ASSETS = (
     "workflow.css",
     "browser_lifecycle.mjs",
     "chat_appearance.mjs",
+    "chat_attachments.mjs",
     "chat_authentication.mjs",
     "chat_assistant_name.mjs",
     "chat_sign_in.mjs",

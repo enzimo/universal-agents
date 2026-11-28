@@ -1,6 +1,11 @@
 import { mountWorkflowCard } from "./workflow_card.mjs";
 import { createPageLifecycle, createRequestClient } from "./browser_lifecycle.mjs";
 import { createAppearance } from "./chat_appearance.mjs";
+import {
+  inferAttachmentKind,
+  normalizeAttachmentPayload,
+  renderAttachmentList as renderChatAttachmentList,
+} from "./chat_attachments.mjs";
 import { createDiagnostics } from "./chat_diagnostics.mjs";
 import { createAuthentication } from "./chat_authentication.mjs";
 import { setAssistantName } from "./chat_assistant_name.mjs";
@@ -1417,98 +1422,11 @@ function formatFileSize(bytes) {
     return (unitIndex === 0 ? String(Math.round(value)) : value.toFixed(value >= 10 ? 1 : 2)) + " " + units[unitIndex];
   }
 
-function inferAttachmentKind(fileOrAttachment) {
-    var kind = String(fileOrAttachment.kind || "").toLowerCase();
-    if (kind) {
-      return kind;
-    }
-    var type = String(fileOrAttachment.type || fileOrAttachment.content_type || "").toLowerCase();
-    if (type.indexOf("image/") === 0) {
-      return "image";
-    }
-    if (type.indexOf("audio/") === 0) {
-      return "audio";
-    }
-    if (type.indexOf("video/") === 0) {
-      return "video";
-    }
-    return "document";
-  }
-
-function normalizeAttachmentPayload(attachment) {
-    return {
-      attachment_id: String(attachment.attachment_id || attachment.id || ""),
-      filename: String(attachment.filename || attachment.name || "attachment"),
-      content_type: String(attachment.content_type || attachment.type || "application/octet-stream"),
-      kind: inferAttachmentKind(attachment),
-      size_bytes: Number(attachment.size_bytes || attachment.size || 0),
-      sha256: String(attachment.sha256 || ""),
-      url: String(attachment.url || attachment.preview_url || ""),
-      preview_url: String(attachment.preview_url || attachment.url || ""),
-    };
-  }
-
 function renderAttachmentList(container, attachments) {
-    var normalized = (Array.isArray(attachments) ? attachments : []).map(normalizeAttachmentPayload);
-    if (!normalized.length) {
-      return;
-    }
-    var rail = document.createElement("div");
-    rail.className = "message-attachments";
-    normalized.forEach(function (attachment) {
-      var href = attachment.url || attachment.preview_url || "";
-      if (attachment.kind === "image" && href) {
-        var link = document.createElement("a");
-        link.className = "message-image-attachment";
-        link.href = href;
-        link.target = "_blank";
-        link.rel = "noopener";
-        link.title = attachment.filename;
-        var image = document.createElement("img");
-        image.src = href;
-        image.alt = attachment.filename;
-        link.appendChild(image);
-        rail.appendChild(link);
-        return;
-      }
-      if (attachment.kind === "audio" && href) {
-        var audio = document.createElement("audio");
-        audio.className = "message-media-attachment";
-        audio.controls = true;
-        audio.src = href;
-        rail.appendChild(audio);
-        return;
-      }
-      if (attachment.kind === "video" && href) {
-        var video = document.createElement("video");
-        video.className = "message-media-attachment";
-        video.controls = true;
-        video.src = href;
-        rail.appendChild(video);
-        return;
-      }
-      var chip = document.createElement(href ? "a" : "span");
-      chip.className = "message-file-attachment";
-      if (href) {
-        chip.href = href;
-        chip.target = "_blank";
-        chip.rel = "noopener";
-      }
-      var icon = document.createElement("span");
-      icon.className = "message-file-icon";
-      icon.innerHTML = fileIconMarkup();
-      var label = document.createElement("span");
-      label.className = "message-file-label";
-      label.textContent = attachment.filename;
-      var meta = document.createElement("span");
-      meta.className = "message-file-meta";
-      meta.textContent = [attachment.kind, formatFileSize(attachment.size_bytes)].filter(Boolean).join(" · ");
-      chip.appendChild(icon);
-      chip.appendChild(label);
-      chip.appendChild(meta);
-      rail.appendChild(chip);
+    renderChatAttachmentList(container, attachments, {
+      document: document,
+      formatFileSize: formatFileSize,
     });
-    container.appendChild(rail);
   }
 
 function addPendingFiles(files) {

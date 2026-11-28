@@ -8,6 +8,10 @@ from typing import Literal
 import unicodedata
 from urllib.parse import quote
 
+from assistant_gateway.attachment_media import (
+    ATTACHMENT_SANDBOX_CSP,
+    AttachmentDisposition,
+)
 from assistant_gateway.interactive_apps.website_support import _WEB_CHAT_ROUTE
 
 
@@ -16,7 +20,6 @@ DOWNLOAD_CHUNK_BYTES = 64 * 1024
 _MAX_RANGE_DIGITS = 20
 _RFC5987_SAFE = "!#$&+-.^_`|~"
 _URL_PATH_QUERY_SAFE = "-_.~"
-_DOWNLOAD_SANDBOX_CSP = "sandbox; default-src 'none'"
 _ACTIVE_WEB_DOWNLOAD_MIME_TYPES = frozenset(
     {
         "text/javascript",
@@ -131,8 +134,12 @@ def parse_byte_range(header_value: str | None, size_bytes: int) -> ByteRangeResu
     return _resolve_byte_range(start_text, end_text, size_bytes)
 
 
-def build_attachment_disposition(filename: str) -> str:
-    """Build a safe ``Content-Disposition: attachment`` header with UTF-8 filename*."""
+def build_content_disposition(
+    filename: str,
+    *,
+    disposition: AttachmentDisposition = "attachment",
+) -> str:
+    """Build a safe ``Content-Disposition`` header with UTF-8 ``filename*``."""
 
     cleaned_chars = [
         ch
@@ -152,7 +159,7 @@ def build_attachment_disposition(filename: str) -> str:
         ascii_fallback = "download"
 
     encoded_utf8 = quote(sanitized, safe=_RFC5987_SAFE, encoding="utf-8")
-    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_utf8}'
+    return f'{disposition}; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded_utf8}'
 
 
 def _media_range_quality(params: Sequence[str]) -> float:
@@ -205,11 +212,11 @@ def safe_download_content_type(content_type: str | None) -> str:
 
 
 def download_security_headers() -> dict[str, str]:
-    """Security headers attached to every workspace file download response."""
+    """Security headers attached to every workspace download and attachment response."""
 
     return {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": _DOWNLOAD_SANDBOX_CSP,
+        "Content-Security-Policy": ATTACHMENT_SANDBOX_CSP,
         "Cross-Origin-Resource-Policy": "same-origin",
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",

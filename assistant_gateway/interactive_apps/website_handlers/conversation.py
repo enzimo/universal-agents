@@ -4,6 +4,10 @@ import json
 import logging
 from typing import Any
 from aiohttp import web
+from assistant_gateway.attachment_media import (
+    attachment_disposition_for_content_type,
+    attachment_response_content_type,
+)
 from assistant_gateway.attachments import StagedAttachmentUnavailable
 from assistant_gateway.application.command_help import (
     build_web_chat_help,
@@ -57,6 +61,10 @@ from assistant_gateway.interactive_apps.website_support import (
 from .off_loop import off_loop
 from .operations import WebsiteConversationHandlersOperations
 from .event_stream import stream_events
+from .workspace_download import (
+    build_content_disposition,
+    download_security_headers,
+)
 
 
 def transient_action_fields(action: GatewayTransientAction) -> dict[str, Any]:
@@ -304,15 +312,19 @@ class WebsiteConversationHandlers:
                 exc.reason,
             )
             raise web.HTTPGone(text="This attachment is no longer available.") from exc
-        disposition = (
-            "inline" if record.kind in {"image", "audio", "video"} else "attachment"
-        )
+        disposition = attachment_disposition_for_content_type(record.content_type)
+        response_content_type = attachment_response_content_type(record.content_type)
+        headers = {
+            **download_security_headers(),
+            "Content-Disposition": build_content_disposition(
+                record.filename,
+                disposition=disposition,
+            ),
+        }
         return web.Response(
             body=data,
-            headers={
-                "Content-Type": record.content_type,
-                "Content-Disposition": f'{disposition}; filename="{record.filename}"',
-            },
+            content_type=response_content_type,
+            headers=headers,
         )
 
     async def _handle_web_chat_archive_session(
