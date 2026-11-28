@@ -4723,6 +4723,7 @@ def _acting_person(args: argparse.Namespace, config: Any) -> Any:
 
 
 def _access_grant(args: argparse.Namespace, config: Any, service: Any) -> None:
+    from access_control.decisions import HandDownRefused
     from access_control.operator_commands import GrantRequest, build_grant_spec, describe_grant
 
     person = _acting_person(args, config)
@@ -4743,6 +4744,9 @@ def _access_grant(args: argparse.Namespace, config: Any, service: Any) -> None:
         by=person.person_id,
         now=service.clock(),
     )
+    refusal = service.grant_refusal(person, spec)
+    if refusal:
+        raise HandDownRefused(refusal)
     cover = service.covering_grant(spec)
     if cover is not None:
         print("Already given; nothing changed: " + describe_grant(cover))
@@ -4802,6 +4806,7 @@ _ACCESS_SERVICE_COMMANDS: dict[str, Callable[[argparse.Namespace, Any, Any], Non
 def _access_command(args: argparse.Namespace) -> None:
     """Give, revoke or list grants and the other ``access`` subcommands (access_control.operator_commands)."""
 
+    from access_control.data_folders import protected_locations
     from access_control.decisions import HandDownRefused
     from access_control.operator_commands import OperatorCommandError, open_access_service
 
@@ -4818,6 +4823,11 @@ def _access_command(args: argparse.Namespace) -> None:
         storage_settings=config.manager_storage_settings,
         cedar_binary=config.authorization.cedar_binary_path,
         lead_agent_type=config.manager.named_agent_type,
+        protected=protected_locations(
+            config.instance_root_path,
+            instance_config=Path(args.config).expanduser().resolve(),
+            broker_credentials=getattr(config, "broker_credentials_path", None),
+        ),
     )
     if not config.authorization.enabled:
         print("Authorization is off, so grants are recorded but not enforced until it is turned on.")

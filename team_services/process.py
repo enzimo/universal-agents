@@ -35,6 +35,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from access_catalog.catalog import CatalogSource
 from access_control.cedar import CedarAccessClient
+from access_control.data_folders import folder_roots_provider
 from access_control.decisions import AccessService
 from access_control.entities import agent_role_resolver
 from access_control.people_directory import PeopleDirectory
@@ -333,6 +334,7 @@ def team_operations(
             team_id=config.manager.team_id,
             agent_role_of=agent_role_resolver(config.manager.named_agent_type),
             lead_agent_type=config.manager.named_agent_type,
+            folder_roots=folder_roots_provider(config.instance_root, access_repo, config.manager.team_id),
         )
     # With the knowledge base off no store is opened, and its commands are answered feature_off.
     knowledge_store = create_knowledge_repository(storage, logger=_LOGGER) if settings.enabled else None

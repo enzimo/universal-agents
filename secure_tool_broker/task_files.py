@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from access_control import safe_open
+from access_control.folders import PathSpellingError, check_spelling_below
 from access_control.safe_open import UnsafePath
 from runtime_settings.instance_layout import InstanceLayout, WorkspaceScope
 
@@ -57,7 +58,12 @@ def _locate(raw: str, scope: WorkspaceScope) -> _Located:
     normalized = Path(os.path.normpath(candidate))
     for root in scope.roots:
         if normalized == root or root in normalized.parents:
-            return _Located(root, normalized.relative_to(root).parts, normalized)
+            parts = normalized.relative_to(root).parts
+            try:
+                check_spelling_below(scope.workspaces_dir, root, parts)
+            except PathSpellingError as exc:
+                raise TaskFileRejected(str(exc)) from exc
+            return _Located(root, parts, normalized)
     raise TaskFileRejected(
         f"Local files must be in this task's folders ({scope.home} or the shared team/ "
         f"and agents/ folders): {normalized}"

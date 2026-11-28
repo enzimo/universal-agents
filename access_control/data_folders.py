@@ -21,22 +21,24 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from access_control.entities import PersonPrincipal
-from access_control.folders import DataFolder, data_folder_problem
+from access_control.folders import DataFolder, FolderRoots, data_folder_problem
 from access_control.people import is_administrator
 from access_control.sensitive_paths import sensitive_reason
 from custom_messages.contracts.access_v2 import (
     DATA_FOLDER_NAME_PATTERN,
     DataFolderRecordV1,
+    ProposedDataFolderV1,
     SubjectKind,
     SubjectRefV1,
 )
 from id_generation import new_id
+from runtime_settings.instance_layout import InstanceLayout
 from storage.access_repository import AccessRepository, AccessStoreConflict
 
 logger = logging.getLogger(__name__)
@@ -194,9 +196,52 @@ class DataFolderRegistry:
         return removed
 
 
+def folder_roots_provider(
+    instance_root: str | Path | None,
+    store: AccessRepository,
+    team_id: str,
+    *,
+    protected: Iterable[Path] = (),
+) -> Callable[[], FolderRoots] | None:
+    """Return a live ``FolderRoots`` supplier for ``instance_root``, or None if unset."""
+
+    if not instance_root:
+        return None
+    layout = InstanceLayout.at(instance_root)
+    guarded = tuple(protected) or protected_locations(layout.root)
+    registry = DataFolderRegistry(store, team_id)
+    return lambda: FolderRoots.for_layout(layout, registry.usable(guarded))
+
+
+def roots_with_data_folders(
+    base: FolderRoots,
+    records: Iterable[DataFolder | DataFolderRecordV1 | ProposedDataFolderV1],
+) -> FolderRoots:
+    """Return ``base`` extended with any data-folder records whose names are not already present."""
+
+    seen = {folder.name for folder in base.data_folders}
+    extra: list[DataFolder] = []
+    for record in records:
+        if record.name in seen:
+            continue
+        seen.add(record.name)
+        extra.append(
+            DataFolder(
+                record.name,
+                Path(os.path.realpath(Path(record.path).expanduser())),
+                record.writable,
+            )
+        )
+    if not extra:
+        return base
+    return FolderRoots(base.workspaces_dir, (*base.data_folders, *extra))
+
+
 __all__ = [
     "DataFolderRefused",
     "DataFolderRegistry",
+    "folder_roots_provider",
     "protected_locations",
     "registration_problem",
+    "roots_with_data_folders",
 ]

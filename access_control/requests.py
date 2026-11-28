@@ -47,6 +47,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Protocol
 
 from access_control.decisions import AccessService, HandDownBlockedInside, HandDownRefused
+from access_control.folders import FOLDER_ROOT_USERS
 from access_control.entities import (
     AGENT_ROLE_TEAM_LEAD,
     AGENT_ROLE_WORKER,
@@ -445,9 +446,13 @@ class AccessRequests:
         )
 
     def _check_request(
-        self, target: TargetRefV1, lifetime: GrantLifetime, task_id: str | None, hours: int | None
+        self,
+        target: TargetRefV1,
+        lifetime: GrantLifetime,
+        task_id: str | None,
+        hours: int | None,
     ) -> datetime | None:
-        """Validate what is asked for; returns the expiry for access until a time."""
+        """Validate what is asked for (without touching disk); returns expiry for access until a time."""
 
         # Access is a level on a whole tool (owner's decision 2026-09-30):
         # operation names are fragile (sending mail is both gmail_send and
@@ -461,6 +466,12 @@ class AccessRequests:
             )
         # Raises HandDownRefused for targets outside the catalog.
         self.service.target_entities_for_ref(target)
+        if target.kind in {TargetKind.FOLDER, TargetKind.FILE} and target.id.split("/", 1)[0] == FOLDER_ROOT_USERS:
+            # Refuse before any disk check so agents cannot probe other people's folders.
+            raise HandDownRefused(
+                "Agents reach a person's folder only while working for that person, or for someone it "
+                "was shared with; share it with a person instead."
+            )
         if self.service.person_owned(target.id):
             # A person's own tool is opened only by that person, never on an
             # agent's request (AccessService.person_owned_refusal).
@@ -500,8 +511,11 @@ class AccessRequests:
 
         work_id = requester.work_id
         expires_at = self._check_request(target, lifetime, work_id, hours)
-        name = self.target_name(target)
+        # Refuse agent and person blocks before any disk check so blocked agents
+        # cannot probe which files exist or their spelling inside a blocked folder.
         self._refuse_when_blocked(requester, person, target, work_id)
+        self.service.check_folder_target(target, for_block=False)
+        name = self.target_name(target)
         person_id = person.person_id if person else None
         # hand_on: only the team lead asks for access its workers' tasks can draw on.
         hand_on = hand_on and requester.agent_type == self.lead_agent_type
@@ -921,14 +935,34 @@ class AccessRequests:
     def _decide_in_one_transaction(self, request_id: str, decided: "Decided") -> AccessRequestV1:
         """Store the decision's grants and its outcome together (see ``decide``)."""
 
+        target_kind: TargetKind | None = None
+        target_id = ""
         try:
             with self.service.store.decision_transaction(request_id, at=decided.at) as request:
+                target_kind = request.target.kind
+                target_id = request.target.id
                 finished = self._outcome(request, decided)
                 self.service.store.finish_request(finished)
         except DecisionInProgress as exc:
             raise HandDownRefused(DECIDING_NOW) from exc
         except AccessStoreConflict as exc:
             raise HandDownRefused(str(exc)) from exc
+        except HandDownRefused as exc:
+            event = (
+                "access_decision_folder_target_refused"
+                if target_kind in {TargetKind.FOLDER, TargetKind.FILE}
+                else "access_decision_refused"
+            )
+            logger.warning(
+                "An access decision was refused; nothing was changed. event=%s "
+                "request_id=%s by=%s target=%s reason=%s",
+                event,
+                request_id,
+                decided.reviewer.person_id,
+                target_id,
+                exc,
+            )
+            raise
         except Exception as exc:
             # A lost PostgreSQL commit answer may hide an outcome that was stored.
             stored = None
@@ -1457,6 +1491,7 @@ class AccessRequests:
                 f"You can restrict only access you could give; you cannot give access to "
                 f"{self.target_name(target, for_block=True)}."
             )
+        self.service.check_folder_target(target, for_block=True)
         now = self.service.clock()
         block = GrantV1(
             grant_id=new_id("grant"),
@@ -1545,6 +1580,7 @@ class AccessRequests:
         owned_refusal = self.service.person_owned_refusal(person, block)
         if owned_refusal:
             raise HandDownRefused(owned_refusal)
+        self.service.check_folder_target(target, for_block=True)
         created = self.service.store.replace_block(previous, block) if previous else self.service.store.create(block)
         logger.warning(
             "A person blocked access. event=access_blocked grant_id=%s by=%s subject=%s:%s target=%s expires_at=%s "

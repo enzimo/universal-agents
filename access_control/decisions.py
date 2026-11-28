@@ -34,7 +34,12 @@ from access_catalog.catalog import ToolCatalog
 from access_control.cedar import AccessEvaluationError, CedarAccessClient
 from access_control.folders import (
     FOLDER_ROOT_USERS,
+    FolderGrantOnFileError,
     FolderIdError,
+    FolderRoots,
+    PathSpellingError,
+    check_folder_id_spelling,
+    check_folder_target,
     covers,
     folder_chain,
     folder_owner,
@@ -155,6 +160,50 @@ class AccessService:
     # The team lead's agent type: the one holder of lasting access for a
     # person, and where workers' task access comes from (hand_on_for_task).
     lead_agent_type: str = "TeamArchitect"
+    # Live folder roots for on-disk spelling and file-path grant checks.
+    folder_roots: Callable[[], FolderRoots] | None = None
+
+    def current_folder_roots(self) -> FolderRoots | None:
+        """Current folder roots for this instance, or None when unconfigured."""
+
+        return self.folder_roots() if self.folder_roots is not None else None
+
+    def folder_target_refusal(self, target: TargetRefV1, *, for_block: bool = False) -> str | None:
+        """Why a folder or file target fails on-disk spelling or file-path grant rules, or None.
+
+        Called only after authority checks pass (no existence or spelling oracle
+        for unauthorized callers). ``TargetKind.FILE`` (single-file shares) and
+        blocks (``for_block=True``) check exact on-disk spelling only;
+        ``TargetKind.FOLDER`` access grants also refuse existing file paths.
+        """
+
+        if target.kind not in {TargetKind.FOLDER, TargetKind.FILE}:
+            return None
+        roots = self.current_folder_roots()
+        if roots is None:
+            logger.warning(
+                "Skipping folder target disk check because AccessService has no folder_roots configured. "
+                "event=folder_target_check_skipped target_kind=%s target=%s for_block=%s",
+                target.kind.value,
+                target.id,
+                for_block,
+            )
+            return None
+        try:
+            if for_block or target.kind is TargetKind.FILE:
+                check_folder_id_spelling(roots, target.id)
+            else:
+                check_folder_target(roots, target.id, for_block=False)
+        except (PathSpellingError, FolderGrantOnFileError, FolderIdError) as exc:
+            return str(exc)
+        return None
+
+    def check_folder_target(self, target: TargetRefV1, *, for_block: bool = False) -> None:
+        """Raise ``HandDownRefused`` when ``target`` fails on-disk spelling or file-path grant rules."""
+
+        refusal = self.folder_target_refusal(target, for_block=for_block)
+        if refusal is not None:
+            raise HandDownRefused(refusal)
 
     # -- validity -----------------------------------------------------------------
 
@@ -1426,24 +1475,8 @@ class AccessService:
             return f"TeamLead keeps {name} to itself: it cannot be handed on to workers."
         return None
 
-    def grant_refusal(self, person: PersonPrincipal, spec: GrantV1) -> str | None:
-        """Why the person may not create this grant, or None when they may.
-
-        - Agents working for the person, for the person's own work (decision
-          D13): the person authorizes what they hold themselves. Agents never
-          exceed their person, so this is the person's consent, not new
-          authority.
-        - Agents working for someone else: only who could give the access
-          (administrators for team targets) and only when approving that
-          person's request (``AccessRequests``), which also gives the person
-          the access when they lack it.
-        - Agents for everyone's work: administrators only.
-        - People, and blocks: who could give the access (administrator or
-          owner authority, or a delegable grant). A person shares their own
-          folder through owner authority (decision D15).
-        - A person's own tool (``OwnerScope.PERSON``): see
-          ``person_owned_refusal``.
-        """
+    def _grant_authority_refusal(self, person: PersonPrincipal, spec: GrantV1) -> str | None:
+        """Authority and scope checks for ``grant_refusal`` and ``approve_pending``, without touching disk."""
 
         worker_refusal = (
             self.operation_refusal(spec) or self.worker_lasting_refusal(spec) or self.person_owned_refusal(person, spec)
@@ -1481,6 +1514,32 @@ class AccessService:
         if not check.allowed:
             return f"You cannot give {spec.level.value} access to {spec.target.id}: it is beyond your own authority."
         return None
+
+    def grant_refusal(self, person: PersonPrincipal, spec: GrantV1) -> str | None:
+        """Why the person may not create this grant, or None when they may.
+
+        - Agents working for the person, for the person's own work (decision
+          D13): the person authorizes what they hold themselves. Agents never
+          exceed their person, so this is the person's consent, not new
+          authority.
+        - Agents working for someone else: only who could give the access
+          (administrators for team targets) and only when approving that
+          person's request (``AccessRequests``), which also gives the person
+          the access when they lack it.
+        - Agents for everyone's work: administrators only.
+        - People, and blocks: who could give the access (administrator or
+          owner authority, or a delegable grant). A person shares their own
+          folder through owner authority (decision D15).
+        - A person's own tool (``OwnerScope.PERSON``): see
+          ``person_owned_refusal``.
+        - On-disk folder checks run only after authority checks pass so
+          unauthorized callers never get an existence or spelling oracle.
+        """
+
+        authority_refusal = self._grant_authority_refusal(person, spec)
+        if authority_refusal:
+            return authority_refusal
+        return self.folder_target_refusal(spec.target, for_block=spec.kind is GrantKind.BLOCK)
 
     def hand_down(
         self,
@@ -1540,6 +1599,7 @@ class AccessService:
             raise HandDownRefused(
                 f"{grantor.agent_type} holds no {spec.level.value} access to {spec.target.id} that it may hand on."
             )
+        self.check_folder_target(spec.target, for_block=False)
         _refuse_folder_with_block_inside(grantor, spec.target, grants)
         parents = check.grant_ids
         if automatic_only:
@@ -1614,8 +1674,9 @@ class AccessService:
         grant = self.store.get(grant_id)
         if grant is None or grant.status is not GrantStatus.PENDING:
             raise HandDownRefused("That hand-down is not waiting for approval.")
-        if self.grant_refusal(person, grant) is not None:
+        if self._grant_authority_refusal(person, grant) is not None:
             raise HandDownRefused("Only the target's approver can approve this hand-down.")
+        self.check_folder_target(grant.target, for_block=grant.kind is GrantKind.BLOCK)
         actor = SubjectRefV1(kind=SubjectKind.USER, id=person.person_id)
         active = grant.model_copy(update={"status": GrantStatus.ACTIVE})
         # Planned inside the store's write transaction, as in _store_grant.

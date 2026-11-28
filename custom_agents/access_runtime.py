@@ -39,6 +39,7 @@ from strands.tools.structured_output.structured_output_tool import StructuredOut
 
 from access_catalog.catalog import CatalogSource, ToolCatalog
 from access_control.cedar import CedarAccessClient
+from access_control.data_folders import folder_roots_provider
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import (
     AGENT_ROLE_SYSTEM,
@@ -108,13 +109,15 @@ def _runtime_access(
     catalogs = CatalogSource(instance_root)
     service = None
     if enabled:
+        store = AccessRepository(storage)
         service = AccessService(
-            store=AccessRepository(storage),
+            store=store,
             catalog=catalogs.current(),
             cedar=CedarAccessClient(binary=cedar_binary),
             team_id=team_id,
             agent_role_of=agent_role_resolver(TEAM_ARCHITECT_AGENT_TYPE),
             lead_agent_type=TEAM_ARCHITECT_AGENT_TYPE,
+            folder_roots=folder_roots_provider(instance_root, store, team_id),
         )
     return RuntimeAccess(
         team_id, enabled, catalogs, ContextVerifier.from_env(), service, ScheduleRunLookup.from_storage(storage)

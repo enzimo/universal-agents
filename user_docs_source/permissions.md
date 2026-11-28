@@ -451,7 +451,9 @@ once. A proposal can contain:
   every active grant, active whole-tool or single-operation block, and active
   account or gate link that approval will revoke;
 - access for TeamLead to tools, tool sets or folders (a level on a whole tool,
-  never one operation), optionally with the right to hand it on to workers'
+  never one operation; folder grants must name a folder rather than an existing
+  file and use the exact on-disk spelling of existing paths), optionally with
+  the right to hand it on to workers'
   tasks; a worker type may get access only for this task, since workers keep
   nothing between tasks;
 - restrictions (blocks) on agent types;
@@ -581,11 +583,26 @@ Control files, databases, runtime records, credentials, the instance
 configuration and other people's folders (except what they shared) are never
 reachable, whatever the grants say.
 
-**Folder names.** Grants, requests, shares and blocks name a folder by where
-it sits, never by its path on the host: `team/…`, `agents/…`, `data/<name>/…`,
-or `users/<folder>/…` for a person's folder, for example `data/reports/2026`
-or `team/finance`. Access to a folder covers everything inside it. Reading a
-file needs `read`, and creating or changing one needs `write`.
+**Folder names and exact spelling.** Grants, requests, shares and blocks name a
+folder by where it sits, never by its path on the host: `team/…`, `agents/…`,
+`data/<name>/…`, or `users/<folder>/…` for a person's folder, for example
+`data/reports/2026` or `team/finance`. Access to a folder covers everything
+inside it. Reading a file needs `read`, and creating or changing one needs
+`write`. Existing paths must use the exact spelling on disk (letter case and
+Unicode normalization) across file tools, shares, grants, blocks, requests and
+proposals: a mismatch is refused with the disk's exact spelling up to the first
+mismatched component (without inspecting deeper paths), so an agent cannot
+sidestep a block on macOS, Windows or Docker Desktop bind mounts. New files
+being created and paths that do not exist yet are accepted as typed. Folder
+grants (`request_access`, `propose_access_change`, `/access grant` and
+`assistant_cli access grant --folder`) only open folders; if a path names an
+existing file, creating or applying the grant is refused at once and names the
+containing folder to grant instead (or `/share` for a person's own file).
+`request_access` refuses blocks and private person folders before checking the
+disk; for already-registered data folders, `request_access` and
+`propose_access_change` still check on-disk spelling (up to the first mismatched
+component) and whether the named path is an existing file when asked, even if
+the requester does not yet have read access to that data folder.
 
 **Standard access.** Every agent and every person holds `write` on `team/` and
 `agents/` without a grant. An agent may also use the folder of the person its
@@ -819,7 +836,8 @@ works for, checked for every command:
   exists, including after the file itself is deleted. To give code the folder
   back, remove the block with `/access unblock <block id>` (`/access list`
   shows its id). Code mounts are folders only, and the sandbox
-  never mounts a folder whose path contains a symbolic link or that the runtime
+  never mounts a folder whose path contains a symbolic link, whose stored
+  spelling does not match the path on disk, or that the runtime
   itself cannot open; those are skipped with a sandbox note and a warning log
   (and any link appearing after planning is refused before the command starts).
 - **Network.** Commands can open network connections when the agent and its
@@ -1014,7 +1032,9 @@ work, give access to TeamArchitect with `--delegate-depth 1`: its workers get it
 for each task. Only a team default (`--everyone`, administrators) may go to a
 worker type directly. Name the target as a tool (`cli:github`), a tool set
 (`github`), or a folder: a name with `/` (`data/reports/2026`), or
-`folder:team` for a whole shared folder. `/access revoke` removes all of that
+`folder:team` for a whole shared folder. Folder grants refuse existing file
+paths (naming the folder to grant instead, or `/share` for a person's file) and
+require the exact on-disk spelling of existing paths. `/access revoke` removes all of that
 agent's access to the tool, and what was handed on from it. `/access requests` lists agents'
 requests you can decide, with a link to the Inbox where you decide them.
 `/access profile` shows or sets [TeamLead's standing access for your
@@ -1096,12 +1116,25 @@ Who may block and unblock:
   before the file is created), while sibling files stay accessible and the
   blocked file's name and size still show in its folder's listing. Shell and
   Python commands then do not get the folder that contains the blocked folder
-  or file at all (see [Shell and Python code](#shell-and-python-code)). Blocks
-  match the exact spelling of a path.
-- Access given on a file path does not open that file. Grants made with
-  `/access grant` or `assistant_cli access grant --folder`, and approved
-  requests that name a file, count only for folders, so give the folder that
-  holds the file.
+  or file at all (see [Shell and Python code](#shell-and-python-code)).
+  Existing paths must use their exact on-disk spelling (letter case and Unicode
+  form) whenever files are opened or grants, blocks and shares are created, so
+  a different spelling cannot sidestep a block on macOS, Windows or Docker
+  Desktop bind mounts. Blocks on paths that do not exist yet are stored as
+  typed; if a file is later created under a different letter case or Unicode
+  form, the old block will not match that file. At gateway startup, Universal
+  Agents checks active stored grants and blocks without changing or deleting
+  them, logs warnings, and sends administrators an Inbox notice for any
+  confirmed legacy file-path grant or stored path whose spelling no longer
+  matches disk (targets that cannot be checked due to a temporary I/O error are
+  logged and checked again on the next start).
+- Folder grants cannot target an existing file: `/access grant`,
+  `assistant_cli access grant --folder`, `request_access`,
+  `propose_access_change` and approval apply steps refuse a folder grant whose
+  path names an existing file (even if the file appeared after the request was
+  made), telling you to grant the containing folder instead (or, for a person's
+  own file, to share it with `/share`). Single-file shares (`/share`) and
+  blocks on file paths remain allowed.
 
 TeamLead's `restrict_access` creates the same kind of block on a worker, but
 only for the request TeamLead is working on: it counts in that request, ends

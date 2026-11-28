@@ -23,11 +23,32 @@ entity of each folder up to its root (``access_control.entities``).
 
 from __future__ import annotations
 
+import errno
+import logging
 import os
-from collections.abc import Iterable
+import stat
+import threading
+import time
+import unicodedata
+from collections import OrderedDict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, NoReturn
 
+from access_control import safe_open
+from access_control.people import PERSON_ROLE_ADMIN
+from custom_messages.contracts.access_v2 import (
+    AccessNoticeKind,
+    AccessNoticeV1,
+    GrantKind,
+    GrantStatus,
+    GrantV1,
+    SubjectKind,
+    SubjectRefV1,
+    TargetKind,
+)
 from runtime_settings.instance_layout import (
     AGENTS_DIRNAME,
     TEAM_DIRNAME,
@@ -35,6 +56,8 @@ from runtime_settings.instance_layout import (
     InstanceLayout,
     person_folder_name,
 )
+
+logger = logging.getLogger(__name__)
 
 FOLDER_ROOT_TEAM = TEAM_DIRNAME
 FOLDER_ROOT_AGENTS = AGENTS_DIRNAME
@@ -46,9 +69,68 @@ STANDARD_SHARED_FOLDERS = (FOLDER_ROOT_TEAM, FOLDER_ROOT_AGENTS)
 # the owner policy never matches it (no User has this id).
 _OTHER_PERSON_OWNER_PREFIX = "folder-owner:"
 
+PATH_SPELLING_MISMATCH = "path_spelling_mismatch"
+PATH_SPELLING_UNVERIFIABLE = "path_spelling_unverifiable"
+
 
 class FolderIdError(ValueError):
     """A folder id is malformed or names no registered root."""
+
+
+class PathSpellingError(FolderIdError):
+    """An existing path component differed from disk or could not be verified."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        typed: str,
+        disk: str,
+        unicode_only: bool = False,
+        reason_code: str = PATH_SPELLING_MISMATCH,
+        errno_value: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.typed = typed
+        self.disk = disk
+        self.unicode_only = unicode_only
+        self.reason_code = reason_code
+        self.errno_value = errno_value
+
+
+class PathSpellingUnverifiableError(PathSpellingError):
+    """On-disk spelling could not be verified (for example, unreadable folder or I/O error)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        typed: str,
+        errno_value: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            typed=typed,
+            disk="",
+            unicode_only=False,
+            reason_code=PATH_SPELLING_UNVERIFIABLE,
+            errno_value=errno_value,
+        )
+
+
+class FolderGrantOnFileError(FolderIdError):
+    """A folder grant targeted an existing file or non-directory."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        target: str,
+        suggested_folder: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.target = target
+        self.suggested_folder = suggested_folder
 
 
 def _components(raw: str) -> list[str]:
@@ -201,6 +283,618 @@ class FolderRoots:
         return Path(os.path.realpath(self.workspaces_dir)), tuple(parts)
 
 
+_DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+# Bounded per-process cache of exact directory entry names on case- or
+# Unicode-normalizing filesystems, used only for exact-match fast hits when a
+# directory's timestamps are safely in the past (avoiding coarse-timestamp
+# races on Docker Desktop bind mounts).
+_DIR_NAMES_CACHE_MAX = 128
+_DIR_CACHE_MIN_AGE_NS = 2_000_000_000
+
+
+@dataclass(frozen=True)
+class _SpellingFS:
+    """Filesystem operations seam for exact-spelling verification and tests."""
+
+    open_root: Callable[[Path], int]
+    open_dir: Callable[[str, int], int]
+    fstat_dir: Callable[[int], os.stat_result]
+    stat_entry: Callable[[str, int], os.stat_result]
+    list_entries: Callable[[int], list[tuple[str, int | None]]]
+    close_fd: Callable[[int], None]
+    now_ns: Callable[[], int] = time.time_ns
+
+
+def _posix_open_dir(name: str, dir_fd: int) -> int:
+    return os.open(name, _DIRECTORY_OPEN_FLAGS, dir_fd=dir_fd)
+
+
+def _posix_stat_entry(name: str, dir_fd: int) -> os.stat_result:
+    return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+
+
+def _posix_list_entries(dir_fd: int) -> list[tuple[str, int | None]]:
+    with os.scandir(dir_fd) as entries:
+        return [(entry.name, entry.inode()) for entry in entries]
+
+
+_POSIX_FS = _SpellingFS(
+    open_root=safe_open.open_root,
+    open_dir=_posix_open_dir,
+    fstat_dir=os.fstat,
+    stat_entry=_posix_stat_entry,
+    list_entries=_posix_list_entries,
+    close_fd=os.close,
+    now_ns=time.time_ns,
+)
+# Tests may monkeypatch _ACTIVE_FS to simulate case-insensitive or
+# Unicode-normalizing filesystems over real case-sensitive temp folders.
+_ACTIVE_FS: _SpellingFS = _POSIX_FS
+
+_SPELLING_CACHE_LOCK = threading.Lock()
+# Keyed by (st_dev, st_ino, st_mtime_ns, st_ctime_ns) of the parent directory.
+_dir_names_cache: OrderedDict[tuple[int, int, int, int], frozenset[str]] = OrderedDict()
+
+
+def clear_spelling_cache() -> None:
+    """Reset the bounded exact-match directory-name cache."""
+
+    with _SPELLING_CACHE_LOCK:
+        _dir_names_cache.clear()
+
+
+def _ascii_swapcase(name: str) -> str | None:
+    """Swap only ASCII letters [A-Za-z]; return None when ``name`` has none.
+
+    Using ``str.swapcase`` would expand non-ASCII characters such as ``ß`` ->
+    ``SS`` or ``ﬁ`` -> ``FI`` into names that do not exist even on
+    case-insensitive APFS/NTFS, which would miss the case-insensitive match.
+    """
+
+    chars: list[str] = []
+    changed = False
+    for ch in name:
+        if "a" <= ch <= "z":
+            chars.append(chr(ord(ch) - 32))
+            changed = True
+        elif "A" <= ch <= "Z":
+            chars.append(chr(ord(ch) + 32))
+            changed = True
+        else:
+            chars.append(ch)
+    return "".join(chars) if changed else None
+
+
+def _unicode_alt_form(name: str) -> str | None:
+    """An alternate canonical Unicode normalization form of ``name``, or None."""
+
+    nfc = unicodedata.normalize("NFC", name)
+    if name != nfc:
+        return nfc
+    nfd = unicodedata.normalize("NFD", name)
+    if name != nfd:
+        return nfd
+    return None
+
+
+def _probe_variant_exists(fs: _SpellingFS, current: int, alt: str) -> bool:
+    """Whether ``alt`` exists inside ``current`` regardless of its inode.
+
+    Network filesystems such as sshfs without ``use_ino`` or CIFS with
+    ``noserverino`` synthesize a fresh inode per looked-up name, so two
+    spellings of the same entry can report different ``st_ino`` values.
+    Listing whenever the variant name exists handles those mounts safely while
+    keeping zero listings for ordinary names on case-sensitive ext4 (where
+    ``alt`` raises ``FileNotFoundError``).
+    """
+
+    try:
+        fs.stat_entry(alt, current)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            return True
+        raise
+    return True
+
+
+def _needs_directory_listing(fs: _SpellingFS, current: int, part: str) -> bool:
+    """Whether ``current`` must be listed to verify ``part``'s exact spelling.
+
+    Decides per parent directory rather than caching per device, because ext4
+    and f2fs casefold (``chattr +F``), NTFS and WSL/Docker Desktop ``drvfs``
+    allow case-sensitive and case-insensitive directories on the same ``st_dev``.
+    """
+
+    swapped = _ascii_swapcase(part)
+    if swapped is not None:
+        if _probe_variant_exists(fs, current, swapped):
+            return True
+    elif not part.isascii():
+        # Non-ASCII names with no ASCII letters cannot be case-probed via ASCII
+        # swap; list the directory directly rather than guessing.
+        return True
+    if not part.isascii():
+        unicode_alt = _unicode_alt_form(part)
+        if unicode_alt is not None and _probe_variant_exists(fs, current, unicode_alt):
+            return True
+    return False
+
+
+def _lookup_cached_names(dir_key: tuple[int, int, int, int]) -> frozenset[str] | None:
+    with _SPELLING_CACHE_LOCK:
+        names = _dir_names_cache.get(dir_key)
+        if names is not None:
+            _dir_names_cache.move_to_end(dir_key)
+        return names
+
+
+def _store_cached_names(dir_key: tuple[int, int, int, int], names: frozenset[str]) -> None:
+    with _SPELLING_CACHE_LOCK:
+        _dir_names_cache[dir_key] = names
+        _dir_names_cache.move_to_end(dir_key)
+        while len(_dir_names_cache) > _DIR_NAMES_CACHE_MAX:
+            _dir_names_cache.popitem(last=False)
+
+
+def _stat_matches_target(
+    fs: _SpellingFS,
+    current: int,
+    name: str,
+    target: tuple[int, int],
+) -> bool:
+    try:
+        st = fs.stat_entry(name, current)
+    except OSError:
+        return False
+    return (st.st_dev, st.st_ino) == target
+
+
+def _fallback_match_candidates(
+    part: str,
+    dir_info: os.stat_result,
+    entry_info: os.stat_result,
+    entries: list[tuple[str, int | None]],
+) -> list[str]:
+    """Candidate names when ``d_ino`` did not match (mount points or missing d_ino)."""
+
+    part_folded = unicodedata.normalize("NFC", part).casefold()
+    scan_all = entry_info.st_dev != dir_info.st_dev
+    likely: list[str] = []
+    remaining: list[str] = []
+    for name, entry_ino in entries:
+        if entry_ino == entry_info.st_ino:
+            continue
+        if unicodedata.normalize("NFC", name).casefold() == part_folded:
+            likely.append(name)
+        elif scan_all or entry_ino is None:
+            remaining.append(name)
+    return likely + remaining
+
+
+def _match_disk_entry(
+    fs: _SpellingFS,
+    current: int,
+    part: str,
+    dir_info: os.stat_result,
+    entry_info: os.stat_result,
+    entries: list[tuple[str, int | None]],
+) -> str | None:
+    """Find the on-disk entry name inside ``current`` matching ``entry_info``."""
+
+    target = (entry_info.st_dev, entry_info.st_ino)
+    for name, entry_ino in entries:
+        if entry_ino == entry_info.st_ino and _stat_matches_target(fs, current, name, target):
+            return name
+    for name in _fallback_match_candidates(part, dir_info, entry_info, entries):
+        if _stat_matches_target(fs, current, name, target):
+            return name
+    return None
+
+
+def _maybe_cache_dir_names(
+    fs: _SpellingFS,
+    current: int,
+    dir_info: os.stat_result,
+    names: frozenset[str],
+) -> os.stat_result:
+    """Cache ``names`` only when ``current`` did not change and its mtime is safely past."""
+
+    after_dir = fs.fstat_dir(current)
+    unchanged = (after_dir.st_mtime_ns, after_dir.st_ctime_ns) == (
+        dir_info.st_mtime_ns,
+        dir_info.st_ctime_ns,
+    )
+    old_enough = fs.now_ns() - max(dir_info.st_mtime_ns, dir_info.st_ctime_ns) >= _DIR_CACHE_MIN_AGE_NS
+    if unchanged and old_enough:
+        dir_key = (dir_info.st_dev, dir_info.st_ino, dir_info.st_mtime_ns, dir_info.st_ctime_ns)
+        _store_cached_names(dir_key, names)
+    return after_dir
+
+
+def _first_folded_match(part: str, entries: list[tuple[str, int | None]]) -> str:
+    part_folded = unicodedata.normalize("NFC", part).casefold()
+    for name, _ in entries:
+        if unicodedata.normalize("NFC", name).casefold() == part_folded:
+            return name
+    return ""
+
+
+def _resolve_disk_name(
+    fs: _SpellingFS,
+    current: int,
+    part: str,
+    dir_info: os.stat_result,
+    entry_info: os.stat_result,
+) -> tuple[str | None, bool]:
+    """Return ``(disk_name, exists)`` for ``part`` inside ``current``.
+
+    Exact matches may be served from ``_dir_names_cache``; any mismatch always
+    re-lists fresh so a rename or create is never hidden by a stale cache entry.
+    """
+
+    dir_key = (dir_info.st_dev, dir_info.st_ino, dir_info.st_mtime_ns, dir_info.st_ctime_ns)
+    cached_names = _lookup_cached_names(dir_key)
+    if cached_names is not None and part in cached_names:
+        return part, True
+
+    current_dir = dir_info
+    current_entry = entry_info
+    for attempt in range(2):
+        entries = fs.list_entries(current)
+        names = frozenset(name for name, _ in entries)
+        after_dir = _maybe_cache_dir_names(fs, current, current_dir, names)
+        if part in names:
+            return part, True
+        matched = _match_disk_entry(fs, current, part, current_dir, current_entry, entries)
+        if matched is not None:
+            return matched, True
+        try:
+            refreshed = fs.stat_entry(part, current)
+        except FileNotFoundError:
+            return None, False
+        if attempt == 0 and (refreshed.st_dev, refreshed.st_ino) != (current_entry.st_dev, current_entry.st_ino):
+            current_entry = refreshed
+            current_dir = after_dir
+            continue
+        return _first_folded_match(part, entries), True
+    return "", True
+
+
+def _format_display_path(display_prefix: str | None, parts: Iterable[str]) -> str:
+    joined = "/".join(parts)
+    if display_prefix and joined:
+        return f"{display_prefix}/{joined}"
+    return display_prefix or joined
+
+
+def _validate_spelling_parts(parts: tuple[str, ...]) -> None:
+    for part in parts:
+        if part in {"", ".", ".."} or "/" in part or "\x00" in part:
+            raise FolderIdError(f"Unsafe path component: {part!r}")
+
+
+def _check_component_spelling(
+    fs: _SpellingFS,
+    current: int,
+    part: str,
+) -> tuple[str | None, os.stat_result | None, bool]:
+    """Check one component inside ``current``.
+
+    Returns ``(disk_name, entry_info, unresolved_churn)``; ``disk_name is None``
+    means the component does not exist on disk.
+    """
+
+    try:
+        entry_info = fs.stat_entry(part, current)
+    except FileNotFoundError:
+        return None, None, False
+    if not _needs_directory_listing(fs, current, part):
+        return part, entry_info, False
+    dir_info = fs.fstat_dir(current)
+    disk_name, exists = _resolve_disk_name(fs, current, part, dir_info, entry_info)
+    if not exists or disk_name is None:
+        return None, None, False
+    if disk_name == "":
+        return "", entry_info, True
+    return disk_name, entry_info, False
+
+
+def _raise_spelling_mismatch(
+    display_prefix: str | None,
+    parts: tuple[str, ...],
+    disk_parts: list[str],
+    *,
+    unresolved_churn: bool,
+) -> None:
+    typed_display = _format_display_path(display_prefix, parts)
+    if unresolved_churn:
+        raise PathSpellingUnverifiableError(
+            f"Path {typed_display!r} could not be verified against an exact on-disk name because the folder changed while checking it.",
+            typed=typed_display,
+        )
+    disk_display = _format_display_path(display_prefix, disk_parts)
+    typed_prefix = _format_display_path(display_prefix, parts[: len(disk_parts)])
+    unicode_only = unicodedata.normalize("NFC", typed_prefix) == unicodedata.normalize("NFC", disk_display)
+    unicode_note = " (different Unicode normalization)" if unicode_only else ""
+    if len(disk_parts) < len(parts):
+        message = (
+            f"Path component {typed_prefix!r} in {typed_display!r} does not match the exact name on disk "
+            f"{disk_display!r}{unicode_note}. Use the exact on-disk spelling {disk_display!r}."
+        )
+    else:
+        message = (
+            f"Path {typed_display!r} does not match the exact name on disk {disk_display!r}{unicode_note}. "
+            f"Use the exact on-disk spelling {disk_display!r}."
+        )
+    raise PathSpellingError(message, typed=typed_display, disk=disk_display, unicode_only=unicode_only)
+
+
+def _raise_spelling_unverifiable(
+    display_prefix: str | None,
+    parts: tuple[str, ...],
+    exc: OSError,
+) -> NoReturn:
+    typed_display = _format_display_path(display_prefix, parts)
+    err_no = (
+        exc.__cause__.errno
+        if isinstance(exc, safe_open.UnsafePath) and isinstance(exc.__cause__, OSError)
+        else exc.errno
+    )
+    logger.warning(
+        "Could not verify the exact on-disk spelling of a path. "
+        "event=path_spelling_unverifiable path=%s errno=%s",
+        typed_display,
+        err_no,
+    )
+    raise PathSpellingUnverifiableError(
+        f"Could not verify the exact on-disk spelling of {typed_display!r}.",
+        typed=typed_display,
+        errno_value=err_no,
+    ) from exc
+
+
+_STOP_WALK_ERRNOS = frozenset({errno.ENOENT, errno.ELOOP, errno.ENOTDIR})
+
+
+def _open_next_dir(
+    active_fs: _SpellingFS,
+    current: int,
+    disk_name: str,
+) -> int | None:
+    """Open the next directory component without following links, or return None to stop."""
+
+    try:
+        return active_fs.open_dir(disk_name, current)
+    except OSError as exc:
+        if exc.errno in _STOP_WALK_ERRNOS:
+            return None
+        raise
+
+
+def _walk_exact_spelling(
+    active_fs: _SpellingFS,
+    current: int,
+    parts: tuple[str, ...],
+) -> tuple[list[str], bool, bool]:
+    """Walk ``parts`` below open root fd ``current`` without following links.
+
+    Stops immediately at the first mismatched component (reporting the disk
+    spelling only up to and including it and never opening anything below it)
+    so a misspelled path into a blocked folder reveals nothing inside it.
+    """
+
+    disk_parts: list[str] = []
+    had_mismatch = False
+    unresolved_churn = False
+    try:
+        for index, part in enumerate(parts):
+            disk_name, entry_info, churn = _check_component_spelling(active_fs, current, part)
+            if disk_name is None or entry_info is None:
+                break
+            if churn:
+                had_mismatch = True
+                unresolved_churn = True
+                break
+            disk_parts.append(disk_name)
+            if disk_name != part:
+                had_mismatch = True
+                break
+            if index + 1 >= len(parts) or not stat.S_ISDIR(entry_info.st_mode):
+                break
+            following = _open_next_dir(active_fs, current, disk_name)
+            if following is None:
+                break
+            active_fs.close_fd(current)
+            current = following
+    finally:
+        active_fs.close_fd(current)
+    return disk_parts, had_mismatch, unresolved_churn
+
+
+def check_exact_spelling(
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    display_prefix: str | None = None,
+    fs: _SpellingFS | None = None,
+) -> None:
+    """Verify every existing component of ``root/parts`` matches its on-disk name.
+
+    Walks from ``root`` one directory descriptor at a time without following
+    links (matching ``access_control.safe_open``). Stops as soon as a component
+    does not exist on disk so newly created files and future targets are
+    accepted as typed. Raises ``PathSpellingError`` when any existing component
+    differs in letter case or Unicode normalization from its directory entry,
+    or ``PathSpellingUnverifiableError`` (a ``PathSpellingError`` subclass) when
+    an ``OSError`` prevents verifying spelling, failing closed without leaking
+    host paths.
+    """
+
+    if not parts:
+        return
+    _validate_spelling_parts(parts)
+
+    active_fs = _ACTIVE_FS if fs is None else fs
+    try:
+        current = active_fs.open_root(root)
+    except safe_open.UnsafePath as exc:
+        if exc.reason == safe_open.REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError):
+            return
+        _raise_spelling_unverifiable(display_prefix, parts, exc)
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return
+        _raise_spelling_unverifiable(display_prefix, parts, exc)
+
+    try:
+        disk_parts, had_mismatch, unresolved_churn = _walk_exact_spelling(active_fs, current, parts)
+    except OSError as exc:
+        _raise_spelling_unverifiable(display_prefix, parts, exc)
+    if had_mismatch:
+        _raise_spelling_mismatch(display_prefix, parts, disk_parts, unresolved_churn=unresolved_churn)
+
+
+def check_spelling_below(
+    workspaces_dir: Path,
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    display_prefix: str | None = None,
+    fs: _SpellingFS | None = None,
+) -> None:
+    """Verify exact spelling anchoring at ``workspaces_dir`` when ``root`` sits inside it.
+
+    For roots outside ``workspaces_dir`` (such as registered data folders), walks
+    from ``root`` and reports paths with ``display_prefix`` (for example
+    ``data/<name>``) or bare relative parts, never deriving a host folder name.
+    """
+
+    real_root = Path(os.path.realpath(root))
+    real_workspaces = Path(os.path.realpath(workspaces_dir))
+    try:
+        rel_root = real_root.relative_to(real_workspaces).parts
+    except ValueError:
+        check_exact_spelling(real_root, parts, display_prefix=display_prefix, fs=fs)
+        return
+    check_exact_spelling(real_workspaces, (*rel_root, *parts), fs=fs)
+
+
+def check_folder_id_spelling(
+    roots: FolderRoots,
+    folder_id: str,
+    *,
+    fs: _SpellingFS | None = None,
+) -> None:
+    """Verify ``folder_id`` matches the exact on-disk spelling below its registered root.
+
+    Messages always report logical folder ids (never host paths). Unregistered
+    ``data/<name>`` targets are ignored here so access rules refuse them with
+    their own message.
+    """
+
+    canonical = normalize_folder_id(folder_id)
+    parts = canonical.split("/")
+    if parts[0] == FOLDER_ROOT_DATA:
+        folder = roots.data_folder(canonical)
+        if folder is None:
+            return
+        rel_parts = tuple(parts[2:])
+        if not rel_parts:
+            return
+        check_exact_spelling(
+            Path(os.path.realpath(folder.path)),
+            rel_parts,
+            display_prefix=f"{FOLDER_ROOT_DATA}/{parts[1]}",
+            fs=fs,
+        )
+        return
+    check_exact_spelling(Path(os.path.realpath(roots.workspaces_dir)), tuple(parts), fs=fs)
+
+
+def _parent_folder_id(canonical: str) -> str | None:
+    parts = canonical.split("/")
+    if len(parts) <= root_length(parts):
+        return None
+    return "/".join(parts[:-1])
+
+
+def _unsafe_path_refusal(canonical: str, exc: safe_open.UnsafePath) -> str | None:
+    if exc.reason == safe_open.REASON_ROOT_UNAVAILABLE and isinstance(exc.__cause__, FileNotFoundError):
+        return None
+    if exc.reason == safe_open.REASON_NOT_DIRECTORY:
+        return f"Folder grants only open folders, not a path inside a file: '{canonical}'."
+    if exc.reason == safe_open.REASON_LINK:
+        return f"Folder grants only open real folders, not symbolic links: '{canonical}'."
+    return f"Folder grants only open accessible folders: '{canonical}' could not be checked."
+
+
+def _non_directory_refusal(canonical: str, mode: int) -> str:
+    if stat.S_ISREG(mode):
+        if is_person_folder(canonical):
+            return (
+                f"Folder grants only open folders, not the file '{canonical}'. "
+                "A file in a person's folder is shared by its owner with /share or Share in the workspace browser."
+            )
+        parent = _parent_folder_id(canonical)
+        if parent is not None:
+            return f"Folder grants only open folders, not the file '{canonical}'. Grant the folder '{parent}' instead."
+        return f"Folder grants only open folders, not the file '{canonical}'."
+    if stat.S_ISLNK(mode):
+        return f"Folder grants only open real folders, not the symbolic link '{canonical}'."
+    return f"Folder grants only open folders, not '{canonical}'."
+
+
+def folder_grant_file_refusal(roots: FolderRoots, folder_id: str) -> str | None:
+    """Why a folder grant on ``folder_id`` must be refused, or None if allowed.
+
+    Folder grants only open folders; a grant targeting an existing file would
+    silently do nothing because file tools check ``File::<path>``. Returns a
+    plain-language message naming the folder to grant instead (or, for a file
+    in a person's folder, that its owner shares it). Missing paths and real
+    directories return None.
+    """
+
+    canonical = normalize_folder_id(folder_id)
+    parts = canonical.split("/")
+    if parts[0] == FOLDER_ROOT_DATA and roots.data_folder(canonical) is None:
+        return None
+    base, rel_parts = roots.root_and_parts(canonical)
+    try:
+        info = safe_open.entry_status(base, rel_parts)
+    except safe_open.UnsafePath as exc:
+        return _unsafe_path_refusal(canonical, exc)
+    if info is None or stat.S_ISDIR(info.st_mode):
+        return None
+    return _non_directory_refusal(canonical, info.st_mode)
+
+
+def check_folder_target(
+    roots: FolderRoots,
+    target_id: str,
+    *,
+    for_block: bool = False,
+    fs: _SpellingFS | None = None,
+) -> None:
+    """Validate an access target's on-disk spelling and (for grants) that it is not a file.
+
+    Raises ``PathSpellingError`` when any existing component differs from its
+    on-disk spelling. When ``for_block`` is False, also raises
+    ``FolderGrantOnFileError`` if the target names an existing file or
+    non-directory. Blocks on file paths remain allowed.
+    """
+
+    canonical = normalize_folder_id(target_id)
+    check_folder_id_spelling(roots, canonical, fs=fs)
+    if for_block:
+        return
+    refusal = folder_grant_file_refusal(roots, canonical)
+    if refusal is not None:
+        suggested = None if is_person_folder(canonical) else _parent_folder_id(canonical)
+        raise FolderGrantOnFileError(refusal, target=canonical, suggested_folder=suggested)
+
+
 def data_folder_problem(path: Path, protected: Iterable[Path]) -> str | None:
     """Why a data folder cannot be registered, or None.
 
@@ -234,23 +928,383 @@ def folder_owner(folder_id: str, task_person_id: str | None) -> str | None:
     return _OTHER_PERSON_OWNER_PREFIX + parts[1]
 
 
+FOLDER_TARGET_PROBLEM_NOTICE_PREFIX = "folder_target_problem"
+
+
+@dataclass(frozen=True)
+class FolderTargetProblem:
+    """An active stored folder/file grant or block whose target is ineffective or misspelled."""
+
+    grant: GrantV1
+    problem: str  # "file_target" | "spelling" | "unverifiable"
+    detail: str
+    disk_spelling: str = ""
+    suggested_folder: str | None = None
+
+
+def _grant_subject_text(subject: SubjectRefV1) -> str | None:
+    """Format ``subject`` for ``/access`` commands (matching ``parse_subject``), or None if unsupported."""
+
+    short = subject.id.split("/", 1)[-1]
+    if subject.kind is SubjectKind.AGENT_TYPE:
+        return f"agent-type:{short}"
+    if subject.kind is SubjectKind.AGENT:
+        return f"agent:{subject.id}"
+    if subject.kind is SubjectKind.ROLE:
+        return f"role:{short}"
+    if subject.kind is SubjectKind.TEAM:
+        return "team"
+    if subject.kind is SubjectKind.USER:
+        return f"user:{subject.id}"
+    return None
+
+
+def _grant_subject_name(subject: SubjectRefV1) -> str:
+    if subject.kind is SubjectKind.TEAM:
+        return "everyone in the team"
+    if subject.kind is SubjectKind.ROLE:
+        return f"everyone with the {subject.id.split('/', 1)[-1]} role"
+    if subject.kind is SubjectKind.SCHEDULE:
+        return f"scheduled job {subject.id.split('/', 1)[-1]}"
+    return subject.id.split("/", 1)[-1] if subject.kind is SubjectKind.AGENT_TYPE else subject.id
+
+
+def _inspect_stored_folder_grant(
+    roots: FolderRoots,
+    grant: GrantV1,
+    *,
+    fs: _SpellingFS | None = None,
+) -> FolderTargetProblem | None:
+    try:
+        canonical = normalize_folder_id(grant.target.id)
+    except FolderIdError:
+        return None
+    try:
+        check_folder_id_spelling(roots, canonical, fs=fs)
+    except PathSpellingUnverifiableError as exc:
+        return FolderTargetProblem(grant=grant, problem="unverifiable", detail=str(exc))
+    except PathSpellingError as exc:
+        return FolderTargetProblem(grant=grant, problem="spelling", detail=str(exc), disk_spelling=exc.disk)
+    if grant.kind is GrantKind.ACCESS and grant.target.kind is TargetKind.FOLDER:
+        refusal = folder_grant_file_refusal(roots, canonical)
+        if refusal is not None:
+            suggested = None if is_person_folder(canonical) else _parent_folder_id(canonical)
+            return FolderTargetProblem(
+                grant=grant,
+                problem="file_target",
+                detail=refusal,
+                suggested_folder=suggested,
+            )
+    return None
+
+
+def folder_target_problems(
+    roots: FolderRoots,
+    grants: Iterable[GrantV1],
+    *,
+    now: datetime,
+    fs: _SpellingFS | None = None,
+) -> list[FolderTargetProblem]:
+    """Active, unexpired folder/file grants and blocks whose stored target mismatches disk or names a file."""
+
+    found: list[FolderTargetProblem] = []
+    for grant in grants:
+        if grant.status is not GrantStatus.ACTIVE:
+            continue
+        if grant.expires_at_utc is not None and grant.expires_at_utc <= now:
+            continue
+        if grant.target.kind not in {TargetKind.FOLDER, TargetKind.FILE}:
+            continue
+        if grant.kind not in {GrantKind.ACCESS, GrantKind.BLOCK}:
+            continue
+        item = _inspect_stored_folder_grant(roots, grant, fs=fs)
+        if item is not None:
+            found.append(item)
+    return found
+
+
+def _is_prefix_mismatch(target_id: str, disk_spelling: str) -> bool:
+    """Whether ``disk_spelling`` stopped at an ancestor component of ``target_id``."""
+
+    if not disk_spelling:
+        return False
+    try:
+        canonical = normalize_folder_id(target_id)
+    except FolderIdError:
+        canonical = target_id.strip("/")
+    return disk_spelling.count("/") < canonical.count("/")
+
+
+def _block_problem_notice_text(problem: FolderTargetProblem, who: str) -> tuple[str, str]:
+    grant = problem.grant
+    is_prefix = _is_prefix_mismatch(grant.target.id, problem.disk_spelling)
+    if grant.task_id or grant.for_person_id:
+        if not problem.disk_spelling:
+            title = f"Could not check a stored restriction on {grant.target.id} against disk"[:400]
+            summary = (
+                f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling "
+                f"could not be checked ({problem.detail}). It is bound to one request and ends with that request."
+            )
+            return title, summary
+        title = f"A stored restriction on {grant.target.id} does not match the path on disk"[:400]
+        if is_prefix:
+            summary = (
+                f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', whose path on disk starts with "
+                f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this "
+                "restriction does not stop access under the disk spelling. It is bound to one request and ends with "
+                "that request."
+            )
+        else:
+            summary = (
+                f"Restriction {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+                f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this "
+                f"restriction does not stop access to '{problem.disk_spelling}'. It is bound to one request and "
+                "ends with that request."
+            )
+        return title, summary
+
+    if not problem.disk_spelling:
+        title = f"Could not check a stored block on {grant.target.id} against disk"[:400]
+        summary = (
+            f"Block {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
+            f"not be checked ({problem.detail}). Check the path and replace the block if needed."
+        )
+        return title, summary
+
+    title = f"A stored block on {grant.target.id} does not match the path on disk"[:400]
+    if is_prefix:
+        summary = (
+            f"Block {grant.grant_id} for {who} names '{grant.target.id}', whose path on disk starts with "
+            f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this block "
+            f"does not stop access under '{problem.disk_spelling}'. Check the exact on-disk path under "
+            f"'{problem.disk_spelling}', add a replacement block on that exact path, and then remove the old "
+            f"one with `/access unblock {grant.grant_id}`."
+        )
+        return title, summary
+
+    subject_text = _grant_subject_text(grant.subject)
+    if subject_text is not None:
+        replacement = (
+            f'Add a replacement block with `/access block {subject_text} {problem.disk_spelling} --reason "..."` '
+            f"and then remove the old one with `/access unblock {grant.grant_id}`."
+        )
+    else:
+        replacement = (
+            f"Add a replacement block for {who} on '{problem.disk_spelling}' and then remove the old one "
+            f"with `/access unblock {grant.grant_id}`."
+        )
+    summary = (
+        f"Block {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+        f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this block "
+        f"does not stop access to '{problem.disk_spelling}'. {replacement}"
+    )
+    return title, summary
+
+
+def _share_spelling_notice_text(
+    problem: FolderTargetProblem,
+    who: str,
+    *,
+    kind_label: str,
+    owner_noun: str,
+    mentions_code_mounts: bool,
+) -> tuple[str, str]:
+    grant = problem.grant
+    if not problem.disk_spelling:
+        title = f"Could not check a stored {kind_label} on {grant.target.id} against disk"[:400]
+        summary = (
+            f"{kind_label.capitalize()} {grant.grant_id} for {who} names '{grant.target.id}', whose exact "
+            f"on-disk spelling could not be checked ({problem.detail})."
+        )
+        return title, summary
+    title = f"A stored {kind_label} on {grant.target.id} does not match the path on disk"[:400]
+    code_note = " and is skipped for code mounts" if mentions_code_mounts else ""
+    if _is_prefix_mismatch(grant.target.id, problem.disk_spelling):
+        summary = (
+            f"{kind_label.capitalize()} {grant.grant_id} for {who} names '{grant.target.id}', whose path on "
+            f"disk starts with '{problem.disk_spelling}'. It no longer matches on-disk paths{code_note}. "
+            f"Remove the old share with `/access revoke {grant.grant_id}`; the {owner_noun}'s owner must share "
+            f"the exact on-disk path under '{problem.disk_spelling}' again with `/share` or Share in the "
+            "workspace browser."
+        )
+    else:
+        summary = (
+            f"{kind_label.capitalize()} {grant.grant_id} for {who} names '{grant.target.id}', while the path "
+            f"on disk is '{problem.disk_spelling}'. It no longer matches on-disk paths{code_note}. Remove the "
+            f"old share with `/access revoke {grant.grant_id}`; the {owner_noun}'s owner must share "
+            f"'{problem.disk_spelling}' again with `/share` or Share in the workspace browser."
+        )
+    return title, summary
+
+
+def _grant_spelling_notice_text(problem: FolderTargetProblem, who: str) -> tuple[str, str]:
+    grant = problem.grant
+    if grant.target.kind is TargetKind.FILE:
+        return _share_spelling_notice_text(
+            problem, who, kind_label="file share", owner_noun="file", mentions_code_mounts=False
+        )
+    if grant.subject.kind is SubjectKind.USER and is_person_folder(grant.target.id):
+        return _share_spelling_notice_text(
+            problem, who, kind_label="folder share", owner_noun="folder", mentions_code_mounts=True
+        )
+    if not problem.disk_spelling:
+        title = f"Could not check a stored folder grant on {grant.target.id} against disk"[:400]
+        summary = (
+            f"Grant {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
+            f"not be checked ({problem.detail})."
+        )
+        return title, summary
+    title = f"A stored folder grant on {grant.target.id} does not match the path on disk"[:400]
+    if _is_prefix_mismatch(grant.target.id, problem.disk_spelling):
+        summary = (
+            f"Grant {grant.grant_id} for {who} names '{grant.target.id}', whose path on disk starts with "
+            f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
+            f"Remove it with `/access revoke {grant.grant_id}` and grant the exact on-disk path under "
+            f"'{problem.disk_spelling}' instead."
+        )
+    else:
+        summary = (
+            f"Grant {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+            f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
+            f"Remove it with `/access revoke {grant.grant_id}` and grant '{problem.disk_spelling}' instead."
+        )
+    return title, summary
+
+
+def folder_target_problem_notice(problem: FolderTargetProblem, *, now: datetime) -> AccessNoticeV1:
+    """The administrators' Inbox notice for one stored file-path grant or misspelled grant/block."""
+
+    grant = problem.grant
+    who = _grant_subject_name(grant.subject)
+    if grant.kind is GrantKind.BLOCK:
+        title, summary = _block_problem_notice_text(problem, who)
+    elif problem.problem == "file_target":
+        title = f"A stored folder grant on {grant.target.id} targets a file and has no effect"[:400]
+        summary = (
+            f"Grant {grant.grant_id} gives {who} folder access to '{grant.target.id}', which is a file on disk "
+            f"so the grant never opens it. {problem.detail} Remove the ineffective grant with "
+            f"`/access revoke {grant.grant_id}`."
+        )
+    else:
+        title, summary = _grant_spelling_notice_text(problem, who)
+    return AccessNoticeV1(
+        notice_id=f"{FOLDER_TARGET_PROBLEM_NOTICE_PREFIX}:{problem.problem}:{grant.grant_id}"[:120],
+        team_id=grant.team_id,
+        kind=AccessNoticeKind.FOLDER_TARGET_PROBLEM,
+        recipient_roles=(PERSON_ROLE_ADMIN,),
+        title=title,
+        summary=summary[:4000],
+        grant_id=grant.grant_id,
+        created_at_utc=now,
+    )
+
+
+def report_folder_target_problems(
+    roots: FolderRoots,
+    store: Any,
+    team_id: str,
+    *,
+    now: datetime | None = None,
+    fs: _SpellingFS | None = None,
+) -> list[str]:
+    """Log structured warnings and store one admin notice per confirmed legacy file-path or misspelled grant/block.
+
+    Unverifiable results (such as a transient I/O error at startup) are logged
+    and checked again on the next start rather than storing a notice that could
+    hide a later confirmed problem. Store errors while saving one notice are
+    logged with its grant id without stopping the remaining checks. Never
+    deletes or rewrites stored grants or blocks.
+    """
+
+    moment = now or datetime.now(timezone.utc)
+    reported: list[str] = []
+    for item in folder_target_problems(roots, store.for_status(team_id, (GrantStatus.ACTIVE,)), now=moment, fs=fs):
+        grant = item.grant
+        if item.problem == "unverifiable":
+            logger.warning(
+                "Could not verify a stored folder target against disk; will check again at the next start. "
+                "event=folder_target_unverifiable grant_id=%s kind=%s subject=%s:%s target=%s detail=%s",
+                grant.grant_id,
+                grant.kind.value,
+                grant.subject.kind.value,
+                grant.subject.id,
+                grant.target.id,
+                item.detail,
+            )
+            continue
+        if grant.kind is GrantKind.BLOCK:
+            logger.warning(
+                "A stored block does not match the exact on-disk path spelling and will not protect it. "
+                "event=misspelled_folder_block_found grant_id=%s subject=%s:%s target=%s disk=%s problem=%s",
+                grant.grant_id,
+                grant.subject.kind.value,
+                grant.subject.id,
+                grant.target.id,
+                item.disk_spelling,
+                item.problem,
+            )
+        else:
+            logger.warning(
+                "A stored folder grant is ineffective because its target names a file or mismatches disk spelling. "
+                "event=ineffective_folder_grant_found grant_id=%s subject=%s:%s target=%s problem=%s disk=%s suggested=%s",
+                grant.grant_id,
+                grant.subject.kind.value,
+                grant.subject.id,
+                grant.target.id,
+                item.problem,
+                item.disk_spelling,
+                item.suggested_folder or "",
+            )
+        try:
+            created = store.create_notice_if_absent(folder_target_problem_notice(item, now=moment))
+        except Exception:
+            logger.error(
+                "Could not store the administrator notice for a stored folder target problem. "
+                "event=folder_target_problem_notice_failed grant_id=%s target=%s problem=%s",
+                grant.grant_id,
+                grant.target.id,
+                item.problem,
+                exc_info=True,
+            )
+            continue
+        if created:
+            reported.append(grant.grant_id)
+    return reported
+
+
 __all__ = [
     "DataFolder",
     "FOLDER_ROOT_AGENTS",
     "FOLDER_ROOT_DATA",
     "FOLDER_ROOT_TEAM",
     "FOLDER_ROOT_USERS",
+    "FOLDER_TARGET_PROBLEM_NOTICE_PREFIX",
+    "FolderGrantOnFileError",
     "FolderIdError",
     "FolderRoots",
+    "FolderTargetProblem",
+    "PATH_SPELLING_MISMATCH",
+    "PATH_SPELLING_UNVERIFIABLE",
+    "PathSpellingError",
+    "PathSpellingUnverifiableError",
     "STANDARD_SHARED_FOLDERS",
+    "check_exact_spelling",
+    "check_folder_id_spelling",
+    "check_folder_target",
+    "check_spelling_below",
+    "clear_spelling_cache",
     "covers",
     "data_folder_problem",
     "folder_chain",
+    "folder_grant_file_refusal",
     "folder_owner",
+    "folder_target_problem_notice",
+    "folder_target_problems",
     "grantable_folder_id",
     "is_person_folder",
     "normalize_folder_id",
     "paths_inside",
     "person_folder_id",
+    "report_folder_target_problems",
     "root_length",
 ]

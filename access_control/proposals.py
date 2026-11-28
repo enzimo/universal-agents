@@ -76,7 +76,12 @@ from access_catalog.instance_tools import (
     write_instance_tool,
 )
 from access_control.cli_binaries import Downloader, fetch_https, workspaces_root
-from access_control.data_folders import DataFolderRegistry, registration_problem
+from access_control.data_folders import (
+    DataFolderRegistry,
+    folder_roots_provider,
+    registration_problem,
+    roots_with_data_folders,
+)
 from access_control.decision_effects import EffectJournal, OwnedFile, RemovedFile, ReplacedFile
 from access_control.proposal_clis import cli_rows, install_programs
 from access_control.proposal_errors import ProposalRefused
@@ -93,7 +98,17 @@ from access_control.tool_removals import (
 )
 from access_control.decisions import AccessService, HandDownRefused
 from access_control.entities import PersonPrincipal, agent_type_id
-from access_control.folders import FOLDER_ROOT_USERS, FolderIdError, grantable_folder_id
+from access_control.folders import (
+    FOLDER_ROOT_DATA,
+    FOLDER_ROOT_USERS,
+    FolderGrantOnFileError,
+    FolderIdError,
+    FolderRoots,
+    PathSpellingError,
+    check_folder_target,
+    grantable_folder_id,
+    normalize_folder_id,
+)
 from access_control.grant_entries import GrantPlan
 from access_control.mcp_servers import default_proposal_grants
 from access_control.people import is_administrator
@@ -478,6 +493,62 @@ class ProposalCompiler:
     blocks_for_tool: Callable[[str], list[GrantV1]] = lambda _tool_id: []
     # Active grants and blocks targeting one tool_id, used for tool_removals impact rows.
     grants_for_tool: Callable[[str], list[GrantV1]] = lambda _tool_id: []
+    # Optional live FolderRoots override (otherwise derived from instance_root + data_folders).
+    folder_roots: Callable[[], FolderRoots] | None = None
+    # False at submission (skip probing inside newly proposed data folders before admin approval);
+    # True in ProposalApplier at apply time (enforce disk checks on proposed data folders too).
+    include_proposed_data_folders: bool = False
+
+    def _effective_folder_roots(self, proposal: AccessProposalV1) -> FolderRoots | None:
+        if self.folder_roots is not None:
+            base = self.folder_roots()
+        elif self.instance_root is not None:
+            if self.data_folders is not None:
+                provider = folder_roots_provider(
+                    self.instance_root,
+                    self.data_folders.store,
+                    self.team_id,
+                    protected=self.protected,
+                )
+                assert provider is not None
+                base = provider()
+            else:
+                from runtime_settings.instance_layout import InstanceLayout
+
+                base = FolderRoots.for_layout(InstanceLayout.at(self.instance_root))
+        else:
+            return None
+        if not self.include_proposed_data_folders or not proposal.data_folders:
+            return base
+        return roots_with_data_folders(base, proposal.data_folders)
+
+    def _check_folder_disk_target(
+        self,
+        target: TargetRefV1,
+        roots: FolderRoots | None,
+        proposed_folder_names: set[str],
+        *,
+        for_block: bool,
+    ) -> None:
+        if target.kind not in {TargetKind.FOLDER, TargetKind.FILE}:
+            return
+        parts = normalize_folder_id(target.id).split("/")
+        if not self.include_proposed_data_folders and parts[0] == FOLDER_ROOT_DATA and parts[1] in proposed_folder_names:
+            # C04: do not probe host directories only proposed in this request before admin approval.
+            return
+        if roots is None:
+            logger.warning(
+                "Skipping proposal folder target disk check because no folder_roots or instance_root is set. "
+                "event=folder_target_check_skipped target_kind=%s target=%s for_block=%s",
+                target.kind.value,
+                target.id,
+                for_block,
+            )
+            return
+        try:
+            check_folder_target(roots, target.id, for_block=for_block)
+        except (PathSpellingError, FolderGrantOnFileError, FolderIdError) as exc:
+            raise ProposalRefused(str(exc)) from exc
 
     def compile(
         self, proposal: AccessProposalV1, *, person: PersonPrincipal | None, task_id: str | None
@@ -485,6 +556,8 @@ class ProposalCompiler:
         servers = self._servers(proposal)
         removed_files = self._tool_removal_files(proposal)
         changed_files = self._tool_change_files(proposal)
+        effective_roots = self._effective_folder_roots(proposal)
+        proposed_folder_names = {folder.name for folder in proposal.data_folders}
         try:
             candidate = with_proposed_tools(
                 self.catalog,
@@ -533,6 +606,9 @@ class ProposalCompiler:
                     f"Give {self.lead_agent_type} the access with delegation_depth 1: its workers then get it for "
                     "each task. Or give the worker access for this task only (lifetime 'task')."
                 )
+            self._check_folder_disk_target(
+                grant.target, effective_roots, proposed_folder_names, for_block=False
+            )
             rows.append(self._grant_row(candidate, grant, index, task_id, new_tools))
             if person is not None and not self._person_holds(person, grant, new_tools, new_mcp):
                 key = (grant.target.id, grant.level.value)
@@ -551,7 +627,7 @@ class ProposalCompiler:
                     flags=("full_access",) if level is AccessLevel.FULL else (),
                 )
             )
-        rows += self._block_rows(candidate, proposal)
+        rows += self._block_rows(candidate, proposal, effective_roots, proposed_folder_names)
         rows += self._folder_rows(proposal)
         rows += self._account_rows(candidate, proposal)
         rows += self._revocation_rows(proposal)
@@ -785,10 +861,20 @@ class ProposalCompiler:
         keepable = grant.lifetime == "until_revoked" and bool(task_id)
         return ReviewItemV1(item_id=f"grant-{index}", section="access", text=text, flags=tuple(flags), keepable=keepable)
 
-    def _block_rows(self, catalog: ToolCatalog, proposal: AccessProposalV1) -> list[ReviewItemV1]:
+    def _block_rows(
+        self,
+        catalog: ToolCatalog,
+        proposal: AccessProposalV1,
+        effective_roots: FolderRoots | None = None,
+        proposed_folder_names: set[str] | None = None,
+    ) -> list[ReviewItemV1]:
         rows = []
+        proposed_names = proposed_folder_names or set()
         for index, block in enumerate(proposal.blocks):
             self._check_target(catalog, block.target, what="A restriction")
+            self._check_folder_disk_target(
+                block.target, effective_roots, proposed_names, for_block=True
+            )
             rows.append(
                 ReviewItemV1(
                     item_id=f"block-{index}",
@@ -908,6 +994,7 @@ def _service_with_catalog(service: AccessService, catalog: ToolCatalog) -> Acces
         clock=service.clock,
         agent_role_of=service.agent_role_of,
         lead_agent_type=service.lead_agent_type,
+        folder_roots=service.folder_roots,
     )
 
 
@@ -1014,6 +1101,7 @@ class ProposalApplier:
             grants_for_tool=lambda tool_id: active_grants_for_tool_in_store(
                 service.store, service.team_id, tool_id, now=service.clock()
             ),
+            include_proposed_data_folders=True,
         )
 
     def stored_proposal(self, requests: AccessRequests, request: AccessRequestV1) -> AccessProposalV1:
@@ -1490,6 +1578,7 @@ class ProposalApplier:
             if refusal:
                 raise HandDownRefused(refusal)
         folders = self._folders(reviewer, now, proposal)
+        self._check_stored_folder_targets(folders, grants)
         # Removing access removes its whole entry (access_control.grant_entries),
         # as Remove on the Access page does.
         revoke_ids: list[str] = []
@@ -1657,6 +1746,29 @@ class ProposalApplier:
             level=AccessLevel.FULL,
             lifetime=GrantLifetime.UNTIL_REVOKED,
         ).model_copy(update={"reason": reason[:2000]})
+
+    def _check_stored_folder_targets(
+        self, folders: Iterable[DataFolderRecordV1], grants: list[GrantV1]
+    ) -> None:
+        """Re-check folder/file grants and blocks against effective FolderRoots right before apply_together."""
+
+        folder_grants = [grant for grant in grants if grant.target.kind in {TargetKind.FOLDER, TargetKind.FILE}]
+        if not folder_grants:
+            return
+        registry = self.data_folders()
+        provider = folder_roots_provider(
+            self.instance_root,
+            registry.store,
+            registry.team_id,
+            protected=self.protected,
+        )
+        assert provider is not None
+        roots = roots_with_data_folders(provider(), folders)
+        for grant in folder_grants:
+            try:
+                check_folder_target(roots, grant.target.id, for_block=grant.kind is GrantKind.BLOCK)
+            except (PathSpellingError, FolderGrantOnFileError, FolderIdError) as exc:
+                raise HandDownRefused(str(exc)) from exc
 
     def _folders(
         self, reviewer: PersonPrincipal, now: datetime, proposal: AccessProposalV1

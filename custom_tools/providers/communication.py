@@ -1,12 +1,16 @@
 """Communication support for the trusted Strands tool surface."""
 
+from collections.abc import Mapping
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from strands import tool
 
-from assistant_gateway.attachments import validate_user_notification_attachments
+from assistant_gateway.attachments import (
+    coerce_attachment_items,
+    validate_user_notification_attachments,
+)
 from custom_tools.workspace_scope import current_workspace_scope
 from custom_messages.contracts.runtime_v1 import MEM_REVIEW_AGENT_TYPE
 from custom_agents.instance_delivery_context import default_notification_gateway_context
@@ -14,7 +18,7 @@ from custom_agents.memory_plugins.config import memory_notification_delivery_tar
 from custom_agents.schedule_management import (
     is_system_managed_schedule,
 )
-from custom_messages.contracts.delivery_v1 import UserNotification
+from custom_messages.contracts.delivery_v1 import UserNotification, UserNotificationAttachment
 from custom_messages.contracts.envelope_v1 import (
     GATEWAY_MANAGER_CONTROL_TYPES,
     SCHEDULED_RUN_CONTEXT_TYPES,
@@ -299,6 +303,42 @@ def _notify_user_gateway_context(
     return _default_context(config, active_context, person_id)
 
 
+def _precheck_attachment_access(agent: Any, raw_attachments: Any) -> List[str]:
+    """Run agent-side ``file_access`` decisions before gateway attachment validation.
+
+    Uses ``coerce_attachment_items`` and the same payload extraction as
+    ``validate_user_notification_attachments`` so both sides stay in step.
+    Refuses blocked or unauthorized paths before gateway-side spelling or file
+    checks can reveal on-disk names. Location errors outside the workspace fall
+    through to gateway validation so its outside-folder messages stay intact;
+    accepted attachments are still checked again by ``_attachment_access_errors``.
+    """
+
+    items, coerce_error = coerce_attachment_items(raw_attachments)
+    if coerce_error:
+        return [coerce_error]
+    errors: List[str] = []
+    for index, raw in enumerate(items):
+        payload = raw.model_dump() if isinstance(raw, UserNotificationAttachment) else raw
+        if isinstance(payload, str):
+            payload = {"path": payload}
+        if not isinstance(payload, Mapping):
+            continue
+        raw_path = str(payload.get("path") or "").strip()
+        if not raw_path:
+            continue
+        try:
+            file_access.status(raw_path, agent=agent)
+        except file_access.PathPolicyError as exc:
+            if exc.reason_code in {
+                file_access.ACCESS_DENIED,
+                file_access.PATH_SPELLING_MISMATCH,
+                file_access.PATH_SPELLING_UNVERIFIABLE,
+            }:
+                errors.append(f"attachments[{index}].path cannot be sent: {exc}")
+    return errors
+
+
 def _attachment_access_errors(agent: Any, attachments: List[Any]) -> List[str]:
     """Why the agent may not send each attachment: the folder rules and, with
     authorization on, the folder decision (custom_tools.file_access), so a block
@@ -461,6 +501,13 @@ def notify_user(
             "channel_name": gateway_context.channel_name,
         }
 
+    attachment_errors = _precheck_attachment_access(agent, attachments)
+    if attachment_errors:
+        return {
+            "status": "error",
+            "error": "One or more attachments are invalid.",
+            "attachment_errors": attachment_errors,
+        }
     validated_attachments, attachment_errors = validate_user_notification_attachments(
         attachments,
         config=config,

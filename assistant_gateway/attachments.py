@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from access_control import safe_open
+from access_control.folders import FOLDER_ROOT_DATA, PathSpellingError, check_spelling_below
 from access_control.safe_open import UnsafePath
 from access_control.sensitive_paths import sensitive_reason
 from assistant_gateway.attachment_media import (
@@ -83,6 +84,7 @@ class _Source:
 
     root: Path
     only: str | None = None
+    display_prefix: str | None = None
 
 
 def _extra_sources(config: Any, person_id: str | None) -> list[_Source]:
@@ -106,7 +108,10 @@ def _extra_sources(config: Any, person_id: str | None) -> list[_Source]:
     store = AccessRepository(storage)
     root = getattr(config, "instance_root_path", None)
     protected = protected_locations(root, broker_credentials=getattr(config, "broker_credentials_path", None))
-    sources = [_Source(folder.path) for folder in DataFolderRegistry(store, team_id).usable(protected)]
+    sources = [
+        _Source(folder.path, display_prefix=f"{FOLDER_ROOT_DATA}/{folder.name}")
+        for folder in DataFolderRegistry(store, team_id).usable(protected)
+    ]
     if not person_id:
         return sources
     now = _utc_now()
@@ -152,7 +157,8 @@ def _is_sensitive_path(path: Path) -> bool:
     return sensitive_reason(path) is not None
 
 
-def _coerce_attachment_items(raw_attachments: Any) -> tuple[list[Any], str | None]:
+def coerce_attachment_items(raw_attachments: Any) -> tuple[list[Any], str | None]:
+    """Normalize ``notify_user`` attachment inputs into raw items or a parse error."""
     if raw_attachments in (None, "", []):
         return [], None
     if isinstance(raw_attachments, str):
@@ -178,20 +184,20 @@ def _coerce_attachment_items(raw_attachments: Any) -> tuple[list[Any], str | Non
 
 def _located(
     resolved: Path, scope: WorkspaceScope, extra: Iterable[_Source] = ()
-) -> tuple[Path, tuple[str, ...]] | None:
-    """The allowed folder holding the real path ``resolved``, and the path below it."""
+) -> tuple[Path, tuple[str, ...], str | None] | None:
+    """The allowed folder holding the real path ``resolved``, parts below it, and optional logical prefix."""
 
     for root in scope.roots:
         real_root = Path(os.path.realpath(root))
         if resolved == real_root or real_root in resolved.parents:
-            return real_root, resolved.relative_to(real_root).parts
+            return real_root, resolved.relative_to(real_root).parts, None
     for source in extra:
         real_root = Path(os.path.realpath(source.root))
         if real_root not in resolved.parents:
             continue
         parts = resolved.relative_to(real_root).parts
         if source.only is None or parts == (source.only,):
-            return real_root, parts
+            return real_root, parts, source.display_prefix
     return None
 
 
@@ -209,10 +215,15 @@ def _checked_path(
     located = _located(resolved, scope, extra)
     if located is None:
         return OUTSIDE_SOURCES, None
+    root, parts, display_prefix = located
     if _is_sensitive_path(resolved):
         return "is sensitive and cannot be attached", None
     try:
-        entry = safe_open.entry_status(*located)
+        check_spelling_below(scope.workspaces_dir, root, parts, display_prefix=display_prefix)
+    except PathSpellingError as exc:
+        return str(exc), None
+    try:
+        entry = safe_open.entry_status(root, parts)
     except UnsafePath as exc:
         return f"cannot be opened safely ({exc})", None
     if entry is None:
@@ -275,7 +286,7 @@ def validate_user_notification_attachments(
     person_id: str | None,
 ) -> tuple[list[UserNotificationAttachment], list[str]]:
     """Validate attachments for a message to ``person_id`` (None: no person)."""
-    items, error = _coerce_attachment_items(raw_attachments)
+    items, error = coerce_attachment_items(raw_attachments)
     if error:
         return [], [error]
     if not items:
@@ -374,11 +385,23 @@ def stage_user_notification_attachments(
         if located is None:
             errors.append(f"{resolved} {OUTSIDE_SOURCES}.")
             continue
+        root, parts, display_prefix = located
         name = Path(attachment.filename or resolved.name).name
         folder_parts = (*sent_parts, new_id("outgoing"))
         destination_parts = (*folder_parts, name if name not in {"", ".", ".."} else "attachment")
         try:
-            copied, digest = _copy_with_digest(located, scope.workspaces_dir, destination_parts)
+            check_spelling_below(scope.workspaces_dir, root, parts, display_prefix=display_prefix)
+            copied, digest = _copy_with_digest((root, parts), scope.workspaces_dir, destination_parts)
+        except PathSpellingError as exc:
+            logger.warning(
+                "An attachment was not copied for delivery. event=outgoing_attachment_refused "
+                "person_id=%s path=%s reason=%s",
+                person_id,
+                resolved,
+                exc.reason_code,
+            )
+            errors.append(f"{resolved} cannot be attached: {exc}")
+            continue
         except UnsafePath as exc:
             _remove_partial_copy(scope.workspaces_dir, folder_parts, destination_parts[-1])
             logger.warning(

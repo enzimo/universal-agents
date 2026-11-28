@@ -6,6 +6,7 @@ import logging
 
 from access_catalog.catalog import CatalogSource
 from access_control.cedar import CedarAccessClient
+from access_control.data_folders import folder_roots_provider
 from access_control.decisions import AccessService
 from access_control.entities import agent_role_resolver
 from assistant_gateway.config import GatewayInstanceConfig
@@ -53,13 +54,15 @@ def build_execution_access_guard(config: GatewayInstanceConfig) -> ExecutionAcce
     if not config.authorization.enabled:
         return ExecutionAccessGuard(authorization_enabled=False)
     catalogs = CatalogSource(config.instance_root_path)
+    store = AccessRepository(config.manager_storage_settings)
     access = AccessService(
-        store=AccessRepository(config.manager_storage_settings),
+        store=store,
         catalog=catalogs.current(),
         cedar=CedarAccessClient(binary=config.authorization.cedar_binary_path),
         team_id=config.gateway.team_id,
         agent_role_of=agent_role_resolver(config.manager.named_agent_type),
         lead_agent_type=config.manager.named_agent_type,
+        folder_roots=folder_roots_provider(config.instance_root_path, store, config.gateway.team_id),
     )
     return ExecutionAccessGuard(authorization_enabled=True, access=access, catalogs=catalogs)
 
