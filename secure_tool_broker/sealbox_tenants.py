@@ -36,6 +36,33 @@ from secure_tools.providers import ToolResult
 
 logger = logging.getLogger(__name__)
 SEALBOX_TENANT_NOT_PROVISIONED = "sealbox_tenant_not_provisioned"
+# Allowlisted OS/network variables kept when running isolated per-tenant Sealbox
+# maintenance commands (e.g. `secret cleanup-expired`). Never inherit SEALBOX_*,
+# AUTH_TOKEN_FILE, HOME, or XDG_CONFIG_HOME from the broker environment so a
+# config file or broker token can never silently target another tenant.
+_ISOLATED_SUBPROCESS_ENV_KEYS = (
+    "PATH",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "WINDIR",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NO_PROXY",
+    "no_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+)
 
 
 def _catalog_store() -> CredentialCatalogStore:
@@ -101,7 +128,32 @@ def _root_environment() -> dict[str, str] | ToolResult:
     return env
 
 
-def _tenant_environment(mapping: SealboxTenantMapping) -> dict[str, str] | ToolResult:
+def _build_tenant_environment(
+    mapping: SealboxTenantMapping,
+    *,
+    require_url: bool = False,
+) -> dict[str, str] | ToolResult:
+    """Build a strictly isolated environment for one Sealbox tenant mapping.
+
+    Used by every per-tenant Sealbox CLI call (reads, writes, deletes, and
+    ``secret cleanup-expired``). Never inherits ``SEALBOX_TOKEN``,
+    ``SEALBOX_TOKEN_FILE``, ``SEALBOX_ROOT_TOKEN_FILE``, ``SEALBOX_CONFIG``,
+    ``AUTH_TOKEN_FILE``, or ``HOME``/``XDG_CONFIG_HOME`` from the broker process
+    environment so a broker root token or ambient config file can never target
+    another tenant.
+    """
+
+    url = str(os.getenv("SEALBOX_URL") or "").strip()
+    if require_url and not url:
+        return ToolResult(
+            status="error",
+            error="Sealbox URL is not configured for tenant maintenance.",
+            content={
+                "error_code": "sealbox_url_not_configured",
+                "tenant_id": mapping.tenant_id,
+                "material_id": mapping.material_id,
+            },
+        )
     directory = _material_root() / mapping.material_id
     token_file = directory / "token"
     public_key_file = directory / "public.pem"
@@ -118,25 +170,46 @@ def _tenant_environment(mapping: SealboxTenantMapping) -> dict[str, str] | ToolR
             content={
                 "error_code": "sealbox_tenant_material_missing",
                 "tenant_id": mapping.tenant_id,
+                "material_id": mapping.material_id,
                 "missing_files": missing,
+            },
+        )
+    try:
+        token_text = token_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        token_text = ""
+    if not token_text:
+        return ToolResult(
+            status="error",
+            error="Sealbox tenant token file is empty or unreadable.",
+            content={
+                "error_code": "sealbox_tenant_token_missing",
+                "tenant_id": mapping.tenant_id,
+                "material_id": mapping.material_id,
             },
         )
     invalid_material = _validate_tenant_keys(mapping, public_key_file, private_key_file)
     if invalid_material is not None:
         return invalid_material
-    env = _base_environment()
-    for key in (
-        "SEALBOX_TOKEN",
-        "SEALBOX_ROOT_TOKEN_FILE",
-        "SEALBOX_AUTH_TOKEN_FILE",
-        "AUTH_TOKEN_FILE",
-    ):
-        env.pop(key, None)
-    env["SEALBOX_URL"] = str(os.getenv("SEALBOX_URL") or "").strip()
+    isolated_home = str(directory / ".no-config")
+    env = {
+        key: value
+        for key in _ISOLATED_SUBPROCESS_ENV_KEYS
+        if (value := os.environ.get(key)) is not None
+    }
+    env["HOME"] = isolated_home
+    env["XDG_CONFIG_HOME"] = isolated_home
+    env["SEALBOX_API_VERSION"] = "v2"
+    env["SEALBOX_OUTPUT_FORMAT"] = "json"
+    env["SEALBOX_URL"] = url
     env["SEALBOX_TOKEN_FILE"] = str(token_file)
     env["SEALBOX_PUBLIC_KEY_FILE"] = str(public_key_file)
     env["SEALBOX_PRIVATE_KEY_FILE"] = str(private_key_file)
     return env
+
+
+def _tenant_environment(mapping: SealboxTenantMapping) -> dict[str, str] | ToolResult:
+    return _build_tenant_environment(mapping, require_url=False)
 
 
 def _validate_tenant_keys(
@@ -368,4 +441,10 @@ def sealbox_tenant_environment(
     return _provision(scope, store)
 
 
-__all__ = ["sealbox_tenant_environment"]
+def tenant_environment_for_mapping(mapping: SealboxTenantMapping) -> dict[str, str] | ToolResult:
+    """Build a strictly isolated environment for one recorded Sealbox tenant mapping."""
+
+    return _build_tenant_environment(mapping, require_url=True)
+
+
+__all__ = ["sealbox_tenant_environment", "tenant_environment_for_mapping"]

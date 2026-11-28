@@ -4477,6 +4477,20 @@
           "description": "Human-readable catalog display name.",
           "title": "Display Name"
         },
+        "expires_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional proposed deletion time in UTC (timezone-aware ISO-8601 datetime). When the person asks for a temporary credential (for example 'in 2 hours' or 'Friday 5 PM' in their time zone), convert their words to UTC and set this field so the secure form starts pre-filled; the person decides the final expiry on the form. Omit for lasting credentials and never set on credential deletion requests.",
+          "title": "Expires At"
+        },
         "fields": {
           "items": {
             "$ref": "#/$defs/SecureCredentialFieldSpec"
@@ -4684,6 +4698,20 @@
           "default": null,
           "description": "Redacted error text, when any.",
           "title": "Error"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Deletion time in UTC when the stored credential is temporary, or omitted when it does not expire.",
+          "title": "Expires At"
         },
         "manual_fallback_url": {
           "anyOf": [

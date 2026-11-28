@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -52,6 +53,7 @@ from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_
 from access_control.identity import ContextVerifier, IdentityRejected
 from access_control.task_identity import ScheduleRunLookup, job_schedule_id, resolve_task_identity
 from custom_messages.contracts.access_v2 import (
+    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
     REASON_ACCOUNT_LINK_MISSING,
     REASON_ACCOUNT_LINK_OUTDATED,
     REASON_GATE_LINK_MISSING,
@@ -66,6 +68,7 @@ from custom_messages.contracts.access_v2 import (
 )
 from secure_tool_broker.account_links import ACCESS_STORE_MISSING_NEXT_STEP, ACCESS_STORE_MISSING_TEXT
 from secure_tool_broker.cli_passthrough import REASON_COMMAND_LINE_REJECTED
+from secure_tool_broker.credential_catalog import linked_credential_state
 from secure_tool_broker.tool_setup_tracking import note_gate_link_missing, note_link_missing
 from secure_tools.auth_methods import tool_sign_in
 from secure_tools.chat_commands import link_command
@@ -270,11 +273,19 @@ class BrokerAccessGate:
             return None
         return TeamAccountSharing(self.links, self.team_id)
 
-    def account_link_for(self, tool_id: str, person_id: str | None) -> AccountLinkV1 | None:
-        """The person's own link for a tool, or else the team's: only the owners the tool and the team's sharing allow."""
+    def resolve_account_link(
+        self, tool_id: str, person_id: str | None, *, now: datetime | None = None
+    ) -> tuple[AccountLinkV1 | None, AccountLinkV1 | None]:
+        """Return ``(usable_link, expired_link)`` for ``tool_id`` and ``person_id``.
+
+        An expired personal link is treated as absent so the team's shared
+        account still applies when the team shares the service; ``expired_link``
+        records the expired link when no usable fallback exists so callers can
+        refuse with ``REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED``.
+        """
 
         if self.links is None:
-            return None
+            return None, None
         tool = self.catalog.tools.get(tool_id)
         if tool is None:
             logger.warning(
@@ -282,19 +293,37 @@ class BrokerAccessGate:
                 "event=broker_account_link_unknown_tool tool_id=%s",
                 tool_id,
             )
-            return None
+            return None, None
         owners = TeamAccountSharing(self.links, self.team_id).link_owners(tool)
+        expired_own: AccountLinkV1 | None = None
         if person_id and LinkOwnerKind.PERSON in owners:
             own = self.links.active_link(
                 self.team_id, tool_id, LinkOwnerKind.PERSON, person_id, purpose=LinkPurpose.ACCOUNT
             )
             if own is not None:
-                return own
+                own_state = linked_credential_state(own, now=now)
+                if own_state == "usable":
+                    return own, None
+                if own_state == "expired":
+                    expired_own = own
         if LinkOwnerKind.TEAM not in owners:
-            return None
-        return self.links.active_link(
+            return None, expired_own
+        team_link = self.links.active_link(
             self.team_id, tool_id, LinkOwnerKind.TEAM, self.team_id, purpose=LinkPurpose.ACCOUNT
         )
+        if team_link is not None:
+            team_state = linked_credential_state(team_link, now=now)
+            if team_state == "usable":
+                return team_link, expired_own
+            if team_state == "expired":
+                return None, expired_own or team_link
+        return None, expired_own
+
+    def account_link_for(self, tool_id: str, person_id: str | None) -> AccountLinkV1 | None:
+        """The person's own usable link for a tool, or else the team's: only the owners the tool and sharing allow."""
+
+        link, _expired = self.resolve_account_link(tool_id, person_id)
+        return link
 
     def gate_link_for(self, tool_id: str) -> AccountLinkV1 | None:
         """The team's active gate credential link for a web API tool, regardless of account sharing."""
@@ -341,6 +370,26 @@ class BrokerAccessGate:
                 next_step=gate_link_next_step(tool),
                 resolution=resolution,
             )
+        gate_state = linked_credential_state(gate_link)
+        if gate_state == "expired":
+            note_gate_link_missing(self.links, self.team_id, person_id, tool.tool_id)
+            return None, self._refuse(
+                REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+                f"The temporary team gate credential linked to {tool.display_name} has expired, "
+                "so the broker did not send the request.",
+                context,
+                next_step=expired_link_next_step(tool, gate_link),
+                resolution=resolution,
+            )
+        if gate_state == "missing":
+            note_gate_link_missing(self.links, self.team_id, person_id, tool.tool_id)
+            return None, self._refuse(
+                REASON_GATE_LINK_MISSING,
+                f"{tool.display_name} requires a team gate credential before requests can be sent, and none is linked.",
+                context,
+                next_step=gate_link_next_step(tool),
+                resolution=resolution,
+            )
         if not injections_match(gate_link.injections, tool.gate_injections):
             note_gate_link_missing(self.links, self.team_id, person_id, tool.tool_id)
             return None, self._refuse(
@@ -379,9 +428,18 @@ class BrokerAccessGate:
             # A sign-in tool with a team fallback (X): the executor uses the
             # person's own sign-in first, and this team link (only while the
             # team shares the service) without one; it tells the person how to
-            # sign in when neither exists. An outdated team fallback link is
-            # skipped rather than refusing callers who have their own sign-in.
-            team_link = self.account_link_for(tool.tool_id, None)
+            # sign in when neither exists. An outdated or expired team fallback
+            # link is skipped rather than refusing callers who have their own sign-in.
+            team_link, expired_team = self.resolve_account_link(tool.tool_id, None)
+            if team_link is None and expired_team is not None:
+                logger.warning(
+                    "The team's fallback account link for a sign-in tool has an expired credential and will not be used. "
+                    "event=broker_team_link_expired tool_id=%s link_id=%s person_id=%s next_step=%s",
+                    tool.tool_id,
+                    expired_team.link_id,
+                    person_id,
+                    expired_link_next_step(tool, expired_team),
+                )
             if team_link is not None and not injections_match(team_link.injections, tool.credential_injections):
                 logger.warning(
                     "The team's fallback account link for a sign-in tool is outdated and will not be used. "
@@ -414,10 +472,19 @@ class BrokerAccessGate:
                 next_step=ACCESS_STORE_MISSING_NEXT_STEP,
                 resolution=resolution,
             )
-        link = self.account_link_for(tool.tool_id, person_id)
+        link, expired_link = self.resolve_account_link(tool.tool_id, person_id)
         if link is None:
             note_link_missing(self.links, self.team_id, person_id, tool.tool_id)
             team_used = TeamAccountSharing(self.links, self.team_id).team_account_used(tool)
+            if expired_link is not None:
+                return self._refuse(
+                    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+                    f"The temporary credential linked to {tool.display_name} has expired, "
+                    "so the broker has no usable credential.",
+                    context,
+                    next_step=expired_link_next_step(tool, expired_link, team_used=team_used),
+                    resolution=resolution,
+                )
             return self._refuse(
                 REASON_ACCOUNT_LINK_MISSING,
                 f"No account is linked for {tool.display_name}, so the broker has no credential to use.",
@@ -452,6 +519,36 @@ def gate_link_next_step(tool: ToolDefinitionV1, *, outdated: bool = False) -> st
     if outdated:
         return f"A team administrator links the team's gate credential for {tool.display_name} again with {command}."
     return f"A team administrator links the team's gate credential for {tool.display_name} with {command}."
+
+
+def expired_link_next_step(
+    tool: ToolDefinitionV1,
+    link: AccountLinkV1,
+    *,
+    team_used: bool = False,
+) -> str:
+    """What to do when an active link's temporary credential has expired."""
+
+    if link.purpose is LinkPurpose.GATE:
+        command = link_command(tool.tool_id, purpose=LinkPurpose.GATE)
+        return f"A team administrator links a new team gate credential for {tool.display_name} with {command}."
+    if link.owner_kind is LinkOwnerKind.TEAM:
+        team_cmd = link_command(tool.tool_id, LinkOwnerKind.TEAM)
+        if LinkOwnerKind.PERSON in tool.link_owners:
+            own_cmd = link_command(tool.tool_id)
+            return (
+                f"A team administrator links a new team account for {tool.display_name} with {team_cmd}, "
+                f"or link your own with {own_cmd}."
+            )
+        return f"A team administrator links a new team account for {tool.display_name} with {team_cmd}."
+    own_cmd = link_command(tool.tool_id)
+    if team_used:
+        team_cmd = link_command(tool.tool_id, LinkOwnerKind.TEAM)
+        return (
+            f"Link a new account for {tool.display_name} with {own_cmd}, "
+            f"or a team administrator can link the team's account with {team_cmd}."
+        )
+    return f"Link a new account for {tool.display_name} with {own_cmd}."
 
 
 def outdated_link_next_step(tool: ToolDefinitionV1, link: AccountLinkV1) -> str:
@@ -545,12 +642,14 @@ def build_broker_access_gate(
 
 
 __all__ = [
+    "REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED",
     "REASON_ACCOUNT_LINK_MISSING",
     "REASON_ACCOUNT_LINK_OUTDATED",
     "REASON_GATE_LINK_MISSING",
     "account_link_next_step",
     "BrokerAccessGate",
     "build_broker_access_gate",
+    "expired_link_next_step",
     "gate_link_next_step",
     "GateResult",
     "outdated_link_next_step",

@@ -424,6 +424,20 @@ async def test_gate_tool_setup_check_reports_missing_outdated_and_configured_gat
     assert plan.stops and "/link http:gated_docs gate" in plan.stops[0]
 
     # Outdated gate: reports outdated and names /link http:gated_docs gate.
+    from secure_tool_broker.credential_catalog import CatalogCredential
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        CredentialOwnerScope.team(TEAM),
+        "docs_gate",
+        CatalogCredential(display_name="Docs Gate", purpose="Gate credential").model_dump(
+            mode="json", exclude_none=True
+        ),
+    )
     world.store.create_link(
         AccountLinkV1(
             link_id="link_docs_gate_old",

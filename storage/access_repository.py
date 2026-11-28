@@ -1778,14 +1778,19 @@ class AccessRepository:
             recorded_at_utc=at,
         )
 
-    def _mark_link_revoked(self, conn: Any, link: AccountLinkV1, *, actor: SubjectRefV1, at: datetime, **detail: Any) -> None:
+    def _mark_link_revoked(
+        self, conn: Any, link: AccountLinkV1, *, actor: SubjectRefV1, at: datetime, **detail: Any
+    ) -> bool:
         p = self.dialect.bind
-        conn.execute(
+        cursor = conn.execute(
             f"UPDATE access_account_links SET status={p}, revoked_at={p}, revoked_by_json={p} "
             f"WHERE link_id={p} AND status={p}",
             (AccountLinkStatus.REVOKED.value, _utc(at), actor.model_dump_json(), link.link_id, AccountLinkStatus.ACTIVE.value),
         )
-        self._event(conn, self._link_event(link, "account_link_revoked", actor, at, **detail))
+        changed = int(getattr(cursor, "rowcount", 0) or 0) > 0
+        if changed:
+            self._event(conn, self._link_event(link, "account_link_revoked", actor, at, **detail))
+        return changed
 
     def create_link(self, link: AccountLinkV1) -> AccountLinkV1:
         """Store a link, revoking the owner's earlier link for the same tool and purpose.
@@ -1834,14 +1839,21 @@ class AccessRepository:
         return link
 
     def revoke_link(self, link_id: str, *, actor: SubjectRefV1, at: datetime) -> AccountLinkV1:
-        link = self.get_link(link_id)
-        if link is None:
-            raise KeyError(link_id)
-        if link.status is not AccountLinkStatus.ACTIVE:
-            return link
+        p = self.dialect.bind
         with self._connect() as conn:
             conn.begin_write()
-            self._mark_link_revoked(conn, link, actor=actor, at=at)
+            row = conn.execute(f"SELECT * FROM access_account_links WHERE link_id={p}", (link_id,)).fetchone()
+            if row is None:
+                raise KeyError(link_id)
+            link = self._link_from_row(row)
+            if link.status is not AccountLinkStatus.ACTIVE:
+                conn.commit()
+                return link
+            changed = self._mark_link_revoked(conn, link, actor=actor, at=at)
+            if not changed:
+                fresh = conn.execute(f"SELECT * FROM access_account_links WHERE link_id={p}", (link_id,)).fetchone()
+                conn.commit()
+                return self._link_from_row(fresh) if fresh is not None else link
             self._bump(conn, link.team_id)
             conn.commit()
         return link.model_copy(update={"status": AccountLinkStatus.REVOKED, "revoked_at_utc": at, "revoked_by": actor})

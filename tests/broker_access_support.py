@@ -200,10 +200,41 @@ def account_link(
     )
 
 
-def store_account_link(links: AccessRepository, tool_id: str, credential_key: str, **kwargs: Any) -> AccountLinkV1:
+def store_account_link(
+    links: AccessRepository,
+    tool_id: str,
+    credential_key: str,
+    *,
+    ensure_catalog_entry: bool = True,
+    **kwargs: Any,
+) -> AccountLinkV1:
     """Store an account link (``account_link`` arguments) and return it."""
 
-    return links.create_link(account_link(tool_id, credential_key, **kwargs))
+    import os
+    from secure_tool_broker.credential_catalog import CatalogCredential
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+
+    built = account_link(tool_id, credential_key, **kwargs)
+    if ensure_catalog_entry and os.getenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH"):
+        scope = (
+            CredentialOwnerScope.team(built.owner_id)
+            if built.owner_kind is LinkOwnerKind.TEAM
+            else CredentialOwnerScope.user(built.owner_id)
+        )
+        catalog_store = CredentialCatalogStore(resolve_catalog_db_path())
+        if catalog_store.load_credential(scope, built.credential_key) is None:
+            catalog_store.put_credential(
+                scope,
+                built.credential_key,
+                CatalogCredential(display_name=built.credential_key, purpose="test link").model_dump(
+                    mode="json", exclude_none=True
+                ),
+            )
+    return links.create_link(built)
 
 
 def team_sharing(links: AccessRepository, *, team_id: str = TEST_TEAM) -> TeamAccountSharing:

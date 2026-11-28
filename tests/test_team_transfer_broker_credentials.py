@@ -39,10 +39,12 @@ class _FakeSealboxCli:
 
     def __init__(self) -> None:
         self.secrets: dict[str, str] = {}
+        self.set_calls: list[list[str]] = []
 
     def __call__(self, args, *, input_text=None, env=None, timeout_seconds=30):
         action, key = list(args[:2]), args[2]
         if action == ["secret", "set"]:
+            self.set_calls.append(list(args))
             self.secrets[key] = input_text or ""
             return subprocess.CompletedProcess(args, 0, stdout='{"version": 1}\n', stderr="")
         if action == ["secret", "get"] and key in self.secrets:
@@ -586,11 +588,11 @@ def test_catalog_save_failure_retries_without_losing_metadata_or_leaving_duplica
     original_put = CredentialCatalogStore.put_credential
     attempted_rows = []
 
-    def fail_first_put(self, owner_scope, key, credential):
+    def fail_first_put(self, owner_scope, key, credential, **kwargs):
         attempted_rows.append(credential)
         if len(attempted_rows) == 1:
             raise RuntimeError("catalog storage unavailable")
-        return original_put(self, owner_scope, key, credential)
+        return original_put(self, owner_scope, key, credential, **kwargs)
 
     monkeypatch.setattr(CredentialCatalogStore, "put_credential", fail_first_put)
     [failed] = import_credentials(records, team_id=TEST_TEAM)
@@ -709,3 +711,964 @@ def test_retry_refuses_an_item_adopted_by_a_destination_credential(
     assert destination.secrets == before_retry
     assert "search_api" not in credential_catalog.load_catalog(scope=scope).credentials
     assert credential_catalog.resolve_secret_field("destination_alias", "api_key", scope=scope).value == existing_value
+
+
+def test_temporary_credential_transfer_carries_expiry_reapplies_ttl_and_upgrades_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A5: temporary credentials carry expires_at, re-apply remaining Sealbox TTL on import, and v2 imports still pass."""
+
+    from datetime import timedelta
+    from secure_tool_broker import credential_transfer_api as api
+    from secure_tool_broker.credential_catalog import collect_credential, load_catalog, resolve_secret_field
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_transfer import export_credentials, import_credentials
+    from team_transfer.crypto import canonical_json, encrypt_with_key
+    from team_transfer.format import SectionDocumentV1
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    future_expiry = (now + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "old", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "temp_api",
+            "display_name": "Temporary API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "temp-secret-token"},
+        scope=scope,
+        expires_at=future_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success", saved.error
+
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+    assert len(records) == 1
+    assert records[0]["credential"]["expires_at"] == future_expiry
+
+    # Import 30 minutes later: Sealbox write must receive remaining TTL (~5400s).
+    import_time = now + timedelta(minutes=30)
+    _use_store(tmp_path / "new", monkeypatch)
+    destination = _FakeSealboxCli()
+    _use_sealbox(destination, monkeypatch)
+    [outcome] = import_credentials(records, team_id=TEST_TEAM, now=import_time)
+    assert outcome.imported, outcome.reason
+    assert len(destination.set_calls) == 1
+    ttl_flag_index = destination.set_calls[0].index("--ttl")
+    ttl_value = int(destination.set_calls[0][ttl_flag_index + 1])
+    assert 5395 <= ttl_value <= 5405
+    imported_cred = load_catalog(scope=scope).credentials["temp_api"]
+    assert imported_cred.expires_at == future_expiry
+    assert resolve_secret_field("temp_api", "api_key", scope=scope, now=import_time).value == "temp-secret-token"
+
+    # Previous schema version 2 document converts cleanly to version 3 inside decrypt_records.
+    v2_doc = SectionDocumentV1(
+        section="broker_credentials",
+        schema_version=2,
+        records=[
+            {
+                "kind": "catalog_entry",
+                "owner": {"kind": "person", "owner_id": "usr_ana"},
+                "credential_key": "legacy_v2_cred",
+                "credential": {
+                    "display_name": "Legacy V2",
+                    "purpose": "Pre-expiry credential",
+                    "fields": {},
+                },
+                "secret_values": {},
+            }
+        ],
+    )
+    v2_ciphertext = base64.b64encode(
+        encrypt_with_key(canonical_json(v2_doc.model_dump(mode="json")), KEY)
+    ).decode("ascii")
+    upgraded = api.decrypt_records(
+        api.CredentialImportRequestV1(
+            team_id=TEST_TEAM,
+            encryption_key_b64=KEY_B64,
+            ciphertext_b64=v2_ciphertext,
+        )
+    )
+    assert len(upgraded) == 1
+    assert upgraded[0]["credential_key"] == "legacy_v2_cred"
+
+
+def test_transfer_import_skips_expired_credential_revokes_destination_link_and_notifies_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A5 + C20 lead ruling: expired imported credential is skipped, destination link revoked with system actor, 1 notice, idempotent rerun."""
+
+    from dataclasses import replace
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from access_catalog.catalog import CatalogSource
+    from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessNoticeKind,
+        AccountLinkStatus,
+        AccountLinkV1,
+        AccountMode,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog import collect_credential, load_catalog
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_transfer import (
+        EXPIRED_BEFORE_IMPORT_REASON,
+        export_credentials,
+        import_credentials,
+    )
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    short_expiry = (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "old", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "expiring_in_transit",
+            "display_name": "Expiring API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "soon-expired-secret"},
+        scope=scope,
+        expires_at=short_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success", saved.error
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+    assert len(records) == 1
+
+    # Destination already imported the access section (active link exists for usr_ana -> expiring_in_transit).
+    _use_store(tmp_path / "new", monkeypatch)
+    destination = _FakeSealboxCli()
+    _use_sealbox(destination, monkeypatch)
+    access_store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "new" / "access.db")}})
+    )
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:transfer_demo",
+        kind=ToolKind.HTTP,
+        display_name="Transfer Demo",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("transfer.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization",
+                field="api_key",
+                template="Bearer {value}",
+            ),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    custom_catalog = replace(base_catalog, tools={**base_catalog.tools, demo_tool.tool_id: demo_tool})
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=access_store,
+    )
+    access_store.create_link(
+        AccountLinkV1(
+            link_id="link-transfer-expired",
+            team_id=TEST_TEAM,
+            tool_id="http:transfer_demo",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="usr_ana",
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="expiring_in_transit",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="usr_ana"),
+            created_at_utc=now - timedelta(hours=1),
+        )
+    )
+
+    after_expiry = now + timedelta(minutes=20)
+    [outcome] = import_credentials(records, team_id=TEST_TEAM, access_gate=gate, now=after_expiry)
+    assert outcome.imported is False
+    assert outcome.reason == EXPIRED_BEFORE_IMPORT_REASON
+    assert outcome.retryable is False
+    assert destination.secrets == {}
+    assert "expiring_in_transit" not in load_catalog(scope=scope).credentials
+
+    # Destination link revoked by system role actor and exactly one notice sent.
+    expected_actor = SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEST_TEAM, AGENT_ROLE_SYSTEM))
+    revoked = access_store.get_link("link-transfer-expired")
+    assert revoked is not None
+    assert revoked.status is AccountLinkStatus.REVOKED
+    assert revoked.revoked_by == expected_actor
+
+    notices = [n for n, _read in access_store.notices_for(TEST_TEAM, person_id="usr_ana", roles=())]
+    assert len(notices) == 1
+    assert notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert "/link http:transfer_demo" in notices[0].summary
+
+    # Re-running the same import adds no second revocation and no second notice.
+    [rerun] = import_credentials(records, team_id=TEST_TEAM, access_gate=gate, now=after_expiry)
+    assert rerun.imported is False
+    assert rerun.reason == EXPIRED_BEFORE_IMPORT_REASON
+    assert len(access_store.notices_for(TEST_TEAM, person_id="usr_ana", roles=())) == 1
+
+
+def test_transfer_import_expired_credential_is_retryable_when_link_revocation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C26: a failed link revocation on an expired import marks the outcome retryable; retrying finishes revocation with one notice."""
+
+    from dataclasses import replace
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from typing import Any
+    from access_catalog.catalog import CatalogSource
+    from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessNoticeKind,
+        AccountLinkStatus,
+        AccountLinkV1,
+        AccountMode,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog import collect_credential
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_transfer import (
+        EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON,
+        EXPIRED_BEFORE_IMPORT_REASON,
+        export_credentials,
+        import_credentials,
+    )
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    short_expiry = (now + timedelta(minutes=10)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "old", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "expiring_retry_link",
+            "display_name": "Expiring Retry API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "soon-expired-secret"},
+        scope=scope,
+        expires_at=short_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success", saved.error
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+
+    _use_store(tmp_path / "new", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    access_store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "new" / "access.db")}})
+    )
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:transfer_retry_demo",
+        kind=ToolKind.HTTP,
+        display_name="Transfer Retry Demo",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("transfer-retry.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization",
+                field="api_key",
+                template="Bearer {value}",
+            ),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    custom_catalog = replace(base_catalog, tools={**base_catalog.tools, demo_tool.tool_id: demo_tool})
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=access_store,
+    )
+    access_store.create_link(
+        AccountLinkV1(
+            link_id="link-transfer-retry",
+            team_id=TEST_TEAM,
+            tool_id="http:transfer_retry_demo",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="usr_ana",
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="expiring_retry_link",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="usr_ana"),
+            created_at_utc=now - timedelta(hours=1),
+        )
+    )
+
+    real_revoke = access_store.revoke_link
+    attempts = {"count": 0}
+
+    def flaky_revoke(*args: Any, **kwargs: Any) -> Any:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("transient access store outage")
+        return real_revoke(*args, **kwargs)
+
+    monkeypatch.setattr(access_store, "revoke_link", flaky_revoke)
+
+    after_expiry = now + timedelta(minutes=20)
+    [first] = import_credentials(records, team_id=TEST_TEAM, access_gate=gate, now=after_expiry)
+    assert first.imported is False
+    assert first.retryable is True
+    assert first.reason == EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON
+    still_active = access_store.get_link("link-transfer-retry")
+    assert still_active is not None
+    assert still_active.status is AccountLinkStatus.ACTIVE
+
+    [second] = import_credentials(records, team_id=TEST_TEAM, access_gate=gate, now=after_expiry)
+    assert second.imported is False
+    assert second.retryable is False
+    assert second.reason == EXPIRED_BEFORE_IMPORT_REASON
+
+    expected_actor = SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEST_TEAM, AGENT_ROLE_SYSTEM))
+    revoked = access_store.get_link("link-transfer-retry")
+    assert revoked is not None
+    assert revoked.status is AccountLinkStatus.REVOKED
+    assert revoked.revoked_by == expected_actor
+
+    notices = [n for n, _read in access_store.notices_for(TEST_TEAM, person_id="usr_ana", roles=())]
+    assert len(notices) == 1
+    assert notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert "/link http:transfer_retry_demo" in notices[0].summary
+
+
+def test_f5_expired_before_export_carries_key_only_and_revokes_destination_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5: a credential already expired before export emits an expired_catalog_entry (no values) and import revokes its destination link."""
+
+    from dataclasses import replace
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from access_catalog.catalog import CatalogSource
+    from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessNoticeKind,
+        AccountLinkStatus,
+        AccountLinkV1,
+        AccountMode,
+        CredentialInjectionV1,
+        InjectionPlacement,
+        LinkOwnerKind,
+        LinkPurpose,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+    )
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+    from secure_tool_broker.credential_transfer import (
+        EXPIRED_BEFORE_IMPORT_REASON,
+        credential_index,
+        export_credentials,
+        import_credentials,
+    )
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    past_expiry = (now - timedelta(minutes=15)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "old", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        "expired_before_export",
+        CatalogCredential(
+            display_name="Expired Before Export",
+            purpose="test",
+            expires_at=past_expiry,
+            fields={
+                "api_key": CatalogCredentialField(
+                    kind="api_key",
+                    visibility="secret",
+                    resolution_order=[
+                        CatalogSourceRef(
+                            source="sealbox",
+                            item_id="old-item:api_key",
+                            item_name="old-item:api_key",
+                            field_ref="value",
+                        )
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+
+    exported = export_credentials(TEST_TEAM, ["usr_ana"])
+    assert len(exported) == 1
+    assert exported[0]["kind"] == "expired_catalog_entry"
+    assert exported[0]["credential_key"] == "expired_before_export"
+    assert exported[0]["expires_at"] == past_expiry
+    assert "secret_values" not in exported[0]
+    assert "credential" not in exported[0]
+    [idx] = credential_index(exported)
+    assert idx["key"] == "person:usr_ana/expired_catalog_entry/expired_before_export"
+
+    # Destination has the transferred active link from the access section.
+    _use_store(tmp_path / "new", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    access_store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "new" / "access.db")}})
+    )
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:f5_demo",
+        kind=ToolKind.HTTP,
+        display_name="F5 Demo",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("f5.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(placement=InjectionPlacement.HEADER, name="Authorization", field="api_key"),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    custom_catalog = replace(base_catalog, tools={**base_catalog.tools, demo_tool.tool_id: demo_tool})
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=TEST_TEAM,
+        access=None,
+        links=access_store,
+    )
+    access_store.create_link(
+        AccountLinkV1(
+            link_id="link-f5-expired",
+            team_id=TEST_TEAM,
+            tool_id="http:f5_demo",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id="usr_ana",
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="expired_before_export",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id="usr_ana"),
+            created_at_utc=now - timedelta(hours=1),
+        )
+    )
+
+    [outcome] = import_credentials(exported, team_id=TEST_TEAM, access_gate=gate, now=now)
+    assert outcome.imported is False
+    assert outcome.retryable is False
+    assert outcome.reason == EXPIRED_BEFORE_IMPORT_REASON
+
+    revoked = access_store.get_link("link-f5-expired")
+    assert revoked is not None and revoked.status is AccountLinkStatus.REVOKED
+    assert revoked.revoked_by == SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(TEST_TEAM, AGENT_ROLE_SYSTEM))
+    notices = [n for n, _read in access_store.notices_for(TEST_TEAM, person_id="usr_ana", roles=())]
+    assert len(notices) == 1
+    assert notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert "/link http:f5_demo" in notices[0].summary
+
+
+def test_f7_f10_transfer_export_and_import_hold_credential_key_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F7 & F10: export and import serialize against concurrent saves via credential_key_lock."""
+
+    import threading
+    from datetime import timedelta
+    from secure_tool_broker.credential_catalog import collect_credential, credential_key_lock, load_catalog
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_transfer import export_credentials, import_credentials
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    future_expiry = (now + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "src", monkeypatch)
+    source_sealbox = _FakeSealboxCli()
+    _use_sealbox(source_sealbox, monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "lock_sync_api",
+            "display_name": "Lock Sync API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "initial-lasting-value"},
+        scope=scope,
+        allow_expiry_change=True,
+    )
+    assert saved.status == "success"
+
+    # F7: hold credential_key_lock while upgrading to a temporary credential; export blocks until done
+    # and exports the consistent temporary value + expires_at together (never temporary secret without expiry).
+    exported_holder: list[list[dict]] = []
+    lock = credential_key_lock(scope, "lock_sync_api")
+    with lock:
+        export_thread = threading.Thread(
+            target=lambda: exported_holder.append(export_credentials(TEST_TEAM, ["usr_ana"]))
+        )
+        export_thread.start()
+        # Update catalog row + secret while holding lock (simulating a form save in progress).
+        cred = load_catalog(scope=scope).credentials["lock_sync_api"]
+        from secure_tool_broker.credential_catalog import _save_catalog_credential
+
+        item_key = cred.fields["api_key"].resolution_order[0].item_id
+        assert item_key is not None
+        source_sealbox.secrets[item_key] = "new-temp-value"
+        _save_catalog_credential("lock_sync_api", cred.model_copy(update={"expires_at": future_expiry}), scope=scope)
+    export_thread.join(timeout=5.0)
+    assert not export_thread.is_alive()
+    [records] = exported_holder
+    assert len(records) == 1
+    assert records[0]["secret_values"]["api_key"] == "new-temp-value"
+    assert records[0]["credential"]["expires_at"] == future_expiry
+
+    # F10: hold credential_key_lock during destination save while import runs; import waits and keeps the saved value.
+    _use_store(tmp_path / "dst", monkeypatch)
+    dst_sealbox = _FakeSealboxCli()
+    _use_sealbox(dst_sealbox, monkeypatch)
+    outcomes_holder: list[list] = []
+    with credential_key_lock(scope, "lock_sync_api"):
+        import_thread = threading.Thread(
+            target=lambda: outcomes_holder.append(import_credentials(records, team_id=TEST_TEAM, now=now))
+        )
+        import_thread.start()
+        # Simulate concurrent destination save finishing before releasing key lock.
+        from secure_tool_broker.credential_catalog import _save_catalog_credential
+
+        _save_catalog_credential("lock_sync_api", cred.model_copy(update={"expires_at": None}), scope=scope)
+    import_thread.join(timeout=5.0)
+    assert not import_thread.is_alive()
+    [[outcome]] = outcomes_holder
+    assert outcome.imported is False
+    assert "already stored" in outcome.reason
+    assert load_catalog(scope=scope).credentials["lock_sync_api"].expires_at is None
+
+
+def test_f11_import_overwrites_expired_destination_row_and_deletes_dropped_sealbox_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F11 + Root cause A: an expired destination row is treated as absent on import and its dropped Sealbox records are deleted."""
+
+    from datetime import timedelta
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        collect_credential,
+        load_catalog,
+        resolve_secret_field,
+    )
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+    from secure_tool_broker.credential_transfer import export_credentials, import_credentials
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    past_expiry = (now - timedelta(minutes=20)).isoformat().replace("+00:00", "Z")
+    future_expiry = (now + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    # Export a valid credential from source.
+    _use_store(tmp_path / "src", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "replace_expired_key",
+            "display_name": "Replace Expired",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "fresh-imported-secret"},
+        scope=scope,
+        expires_at=future_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success"
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+
+    # Destination has an expired not-yet-deleted row referencing an older Sealbox record.
+    _use_store(tmp_path / "dst", monkeypatch)
+    dst_sealbox = _FakeSealboxCli()
+    _use_sealbox(dst_sealbox, monkeypatch)
+    old_item = "old-expired-item:api_key"
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        "replace_expired_key",
+        CatalogCredential(
+            display_name="Old Expired",
+            purpose="test",
+            expires_at=past_expiry,
+            fields={
+                "api_key": CatalogCredentialField(
+                    kind="api_key",
+                    visibility="secret",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id=old_item, item_name=old_item, field_ref="value")
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+
+    deleted_items: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        credential_catalog,
+        "delete_sealbox_item",
+        lambda *, item_key, item_kind, env=None: (
+            deleted_items.append((item_key, item_kind))
+            or {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+        ),
+    )
+
+    [outcome] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert outcome.imported is True, outcome.reason
+    assert deleted_items == [(old_item, "secret")]
+    imported_cred = load_catalog(scope=scope).credentials["replace_expired_key"]
+    assert imported_cred.expires_at == future_expiry
+    resolved = resolve_secret_field("replace_expired_key", "api_key", scope=scope, now=now)
+    assert not hasattr(resolved, "status") and resolved.value == "fresh-imported-secret"
+
+
+def test_f14_import_checks_current_time_per_record_when_expiring_mid_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F14: import_credentials evaluates wall-clock time per record so a mid-batch expiry is skipped."""
+
+    import time as time_mod
+    from datetime import timedelta
+    from secure_tool_broker.credential_catalog import collect_credential, load_catalog
+    from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+    from secure_tool_broker.credential_transfer import (
+        EXPIRED_BEFORE_IMPORT_REASON,
+        export_credentials,
+        import_credentials,
+    )
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    short_expiry = (now + timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "src", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    assert collect_credential(
+        {
+            "credential_key": "a_first_lasting",
+            "display_name": "First",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "first-secret"},
+        scope=scope,
+        allow_expiry_change=True,
+    ).status == "success"
+    assert collect_credential(
+        {
+            "credential_key": "b_second_expiring",
+            "display_name": "Second",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "second-secret"},
+        scope=scope,
+        expires_at=short_expiry,
+        allow_expiry_change=True,
+        now=now,
+    ).status == "success"
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+    assert [r["credential_key"] for r in records] == ["a_first_lasting", "b_second_expiring"]
+
+    _use_store(tmp_path / "dst", monkeypatch)
+    dst_sealbox = _FakeSealboxCli()
+
+    def slow_first_write(args, *, input_text=None, env=None, timeout_seconds=30):
+        res = dst_sealbox(args, input_text=input_text, env=env, timeout_seconds=timeout_seconds)
+        # Sleep past b_second_expiring's expiry while importing record 1.
+        wait = (datetime.fromisoformat(short_expiry.replace("Z", "+00:00")) - datetime.now(timezone.utc)).total_seconds()
+        if wait > 0:
+            time_mod.sleep(wait + 0.1)
+        return res
+
+    _use_sealbox(slow_first_write, monkeypatch)  # type: ignore[arg-type]
+
+    outcomes = import_credentials(records, team_id=TEST_TEAM)
+    assert outcomes[0].imported is True
+    assert outcomes[1].imported is False
+    assert outcomes[1].reason == EXPIRED_BEFORE_IMPORT_REASON
+    assert "a_first_lasting" in load_catalog(scope=scope).credentials
+    assert "b_second_expiring" not in load_catalog(scope=scope).credentials
+
+
+def test_f15_retry_reason_states_next_start_retries_automatically() -> None:
+    """F15: expired-import link retry text tells the owner the next start retries automatically, not to import again."""
+
+    from secure_tool_broker.credential_transfer import EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON
+
+    assert "import it again" not in EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON.lower()
+    assert "next start" in EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON.lower()
+    assert "retries automatically" in EXPIRED_BEFORE_IMPORT_LINK_RETRY_REASON.lower()
+
+
+def test_c29_import_failed_dropped_sealbox_delete_is_retryable_and_cleans_up_on_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C29: when replacing an expired destination row fails to delete its dropped Sealbox record, import is retryable and cleans up on retry."""
+
+    from datetime import timedelta
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        collect_credential,
+        load_catalog,
+    )
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+    from secure_tool_broker.credential_transfer import (
+        DROPPED_CLEANUP_RETRY_REASON,
+        export_credentials,
+        import_credentials,
+    )
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    past_expiry = (now - timedelta(minutes=20)).isoformat().replace("+00:00", "Z")
+    future_expiry = (now + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "src", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "retry_drop_key",
+            "display_name": "Retry Drop",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "fresh-imported-secret"},
+        scope=scope,
+        expires_at=future_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success"
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+
+    # Destination has an expired row referencing old_item.
+    _use_store(tmp_path / "dst", monkeypatch)
+    dst_sealbox = _FakeSealboxCli()
+    _use_sealbox(dst_sealbox, monkeypatch)
+    old_item = "old-dropped-import:api_key"
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        "retry_drop_key",
+        CatalogCredential(
+            display_name="Old Expired",
+            purpose="test",
+            expires_at=past_expiry,
+            fields={
+                "api_key": CatalogCredentialField(
+                    kind="api_key",
+                    visibility="secret",
+                    value_source="user_input",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id=old_item, item_name=old_item, field_ref="value")
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+    )
+
+    deleted_items: list[str] = []
+    should_fail = True
+
+    def fake_delete(*, item_key: str, item_kind: str, env: object = None) -> object:
+        if should_fail:
+            return credential_catalog.ToolResult(status="error", error="sealbox timeout")
+        deleted_items.append(item_key)
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    # Attempt 1: catalog saves new entry, dropped delete fails -> retryable outcome + queue row.
+    [first] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert first.imported is False
+    assert first.retryable is True
+    assert first.reason == DROPPED_CLEANUP_RETRY_REASON
+    assert load_catalog(scope=scope).credentials["retry_drop_key"].expires_at == future_expiry
+    pending = CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=scope)
+    assert [entry.item_key for entry in pending] == [old_item]
+
+    # Attempt 2: Sealbox recovers -> retry finishes pending dropped deletion and reports imported=True.
+    should_fail = False
+    [second] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert second.imported is True
+    assert deleted_items == [old_item]
+    assert CredentialCatalogStore(resolve_catalog_db_path()).list_pending_dropped_sealbox_deletes(scope=scope) == []
+
+
+def test_c35_import_pending_dropped_refusal_inline_retry_and_form_queued_already_stored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C34(2) + C35(a) + C35(b): import refuses queued target when delete still fails, retries inline when Sealbox recovers, and reports already-stored when a form save queued deletions."""
+
+    from datetime import timedelta
+    from secure_tool_broker import credential_catalog
+    from secure_tool_broker.credential_catalog import (
+        CatalogCredential,
+        CatalogCredentialField,
+        CatalogSourceRef,
+        collect_credential,
+        load_catalog,
+    )
+    from secure_tool_broker.credential_catalog_store import (
+        DROPPED_DELETE_QUEUED_BY_FORM,
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+    from secure_tool_broker.credential_transfer import (
+        _collection_request,
+        export_credentials,
+        import_credentials,
+    )
+    from secure_tool_broker.credential_transfer import CatalogEntryV1
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    future_expiry = (now + timedelta(hours=3)).isoformat().replace("+00:00", "Z")
+    scope = CredentialOwnerScope.user("usr_ana")
+
+    _use_store(tmp_path / "src", monkeypatch)
+    _use_sealbox(_FakeSealboxCli(), monkeypatch)
+    saved = collect_credential(
+        {
+            "credential_key": "queued_target_key",
+            "display_name": "Queued Target",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_key", "kind": "api_key", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_key": "imported-secret"},
+        scope=scope,
+        expires_at=future_expiry,
+        allow_expiry_change=True,
+        now=now,
+    )
+    assert saved.status == "success"
+    records = export_credentials(TEST_TEAM, ["usr_ana"])
+    entry = CatalogEntryV1.model_validate(records[0])
+    req = _collection_request(entry, CatalogCredential.model_validate(entry.credential))
+    planned_key = f"{req['item_id']}:{req['fields'][0]['field_ref']}"
+
+    # 1. Destination has planned_key queued in pending_dropped_sealbox_deletes; while delete fails, import refuses before writing.
+    _use_store(tmp_path / "dst1", monkeypatch)
+    dst1_sealbox = _FakeSealboxCli()
+    _use_sealbox(dst1_sealbox, monkeypatch)
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        "other_existing",
+        CatalogCredential(display_name="Other", purpose="test", fields={}).model_dump(mode="json", exclude_none=True),
+        dropped_sealbox_targets=[(planned_key, "secret")],
+        queued_by=DROPPED_DELETE_QUEUED_BY_FORM,
+    )
+    fail_delete = True
+    deleted_items: list[str] = []
+
+    def fake_delete(*, item_key: str, item_kind: str, env: object = None) -> object:
+        if fail_delete:
+            return credential_catalog.ToolResult(status="error", error="sealbox unavailable")
+        deleted_items.append(item_key)
+        return {"source": "sealbox", "item_key": item_key, "item_kind": item_kind, "already_absent": False}
+
+    monkeypatch.setattr(credential_catalog, "delete_sealbox_item", fake_delete)
+
+    [refused] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert refused.imported is False
+    assert refused.retryable is False
+    assert dst1_sealbox.secrets == {}
+    assert "queued_target_key" not in load_catalog(scope=scope).credentials
+
+    # 2. Once Sealbox recovers, import retries the queued deletion inline and succeeds immediately.
+    fail_delete = False
+    [recovered] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert recovered.imported is True, recovered.reason
+    assert deleted_items == [planned_key]
+    assert "queued_target_key" in load_catalog(scope=scope).credentials
+
+    # 3. C35(b): When destination already holds queued_target_key with a queued deletion from a person's form save,
+    #    import keeps the current credential and reports already-stored (NOT imported=True).
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        scope,
+        "queued_target_key",
+        CatalogCredential(
+            display_name="Person Form Save",
+            purpose="test",
+            fields={
+                "api_key": CatalogCredentialField(
+                    kind="api_key",
+                    visibility="secret",
+                    value_source="user_input",
+                    resolution_order=[
+                        CatalogSourceRef(source="sealbox", item_id="current-item:api_key", item_name="current-item:api_key", field_ref="value")
+                    ],
+                )
+            },
+        ).model_dump(mode="json", exclude_none=True),
+        dropped_sealbox_targets=[("person-old-item:api_key", "secret")],
+        queued_by=DROPPED_DELETE_QUEUED_BY_FORM,
+    )
+    [kept] = import_credentials(records, team_id=TEST_TEAM, now=now)
+    assert kept.imported is False
+    assert kept.reason == "already stored in this instance; kept the current credential"
+    assert load_catalog(scope=scope).credentials["queued_target_key"].display_name == "Person Form Save"

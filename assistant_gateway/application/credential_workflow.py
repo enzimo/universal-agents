@@ -76,6 +76,7 @@ from assistant_gateway.domain.request_state import CredentialCollectionRecord
 from assistant_gateway.ports.repositories import CredentialCollectionRepository, SessionRepository, ToolSetupRepository
 from custom_messages.contracts.credentials_v1 import (
     CREDENTIAL_DECLINED,
+    CREDENTIAL_DELETION_FLOWS,
     SecureCredentialCollectionRequest,
     SecureCredentialCollectionResult,
     SecureCredentialResultStatus,
@@ -643,6 +644,10 @@ class GatewayCredentialWorkflow:
             request_content.source_item_name,
         )
         message = str(content_payload.get("message") or "")
+        # Read the credential's deletion time strictly from stored credential
+        # metadata — never from session_payload["expires_at"], which is the
+        # form session's own short-lived expiry.
+        credential_expires_at = metadata.get("expires_at")
         session = self._require_session(session_key)
         result = SecureCredentialCollectionResult(
             credential_request_id=request_content.credential_request_id,
@@ -653,6 +658,7 @@ class GatewayCredentialWorkflow:
             parent_task_id=request_content.parent_task_id,
             broker_session_id=str(session_payload.get("session_id") or ""),
             metadata=metadata,
+            expires_at=credential_expires_at,
             message=message,
             error=str(result_payload.get("error") or "") or None,
             continue_task=request_content.continue_task,
@@ -752,11 +758,7 @@ class GatewayCredentialWorkflow:
     def _is_deletion_request(
         request_content: SecureCredentialCollectionRequest,
     ) -> bool:
-        return str(request_content.flow or "").strip().lower() in {
-            "credential_deletion",
-            "credential_delete",
-            "delete_credential",
-        }
+        return str(request_content.flow or "").strip().lower() in CREDENTIAL_DELETION_FLOWS
 
     async def _collection_start_failure(
         self,

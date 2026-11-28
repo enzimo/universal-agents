@@ -1208,11 +1208,11 @@ def test_live_team_transfer_reuses_secrets_after_catalog_storage_failure(
     attempted_rows = []
     written_items = []
 
-    def fail_first_put(self, owner_scope, key, credential):
+    def fail_first_put(self, owner_scope, key, credential, **kwargs):
         attempted_rows.append(credential)
         if len(attempted_rows) == 1:
             raise RuntimeError("catalog storage unavailable")
-        return original_put(self, owner_scope, key, credential)
+        return original_put(self, owner_scope, key, credential, **kwargs)
 
     def record_secret_writes(args, **kwargs):
         if list(args[:2]) == ["secret", "set"]:
@@ -1351,3 +1351,239 @@ def test_a_sealbox_server_the_start_began_is_stopped_when_the_wait_for_it_fails(
             _start_own_sealbox(stand_in, dict(os.environ), _free_port(), token_file)
         [server] = started
         assert server.returncode == -signal.SIGTERM
+
+
+def test_live_sealbox_temporary_credential_expiry_overwrite_fallback_and_janitor(
+    live_sealbox,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A6 + Lead Intervention 0005: real Sealbox TTL over an existing key, immediate refusal, janitor cleanup + link revocation + notice."""
+
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    from access_catalog.catalog import CatalogSource
+    from access_control.account_sharing import TeamAccountSharing
+    from access_control.entities import AGENT_ROLE_SYSTEM, role_id
+    from access_control.identity import ContextVerifier
+    from custom_messages.contracts.access_v2 import (
+        AccessLevel,
+        AccessNoticeKind,
+        AccountLinkStatus,
+        AccountLinkV1,
+        AccountMode,
+        AccountSharing,
+        ClassificationSource,
+        LinkOwnerKind,
+        LinkPurpose,
+        OperationResolutionV1,
+        REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+        SubjectKind,
+        SubjectRefV1,
+        ToolDefinitionV1,
+        ToolKind,
+    )
+    from secure_tool_broker import janitor
+    from secure_tool_broker.access_gate import BrokerAccessGate
+    from secure_tool_broker.credential_diagnostics import CREDENTIAL_EXPIRED
+    from secure_tool_broker.sealbox_cli import first_json_value
+    from storage.access_repository import AccessRepository
+    from storage.config import resolve_storage_settings
+    from tests.broker_access_support import context_verify_keys
+
+    monkeypatch.setenv("SECURE_TOOL_BROKER_DEFAULT_CREDENTIAL_WRITE_SOURCE", "sealbox")
+    monkeypatch.setenv("TEAM_INSTANCE_NAME", "live-temp-cred")
+    credential_catalog._SECRET_CACHE.clear()
+
+    team_id = "team-live-temp"
+    person_id = "live-temp-alice"
+    scope = CredentialOwnerScope.user(person_id)
+
+    # 1. Store an initial lasting credential (Sealbox version 1, no TTL).
+    v1_saved = credential_catalog.collect_credential(
+        {
+            "credential_key": "live_temp_api",
+            "display_name": "Live Temp API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_token", "kind": "token", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_token": "lasting-v1-secret"},
+        scope=scope,
+    )
+    assert v1_saved.status == "success", v1_saved.error
+
+    # 2. Overwrite the same key with a short-lived temporary credential (Sealbox version 2 with --ttl 2).
+    short_expiry = (datetime.now(timezone.utc) + timedelta(seconds=2)).replace(microsecond=0)
+    if (short_expiry - datetime.now(timezone.utc)).total_seconds() < 1.2:
+        short_expiry = short_expiry + timedelta(seconds=1)
+    expiry_iso = short_expiry.isoformat().replace("+00:00", "Z")
+    v2_saved = credential_catalog.collect_credential(
+        {
+            "credential_key": "live_temp_api",
+            "display_name": "Live Temp API",
+            "store_target": "sealbox",
+            "fields": [{"name": "api_token", "kind": "token", "visibility": "secret", "value_source": "user_input"}],
+        },
+        {"api_token": "temporary-v2-secret"},
+        scope=scope,
+        expires_at=expiry_iso,
+        allow_expiry_change=True,
+    )
+    assert v2_saved.status == "success", v2_saved.error
+    assert v2_saved.content["expires_at"] == expiry_iso
+
+    # Confirm the v2 value resolves before expiry.
+    before_expiry = credential_catalog.resolve_secret_field("live_temp_api", "api_token", scope=scope)
+    assert not hasattr(before_expiry, "status")
+    assert before_expiry.value == "temporary-v2-secret"
+
+    # Link the temporary credential to a private web API tool.
+    access_store = AccessRepository(
+        resolve_storage_settings({"backend": "sqlite", "sqlite": {"path": str(tmp_path / "access.db")}})
+    )
+    demo_tool = ToolDefinitionV1(
+        tool_id="http:live_demo_api",
+        kind=ToolKind.HTTP,
+        display_name="Live Demo API",
+        account=AccountMode.LINKED_CREDENTIAL,
+        hosts=("live.demo.example",),
+        credential_injections=(
+            CredentialInjectionV1(
+                placement=InjectionPlacement.HEADER,
+                name="Authorization",
+                field="api_token",
+                template="Bearer {value}",
+            ),
+        ),
+    )
+    base_catalog = CatalogSource(None).current()
+    custom_catalog = dataclasses.replace(base_catalog, tools={**base_catalog.tools, demo_tool.tool_id: demo_tool})
+    gate = BrokerAccessGate(
+        catalogs=SimpleNamespace(current=lambda: custom_catalog),  # type: ignore[arg-type]
+        verifier=ContextVerifier.from_value(context_verify_keys()),
+        team_id=team_id,
+        access=None,
+        links=access_store,
+    )
+    TeamAccountSharing(access_store, team_id).choose_tool(demo_tool, AccountSharing.PRIVATE, by="admin-1")
+    access_store.create_link(
+        AccountLinkV1(
+            link_id="link-live-temp",
+            team_id=team_id,
+            tool_id="http:live_demo_api",
+            owner_kind=LinkOwnerKind.PERSON,
+            owner_id=person_id,
+            purpose=LinkPurpose.ACCOUNT,
+            credential_key="live_temp_api",
+            injections=demo_tool.credential_injections,
+            created_by=SubjectRefV1(kind=SubjectKind.USER, id=person_id),
+            created_at_utc=datetime.now(timezone.utc) - timedelta(minutes=5),
+        )
+    )
+
+    # Also write one standalone short-TTL secret in Alice's Sealbox tenant so cleanup-expired deletes it.
+    alice_tenant_env = live_sealbox["tenant_env"](person_id)
+    sealbox_key = "team-nats-agents:live-temp-cred:live_temp_api:api_token"
+    direct_before = first_json_value(
+        _run_cli(
+            live_sealbox["cli"],
+            ["secret", "get", sealbox_key, "--output", "json"],
+            env=alice_tenant_env,
+        ).stdout
+    )
+    assert isinstance(direct_before, dict)
+    assert direct_before["version"] == 2
+    assert direct_before["value"] == "temporary-v2-secret"
+    sealbox_v2_expires_at = int(direct_before["expires_at"])
+    # F19: Sealbox TTL rounds up so Sealbox never expires earlier than the catalog's expires_at.
+    assert sealbox_v2_expires_at >= int(short_expiry.timestamp())
+
+    _run_cli(
+        live_sealbox["cli"],
+        ["secret", "set", "standalone-expiring-secret", "--ttl", "1", "--output", "json"],
+        env=alice_tenant_env,
+        input_text="ephemeral-standalone-value",
+    )
+
+    # 3. Wait until after both the catalog expires_at and Sealbox's integer-second expires_at pass.
+    wait_until = max(short_expiry.timestamp(), float(sealbox_v2_expires_at)) + 1.1
+    wait_seconds = wait_until - time.time()
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+
+    # 4. Before any janitor run: Sealbox itself falls back to v1 once v2's TTL passes,
+    # while every broker read path MUST refuse with credential_expired (never serve v1).
+    direct_after = first_json_value(
+        _run_cli(
+            live_sealbox["cli"],
+            ["secret", "get", sealbox_key, "--output", "json"],
+            env=alice_tenant_env,
+        ).stdout
+    )
+    assert isinstance(direct_after, dict)
+    assert direct_after["version"] == 1
+    assert direct_after["value"] == "lasting-v1-secret"
+
+    meta = credential_catalog.get_credential_metadata("live_temp_api", scope=scope)
+    assert meta.status == "error"
+    assert meta.content["error_code"] == CREDENTIAL_EXPIRED
+
+    resolved_after = credential_catalog.resolve_secret_field("live_temp_api", "api_token", scope=scope)
+    assert hasattr(resolved_after, "status") and resolved_after.status == "error"
+    assert resolved_after.content["error_code"] == CREDENTIAL_EXPIRED
+
+    usable_link, expired_link = gate.resolve_account_link("http:live_demo_api", person_id)
+    assert usable_link is None
+    assert expired_link is not None and expired_link.link_id == "link-live-temp"
+    gate_res = gate._with_account(
+        OperationResolutionV1(
+            tool_id="http:live_demo_api",
+            operation="GET /v1/items",
+            level=AccessLevel.READ,
+            source=ClassificationSource.TRUSTED,
+        ),
+        person_id,
+        {},
+    )
+    assert gate_res.allowed is False
+    assert gate_res.reason_code == REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
+
+    # 5. Poison ambient broker env (SEALBOX_TOKEN / HOME config) and run janitor directly.
+    poison_home = tmp_path / "poison-home"
+    poison_home.mkdir()
+    monkeypatch.setenv("SEALBOX_TOKEN", "poisoned-ambient-token")
+    monkeypatch.setenv("HOME", str(poison_home))
+
+    report = janitor.run_janitor_once(gate, tool_setup_recheck_days=0)
+    assert report.job_errors == ()
+    assert report.credentials.deleted == 1
+    assert report.credentials.links_revoked == 1
+    assert report.credentials.notices_sent == 1
+    assert report.credentials.failed == 0
+    assert report.sealbox_cleanup.unsupported_cli is False
+    assert report.sealbox_cleanup.tenants_cleaned >= 1
+    assert report.sealbox_cleanup.tenants_failed == 0
+    assert report.sealbox_cleanup.tenants_timed_out == 0
+    assert report.sealbox_cleanup.secrets_deleted >= 1
+
+    # 6. Confirm catalog entry, ALL Sealbox versions (v1 and v2), the standalone expired secret, and the account link are gone, and 1 notice exists.
+    assert "live_temp_api" not in credential_catalog.load_catalog(scope=scope).credentials
+    for args in (
+        ["secret", "get", sealbox_key],
+        ["secret", "get", sealbox_key, "--version", "1"],
+        ["secret", "get", sealbox_key, "--version", "2"],
+        ["secret", "get", "standalone-expiring-secret"],
+    ):
+        missing = _run_cli_raw(live_sealbox["cli"], args, env=alice_tenant_env)
+        assert missing.returncode != 0
+
+    expected_actor = SubjectRefV1(kind=SubjectKind.ROLE, id=role_id(team_id, AGENT_ROLE_SYSTEM))
+    revoked = access_store.get_link("link-live-temp")
+    assert revoked is not None
+    assert revoked.status is AccountLinkStatus.REVOKED
+    assert revoked.revoked_by == expected_actor
+
+    notices = [n for n, _read in access_store.notices_for(team_id, person_id=person_id, roles=())]
+    assert len(notices) == 1
+    assert notices[0].kind is AccessNoticeKind.CREDENTIAL_EXPIRED
+    assert "/link http:live_demo_api" in notices[0].summary

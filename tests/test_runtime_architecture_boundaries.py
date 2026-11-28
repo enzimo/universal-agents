@@ -806,8 +806,8 @@ def test_capability_attachments_and_tool_groups_are_gone() -> None:
         (
             "secure_tool_broker/service.py",
             "SecureToolBrokerService",
-            65,
-            876,
+            64,
+            830,
         ),
     ),
 )

@@ -468,7 +468,10 @@ def test_without_a_sign_in_x_uses_the_teams_link_and_otherwise_says_how_to_sign_
     assert "/link cli:x" in str(neither.error) and "/link cli:x team" in str(neither.error)
 
 
-def test_the_gate_gives_x_only_the_teams_link_once_the_team_shares_x(tmp_path: Path) -> None:
+def test_the_gate_gives_x_only_the_teams_link_once_the_team_shares_x(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SECURE_TOOL_BROKER_CREDENTIAL_CATALOG_DB_PATH", str(tmp_path / "credential_catalog.db"))
     links = access_store(tmp_path / "access.db")
     store_account_link(links, "cli:x", "x-alice", owner_id=ALICE)
     team = store_account_link(links, "cli:x", "x-team", owner_kind=LinkOwnerKind.TEAM, owner_id=TEST_TEAM)

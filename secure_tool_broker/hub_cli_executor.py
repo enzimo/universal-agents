@@ -21,13 +21,18 @@ from pathlib import Path
 from typing import Any
 
 from secure_tool_broker.cli_process import CliFailure, child_environment, run_cli
-from custom_messages.contracts.access_v2 import REASON_ACCOUNT_LINK_MISSING, LinkOwnerKind
+from custom_messages.contracts.access_v2 import (
+    REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED,
+    REASON_ACCOUNT_LINK_MISSING,
+    LinkOwnerKind,
+)
 from secure_tool_broker.credential_catalog import (
     _redact_known_secret_values,
     resolve_secret_field,
 )
 from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
 from secure_tool_broker.credential_diagnostics import (
+    CREDENTIAL_EXPIRED,
     CREDENTIAL_FIELD_NOT_SECRET,
     CREDENTIAL_VALUE_UNAVAILABLE,
     CREDENTIAL_UNAVAILABLE,
@@ -119,9 +124,10 @@ def _linked_account(action: ValidatedAction, context: ToolContext) -> _Account |
     field_name = "api_token" if action.provider == HF_PROVIDER else "oauth_json"
     resolved = resolve_secret_field(link.credential_key, field_name, scope=scope)
     if isinstance(resolved, ToolResult):
-        return _credential_failure(
-            action, str(resolved.content.get("error_code") or CREDENTIAL_UNAVAILABLE), field_name
-        )
+        code = str(resolved.content.get("error_code") or CREDENTIAL_UNAVAILABLE)
+        if code == CREDENTIAL_EXPIRED:
+            code = REASON_ACCOUNT_LINK_CREDENTIAL_EXPIRED
+        return _credential_failure(action, code, field_name)
     if not resolved.secret:
         return _credential_failure(action, CREDENTIAL_FIELD_NOT_SECRET, field_name)
     if not resolved.value:

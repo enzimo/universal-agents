@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from secure_tool_broker.credential_catalog import (
+    sealbox_record_expiry,
+    sealbox_record_queued_for_deletion,
+)
+from secure_tool_broker.credential_catalog_store import CredentialOwnerScope
+from secure_tool_broker.credential_diagnostics import CREDENTIAL_EXPIRED
+from secure_tool_broker.credential_expiry import is_expired
 from secure_tool_broker.credential_sources import (
     CredentialRef,
     CredentialSecretRequest,
@@ -117,6 +124,32 @@ def use_credential_for_action(
         return _unsupported_target_result(normalized_target_provider, normalized_target_action)
 
     owner_id = str(context.canonical_user_id or "").strip() if context is not None else ""
+    sealbox_expires_at: str | None = None
+    if source_provider == "sealbox" and owner_id:
+        owner_scope = CredentialOwnerScope.user(owner_id)
+        if sealbox_record_queued_for_deletion(
+            owner_scope,
+            item_id=item_id,
+            item_name=item_name,
+            field_ref=field_ref or "password",
+        ):
+            return ToolResult(
+                status="error",
+                error="The requested Sealbox secret does not exist.",
+                content={"error_code": "credential_not_found"},
+            )
+        sealbox_expires_at = sealbox_record_expiry(
+            owner_scope,
+            item_id=item_id,
+            item_name=item_name,
+            field_ref=field_ref or "password",
+        )
+        if sealbox_expires_at is not None and is_expired(sealbox_expires_at):
+            return ToolResult(
+                status="error",
+                error="Temporary credential has expired.",
+                content={"error_code": CREDENTIAL_EXPIRED, "expires_at": sealbox_expires_at},
+            )
     secret = source.get_secret(
         CredentialSecretRequest(
             ref=CredentialRef(
@@ -135,6 +168,12 @@ def use_credential_for_action(
     )
     if isinstance(secret, ToolResult):
         return secret
+    if sealbox_expires_at is not None and is_expired(sealbox_expires_at):
+        return ToolResult(
+            status="error",
+            error="Temporary credential has expired.",
+            content={"error_code": CREDENTIAL_EXPIRED, "expires_at": sealbox_expires_at},
+        )
 
     result = github_token_login(secret, hostname=hostname or "github.com")
     content = dict(result.content)

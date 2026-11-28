@@ -269,6 +269,106 @@ BROKER_AUTH_THEME = """
     min-width: 0;
     color: inherit;
   }
+  /* Temporary credential expiry control: three-column Keep/How-long grid (ui/DESIGN.md). */
+  .expiry-control {
+    display: grid;
+    gap: 0.55rem;
+    max-width: 42rem;
+    padding: 0.75rem 0.85rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-soft);
+    backdrop-filter: blur(18px) saturate(135%);
+    -webkit-backdrop-filter: blur(18px) saturate(135%);
+  }
+  .expiry-bar {
+    display: grid;
+    grid-template-columns: 1.125rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.35rem 0.65rem;
+  }
+  .expiry-bar input[type="checkbox"] {
+    grid-column: 1;
+    align-self: start;
+    width: 1.125rem;
+    height: 1.125rem;
+    margin: 0.25rem 0 0;
+    padding: 0;
+    accent-color: #0284c7;
+  }
+  .expiry-bar-label {
+    grid-column: 2;
+    margin: 0;
+    min-width: 0;
+    color: var(--text-strong);
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .expiry-when-wrap {
+    grid-column: 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+  .expiry-when-wrap[hidden],
+  .expiry-custom-row[hidden] {
+    display: none;
+  }
+  .expiry-when-label {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .expiry-when-select {
+    width: auto;
+    min-width: 11.5rem;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.9rem;
+  }
+  .expiry-help {
+    grid-column: 2 / -1;
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+  .expiry-custom-row {
+    display: grid;
+    gap: 0.35rem;
+    padding-left: 1.775rem;
+  }
+  .expiry-custom-row label {
+    margin: 0;
+    font-size: 0.875rem;
+  }
+  .expiry-existing-active,
+  .expiry-existing-warning {
+    margin: 0;
+    padding: 0.55rem 0.7rem;
+    border-left: 0.25rem solid var(--accent-high);
+    background: var(--accent-low);
+    color: var(--text-strong);
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+  .expiry-unsupported-note {
+    margin: 0;
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+  @media (max-width: 34rem) {
+    .expiry-bar {
+      grid-template-columns: 1.125rem minmax(0, 1fr);
+    }
+    .expiry-when-wrap {
+      grid-column: 2 / -1;
+    }
+    .expiry-when-select {
+      width: 100%;
+    }
+  }
   /* Same inline eye button as the onboarding form's credential fields
      (assistant_gateway/onboarding_web/assets/styles.css .credential-reveal-button). */
   .secret-input-row {
@@ -767,6 +867,7 @@ BROKER_CARD_THEME = """
   body.card-view .step { padding-bottom: 0.6rem; }
   body.card-view .note,
   body.card-view .status { padding: 0.6rem 0.75rem; }
+  body.card-view .expiry-control { max-width: none; padding: 0.6rem 0.7rem; }
   /* The card's footer says where the values go; the page's own sentence about it is left out. */
   body.card-view .broker-note { display: none; }
 </style>

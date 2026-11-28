@@ -3874,11 +3874,12 @@ person which command to run or asking whether to start:
    `unknown`; `set_up_tools` records the person's missing access. TeamLead
    gets the task person's states as one pinned context line
    (`custom_agents/tool_setup_runtime.tool_setup_context`, only for the
-   verified person) and uses a ready tool without checking. The broker's own
-   loop re-checks ready states nobody used or checked for
-   `security_layer.tool_setup_recheck_days` days (default 30, 0 off;
-   `secure_tool_broker/tool_setup_recheck.py`) and sends one Inbox notice per
-   problem. Rationale: a model re-checking before every use costs a call each
+   verified person) and uses a ready tool without checking. The broker's single
+   periodic janitor (`secure_tool_broker/janitor.py`, running ~10 minutes after
+   start and every 6 hours thereafter) includes the tool setup re-check for ready
+   states nobody used or checked for `security_layer.tool_setup_recheck_days`
+   days (default 30, 0 off; `secure_tool_broker/tool_setup_recheck.py`) and
+   sends one Inbox notice per problem. Rationale: a model re-checking before every use costs a call each
    time and can decide differently from run to run; a state trusted code keeps
    is cheap and deterministic, and the periodic check covers sign-ins that
    expire while nobody uses them. It runs in the broker because only the broker
@@ -4043,6 +4044,145 @@ is exempt from secret-field redaction. Other secret markers, such as
 still pass the credential-shape check. The broker derives identity from
 the signed task context and chooses the credential from the tool's account link
 on every use.
+
+### Temporary credentials and the broker janitor
+
+People can save a Sealbox-backed password, token, or auth file with an expiry
+timestamp through the broker's secure credential collection form (presets from
+15 minutes to 3 months, or a local date and time at least 5 minutes in the
+future; `secure_tool_broker/credential_expiry.py`,
+`secure_tool_broker/credential_collection_form.py`). An agent may pre-fill a
+proposed UTC `expires_at` in `SecureCredentialCollectionRequest`, but only the
+person's form submission (or team transfer import re-applying remaining TTL)
+stores or clears an expiry; direct `credential.collect` and
+`credential.register_existing_source` calls cannot set or clear one, and
+non-Sealbox write sources refuse an expiry (`credential_expiry_unsupported_source`).
+
+- **Why catalog expiry checks are the primary guard and Sealbox TTL is a second
+  guard.** Every Sealbox write for a temporary credential passes `--ttl <seconds
+  remaining>` so Sealbox itself drops expired secret versions. However,
+  Sealbox's real read behavior is to delete a key's expired versions on read
+  and then return the newest remaining non-expired version. When a temporary
+  value replaces an existing lasting credential key, Sealbox alone would fall
+  back to the older version after expiry until the janitor deletes all versions
+  of that record. Therefore, every broker read path checks the catalog row's
+  `expires_at` immediately (before and after slow source reads) and refuses
+  with `credential_expired` (or `account_link_credential_expired` on linked
+  tool calls when no shared team fallback applies): metadata reads, secret
+  resolution, the in-memory `_SECRET_CACHE` (each entry carries its hard UTC
+  expiry so cached values can never serve or extend past expiry), `cli:sealbox`
+  action use (including `credential.search` and `credential.get_metadata`,
+  which hide Sealbox records owned by expired catalog entries so expired
+  secrets cannot be discovered or inspected before the janitor removes them),
+  the account-link picker (which hides expired credentials and labels active
+  temporary ones with their UTC deletion time), web API / CLI / MCP / OpenShell
+  binding paths, tool setup status, and team transfer export. Shared-record
+  alias prevention (`credential_expiry_shared_record`) forbids two catalog keys
+  in the same owner scope from referencing the same Sealbox record when either
+  key is temporary, closing both alias-read leaks and janitor data loss on
+  lasting credentials.
+- **Deleting dropped Sealbox records on overwrite.** Deleting a person's stored
+  Sealbox data requires the person's own action. Direct agent-callable saves
+  (`credential.collect` with `allow_drop_stored_records=False` and
+  `credential.register_existing_source`), and any other `collect_credential`
+  caller without `allow_drop_stored_records=True`, refuse before writing
+  anything with `credential_replacement_form_only` (and a next step directing
+  the agent to request a secure form via `secure_credential_collection_request`)
+  whenever the save would drop any Sealbox record referenced by the existing
+  row (a different `item_id`, removed secret field, or move to another source),
+  regardless of `allow_expiry_change`; saves that keep the same Sealbox records
+  proceed unchanged. `allow_expiry_change` and `allow_drop_stored_records` are
+  kept separate so a caller can set an expiry without gaining the right to drop
+  stored Sealbox records. Only the person's submitted secure form sets
+  `allow_drop_stored_records=True` (team transfer import writes directly and
+  runs its own replacement cleanup through
+  `_save_credential_and_cleanup_dropped`); both check under
+  `credential_key_lock` and `_scope_catalog_lock` whether the new row drops any
+  Sealbox record referenced by the previous row: they refuse before saving if
+  another catalog entry still references any dropped record
+  (`credential_expiry_shared_record`), retry any queued target record inline
+  before writing to Sealbox (refusing with `credential_dropped_cleanup_pending`
+  only if deletion still fails), record dropped targets in the broker-local
+  `pending_dropped_sealbox_deletes` table inside the same SQLite transaction as
+  the catalog commit, and delete every version of those dropped records while
+  still holding `_scope_catalog_lock` (so no other key can adopt them in between
+  and no earlier lasting version can outlive a later expiry). If deleting a
+  dropped record fails, the target stays in `pending_dropped_sealbox_deletes`
+  (hidden from `cli:sealbox` `credential.search`, `credential.get_metadata`, and
+  `credential.use_for_action`), the result reports `dropped_records_not_deleted`
+  with `dropped_cleanup_retry_scheduled: true` (the secure form shows a red
+  warning and keeps inline cards open; team transfer import returns a retryable
+  outcome), and the janitor retries the deletion per owner scope (isolating one
+  owner's unreadable catalog from other owners, and skipping any record that a
+  catalog entry references again).
+- **Expired and missing-row link semantics.** From the expiry instant onward,
+  an expired personal link behaves identically to a missing link: if the team
+  shares the service and holds an active, unexpired team link, work falls back
+  to the team's shared account; otherwise calls fail with
+  `account_link_credential_expired` and the `/link` command. Likewise, a link
+  whose `credential_key` has no catalog row counts as a missing link on use
+  (`account_link_missing`, falling back to a shared team account when the
+  service is shared). There is deliberately no janitor job that auto-revokes
+  links with no catalog row: during a team transfer, links are imported before
+  credentials arrive in a later batch, so auto-revoking missing-row links would
+  destroy valid links before their credentials arrive. Deleting an
+  already-expired credential by hand through `delete_credential` runs the same
+  `revoke_expired_credential_links_before_delete` hook before removing the
+  Sealbox records and catalog row so hand deletion never leaves active links
+  dangling without an expiry notice.
+- **Team transfer of temporary and expired credentials.** `broker_credentials/3`
+  carries `expires_at` on active `catalog_entry` records (import applies the
+  remaining TTL to Sealbox and refuses or retries if dropped-record deletion
+  fails) and carries entries that were already expired at export as key-only
+  `expired_catalog_entry` records with no secret values. On import, expired
+  entries are skipped without storing and the broker revokes any active
+  destination links for that owner and key with
+  `revoke_links_for_expired_credential`.
+- **Single broker janitor (`secure_tool_broker/janitor.py`).** Replaces the old
+  standalone re-check loop with one background loop running once 10 minutes
+  after start and every 6 hours thereafter (module constants, no new settings;
+  each run catches unexpected errors so the loop never stops the broker). It
+  runs isolated jobs:
+  1. *Expired temporary credentials, link revocation, and dropped-record
+     cleanup*: scans all owner scopes row-by-row (one unreadable row is logged
+     and skipped without halting other owners). For each expired row, under
+     `credential_key_lock` and after verifying `updated_at` and `expires_at`
+     have not changed (compare-and-delete so concurrently renewed or replaced
+     credentials survive untouched; if the row was rewritten concurrently while
+     still expired, the janitor reloads the row and retries up to 3 times with
+     the new `updated_at` and `expires_at`), it runs in retry-safe order:
+     revoke each active link referencing the key first with the team's system
+     role actor (`<team_id>/system`, never a fake person), and only when that
+     revocation actually changed the link (so a person who relinked
+     concurrently never gets a false expiry notice) create one deterministic
+     `AccessNoticeKind.CREDENTIAL_EXPIRED` Inbox notice (keyed by team, link
+     id, credential key, and `expires_at`, naming whether a shared team account
+     now applies and the exact `/link` command; sent to the link owner for
+     personal links or to team administrators for team/gate links). If notice
+     creation fails after revocation, the catalog row stays intact and a later
+     run finds the system-revoked link (revoked at or after `expires_at` by the
+     system actor) and delivers the missing notice once without duplicating
+     already-sent notices. Only after all link revocations and notices succeed
+     does `delete_credential` remove all Sealbox versions (`already_absent`
+     counts as deleted) and compare-and-delete the catalog row. Team transfer
+     import reuses the same `revoke_links_for_expired_credential` helper when
+     an imported temporary credential expired before import; a failed link
+     revocation during import is a retryable outcome because the import has no
+     catalog row to retry from. Finally, job 1 retries any rows queued in the
+     broker-local `pending_dropped_sealbox_deletes` table (under each owner's
+     `_scope_catalog_lock`, skipping any record a catalog entry references
+     again).
+  2. *Per-tenant Sealbox expired-secret cleanup*: runs `sealbox-cli secret
+     cleanup-expired --output json` for each tenant mapping using a strictly
+     isolated environment built by `sealbox_tenants._build_tenant_environment`
+     (allowlisted OS variables only, isolated `HOME`/`XDG_CONFIG_HOME`, never
+     inheriting `SEALBOX_TOKEN`, `SEALBOX_TOKEN_FILE`, `SEALBOX_ROOT_TOKEN_FILE`,
+     or `SEALBOX_CONFIG`), with a 90-second subprocess limit (above Sealbox's
+     10s connect + 60s request budget) that logs timeouts as an unknown server
+     outcome to be repeated next run, and warns once per run if an older
+     `sealbox-cli` lacks the subcommand.
+  3. *Periodic tool setup re-check*: runs `tool_setup_recheck.recheck_due`
+     unchanged (`security_layer.tool_setup_recheck_days == 0` disables it).
 
 ### Broker pages inside Web Chat cards
 

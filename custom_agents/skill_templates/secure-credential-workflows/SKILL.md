@@ -137,9 +137,11 @@ TeamLead (TeamArchitect) makes setup effortless, in one call, without asking
 the person whether to start (owner's decision 2026-09-28): the approval cards
 and setup pages are where the person agrees, so asking first is a wasted round
 trip. A question about what TeamLead can access ("What repos can you see in
-GitHub?") counts as a request to set up and answer. For a tool listed as
-needing setup or unknown, or not listed, and whenever a call is refused for a
-missing sign-in or account (`auth_required`, `account_link_missing`,
+GitHub?") counts as a request to set up and answer.
+
+For a tool listed as needing setup or unknown, or not listed, and whenever a
+call is refused for a missing or expired sign-in or account (`auth_required`,
+`account_link_missing`, `account_link_credential_expired`,
 `x_account_missing`, `google_oauth_client_missing`):
 
 1. A specialist does not ask the person itself. It escalates to TeamLead with
@@ -301,6 +303,25 @@ When a workflow needs a new named credential:
   ask whether they want a GitHub username/password credential unless they
   explicitly change the credential kind away from API/token.
 
+## Temporary Credentials
+
+- When the person asks to store a temporary password, token, or auth file,
+  offer automatic deletion directly on the secure broker form by setting
+  `expires_at` (timezone-aware UTC ISO-8601 timestamp) on
+  `secure_credential_collection_request`. Convert relative or local wording
+  such as "in 2 hours" or "Friday 5 PM" from the person's time zone to UTC.
+- The person always decides on the form: the form pre-fills your proposed
+  expiry in their local time, and they can choose a preset (15 minutes to 3
+  months), pick another date and time, or untick automatic deletion.
+- Never offer a reminder or scheduled message as a workaround for deleting a
+  temporary credential. Temporary credentials stop working everywhere in the
+  broker at their expiry time and are deleted automatically by the broker
+  janitor, which also revokes any account links that used them and sends the
+  link owner an Inbox notice with the `/link` command.
+- Saving a new value without automatic deletion over a temporary credential
+  through the secure form clears its expiry; direct agent `credential.collect`
+  or `credential.register_existing_source` calls cannot set or clear an expiry.
+
 ## Updating Or Repairing Credentials
 
 - First call `credential_catalog.credential.get_metadata` for the named
@@ -316,6 +337,27 @@ When a workflow needs a new named credential:
   or Docker secrets should be registered by user-named env var with
   `credential_catalog.credential.register_existing_source`; do not scan env
   vars or ask the user to paste the secret.
+- Direct agent saves (`credential.collect` and
+  `credential.register_existing_source`) cannot drop Sealbox records that an
+  existing catalog key already uses (for example changing `item_id`, removing a
+  secret field, or moving a Sealbox-backed key to an environment variable or
+  another source). The broker refuses before writing anything with
+  `credential_replacement_form_only`; return a terminal
+  `secure_credential_collection_request` action so the person decides through
+  the secure form.
+- When the person saves over an existing key through the secure form using a
+  different item or field layout (or moving it to another source), the broker
+  permanently deletes every version of the replaced Sealbox records. Confirm
+  that consequence with the person before asking them to replace a key under a
+  new layout.
+- If a credential write fails with `credential_dropped_cleanup_pending`, tell
+  the person that the broker is still removing an earlier Sealbox value for
+  that record (it retries automatically within 6 hours) and ask them to try
+  again later.
+- If a successful storage result includes `dropped_records_not_deleted` with
+  `dropped_cleanup_retry_scheduled: true`, tell the person that their new
+  credential is stored and working, and that the broker queued the earlier
+  replaced Sealbox record(s) for automatic deletion.
 
 ## Deleting Credentials
 
@@ -568,6 +610,15 @@ raw credential in any field.
     manager item name such as `team-nats-agents :: default :: home_assistant`
     is valid as `item_name`, but do not reuse it as the catalog key. `::` is
     valid inside a catalog key; ` :: ` with spaces is not.
+  - `credential.collect` and `credential.register_existing_source` refuse with
+    `credential_replacement_form_only` if saving over an existing key would
+    drop any Sealbox record it currently uses (use
+    `secure_credential_collection_request` so the person decides on the form).
+    Either action can also return `credential_dropped_cleanup_pending` while a
+    replaced Sealbox record is still waiting to be deleted (retried within
+    6 hours), and a form save can report `dropped_records_not_deleted` with
+    `dropped_cleanup_retry_scheduled: true` when the new credential is stored
+    and cleanup of the older record is queued.
   - `credential.bind_for_openshell` takes the `tool_id` whose linked account
     code should use and returns a `lease_id`; release it afterward with
     `credential.release_openshell_binding` and that `lease_id`. See OpenShell

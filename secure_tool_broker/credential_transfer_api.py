@@ -23,15 +23,18 @@ from secure_tool_broker.credential_transfer import (
     export_credentials,
     import_credentials,
     renamed_credential_owners,
+    upgrade_v2_to_v3,
 )
 from secure_tool_broker.defaults import CREDENTIAL_TRANSFER_EXPORT_ROUTE, CREDENTIAL_TRANSFER_IMPORT_ROUTE
+from team_transfer.sections import SECTION_UPGRADES
 
 BROKER_CREDENTIALS_SECTION = "broker_credentials"
 # When this changes, register the conversion from the previous release's
 # version (team_transfer.sections.SECTION_UPGRADES) in this module too: the
 # broker reads the records here (decrypt_records) and does not import
 # team_transfer.broker_credentials.
-BROKER_CREDENTIALS_SCHEMA_VERSION = 2
+BROKER_CREDENTIALS_SCHEMA_VERSION = 3
+SECTION_UPGRADES[(BROKER_CREDENTIALS_SECTION, 2, BROKER_CREDENTIALS_SCHEMA_VERSION)] = upgrade_v2_to_v3
 
 
 class _Model(BaseModel):
@@ -121,7 +124,7 @@ async def _payload(request: web.Request) -> Any:
         raise web.HTTPBadRequest(text="The request body is not JSON.") from exc
 
 
-def add_transfer_routes(app: web.Application, *, team_id: str) -> None:
+def add_transfer_routes(app: web.Application, *, team_id: str, access_gate: Any = None) -> None:
     """The two operator-only routes; the broker's caller check admits only the operator to them.
 
     Kept outside ``SecureToolBrokerService`` so the transfer adds no weight to
@@ -160,7 +163,11 @@ def add_transfer_routes(app: web.Application, *, team_id: str) -> None:
                         for entry in credential_index(records)]
         else:
             outcomes = await asyncio.to_thread(
-                import_credentials, records, team_id=payload.team_id, source_team_id=payload.source_team_id
+                import_credentials,
+                records,
+                team_id=payload.team_id,
+                source_team_id=payload.source_team_id,
+                access_gate=access_gate,
             )
         return web.json_response(CredentialImportResultV1(outcomes=tuple(outcomes)).model_dump(mode="json"))
 

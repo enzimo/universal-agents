@@ -191,6 +191,20 @@ def person_link(
     *,
     injections: tuple[CredentialInjectionV1, ...] | None = None,
 ) -> AccountLinkV1:
+    from secure_tool_broker.credential_catalog import CatalogCredential
+    from secure_tool_broker.credential_catalog_store import (
+        CredentialCatalogStore,
+        CredentialOwnerScope,
+        resolve_catalog_db_path,
+    )
+
+    CredentialCatalogStore(resolve_catalog_db_path()).put_credential(
+        CredentialOwnerScope.user(person_id),
+        key,
+        CatalogCredential(display_name=key, purpose="test installed cli link").model_dump(
+            mode="json", exclude_none=True
+        ),
+    )
     resolved = (
         tuple(CredentialInjectionV1(**item) for item in tea()["credential_injections"])
         if injections is None

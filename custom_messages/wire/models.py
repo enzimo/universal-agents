@@ -1471,6 +1471,7 @@ class CredentialFormRequestBodyFlowCollect(WireModel):
     purpose: NoteText
     store_target: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     signup_url: Union[Annotated[str, StringConstraints(min_length=1, max_length=2000)], MISSING] = Field(default=MISSING)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     fields: Annotated[list[Annotated[Union[CredentialFormRequestBodyFlowCollectFieldsItemMetadataVisible, CredentialFormRequestBodyFlowCollectFieldsItemSecret], Field(discriminator='visibility')]], Field(min_length=1, max_length=20)]
 
 
@@ -1527,6 +1528,7 @@ class CredentialFormRequestBodyFlowManualSignup(WireModel):
     purpose: NoteText
     store_target: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     signup_url: Annotated[str, StringConstraints(min_length=1, max_length=2000)]
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
     fields: Annotated[list[Annotated[Union[CredentialFormRequestBodyFlowManualSignupFieldsItemMetadataVisible, CredentialFormRequestBodyFlowManualSignupFieldsItemSecret], Field(discriminator='visibility')]], Field(min_length=1, max_length=20)]
     automation_steps: Union[Annotated[list[ShortText], Field(max_length=20)], MISSING] = Field(default=MISSING)
 
@@ -1577,6 +1579,7 @@ class CredentialFormResultBodyCredentialFieldsItemSecret(WireModel):
 class CredentialFormResultBodyCredential(WireModel):
     fields: Annotated[list[Annotated[Union[CredentialFormResultBodyCredentialFieldsItemMetadataVisible, CredentialFormResultBodyCredentialFieldsItemSecret], Field(discriminator='visibility')]], Field(max_length=20)]
     purpose: Union[NoteText, MISSING] = Field(default=MISSING)
+    expires_at: Union[Timestamp, MISSING] = Field(default=MISSING)
 
 
 class CredentialFormResultBody(WireModel):

@@ -361,6 +361,7 @@ async def test_file_upload_credential_form_stores_content_without_agent_echo(
         *,
         context: ToolContext,
         scope,
+        **_kwargs,
     ):
         assert context.canonical_user_id == TEST_CANONICAL_USER_ID
         assert context.principal_type == "user"

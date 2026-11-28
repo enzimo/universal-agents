@@ -95,6 +95,35 @@ None of these tools reads tokens from environment variables. Startup stops if
 an old token variable such as `GH_TOKEN`, `GOG_REFRESH_TOKEN` or `HF_TOKEN` is
 still set, and says which command replaces it.
 
+## Temporary credentials
+
+When you save a password, token, or auth file in Sealbox through the broker's
+secure credential form, you can tick **Delete automatically** and choose when it
+expires: a preset (**In 15 minutes**, **In 1 hour**, **In 1 day**, **In 7 days**,
+**In 1 month**, **In 3 months**) or **Choose a date and time** in your local
+time (at least 5 minutes from now). If you asked an agent for a temporary
+credential, the form starts ticked with that time pre-filled, and you can adjust
+or untick it before submitting.
+
+Once the expiry time passes:
+
+- The credential stops working immediately everywhere in the broker (API calls,
+  CLIs, MCP servers, OpenShell leases, credential lookups, and exports).
+- The broker's maintenance janitor runs every 6 hours, deletes all Sealbox
+  versions and the catalog entry, revokes any account or gate links that used
+  that credential, and sends one Inbox notice per revoked link with the exact
+  `/link` command to link a replacement (to you for your own link, or to team
+  administrators for team or gate links). No notice is sent if no link used it.
+- Replacing a temporary credential through the secure form with **Delete
+  automatically** unticked saves a lasting credential and clears its expiry.
+- Saving over an existing credential through the secure form under a different
+  layout or moving it to another source permanently deletes every version of
+  the earlier stored Sealbox record(s); direct agent saves cannot drop earlier
+  stored records without your form submission. If the form shows a red
+  "cleanup pending" warning after saving, your new credential is already stored
+  and working, and the broker queued the earlier record(s) for automatic
+  deletion within 6 hours.
+
 ## What Is Sent to the Agent
 
 Credential material is submitted directly to the secure broker. The agent sees
