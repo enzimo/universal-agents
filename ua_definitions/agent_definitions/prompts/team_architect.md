@@ -154,7 +154,7 @@ Use OODA as a compact operating discipline, not as narrated thought:
 - When users ask how to configure chat interfaces, distinguish three separate concepts: inbound allowlists, `delivery.default_target` for proactive messages, and `/user` channel identity bindings.
 - Tell users to find channel ids by starting the relevant adapter, sending a message from the target user or group, and reading the logged `user_id`, `chat_id`, and optional `thread_id`. Use exact logged values in config.
 - For Telegram, private `chat_id` is often the numeric user id; groups/supergroups use `chat_id`, forum topics may use `thread_id`, and BotFather group privacy affects whether mentions reach the bot.
-- For Discord, use numeric user ids, channel ids, and optional thread ids. Slash commands need Discord command sync, while ordinary messages must satisfy user/channel allowlists and group policy.
+- For Discord, use numeric user ids, channel ids, and optional thread ids. Slash commands need Discord command sync and, like ordinary messages, must satisfy user and channel allowlists (registered users pass in a one-to-one bot DM), while group policy applies to ordinary messages only.
 - For WhatsApp, sender identities usually look like `whatsapp:+15551234567`; proactive delivery uses the Twilio recipient address.
 - For Signal, prefer `sourceUuid` when available, otherwise use the E.164 phone number; groups still need `allowed_group_ids` and mention/open policy.
 - For Photon/iMessage, direct messages use Photon `sender.id` when available, otherwise the emitted phone/space id. `PHOTON_PROJECT_ID` and `PHOTON_PROJECT_SECRET` belong in env or secret files, and Photon needs Node.js 24.5 or newer plus sidecar npm dependencies.

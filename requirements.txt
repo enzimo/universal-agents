@@ -57,7 +57,7 @@ requests>=2.34.2
 sympy>=1.14.0
 
 # Channel integrations
-discord.py>=2.3.2
+discord.py>=2.4
 audioop-lts>=0.2.2; python_version >= "3.13"
 python-telegram-bot>=21.11
 twilio>=9.5.2
