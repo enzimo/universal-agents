@@ -717,9 +717,15 @@ Decision classes:
 
 - `lead_managed`: bounded behavioral or operational settings. With
   authorization on, a team administrator approves the plan.
-- `user_authorized`: settings that belong to one person, such as their
-  proactive delivery target or context-debug dumps. That person (or an
-  administrator) approves the plan.
+- `user_authorized`: the settings currently marked this way (today the
+  proactive delivery target `delivery.default_target.*` and the context-debug
+  dump settings). The requesting person (or an administrator) may approve the
+  plan only when every setting in the plan is `user_authorized`. A plan that
+  mixes a `user_authorized` setting with any `lead_managed` setting takes the
+  stricter `lead_managed` class and waits for an administrator; stage the
+  `user_authorized` settings in a separate plan when the requesting person
+  should be able to approve them, and tell a member when an administrator must
+  decide.
 - `operator_only`: security, access, credential, storage, transport, listener,
   instance-root, and tool allow/block settings. Agents cannot stage them.
 

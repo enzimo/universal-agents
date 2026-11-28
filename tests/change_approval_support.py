@@ -52,10 +52,15 @@ def authorization_config(enabled: bool) -> dict[str, Any]:
     return {"enabled": False}
 
 
-def agreement() -> ChangeApproval:
+def agreement(plan_digest: str | None = None) -> ChangeApproval:
     """What apply_change passes to a service with authorization off and confirmed=true."""
 
-    return ChangeApproval(ChangeApprovalMode.AGREEMENT, "agreement", datetime.now(timezone.utc))
+    return ChangeApproval(
+        ChangeApprovalMode.AGREEMENT,
+        "agreement",
+        datetime.now(timezone.utc),
+        plan_digest=plan_digest,
+    )
 
 
 class SignedTaskManager:
@@ -108,9 +113,11 @@ def change_agent(
     *,
     authorization_enabled: bool,
     is_team_lead: bool = True,
+    person_id: str | None = None,
+    roles: tuple[str, ...] = OWNER_ROLES,
     **extra: Any,
 ) -> SimpleNamespace:
-    """TeamArchitect (or a CodeWritingAgent) working for the instance owner."""
+    """TeamArchitect (or a CodeWritingAgent) working for one signed person."""
 
     agent_type = "TeamArchitect" if is_team_lead else "CodeWritingAgent"
     team_id = config.gateway.team_id
@@ -128,8 +135,9 @@ def change_agent(
         workspace_dir=str(config.workspace_path),
         task_manager=SignedTaskManager(
             team_id=team_id,
-            person_id=config.user.canonical_user_id,
+            person_id=person_id or config.user.canonical_user_id,
             storage_settings=config.manager_storage_settings,
+            roles=roles,
         ),
         **extra,
     )
