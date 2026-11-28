@@ -605,13 +605,26 @@ request_access(folder='data/reports/2026', level='read', reason='Summarize the 2
 The request goes through the same steps as a request for a tool (see
 [How agents get access](#how-agents-get-access)). A worker's task gets a
 folder from TeamLead's access the same way as a tool, only a folder inside the
-one TeamLead holds, and TeamLead can block a worker from one in the current
-request with `restrict_access(agent_type=..., folder=..., reason=...)`. People give and
-block folders with `/access` and `assistant_cli access` (examples below).
+one TeamLead holds, and TeamLead can block a worker from a folder or file path
+in the current request with `restrict_access(agent_type=..., folder=..., reason=...)`.
+TeamLead does not pass on a folder that holds a file or folder TeamLead itself
+is blocked from, because the worker would get the blocked path with it; the
+worker then asks with `request_access` and a person decides. If the person
+approves, the worker gets the whole folder for its task, including the path
+TeamLead is blocked from, because that block applies only to TeamLead; with
+**Keep**, TeamLead also keeps the folder for later tasks but still does not
+pass it on while the block is inside it. To keep a file from every agent,
+block it for the `worker` role as well (`--role worker`), or, to keep it
+from people too, for the whole team (`--team`).
+People give and block folders (and block file paths) with `/access` and
+`assistant_cli access` (examples below).
 
 A grant, revocation or block applies to the next file an agent opens. An
-allowed answer is kept for up to 10 seconds per folder, so a grant that ends
-at a set time can still be used for those few seconds.
+allowed answer for a folder is kept for up to 10 seconds per folder (excluding
+any blocked direct children, which are always checked against the access
+service), so a grant that ends at a set time can still be used for those few
+seconds. Access to a single shared file is kept only for that exact file and
+never opens its sibling files or its parent folder.
 
 **Links.** File tools look at where a path really points. A link inside the
 person's folder that points at their own files works; a link that points
@@ -1020,8 +1033,8 @@ single-person mode) and that nothing needs to be given or blocked;
 ### Blocking access
 
 A block stops an agent type, one agent, a person, everyone with a role, or the
-whole team from using a tool set, a tool, one of its operations, or a folder,
-whatever grants exist. It applies from the next action, and blocks always win
+whole team from using a tool set, a tool, one of its operations, a folder, or a
+file path, whatever grants exist. It applies from the next action, and blocks always win
 over grants, including standard access such as [internet
 access](#internet-access). An administrator's block is immediate and recorded
 in the access log. Use blocks to stop access now.
@@ -1040,6 +1053,10 @@ assistant_cli.py access block --config /data/instance_config.yaml \
 assistant_cli.py access block --config /data/instance_config.yaml \
   --agent-type ResearchComparisonAgent --folder team/finance --reason "Payroll files"
 
+# Block one file while leaving sibling files in the same folder readable.
+assistant_cli.py access block --config /data/instance_config.yaml \
+  --agent-type WebResearchAgent --folder team/finance/payroll.csv --reason "Payroll is private"
+
 # Turn internet access off for everyone in the team (--tool also takes a tool set).
 assistant_cli.py access block --config /data/instance_config.yaml \
   --team --tool internet --reason "Offline week"
@@ -1051,13 +1068,15 @@ assistant_cli.py access unblock grant_4567efgh --config /data/instance_config.ya
 | Option | Meaning |
 | --- | --- |
 | `--agent-type`, `--agent`, `--person`, `--role`, `--team` | Who is blocked: every agent of a type, one agent by id, a person and every agent working for them, everyone holding a role (such as `worker` or `member`), or the whole team (exactly one) |
-| `--tool`, `--operation`, `--folder` | What is blocked: a tool id or tool set id (such as `internet`), one operation as `tool#operation`, or a folder below `team/`, `agents/` or `data/<name>/` (exactly one) |
+| `--tool`, `--operation`, `--folder` | What is blocked: a tool id or tool set id (such as `internet`), one operation as `tool#operation`, or a folder or file path below `team/`, `agents/` or `data/<name>/` (exactly one) |
 | `--reason` | Why; required, and shown wherever the block is listed |
 | `--hours` | End the block after this many hours; without it the block lasts until removed |
 | `--replace <block id>` | Replace a block on a removed operation with a block on a current operation of the same tool, for the same subject. Keeps the old expiry; cannot be combined with `--hours` |
 
 In chat, `/access block <who> <target> --reason "why" [--hours 24]` names who
-as `agent-type:<Type>`, `agent:<id>`, `user:<id>`, `role:<name>` or `team`.
+as `agent-type:<Type>`, `agent:<id>`, `user:<id>`, `role:<name>` or `team`,
+and accepts a tool, tool set, operation, folder, or file path (for example
+`/access block agent-type:WebResearchAgent team/finance/payroll.csv --reason "Payroll is private"`).
 
 Who may block and unblock:
 
@@ -1071,10 +1090,18 @@ Who may block and unblock:
 - `revoke` does not remove blocks; use `unblock`.
 - An agent that is blocked is told so when it tries the tool, and asking for
   access is refused, because no grant can override a block.
-- A folder block covers everything inside the folder, including the standard
-  `team/` and `agents/` access. Shell and Python commands then do not get the
-  folder that contains the blocked one at all (see
-  [Shell and Python code](#shell-and-python-code)).
+- A block on a folder covers everything inside the folder, including the
+  standard `team/` and `agents/` access. A block on a file path stops file
+  tools from reading, writing, moving, or inspecting that file (including
+  before the file is created), while sibling files stay accessible and the
+  blocked file's name and size still show in its folder's listing. Shell and
+  Python commands then do not get the folder that contains the blocked folder
+  or file at all (see [Shell and Python code](#shell-and-python-code)). Blocks
+  match the exact spelling of a path.
+- Access given on a file path does not open that file. Grants made with
+  `/access grant` or `assistant_cli access grant --folder`, and approved
+  requests that name a file, count only for folders, so give the folder that
+  holds the file.
 
 TeamLead's `restrict_access` creates the same kind of block on a worker, but
 only for the request TeamLead is working on: it counts in that request, ends

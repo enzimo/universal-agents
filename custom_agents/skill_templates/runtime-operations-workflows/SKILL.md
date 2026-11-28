@@ -1003,8 +1003,9 @@ Before delegating work that needs a tool you cannot hand on, call
 `request_access(tool_id, level, reason, hand_on=true)` at the lowest level the
 work needs (access is a level on a whole tool, never one operation). Access
 approved for one task covers the whole request, including the workers helping
-with it. Use `restrict_access` to block a worker from one tool or operation, and
-`revoke_access` with a grant id to take back what you gave. Both act only in the
+with it. Use `restrict_access` to block a worker from one tool, one operation,
+or a folder or file path, and `revoke_access` with a grant id to take back what
+you gave. Both act only in the
 request you are working on, for its person, and a restriction ends with the
 request; for a restriction on every request, propose a block with
 `propose_access_change`. `list_my_access`
