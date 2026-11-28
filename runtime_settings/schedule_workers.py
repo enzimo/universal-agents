@@ -62,7 +62,12 @@ class ScheduleWorkersConfig(BaseModel):
         default=_DEFAULTS["lease_loss_wait_timeout_seconds"],
         ge=60,
         le=86400,
-        description="After a worker loses its launch lease, how long it keeps tasks that wait on a person or subtask before failing them and exiting.",
+        description=(
+            "After a worker loses its launch lease, or a pool worker drains for another message contract, how long it "
+            "keeps tasks that wait on a person, a subtask or a timed wait that ends within this time; a timed wait "
+            "that ends later fails at once. Tasks still waiting when the time is up fail, and the worker exits once "
+            "it holds none."
+        ),
     )
     max_consecutive_interruptions: int = Field(
         default=_DEFAULTS["max_consecutive_interruptions"],

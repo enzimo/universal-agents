@@ -96,8 +96,9 @@ then that person's own access.
 **Standard access.** Every agent may use the tools it needs for its own work
 without a grant: messages, its task queue, memory, skills, its execution plan
 and notes, its own status and configuration, the person's schedules and a
-record of the scheduled run it is doing, the file tools, and the access tools
-below. [Internet access](#internet-access) (web research and the network for
+record of the scheduled run it is doing, short timed pauses (`wait`, up to
+`agent.max_wait_minutes_without_approval` minutes per task), the file tools,
+and the access tools below. [Internet access](#internet-access) (web research and the network for
 code) is standard too, for every agent and every person, until someone blocks
 it. An agent may read and write the folder of the person its task works for
 and the shared `team/` and `agents/` folders; other folders need a grant or a
@@ -182,8 +183,16 @@ Shell commands and Python in the sandbox (`code:shell`, `code:python`) form
 their own tool set, **Sandboxed code**, which only the Trusted profile gives.
 Sandboxed code reaches only your own folders and the shared `team/` and
 `agents/` folders, and the network only with internet access. Running outside
-the sandbox (`code:unconfined`) and platform administration are in no profile;
-people give them with a grant. Model choice is in the Trusted profile only for
+the sandbox (`code:unconfined`), longer timed task pauses (`fn:long_wait` at
+level `write`, for tasks that need to wait beyond the without-approval limit up
+to `agent.max_wait_minutes_with_approval`, 24 hours max), and platform
+administration are in no starter profile. A person who already holds
+`fn:long_wait` (such as an administrator) approves requests for their own work
+in the Inbox; for a member who does not hold `fn:long_wait`, an administrator
+decides the request in the Inbox, and approving it gives the member the access
+too (no separate grant step is needed). With authorization off, `wait` is included on every role
+and an operator adds `fn:long_wait` to an agent type's `default_tools` when
+that type should have `long_wait`. Model choice is in the Trusted profile only for
 administrators. The profile's credential lookup (`cli:sealbox` and
 `procedure:credentials` at read) is given only to people who may give it
 themselves, which today means administrators; a member's Trusted profile leaves

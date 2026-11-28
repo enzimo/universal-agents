@@ -29,7 +29,7 @@ side channels, or authority:
 | Recovery event | `record_plan_action` |
 | Fresh recovery context | `start_isolated_recovery` |
 | Optional solution comparison | Solution-variation tools |
-| Durable wait | Schedules and heartbeat items |
+| Durable wait | Schedules and heartbeat items for work that continues in a later session; `wait` / `long_wait` for a bounded pause inside the current task (counts against the task's budget; refused when it would reach the schedule's next run) |
 | Lesson candidate | `AfterActionReport` |
 | Reusable knowledge for later work | Knowledge pages: `knowledge_search` before researching, `knowledge_write` or `knowledge_add_note` after (team changes made for a person are reviewed first) |
 
@@ -314,8 +314,10 @@ turn activity counts into an invented completion percentage.
 
 Finish each bounded session with a terminal `task_response` after saving its
 checkpoint. Keep unfinished work in the durable Objective and Plan for the next
-session; do not keep the current Task waiting for a future timer tick. Report a
-blocked session honestly without claiming that its remaining subgoals succeeded.
+session instead of keeping the current Task waiting for the next timer tick; a
+short `wait` for an outside process inside the session is fine when it ends well
+before the checkpoint reserve. Report a blocked session honestly without
+claiming that its remaining subgoals succeeded.
 Use a fresh interactive conversation for a repair that requires human input when
 the background Task has no external reply route. Before telling the owner to
 approve something in the Inbox, check that a real access request or staged

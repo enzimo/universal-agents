@@ -403,6 +403,36 @@ def _step_tracking_id(messages: Any, tool_use_id: str) -> str | None:
     return str(tracking_id) if tracking_id else None
 
 
+def step_tool_call_id(
+    agent: Any,
+    strands_agent: Any,
+    tool_use_id: str,
+    *,
+    tool_name: str | None = None,
+) -> str | None:
+    """Stable id of one model-driven tool call: agent id + model step tracking_id + tool use id (hashed).
+
+    Strands assigns every message a UUID ``tracking_id`` and keeps it across
+    an interrupt/resume replay, so a paused call finds the same id when it runs
+    again, while a call in a later model step that reuses ``tool_use_id`` gets
+    a different id. Returns None (and logs) when no model step in
+    ``strands_agent.messages`` asked for ``tool_use_id``.
+    """
+
+    step = _step_tracking_id(getattr(strands_agent, "messages", None), tool_use_id) if tool_use_id else None
+    if step is None:
+        logger.warning(
+            "A tool call is not in the agent's model history, so it has no step-bound call id. "
+            "event=tool_call_without_model_step agent_id=%s tool=%s tool_use_id=%s",
+            getattr(agent, "id", None),
+            tool_name,
+            tool_use_id or None,
+        )
+        return None
+    parts = "\n".join((str(getattr(agent, "id", "") or ""), step, tool_use_id))
+    return TOOL_CALL_OPERATION_PREFIX + hashlib.sha256(parts.encode("utf-8")).hexdigest()
+
+
 def call_operation_id(agent: Any, event: BeforeToolCallEvent) -> str | None:
     """The stable id of one tool call, which a one-time use it takes is bound to.
 
@@ -427,18 +457,12 @@ def call_operation_id(agent: Any, event: BeforeToolCallEvent) -> str | None:
     """
 
     tool_use_id = str(event.tool_use.get("toolUseId") or "")
-    step = _step_tracking_id(getattr(event.agent, "messages", None), tool_use_id) if tool_use_id else None
-    if step is None:
-        logger.warning(
-            "A tool call is not in the agent's model history, so a one-time use it takes is bound to no call. "
-            "event=tool_call_without_model_step agent_id=%s tool=%s tool_use_id=%s",
-            getattr(agent, "id", None),
-            event.tool_use.get("name"),
-            tool_use_id or None,
-        )
-        return None
-    parts = "\n".join((str(getattr(agent, "id", "") or ""), step, tool_use_id))
-    return TOOL_CALL_OPERATION_PREFIX + hashlib.sha256(parts.encode("utf-8")).hexdigest()
+    return step_tool_call_id(
+        agent,
+        getattr(event, "agent", None),
+        tool_use_id,
+        tool_name=event.tool_use.get("name"),
+    )
 
 
 def verified_task_context(agent: Any, access: RuntimeAccess | None = None) -> TaskContextV1 | None:
@@ -871,6 +895,7 @@ __all__ = [
     "send_access_notice",
     "send_runtime_notice_once",
     "resolve_meta_identity",
+    "step_tool_call_id",
     "task_access",
     "task_person",
     "verified_context_id",

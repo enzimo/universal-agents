@@ -44,7 +44,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from custom_agents.structured_llm_messages import is_worker_result_escalation
 from custom_messages.contracts.credentials_v1 import SecureCredentialCollectionRequest
-from custom_messages.contracts.task_v1 import Task, TaskHistoryEntry, TaskQuery
+from custom_messages.contracts.task_v1 import BUBBLED_ENTRY_ID_KEY, Task, TaskHistoryEntry, TaskQuery
 from custom_messages.enums import MessageMetaType
 
 # History entry ``details["event"]`` for a saved turn note.
@@ -283,7 +283,7 @@ def is_turn_work_note(entry: TaskHistoryEntry) -> bool:
     return (
         isinstance(entry.details, Mapping)
         and entry.details.get("event") == TURN_WORK_EVENT
-        and not entry.details.get("bubbled_entry_id")
+        and not entry.details.get(BUBBLED_ENTRY_ID_KEY)
     )
 
 
