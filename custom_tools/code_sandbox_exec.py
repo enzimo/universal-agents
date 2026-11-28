@@ -17,19 +17,27 @@ Usage: code_sandbox_exec.py <policy-json> <command> [args...]
 ``policy-json`` holds ``read`` (read and execute), ``write`` (full access),
 and ``device`` (read/write existing device files) path lists, and ``network``:
 when false, TCP connect and bind are denied (Landlock ABI 4 and later; the
-launcher refuses to start such a command on an older kernel). Missing paths
-are skipped. Any failure to apply the sandbox exits with status 126 before the
+launcher refuses to start such a command on an older kernel). Every rule path
+is walked from ``/`` one component at a time with ``O_PATH | O_CLOEXEC |
+O_NOFOLLOW`` and checked with ``fstat``: missing paths are skipped, and any
+symbolic link (final or intermediate) is refused with status 126 before the
+command runs so a post-planning link swap cannot widen the sandbox. Callers
+building a policy must therefore pass canonical, link-free system paths (for
+example ``/usr/bin`` where ``/bin`` is a symbolic link), as ``sandbox_policy``
+does. Any failure to apply the sandbox exits with status 126 before the
 command runs, so the command never executes unconfined.
 """
 
 from __future__ import annotations
 
 import ctypes
+import errno
 import json
 import os
+import stat
 import struct
 import sys
-from typing import NoReturn
+from typing import Any, NoReturn
 
 # Generic syscall numbers shared by x86_64 and aarch64 since Linux 5.13.
 _SYS_LANDLOCK_CREATE_RULESET = 444
@@ -63,10 +71,18 @@ NETWORK_ABI = 4
 _FILE_RIGHTS = _EXECUTE | _WRITE_FILE | _READ_FILE | _TRUNCATE | _IOCTL_DEV
 
 SANDBOX_FAILURE_EXIT_CODE = 126
+SANDBOX_LINK_REFUSAL_PREFIX = "code sandbox: refusing path with symbolic link: "
 
 
 def _fail(message: str) -> NoReturn:
     sys.stderr.write(f"code sandbox: {message}\n")
+    sys.stderr.flush()
+    os._exit(SANDBOX_FAILURE_EXIT_CODE)
+
+
+def _fail_link(path: str) -> NoReturn:
+    safe_path = path.replace("\r", "\\r").replace("\n", "\\n")
+    sys.stderr.write(f"{SANDBOX_LINK_REFUSAL_PREFIX}{safe_path}\n")
     sys.stderr.flush()
     os._exit(SANDBOX_FAILURE_EXIT_CODE)
 
@@ -127,7 +143,7 @@ def _create_ruleset(libc: ctypes.CDLL, *, network: bool) -> tuple[int, int]:
     return ruleset_fd, handled
 
 
-def _policy_grants(policy: dict, handled: int) -> list[tuple[str, int]]:
+def _policy_grants(policy: dict[str, Any], handled: int) -> list[tuple[str, int]]:
     read_rights = _EXECUTE | _READ_FILE | _READ_DIR
     device_rights = (_READ_FILE | _WRITE_FILE | _READ_DIR | _TRUNCATE | _IOCTL_DEV) & handled
     grants = [(path, read_rights) for path in policy.get("read", [])]
@@ -140,17 +156,80 @@ def _policy_grants(policy: dict, handled: int) -> list[tuple[str, int]]:
     return grants
 
 
-def _add_rule(libc: ctypes.CDLL, ruleset_fd: int, path: str, rights: int) -> None:
-    """Grant ``rights`` below ``path``; missing paths are skipped."""
+def _open_component(parent_fd: int, part: str, path: str) -> int | None:
+    """Open one path component below ``parent_fd`` without following symbolic links."""
 
     try:
-        path_fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        return os.open(part, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
     except FileNotFoundError:
-        return
+        return None
+    except NotADirectoryError:
+        _fail(f"sandbox path component is not a directory for {path!r}")
     except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            _fail_link(path)
         _fail(f"could not open sandbox path {path!r}: {exc}")
+
+
+def _rule_path_parts(path: str) -> list[str]:
+    """Validate an absolute sandbox rule path and return its path components."""
+
+    if not path or not path.startswith("/") or "\x00" in path:
+        _fail(f"invalid sandbox path {path!r}")
+    raw_parts = path.split("/")[1:]
+    if any(part in {".", ".."} for part in raw_parts):
+        _fail(f"invalid sandbox path {path!r}")
+    return [part for part in raw_parts if part]
+
+
+def _inspect_component(fd: int, path: str, *, require_dir: bool) -> bool:
+    """Verify an opened descriptor is not a link (and is a directory when required); return is_dir."""
+
     try:
-        allowed = rights if os.path.isdir(path) else rights & _FILE_RIGHTS
+        st = os.fstat(fd)
+    except OSError as exc:
+        _fail(f"could not inspect sandbox path {path!r}: {exc}")
+    if stat.S_ISLNK(st.st_mode):
+        _fail_link(path)
+    is_dir = stat.S_ISDIR(st.st_mode)
+    if require_dir and not is_dir:
+        _fail(f"sandbox path component is not a directory for {path!r}")
+    return is_dir
+
+
+def _open_rule_path(path: str) -> tuple[int, bool] | None:
+    """Walk ``path`` from ``/`` with ``O_NOFOLLOW``; return ``(fd, is_dir)`` or None if missing."""
+
+    parts = _rule_path_parts(path)
+    try:
+        current_fd = os.open("/", os.O_PATH | os.O_CLOEXEC | os.O_DIRECTORY)
+    except OSError as exc:
+        _fail(f"could not open root directory for {path!r}: {exc}")
+    is_dir = True
+    try:
+        for index, part in enumerate(parts):
+            next_fd = _open_component(current_fd, part, path)
+            if next_fd is None:
+                os.close(current_fd)
+                return None
+            os.close(current_fd)
+            current_fd = next_fd
+            is_dir = _inspect_component(current_fd, path, require_dir=index < len(parts) - 1)
+    except BaseException:
+        os.close(current_fd)
+        raise
+    return current_fd, is_dir
+
+
+def _add_rule(libc: ctypes.CDLL, ruleset_fd: int, path: str, rights: int) -> None:
+    """Grant ``rights`` below ``path``; missing paths are skipped and symbolic links fail closed."""
+
+    opened = _open_rule_path(path)
+    if opened is None:
+        return
+    path_fd, is_dir = opened
+    try:
+        allowed = rights if is_dir else rights & _FILE_RIGHTS
         # struct landlock_path_beneath_attr is packed: __u64 then __s32.
         rule = ctypes.create_string_buffer(struct.pack("=Qi", allowed, path_fd), 12)
         result = libc.syscall(

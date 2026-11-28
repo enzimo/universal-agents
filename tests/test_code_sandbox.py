@@ -379,3 +379,354 @@ def test_a_read_only_granted_folder_may_hold_a_writable_one(tmp_path: Path) -> N
     assert str(reports) in policy["read"]
     assert str(reports / "2026") in policy["write"]
     assert str(tmp_path) not in policy["read"], "a folder holding the instance is never granted"
+
+
+def test_sandbox_policy_drops_instance_private_and_symlinked_task_and_granted_read_roots(
+    tmp_path: Path, caplog
+) -> None:
+    """Feature 2 + C01: sandbox_policy drops instance-private and symlinked roots independently."""
+
+    layout = InstanceLayout.at(tmp_path / "instance")
+    layout.ensure_directories()
+    creds_dir = tmp_path / "broker-creds"
+    creds_dir.mkdir()
+    bob_dir = layout.person_dir("bob")
+    bob_dir.mkdir(parents=True)
+    alice_dir = layout.person_dir("alice")
+    alice_dir.mkdir(parents=True)
+    link_to_bob = alice_dir / "escape_bob"
+    os.symlink(bob_dir, link_to_bob)
+    link_to_control = layout.team_dir / "escape_control"
+    os.symlink(layout.control_dir, link_to_control)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link_to_outside = layout.team_dir / "escape_outside"
+    os.symlink(outside, link_to_outside)
+    env = {
+        "TEAM_INSTANCE_ROOT": str(layout.root),
+        "SECURE_TOOL_BROKER_CREDENTIALS_DIR": str(creds_dir),
+    }
+
+    with caplog.at_level(logging.WARNING, logger="custom_tools.code_sandbox"):
+        policy = sandbox_policy(
+            task_roots=[
+                str(layout.agents_dir),
+                str(layout.control_dir),
+                str(layout.root),
+                str(creds_dir),
+                str(link_to_bob),
+                str(link_to_outside),
+            ],
+            granted_read_roots=[
+                str(layout.team_dir),
+                str(layout.control_dir),
+                str(layout.dbs_dir),
+                str(link_to_control),
+            ],
+            scratch_dir=str(tmp_path / "scratch"),
+            env=env,
+        )
+
+    granted = policy["read"] + policy["write"]
+    # Ordinary task folders stay mounted.
+    assert str(layout.agents_dir) in policy["write"]
+    assert str(layout.team_dir) in policy["read"]
+    # Instance-private paths, instance root, credentials, and all link targets stay out.
+    for forbidden in (
+        layout.control_dir,
+        layout.dbs_dir,
+        layout.root,
+        creds_dir,
+        bob_dir,
+        outside,
+        link_to_bob,
+        link_to_control,
+        link_to_outside,
+    ):
+        assert str(forbidden) not in granted, f"{forbidden} must not be granted"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "event=code_sandbox_path_skipped" in msg and f"kind=task_link path={link_to_bob}" in msg
+        for msg in messages
+    )
+    assert any(
+        "event=code_sandbox_path_skipped" in msg and f"kind=granted_read_link path={link_to_control}" in msg
+        for msg in messages
+    )
+    assert any(
+        "event=code_sandbox_path_skipped" in msg and f"kind=task path={layout.control_dir}" in msg
+        for msg in messages
+    )
+    assert any(
+        "event=code_sandbox_path_skipped" in msg and f"kind=granted_read path={layout.control_dir}" in msg
+        for msg in messages
+    )
+
+
+@requires_landlock
+@pytest.mark.parametrize("link_position", ["final", "intermediate"])
+def test_landlock_helper_refuses_rule_path_with_symlink_component(
+    tmp_path: Path, link_position: str
+) -> None:
+    """A3 (Feature 3): code_sandbox_exec refuses any rule path whose final or intermediate component is a link."""
+
+    helper = Path(code_sandbox.__file__).with_name("code_sandbox_exec.py")
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "sub" / "secret.txt").write_text("outside-secret\n", encoding="utf-8")
+    # The marker lives in a writable folder without links, so a command that
+    # ran despite the linked rule path could write it and fail the test.
+    writable = Path(os.path.realpath(tmp_path)) / "writable"
+    writable.mkdir()
+    marker = writable / "ran.txt"
+    base = tmp_path / "base"
+    base.mkdir()
+    if link_position == "final":
+        rule_path = base / "project"
+        os.symlink(outside, rule_path)
+    else:
+        os.symlink(outside, base / "mid")
+        rule_path = base / "mid" / "sub"
+
+    def run_helper(write_paths: list[str]) -> subprocess.CompletedProcess[str]:
+        policy = {
+            "read": list(dict.fromkeys(os.path.realpath(p) for p in code_sandbox.SYSTEM_READ_PATHS)),
+            "write": write_paths,
+            "device": [os.path.realpath(p) for p in code_sandbox.DEVICE_PATHS],
+            "network": False,
+        }
+        return subprocess.run(
+            [sys.executable, "-I", "-S", str(helper), json.dumps(policy), "/bin/sh", "-c", f"echo ran > {marker}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    # Control: without the linked rule path the command runs and writes the marker.
+    control = run_helper([str(writable)])
+    assert control.returncode == 0, control.stderr
+    assert marker.read_text(encoding="utf-8") == "ran\n"
+    marker.unlink()
+
+    completed = run_helper([str(writable), str(rule_path)])
+
+    assert completed.returncode == SANDBOX_FAILURE_EXIT_CODE
+    assert code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX in completed.stderr
+    assert str(rule_path) in completed.stderr
+    assert not marker.exists()
+
+
+def test_code_sandbox_mirrors_helper_link_refusal_constants() -> None:
+    """C03: code_sandbox mirrors code_sandbox_exec's exit code and symlink refusal prefix exactly."""
+
+    from custom_tools import code_sandbox_exec
+
+    assert code_sandbox.SANDBOX_FAILURE_EXIT_CODE == code_sandbox_exec.SANDBOX_FAILURE_EXIT_CODE
+    assert code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX == code_sandbox_exec.SANDBOX_LINK_REFUSAL_PREFIX
+
+
+@requires_landlock
+def test_full_chain_post_planning_symlink_swap_exits_126_and_logs_warning(
+    instance, tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """C01 + C03 + A3: folder real at planning, swapped for link to outside dir before exec -> exit 126 + warning."""
+
+    import shutil
+    import custom_tools.non_interactive_shell as non_interactive_shell
+
+    layout: InstanceLayout = instance["layout"]
+    project = layout.team_dir / "project"
+    project.mkdir(parents=True)
+    outside = tmp_path / "outside_plain"
+    outside.mkdir()
+    secret = outside / "data.txt"
+    secret.write_text("outside-data\n", encoding="utf-8")
+    escape_write = outside / "written.txt"
+
+    # Race window 1: swap after code_access would have accepted project, before prepare_sandboxed_command.
+    project.rmdir()
+    os.symlink(outside, project)
+    with caplog.at_level(logging.WARNING, logger="custom_tools.code_sandbox"):
+        dropped_policy = sandbox_policy(
+            task_roots=[str(project)],
+            scratch_dir=str(tmp_path / "scratch-w1"),
+            env={"TEAM_INSTANCE_ROOT": str(layout.root), "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        )
+    assert str(project) not in dropped_policy["write"]
+    assert str(outside) not in dropped_policy["write"]
+    assert "kind=task_link" in caplog.text
+
+    # Race window 2: restore real project, prepare command, THEN swap to outside before exec.
+    project.unlink()
+    project.mkdir()
+    prepared = prepare_sandboxed_command(
+        (
+            sys.executable,
+            "-c",
+            f"print(open({str(secret)!r}).read()); open({str(escape_write)!r}, 'w').write('x')",
+        ),
+        task_roots=[str(project)],
+        env={"TEAM_INSTANCE_ROOT": str(layout.root), "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        network=False,
+    )
+    try:
+        project.rmdir()
+        os.symlink(outside, project)
+        ran = subprocess.run(prepared.argv, env=prepared.env, capture_output=True, text=True, check=False)
+    finally:
+        code_sandbox.release_sandboxed_command(prepared)
+
+    assert ran.returncode == SANDBOX_FAILURE_EXIT_CODE
+    assert code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX in ran.stderr
+    assert "outside-data" not in ran.stdout
+    assert not escape_write.exists()
+
+    # Now restore project as a real folder and simulate the race inside _run_in_sandbox (C03).
+    project.unlink()
+    project.mkdir()
+    real_prepare = non_interactive_shell.prepare_sandboxed_command
+
+    def prepare_then_swap(*args, **kwargs):
+        cmd = real_prepare(*args, **kwargs)
+        # Swap layout.team_dir -> outside right after sandbox_policy succeeded.
+        if layout.team_dir.is_dir() and not layout.team_dir.is_symlink():
+            shutil.rmtree(layout.team_dir)
+            os.symlink(outside, layout.team_dir)
+        return cmd
+
+    monkeypatch.setattr(non_interactive_shell, "prepare_sandboxed_command", prepare_then_swap)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="custom_tools.non_interactive_shell"):
+        result = _run("echo should-not-run", instance["workspace"])
+
+    assert result["exit_code"] == SANDBOX_FAILURE_EXIT_CODE
+    assert result["status"] == "error"
+    assert "should-not-run" not in result["output"]
+    assert "event=code_sandbox_link_refused" in caplog.text
+    assert str(layout.team_dir) in caplog.text
+    assert "symbolic link" in result.get("sandbox_note", "")
+
+
+@pytest.mark.parametrize(
+    ("sandbox", "exit_code", "stderr", "policy_paths", "expected"),
+    [
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team\n",
+            frozenset({"/allowed/team"}),
+            "/allowed/team",
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/made/up event=fake agent_id=other\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            1,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_OFF,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_UNCONFINED,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            "ordinary error output\n",
+            frozenset({"/allowed/team"}),
+            None,
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team/a\x0cb\n",
+            frozenset({"/allowed/team/a\x0cb"}),
+            "/allowed/team/a\x0cb",
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team/a\u2028b\n",
+            frozenset({"/allowed/team/a\u2028b"}),
+            "/allowed/team/a\u2028b",
+        ),
+        (
+            code_sandbox.CODE_SANDBOX_KIND_LANDLOCK,
+            SANDBOX_FAILURE_EXIT_CODE,
+            f"{code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX}/allowed/team/trailing \n",
+            frozenset({"/allowed/team/trailing "}),
+            "/allowed/team/trailing ",
+        ),
+    ],
+    ids=[
+        "mounted_path_refusal",
+        "spoofed_unmounted_path",
+        "non_126_exit_code",
+        "sandbox_off",
+        "sandbox_unconfined",
+        "no_prefix_line",
+        "form_feed_in_path",
+        "unicode_line_separator_in_path",
+        "trailing_whitespace_in_path",
+    ],
+)
+def test_sandbox_link_refusal_path_validates_exit_mode_prefix_and_policy_paths(
+    sandbox: str,
+    exit_code: int,
+    stderr: str,
+    policy_paths: frozenset[str],
+    expected: str | None,
+) -> None:
+    """C07 + C08 + C09: sandbox_link_refusal_path only accepts an exact mounted policy path on Landlock exit 126."""
+
+    cmd = code_sandbox.SandboxedCommand(
+        argv=("true",),
+        env={},
+        sandbox=sandbox,
+        policy_paths=policy_paths,
+    )
+    assert code_sandbox.sandbox_link_refusal_path(cmd, exit_code, stderr) == expected
+
+
+@requires_landlock
+def test_command_printing_fake_link_refusal_does_not_log_warning_or_override_note(
+    instance, caplog
+) -> None:
+    """C07: command-printed refusal prefix with a made-up path logs no warning and keeps the normal note."""
+
+    marker = instance["workspace"] / "ran.txt"
+    secret_expr = _dynamic(instance["root"] / "team.env")
+    prefix = json.dumps(code_sandbox.SANDBOX_LINK_REFUSAL_PREFIX)
+    # Build the fake path at runtime so command-text path checks do not refuse before spawn.
+    script = (
+        "import sys; "
+        'open("ran.txt", "w").write("did-run\\n"); '
+        f'sys.stderr.write({prefix} + "/" + "made/up/by/the/command event=fake agent_id=someone-else\\n"); '
+        f"open({secret_expr}).read()"
+    )
+    cmd = f"python3 -c '{script}'; exit 126"
+    with caplog.at_level(logging.WARNING, logger="custom_tools.non_interactive_shell"):
+        result = _run(cmd, instance["workspace"])
+
+    assert result["exit_code"] == SANDBOX_FAILURE_EXIT_CODE
+    assert marker.read_text(encoding="utf-8").strip() == "did-run"
+    assert "event=code_sandbox_link_refused" not in caplog.text
+    note = result.get("sandbox_note", "")
+    assert "symbolic link" not in note
+    assert "Commands run in a sandbox" in note

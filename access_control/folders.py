@@ -165,19 +165,24 @@ class FolderRoots:
                 return "/".join((root_id, *real_path.relative_to(root).parts))
         return None
 
-    def path_of(self, folder_id: str) -> Path:
-        """The host path of a folder id (the id must name a registered root)."""
+    def root_and_parts(self, folder_id: str) -> tuple[Path, tuple[str, ...]]:
+        """The trusted root directory and relative path components below it.
+
+        Workspace paths (``team``, ``agents``, ``users/<person>``, and anything
+        below them) anchor at ``workspaces_dir`` so walking every component
+        verifies ``team``, ``agents``, ``users``, ``users/<person>`` and each
+        subfolder without following links. Data folders anchor at the
+        operator-registered data folder path (canonicalized once) and return
+        the components below it.
+        """
 
         parts = normalize_folder_id(folder_id).split("/")
-        stop = root_length(parts)
-        root_id = "/".join(parts[:stop])
-        if parts[0] == FOLDER_ROOT_USERS:
-            base = self.workspaces_dir / USERS_DIRNAME / parts[1]
-        else:
-            base = dict(self._roots()).get(root_id)
-            if base is None:
-                raise FolderIdError(f"{root_id} is not a registered folder.")
-        return base.joinpath(*parts[stop:])
+        if parts[0] == FOLDER_ROOT_DATA:
+            folder = self.data_folder(folder_id)
+            if folder is None:
+                raise FolderIdError(f"{FOLDER_ROOT_DATA}/{parts[1]} is not a registered folder.")
+            return Path(os.path.realpath(folder.path)), tuple(parts[2:])
+        return Path(os.path.realpath(self.workspaces_dir)), tuple(parts)
 
 
 def data_folder_problem(path: Path, protected: Iterable[Path]) -> str | None:
