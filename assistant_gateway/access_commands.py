@@ -160,6 +160,9 @@ class GatewayAccessCommands:
                 by=person.person_id,
                 now=requests.service.clock(),
             )
+            refusal = requests.service.grant_refusal(person, spec)
+            if refusal:
+                raise HandDownRefused(refusal)
             cover = requests.service.covering_grant(spec)
             if cover is not None:
                 return f"Already given; nothing changed. {summarize_grant(requests, cover)}"

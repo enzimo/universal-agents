@@ -119,7 +119,8 @@ from custom_messages.contracts.envelope_v1 import MessageEnvelope
 from custom_messages.contracts.routing_v1 import MessageHeader, MessageMeta
 from custom_messages.enums import RequesterType
 from secure_tools.broker_pages import card_view_url
-from access_control.data_folders import DataFolderRegistry, protected_locations
+from access_control.data_folders import DataFolderRegistry, folder_roots_provider, protected_locations
+from access_control.folders import FolderRoots
 from assistant_gateway.file_sharing import FILE_DELIVERY_KIND, GatewayFileSharing
 from access_control.proposals import ACCESS_PROPOSAL_KIND, ProposalApplier
 from access_control.tool_setup_states import ToolSetupStates
@@ -174,13 +175,20 @@ class GatewayAccessRequestsSource:
 
     def requests(self) -> AccessRequests:
         if self._service is None:
+            store = AccessRepository(self._settings.storage_settings)
             self._service = AccessService(
-                store=AccessRepository(self._settings.storage_settings),
+                store=store,
                 catalog=self._catalogs.current(),
                 cedar=CedarAccessClient(binary=self._settings.cedar_binary),
                 team_id=self._settings.team_id,
                 agent_role_of=agent_role_resolver(self._settings.lead_agent_type),
                 lead_agent_type=self._settings.lead_agent_type,
+                folder_roots=folder_roots_provider(
+                    self._settings.instance_root,
+                    store,
+                    self._settings.team_id,
+                    protected=self._settings.protected_locations,
+                ),
             )
         self._service.catalog = self._catalogs.current()
         return AccessRequests(
@@ -189,6 +197,15 @@ class GatewayAccessRequestsSource:
             lead_agent_type=self._settings.lead_agent_type,
             appliers=dict(self.appliers),
         )
+
+    def folder_roots(self) -> FolderRoots | None:
+        """Current folder roots for this instance, or None when no instance root is set."""
+
+        if not self._settings.instance_root:
+            return None
+        layout = InstanceLayout.at(self._settings.instance_root)
+        guarded = tuple(self._settings.protected_locations) or protected_locations(layout.root)
+        return FolderRoots.for_layout(layout, self.data_folders().usable(guarded))
 
     @property
     def catalogs(self) -> CatalogSource:
@@ -340,6 +357,9 @@ class GatewayAccessInbox:
 
     def data_folders(self) -> DataFolderRegistry:
         return self._source.data_folders()
+
+    def folder_roots(self) -> FolderRoots | None:
+        return self._source.folder_roots()
 
     def send_notice(self, notice: AccessNoticeV1) -> None:
         self._source.send_notice(notice)

@@ -33,10 +33,22 @@ import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from access_control import safe_open
+from access_control.people import PERSON_ROLE_ADMIN
+from custom_messages.contracts.access_v2 import (
+    AccessNoticeKind,
+    AccessNoticeV1,
+    GrantKind,
+    GrantStatus,
+    GrantV1,
+    SubjectKind,
+    SubjectRefV1,
+    TargetKind,
+)
 from runtime_settings.instance_layout import (
     AGENTS_DIRNAME,
     TEAM_DIRNAME,
@@ -743,6 +755,31 @@ def check_exact_spelling(
         _raise_spelling_mismatch(display_prefix, parts, disk_parts, unresolved_churn=unresolved_churn)
 
 
+def check_spelling_below(
+    workspaces_dir: Path,
+    root: Path,
+    parts: tuple[str, ...],
+    *,
+    display_prefix: str | None = None,
+    fs: _SpellingFS | None = None,
+) -> None:
+    """Verify exact spelling anchoring at ``workspaces_dir`` when ``root`` sits inside it.
+
+    For roots outside ``workspaces_dir`` (such as registered data folders), walks
+    from ``root`` and reports paths with ``display_prefix`` (for example
+    ``data/<name>``) or bare relative parts, never deriving a host folder name.
+    """
+
+    real_root = Path(os.path.realpath(root))
+    real_workspaces = Path(os.path.realpath(workspaces_dir))
+    try:
+        rel_root = real_root.relative_to(real_workspaces).parts
+    except ValueError:
+        check_exact_spelling(real_root, parts, display_prefix=display_prefix, fs=fs)
+        return
+    check_exact_spelling(real_workspaces, (*rel_root, *parts), fs=fs)
+
+
 def check_folder_id_spelling(
     roots: FolderRoots,
     folder_id: str,
@@ -890,15 +927,205 @@ def folder_owner(folder_id: str, task_person_id: str | None) -> str | None:
     return _OTHER_PERSON_OWNER_PREFIX + parts[1]
 
 
+FOLDER_TARGET_PROBLEM_NOTICE_PREFIX = "folder_target_problem"
+
+
+@dataclass(frozen=True)
+class FolderTargetProblem:
+    """An active stored folder/file grant or block whose target is ineffective or misspelled."""
+
+    grant: GrantV1
+    problem: str  # "file_target" | "spelling" | "unverifiable"
+    detail: str
+    disk_spelling: str = ""
+    suggested_folder: str | None = None
+
+
+def _grant_subject_text(subject: SubjectRefV1) -> str:
+    short = subject.id.split("/", 1)[-1]
+    if subject.kind is SubjectKind.AGENT_TYPE:
+        return f"agent-type:{short}"
+    if subject.kind is SubjectKind.ROLE:
+        return f"role:{short}"
+    if subject.kind is SubjectKind.TEAM:
+        return "team"
+    if subject.kind is SubjectKind.USER:
+        return f"user:{subject.id}"
+    return f"{subject.kind.value}:{subject.id}"
+
+
+def _grant_subject_name(subject: SubjectRefV1) -> str:
+    if subject.kind is SubjectKind.TEAM:
+        return "everyone in the team"
+    if subject.kind is SubjectKind.ROLE:
+        return f"everyone with the {subject.id.split('/', 1)[-1]} role"
+    return subject.id.split("/", 1)[-1] if subject.kind is SubjectKind.AGENT_TYPE else subject.id
+
+
+def _inspect_stored_folder_grant(
+    roots: FolderRoots,
+    grant: GrantV1,
+    *,
+    fs: _SpellingFS | None = None,
+) -> FolderTargetProblem | None:
+    try:
+        canonical = normalize_folder_id(grant.target.id)
+    except FolderIdError:
+        return None
+    try:
+        check_folder_id_spelling(roots, canonical, fs=fs)
+    except PathSpellingUnverifiableError as exc:
+        return FolderTargetProblem(grant=grant, problem="unverifiable", detail=str(exc))
+    except PathSpellingError as exc:
+        return FolderTargetProblem(grant=grant, problem="spelling", detail=str(exc), disk_spelling=exc.disk)
+    if grant.kind is GrantKind.ACCESS and grant.target.kind is TargetKind.FOLDER:
+        refusal = folder_grant_file_refusal(roots, canonical)
+        if refusal is not None:
+            suggested = None if is_person_folder(canonical) else _parent_folder_id(canonical)
+            return FolderTargetProblem(
+                grant=grant,
+                problem="file_target",
+                detail=refusal,
+                suggested_folder=suggested,
+            )
+    return None
+
+
+def folder_target_problems(
+    roots: FolderRoots,
+    grants: Iterable[GrantV1],
+    *,
+    now: datetime,
+    fs: _SpellingFS | None = None,
+) -> list[FolderTargetProblem]:
+    """Active, unexpired folder/file grants and blocks whose stored target mismatches disk or names a file."""
+
+    found: list[FolderTargetProblem] = []
+    for grant in grants:
+        if grant.status is not GrantStatus.ACTIVE:
+            continue
+        if grant.expires_at_utc is not None and grant.expires_at_utc <= now:
+            continue
+        if grant.target.kind not in {TargetKind.FOLDER, TargetKind.FILE}:
+            continue
+        if grant.kind not in {GrantKind.ACCESS, GrantKind.BLOCK}:
+            continue
+        item = _inspect_stored_folder_grant(roots, grant, fs=fs)
+        if item is not None:
+            found.append(item)
+    return found
+
+
+def folder_target_problem_notice(problem: FolderTargetProblem, *, now: datetime) -> AccessNoticeV1:
+    """The administrators' Inbox notice for one stored file-path grant or misspelled grant/block."""
+
+    grant = problem.grant
+    who = _grant_subject_name(grant.subject)
+    subject = _grant_subject_text(grant.subject)
+    if grant.kind is GrantKind.BLOCK:
+        title = f"A stored block on {grant.target.id} does not match the path on disk"[:400]
+        if problem.disk_spelling:
+            summary = (
+                f"Block {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+                f"'{problem.disk_spelling}'. Because access checks require the exact on-disk spelling, this block "
+                f"does not stop access to '{problem.disk_spelling}'. Add a replacement block with "
+                f"`/access block {subject} {problem.disk_spelling} --reason \"...\"` and then remove the old one "
+                f"with `/access unblock {grant.grant_id}`."
+            )
+        else:
+            summary = (
+                f"Block {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
+                f"not be verified ({problem.detail}). Check the path and replace the block if needed."
+            )
+    elif problem.problem == "file_target":
+        title = f"A stored folder grant on {grant.target.id} targets a file and has no effect"[:400]
+        summary = (
+            f"Grant {grant.grant_id} gives {who} folder access to '{grant.target.id}', which is a file on disk "
+            f"so the grant never opens it. {problem.detail} Remove the ineffective grant with "
+            f"`/access revoke {grant.grant_id}`."
+        )
+    else:
+        title = f"A stored folder grant on {grant.target.id} does not match the path on disk"[:400]
+        if problem.disk_spelling:
+            summary = (
+                f"Grant {grant.grant_id} for {who} names '{grant.target.id}', while the path on disk is "
+                f"'{problem.disk_spelling}'. It no longer matches on-disk paths and is skipped for code mounts. "
+                f"Remove it with `/access revoke {grant.grant_id}` and grant '{problem.disk_spelling}' instead."
+            )
+        else:
+            summary = (
+                f"Grant {grant.grant_id} for {who} names '{grant.target.id}', whose exact on-disk spelling could "
+                f"not be verified ({problem.detail})."
+            )
+    return AccessNoticeV1(
+        notice_id=f"{FOLDER_TARGET_PROBLEM_NOTICE_PREFIX}:{grant.grant_id}"[:120],
+        team_id=grant.team_id,
+        kind=AccessNoticeKind.FOLDER_TARGET_PROBLEM,
+        recipient_roles=(PERSON_ROLE_ADMIN,),
+        title=title,
+        summary=summary[:4000],
+        grant_id=grant.grant_id,
+        created_at_utc=now,
+    )
+
+
+def report_folder_target_problems(
+    roots: FolderRoots,
+    store: Any,
+    team_id: str,
+    *,
+    now: datetime | None = None,
+    fs: _SpellingFS | None = None,
+) -> list[str]:
+    """Log structured warnings and store one admin notice per legacy file-path or misspelled grant/block.
+
+    Never deletes or rewrites stored grants or blocks. Returns the grant ids
+    for which a new notice was stored (notice ids are deterministic per grant).
+    """
+
+    moment = now or datetime.now(timezone.utc)
+    reported: list[str] = []
+    for item in folder_target_problems(roots, store.for_status(team_id, (GrantStatus.ACTIVE,)), now=moment, fs=fs):
+        grant = item.grant
+        if grant.kind is GrantKind.BLOCK:
+            logger.warning(
+                "A stored block does not match the exact on-disk path spelling and will not protect it. "
+                "event=misspelled_folder_block_found grant_id=%s subject=%s:%s target=%s disk=%s problem=%s",
+                grant.grant_id,
+                grant.subject.kind.value,
+                grant.subject.id,
+                grant.target.id,
+                item.disk_spelling,
+                item.problem,
+            )
+        else:
+            logger.warning(
+                "A stored folder grant is ineffective because its target names a file or mismatches disk spelling. "
+                "event=ineffective_folder_grant_found grant_id=%s subject=%s:%s target=%s problem=%s disk=%s suggested=%s",
+                grant.grant_id,
+                grant.subject.kind.value,
+                grant.subject.id,
+                grant.target.id,
+                item.problem,
+                item.disk_spelling,
+                item.suggested_folder or "",
+            )
+        if store.create_notice_if_absent(folder_target_problem_notice(item, now=moment)):
+            reported.append(grant.grant_id)
+    return reported
+
+
 __all__ = [
     "DataFolder",
     "FOLDER_ROOT_AGENTS",
     "FOLDER_ROOT_DATA",
     "FOLDER_ROOT_TEAM",
     "FOLDER_ROOT_USERS",
+    "FOLDER_TARGET_PROBLEM_NOTICE_PREFIX",
     "FolderGrantOnFileError",
     "FolderIdError",
     "FolderRoots",
+    "FolderTargetProblem",
     "PATH_SPELLING_MISMATCH",
     "PATH_SPELLING_UNVERIFIABLE",
     "PathSpellingError",
@@ -907,16 +1134,20 @@ __all__ = [
     "check_exact_spelling",
     "check_folder_id_spelling",
     "check_folder_target",
+    "check_spelling_below",
     "clear_spelling_cache",
     "covers",
     "data_folder_problem",
     "folder_chain",
     "folder_grant_file_refusal",
     "folder_owner",
+    "folder_target_problem_notice",
+    "folder_target_problems",
     "grantable_folder_id",
     "is_person_folder",
     "normalize_folder_id",
     "paths_inside",
     "person_folder_id",
+    "report_folder_target_problems",
     "root_length",
 ]

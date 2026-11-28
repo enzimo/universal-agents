@@ -47,6 +47,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Protocol
 
 from access_control.decisions import AccessService, HandDownBlockedInside, HandDownRefused
+from access_control.folders import FOLDER_ROOT_USERS
 from access_control.entities import (
     AGENT_ROLE_TEAM_LEAD,
     AGENT_ROLE_WORKER,
@@ -445,7 +446,13 @@ class AccessRequests:
         )
 
     def _check_request(
-        self, target: TargetRefV1, lifetime: GrantLifetime, task_id: str | None, hours: int | None
+        self,
+        target: TargetRefV1,
+        lifetime: GrantLifetime,
+        task_id: str | None,
+        hours: int | None,
+        *,
+        check_disk: bool = True,
     ) -> datetime | None:
         """Validate what is asked for; returns the expiry for access until a time."""
 
@@ -461,6 +468,12 @@ class AccessRequests:
             )
         # Raises HandDownRefused for targets outside the catalog.
         self.service.target_entities_for_ref(target)
+        if target.kind in {TargetKind.FOLDER, TargetKind.FILE} and target.id.split("/", 1)[0] == FOLDER_ROOT_USERS:
+            # Refuse before any disk check so agents cannot probe other people's folders.
+            raise HandDownRefused(
+                "Agents reach a person's folder only while working for that person, or for someone it "
+                "was shared with; share it with a person instead."
+            )
         if self.service.person_owned(target.id):
             # A person's own tool is opened only by that person, never on an
             # agent's request (AccessService.person_owned_refusal).
@@ -474,6 +487,8 @@ class AccessRequests:
             raise ValueError("Access for one task can only be asked for while working on a task.")
         if lifetime is GrantLifetime.UNTIL and not (hours and 1 <= hours <= MAX_REQUEST_HOURS):
             raise ValueError(f"Access for a limited time needs hours between 1 and {MAX_REQUEST_HOURS}.")
+        if check_disk:
+            self.service.check_folder_target(target, for_block=False)
         return self.service.clock() + timedelta(hours=hours) if lifetime is GrantLifetime.UNTIL and hours else None
 
     def submit(
@@ -1372,7 +1387,7 @@ class AccessRequests:
         access of their own (``AccessService.worker_lasting_refusal``).
         """
 
-        expires_at = self._check_request(target, lifetime, task_id, hours)
+        expires_at = self._check_request(target, lifetime, task_id, hours, check_disk=False)
         recipient_name = self.subject_name(recipient)
         grant = self.service.hand_down(
             grantor,
@@ -1457,6 +1472,7 @@ class AccessRequests:
                 f"You can restrict only access you could give; you cannot give access to "
                 f"{self.target_name(target, for_block=True)}."
             )
+        self.service.check_folder_target(target, for_block=True)
         now = self.service.clock()
         block = GrantV1(
             grant_id=new_id("grant"),
@@ -1545,6 +1561,7 @@ class AccessRequests:
         owned_refusal = self.service.person_owned_refusal(person, block)
         if owned_refusal:
             raise HandDownRefused(owned_refusal)
+        self.service.check_folder_target(target, for_block=True)
         created = self.service.store.replace_block(previous, block) if previous else self.service.store.create(block)
         logger.warning(
             "A person blocked access. event=access_blocked grant_id=%s by=%s subject=%s:%s target=%s expires_at=%s "

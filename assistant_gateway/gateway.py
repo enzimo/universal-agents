@@ -496,6 +496,12 @@ def _access_maintenance_tasks(
         tasks.append(
             asyncio.create_task(_report_stale_blocks(access_inbox, config.manager.team_id), name="gateway_stale_blocks")
         )
+        tasks.append(
+            asyncio.create_task(
+                _report_folder_target_problems(access_inbox, config.manager.team_id),
+                name="gateway_folder_target_problems",
+            )
+        )
     return tasks
 
 
@@ -596,6 +602,24 @@ async def _report_stale_blocks(access_inbox: GatewayAccessInbox, team_id: str) -
         await asyncio.to_thread(report_stale_blocks, access_inbox.catalog(), access_inbox.access_store(), team_id)
     except Exception:  # noqa: BLE001 - the blocks still apply to their whole tool; only the notice is missing
         logger.exception("Could not check blocks against the tool catalog. event=stale_block_check_failed team_id=%s", team_id)
+
+
+async def _report_folder_target_problems(access_inbox: GatewayAccessInbox, team_id: str) -> None:
+    """Tell administrators once about stored file-path grants and misspelled folder grants/blocks."""
+
+    from access_control.folders import report_folder_target_problems
+
+    try:
+        roots = await asyncio.to_thread(access_inbox.folder_roots)
+        if roots is None:
+            return
+        await asyncio.to_thread(report_folder_target_problems, roots, access_inbox.access_store(), team_id)
+    except Exception:  # noqa: BLE001 - startup continues; enforcement still runs on every access check
+        logger.exception(
+            "Could not check stored folder grants and blocks against disk. "
+            "event=folder_target_problem_check_failed team_id=%s",
+            team_id,
+        )
 
 
 def _team_view(

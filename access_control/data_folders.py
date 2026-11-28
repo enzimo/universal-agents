@@ -21,13 +21,13 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from access_control.entities import PersonPrincipal
-from access_control.folders import DataFolder, data_folder_problem
+from access_control.folders import DataFolder, FolderRoots, data_folder_problem
 from access_control.people import is_administrator
 from access_control.sensitive_paths import sensitive_reason
 from custom_messages.contracts.access_v2 import (
@@ -37,6 +37,7 @@ from custom_messages.contracts.access_v2 import (
     SubjectRefV1,
 )
 from id_generation import new_id
+from runtime_settings.instance_layout import InstanceLayout
 from storage.access_repository import AccessRepository, AccessStoreConflict
 
 logger = logging.getLogger(__name__)
@@ -194,9 +195,27 @@ class DataFolderRegistry:
         return removed
 
 
+def folder_roots_provider(
+    instance_root: str | Path | None,
+    store: AccessRepository,
+    team_id: str,
+    *,
+    protected: Iterable[Path] = (),
+) -> Callable[[], FolderRoots] | None:
+    """Return a live ``FolderRoots`` supplier for ``instance_root``, or None if unset."""
+
+    if not instance_root:
+        return None
+    layout = InstanceLayout.at(instance_root)
+    guarded = tuple(protected) or protected_locations(layout.root)
+    registry = DataFolderRegistry(store, team_id)
+    return lambda: FolderRoots.for_layout(layout, registry.usable(guarded))
+
+
 __all__ = [
     "DataFolderRefused",
     "DataFolderRegistry",
+    "folder_roots_provider",
     "protected_locations",
     "registration_problem",
 ]

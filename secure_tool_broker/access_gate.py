@@ -47,6 +47,7 @@ from access_catalog.catalog import (
 from access_control.account_sharing import TeamAccountSharing, fixed_sharing, fixed_sharing_text
 from access_control.caller_tokens import BrokerCaller
 from access_control.cedar import CedarAccessClient
+from access_control.data_folders import folder_roots_provider
 from access_control.decisions import AccessService
 from access_control.entities import AgentPrincipal, PersonPrincipal, agent_role_resolver
 from access_control.identity import ContextVerifier, IdentityRejected
@@ -533,6 +534,7 @@ def build_broker_access_gate(
             team_id=team_id,
             agent_role_of=agent_role_resolver(lead_agent_type),
             lead_agent_type=lead_agent_type,
+            folder_roots=folder_roots_provider(instance_root, store, team_id),
         )
     return BrokerAccessGate(
         catalogs=catalogs,

@@ -36,7 +36,13 @@ from access_control import safe_open
 from access_control.decisions import HandDownRefused
 from access_control.decision_effects import EffectJournal, OwnedFile
 from access_control.entities import PersonPrincipal
-from access_control.folders import FOLDER_ROOT_TEAM, FOLDER_ROOT_USERS, normalize_folder_id
+from access_control.folders import (
+    FOLDER_ROOT_TEAM,
+    FOLDER_ROOT_USERS,
+    PathSpellingError,
+    check_exact_spelling,
+    normalize_folder_id,
+)
 from access_control.requests import FILE_DELIVERY_CHANGE, AccessRequests
 from access_control.sensitive_paths import sensitive_reason
 from access_control.safe_open import UnsafePath
@@ -175,6 +181,10 @@ class GatewayFileSharing:
         if reason:
             raise FileSharingRefused(f"{raw} looks like a credential file ({reason}) and is never shared.")
         try:
+            check_exact_spelling(self._workspaces, full)
+        except PathSpellingError as exc:
+            raise FileSharingRefused(str(exc)) from exc
+        try:
             info = safe_open.entry_status(self._workspaces, full)
         except UnsafePath as exc:
             raise FileSharingRefused(f"{raw} cannot be opened safely: {exc}") from exc
@@ -286,6 +296,10 @@ class GatewayFileSharing:
         )
         if not decision.allowed:
             raise FileSharingRefused(f"{decision.reason} {decision.next_step}".strip())
+        try:
+            check_exact_spelling(self._workspaces, tuple(folder_id.split("/")))
+        except PathSpellingError as exc:
+            raise FileSharingRefused(str(exc)) from exc
         data = self._read(item)
         name = self._write_new(tuple(folder_id.split("/")), item.parts[-1], data)
         if move:

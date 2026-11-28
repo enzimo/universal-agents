@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from access_control import safe_open
-from access_control.folders import PathSpellingError, check_exact_spelling
+from access_control.folders import PathSpellingError, check_spelling_below
 from access_control.safe_open import UnsafePath
 from runtime_settings.instance_layout import InstanceLayout, WorkspaceScope
 
@@ -48,19 +48,6 @@ class _Located:
     display: Path
 
 
-def _check_spelling(root: Path, parts: tuple[str, ...], scope: WorkspaceScope) -> None:
-    """Verify exact on-disk spelling from ``workspaces/`` when under it, or from ``root``."""
-
-    real_root = Path(os.path.realpath(root))
-    real_workspaces = Path(os.path.realpath(scope.workspaces_dir))
-    try:
-        rel_root = real_root.relative_to(real_workspaces).parts
-    except ValueError:
-        check_exact_spelling(real_root, parts, display_prefix=root.name)
-        return
-    check_exact_spelling(real_workspaces, (*rel_root, *parts))
-
-
 def _locate(raw: str, scope: WorkspaceScope) -> _Located:
     text = str(raw or "").strip()
     if not text:
@@ -73,7 +60,7 @@ def _locate(raw: str, scope: WorkspaceScope) -> _Located:
         if normalized == root or root in normalized.parents:
             parts = normalized.relative_to(root).parts
             try:
-                _check_spelling(root, parts, scope)
+                check_spelling_below(scope.workspaces_dir, root, parts)
             except PathSpellingError as exc:
                 raise TaskFileRejected(str(exc)) from exc
             return _Located(root, parts, normalized)

@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from access_control import safe_open
-from access_control.folders import PathSpellingError, check_exact_spelling
+from access_control.folders import FOLDER_ROOT_DATA, PathSpellingError, check_spelling_below
 from access_control.safe_open import UnsafePath
 from access_control.sensitive_paths import sensitive_reason
 from assistant_gateway.attachment_media import (
@@ -84,6 +84,7 @@ class _Source:
 
     root: Path
     only: str | None = None
+    display_prefix: str | None = None
 
 
 def _extra_sources(config: Any, person_id: str | None) -> list[_Source]:
@@ -107,7 +108,10 @@ def _extra_sources(config: Any, person_id: str | None) -> list[_Source]:
     store = AccessRepository(storage)
     root = getattr(config, "instance_root_path", None)
     protected = protected_locations(root, broker_credentials=getattr(config, "broker_credentials_path", None))
-    sources = [_Source(folder.path) for folder in DataFolderRegistry(store, team_id).usable(protected)]
+    sources = [
+        _Source(folder.path, display_prefix=f"{FOLDER_ROOT_DATA}/{folder.name}")
+        for folder in DataFolderRegistry(store, team_id).usable(protected)
+    ]
     if not person_id:
         return sources
     now = _utc_now()
@@ -179,20 +183,20 @@ def _coerce_attachment_items(raw_attachments: Any) -> tuple[list[Any], str | Non
 
 def _located(
     resolved: Path, scope: WorkspaceScope, extra: Iterable[_Source] = ()
-) -> tuple[Path, tuple[str, ...]] | None:
-    """The allowed folder holding the real path ``resolved``, and the path below it."""
+) -> tuple[Path, tuple[str, ...], str | None] | None:
+    """The allowed folder holding the real path ``resolved``, parts below it, and optional logical prefix."""
 
     for root in scope.roots:
         real_root = Path(os.path.realpath(root))
         if resolved == real_root or real_root in resolved.parents:
-            return real_root, resolved.relative_to(real_root).parts
+            return real_root, resolved.relative_to(real_root).parts, None
     for source in extra:
         real_root = Path(os.path.realpath(source.root))
         if real_root not in resolved.parents:
             continue
         parts = resolved.relative_to(real_root).parts
         if source.only is None or parts == (source.only,):
-            return real_root, parts
+            return real_root, parts, source.display_prefix
     return None
 
 
@@ -200,19 +204,6 @@ OUTSIDE_SOURCES = (
     "is outside this person's folder, the shared team/ and agents/ folders, the data folders, "
     "and what others shared with this person"
 )
-
-
-def _check_located_spelling(located: tuple[Path, tuple[str, ...]], scope: WorkspaceScope) -> None:
-    """Verify exact on-disk spelling from ``workspaces/`` for workspace paths, or from the data-folder root."""
-
-    root, parts = located
-    real_workspaces = Path(os.path.realpath(scope.workspaces_dir))
-    try:
-        rel_root = root.relative_to(real_workspaces).parts
-    except ValueError:
-        check_exact_spelling(root, parts)
-        return
-    check_exact_spelling(real_workspaces, (*rel_root, *parts))
 
 
 def _checked_path(
@@ -223,14 +214,15 @@ def _checked_path(
     located = _located(resolved, scope, extra)
     if located is None:
         return OUTSIDE_SOURCES, None
+    root, parts, display_prefix = located
     if _is_sensitive_path(resolved):
         return "is sensitive and cannot be attached", None
     try:
-        _check_located_spelling(located, scope)
+        check_spelling_below(scope.workspaces_dir, root, parts, display_prefix=display_prefix)
     except PathSpellingError as exc:
         return str(exc), None
     try:
-        entry = safe_open.entry_status(*located)
+        entry = safe_open.entry_status(root, parts)
     except UnsafePath as exc:
         return f"cannot be opened safely ({exc})", None
     if entry is None:
@@ -392,12 +384,13 @@ def stage_user_notification_attachments(
         if located is None:
             errors.append(f"{resolved} {OUTSIDE_SOURCES}.")
             continue
+        root, parts, display_prefix = located
         name = Path(attachment.filename or resolved.name).name
         folder_parts = (*sent_parts, new_id("outgoing"))
         destination_parts = (*folder_parts, name if name not in {"", ".", ".."} else "attachment")
         try:
-            _check_located_spelling(located, scope)
-            copied, digest = _copy_with_digest(located, scope.workspaces_dir, destination_parts)
+            check_spelling_below(scope.workspaces_dir, root, parts, display_prefix=display_prefix)
+            copied, digest = _copy_with_digest((root, parts), scope.workspaces_dir, destination_parts)
         except PathSpellingError as exc:
             logger.warning(
                 "An attachment was not copied for delivery. event=outgoing_attachment_refused "

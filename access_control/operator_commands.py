@@ -21,6 +21,7 @@ from typing import Any, Protocol
 
 from access_catalog.catalog import load_catalog
 from access_control.cedar import CedarAccessClient
+from access_control.data_folders import folder_roots_provider
 from access_control.decisions import AccessService
 from access_control.entities import (
     PersonPrincipal,
@@ -416,15 +417,18 @@ def open_access_service(
     storage_settings: StorageSettings,
     cedar_binary: str | None,
     lead_agent_type: str = "TeamArchitect",
+    protected: Any = (),
 ) -> AccessService:
+    store = AccessRepository(storage_settings)
     return AccessService(
-        store=AccessRepository(storage_settings),
+        store=store,
         catalog=load_catalog(instance_root),
         cedar=CedarAccessClient(binary=cedar_binary),
         team_id=team_id,
         clock=lambda: datetime.now(timezone.utc),
         agent_role_of=agent_role_resolver(lead_agent_type),
         lead_agent_type=lead_agent_type,
+        folder_roots=folder_roots_provider(instance_root, store, team_id, protected=protected),
     )
 
 
